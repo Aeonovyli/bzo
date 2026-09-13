@@ -612,13 +612,13 @@ end
 
 zone
   position 0 130 0
-  size 8 8 0
+  size 20 8 0
   team 1
 end
 box
   name n_red_spawn
   position 0 130 0
-  size 8 8 0
+  size 20 8 0
   color 1.0 0.0 0.0
   passable
 end
@@ -632,13 +632,13 @@ end
 
 zone
   position 130 0 0
-  size 8 8 0
+  size 8 20 0
   team 2
 end
 box
   name e_green_spawn
   position 130 0 0
-  size 8 8 0
+  size 8 20 0
   color 0.0 1.0 0.0
   passable
 end
@@ -652,13 +652,13 @@ end
 
 zone
   position 0 -130 0
-  size 8 8 0
+  size 20 8 0
   team 3
 end
 box
   name s_blue_spawn
   position 0 -130 0
-  size 8 8 0
+  size 20 8 0
   color 0.101960784 0.2 1.0
   passable
 end
@@ -672,13 +672,13 @@ end
 
 zone
   position -130 0 0
-  size 8 8 0
+  size 8 20 0
   team 4
 end
 box
   name w_purple_spawn
   position -130 0 0
-  size 8 8 0
+  size 8 20 0
   color 1.0 0.0 1.0
   passable
 end
