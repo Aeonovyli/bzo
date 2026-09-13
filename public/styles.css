@@ -147,7 +147,7 @@ html {
   background: transparent;
 }
 
-#operatorOverlay, #operatorOverlay *, #audioOverlay, #audioOverlay *, #helpPanel, #helpPanel * {
+#operatorOverlay, #operatorOverlay *, #audioOverlay, #audioOverlay *, #helpPanel, #helpPanel *, #viewOverlay, #viewOverlay * {
   pointer-events: auto !important;
 }
 
@@ -892,6 +892,11 @@ body {
   display: none;
 }
 
+#viewOverlay {
+  z-index: 300;
+  display: none;
+}
+
 #audioOverlay {
   z-index: 310;
   display: none;
@@ -926,7 +931,8 @@ body {
   cursor: pointer;
 }
 
-#operatorOverlay input[type="number"] {
+#operatorOverlay input[type="number"],
+#viewOverlay input[type="number"] {
   width: 100%;
   padding: 10px;
   font-size: 1em;
@@ -938,18 +944,26 @@ body {
   box-sizing: border-box;
 }
 
-#operatorOverlay .dialogTitle {
+#operatorOverlay .dialogTitle,
+#viewOverlay .dialogTitle {
   margin: 0 0 20px 0;
   color: #4CAF50;
   font-size: 2rem;
 }
 
-#operatorOverlay label {
+#operatorOverlay label,
+#viewOverlay label {
   color: #fff;
   font-weight: bold;
 }
 
-#operatorOverlay input[type="text"] {
+#viewOverlay h3 {
+  color: #4CAF50;
+  margin: 18px 0 8px;
+}
+
+#operatorOverlay input[type="text"],
+#viewOverlay input[type="text"] {
   width: 100%;
   padding: 10px;
   font-size: 1em;
@@ -961,12 +975,14 @@ body {
   box-sizing: border-box;
 }
 
-#operatorOverlay input[type="text"]:focus {
+#operatorOverlay input[type="text"]:focus,
+#viewOverlay input[type="text"]:focus {
   outline: none;
   border-color: #66bb6a;
 }
 
-#operatorOverlay button {
+#operatorOverlay button,
+#viewOverlay button {
   padding: 10px 18px;
   font-size: 1em;
   font-weight: bold;
@@ -979,13 +995,52 @@ body {
   margin-right: 6px;
 }
 
-#operatorOverlay button:hover {
+#operatorOverlay button:hover,
+#viewOverlay button:hover {
   background: rgba(76, 175, 80, 0.4);
   border-color: #66bb6a;
 }
 
-#operatorOverlay button:active {
+#operatorOverlay button:active,
+#viewOverlay button:active {
   background: rgba(76, 175, 80, 0.6);
+}
+
+.viewTable {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+  color: #fff;
+}
+
+.viewTable th, .viewTable td {
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  text-align: left;
+  font-size: 0.9em;
+}
+
+.viewTable th {
+  cursor: pointer;
+  user-select: none;
+  color: #4CAF50;
+  white-space: nowrap;
+}
+
+.viewTable th:hover {
+  color: #66bb6a;
+}
+
+.viewTable tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.viewTable tbody tr:hover {
+  background: rgba(76, 175, 80, 0.15);
+}
+
+.viewTable a {
+  color: #66bb6a;
 }
 
 #settingsHud button:focus-visible,
@@ -1000,6 +1055,9 @@ body {
 #operatorOverlay button:focus-visible,
 #operatorOverlay input:focus-visible,
 #operatorOverlay select:focus-visible,
+#viewOverlay button:focus-visible,
+#viewOverlay input:focus-visible,
+#viewOverlay select:focus-visible,
 #entryDialog button:focus-visible,
 #entryDialog input:focus-visible,
 #entryDialog select:focus-visible {
@@ -1639,6 +1697,7 @@ body.observing #roamStatus {
 #helpPanel,
 #audioOverlay,
 #operatorOverlay,
+#viewOverlay,
 #entryDialog {
   /* `fixed`, not `absolute`. Body is not a positioned ancestor, so an absolute
      dialog centres on the *document* rather than on the window -- and a document
@@ -1691,6 +1750,7 @@ body.observing #roamStatus {
 #helpPanel .dialogTitle,
 #audioOverlay .dialogTitle,
 #operatorOverlay .dialogTitle,
+#viewOverlay .dialogTitle,
 #entryDialog h2 {
   margin: 0 0 18px;
   color: var(--color-accent-light);
@@ -1705,6 +1765,7 @@ body.observing #roamStatus {
 #helpPanel .dialogTitle,
 #audioOverlay .dialogTitle,
 #operatorOverlay .dialogTitle,
+#viewOverlay .dialogTitle,
 #entryDialog h2 {
   display: flex;
   align-items: center;
@@ -1804,6 +1865,7 @@ body.observing #roamStatus {
   #helpPanel,
   #audioOverlay,
   #operatorOverlay,
+  #viewOverlay,
   #entryDialog {
     height: min(88vh, 900px);
     padding: var(--hud-gap);
@@ -1840,6 +1902,7 @@ body.observing #roamStatus {
   #helpPanel,
   #audioOverlay,
   #operatorOverlay,
+  #viewOverlay,
   #entryDialog {
     width: calc(100vw - 16px);
   }

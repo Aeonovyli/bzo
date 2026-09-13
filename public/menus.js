@@ -10,6 +10,7 @@ const DIALOG_ROOT_IDS = [
   'audioOverlay',
   'helpPanel',
   'operatorOverlay',
+  'viewOverlay',
   'entryDialog',
 ];
 

@@ -22,6 +22,7 @@ export const SETTINGS_MENU_ITEMS = Object.freeze([
   { id: 'audioBtn', label: 'Audio Settings', kind: 'submenu' },
   { id: 'helpBtn', label: 'Help', kind: 'submenu' },
   { id: 'operatorBtn', label: 'Operator', kind: 'submenu' },
+  { id: 'viewBtn', label: 'View', kind: 'submenu' },
   { id: 'xrBtn', label: 'VR Mode', kind: 'action' },
   { id: 'closeSettingsHud', label: 'Close', kind: 'action' },
 ]);

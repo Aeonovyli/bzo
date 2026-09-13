@@ -142,6 +142,40 @@
         </div>
       </div>
     </div>
+    <!-- A map view experience, not a game view: browsing and importing maps
+         from the public BZFlag server list, or already-downloaded local
+         maps, has nothing to do with the match currently running. Open to
+         everyone (see server.js's `listRemoteServers`/`importMap`/`getMaps`);
+         only actually switching the *live* match's map (Set Map, in the
+         Operator Panel) stays behind an operator. Picking "View" here sends
+         a real rejoin as Observer with the chosen map, same as the entry
+         dialog's Map Viewer team -- reachable mid-game is the point of this
+         dialog existing at all. -->
+    <div id="viewOverlay" class="dialog">
+      <div class="dialogTitle">View <button id="closeViewBtn" class="closeBtn">&times;</button></div>
+      <div class="dialogContent">
+        <h3>Running BZFlag servers</h3>
+        <div class="operatorRow">
+          <input type="text" id="viewServerFilter" placeholder="Filter…">
+          <button id="viewServerRefreshBtn" class="btn" type="button">Refresh</button>
+        </div>
+        <table id="viewServerTable" class="viewTable">
+          <thead><tr>
+            <th data-sort="num">Players</th><th data-sort="num">Max</th><th>Style</th>
+            <th>Title</th><th>Host</th><th data-sort="num">Port</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <h3>Local maps</h3>
+        <div class="operatorRow">
+          <input type="text" id="viewMapFilter" placeholder="Filter…">
+        </div>
+        <table id="viewMapTable" class="viewTable">
+          <thead><tr><th>File</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
   <div id="mainhud">
     <div id="stats">
       <span id="playerLabel" class="playerLabel" title="Open Settings"><span id="playerName">Player</span><span id="playerFlag" class="scoreboardFlag"></span></span>
@@ -177,6 +211,7 @@
         <button id="cameraBtn" class="settingsHudBtn">Camera</button>
         <button id="helpBtn" class="settingsHudBtn">Help</button>
         <button id="operatorBtn" class="settingsHudBtn">Operator</button>
+        <button id="viewBtn" class="settingsHudBtn">View</button>
         <button id="wireframeBtn" class="settingsHudBtn" title="Wireframe Mode">Wireframe</button>
         <button id="anaglyphBtn" class="settingsHudBtn" title="Anaglyph 3D">Anaglyph 3D</button>
         <button id="dynamicLightingBtn" class="settingsHudBtn" title="Dynamic Lighting">Dynamic Lighting</button>

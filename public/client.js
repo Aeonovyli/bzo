@@ -100,7 +100,8 @@ import {
   setGameplayKeyState,
   setInputContext,
   syncInputContextFromUi,
-  toggleOperatorPanel
+  toggleOperatorPanel,
+  toggleViewPanel
 } from './input.js';
 import { DestructCountdown, PauseState } from './pause.mjs';
 import { XRMenuRenderer } from './xr-menu.js';
@@ -1742,10 +1743,35 @@ const DEFAULT_MAP_SIZE = 800;
 // from, live match or preview alike.
 let currentWorldMapSize = null;
 
+// Whichever world is actually on screen right now, live match or Map Viewer
+// preview alike -- set unconditionally at the bottom of `applyWorldData`, so
+// `announceWorldMessages` always has the right one to read from regardless
+// of which caller just ran it.
+let currentWorldData = null;
+
+// A map's own greeting: `-srvmsg` lines and the dropped-unsupported-feature
+// tally, both computed once server-side (parseBZWMap) and carried in this
+// map's own MAP_REGISTRY entry rather than pushed by the server on join --
+// see AGENTS.md's "Intentional deviations from BZFlag" for why. Reusing
+// `handleServerMessage` for the display keeps chat formatting, sound and
+// roster handling identical to a message that actually arrived over the
+// wire; only the trigger differs. Callers decide *when* this fires --
+// `applyWorldData` itself never calls this, since it also runs for a Map
+// Viewer preview nobody has committed to yet, and a preview must stay silent
+// or cycling through choices would spam chat with every map's own lines,
+// none of them clearly attributed to what the player is actually looking at.
+function announceWorldMessages(world) {
+  const lines = Array.isArray(world?.messages) ? world.messages : [];
+  for (const text of lines) {
+    handleServerMessage({ type: 'message', src: -1, dst: myPlayerId, msgType: 'server', text, ts: Date.now() });
+  }
+}
+
 // Obstacles, teleporters, clouds and world size -- everything a fetched world
 // file carries. Whatever else `init` sends (roster, scores, config) is live
 // match state and does not come from here.
 function applyWorldData(world) {
+  currentWorldData = world;
   if (world && world.obstacles) {
     OBSTACLES = world.obstacles;
     refreshCollisionColliders();
@@ -4319,6 +4345,7 @@ initHudControls({
   getDebugState,
   onOperatorPanelShown: () => openOperatorPanel(),
   onOperatorPanelHidden: () => discardOperatorPanel(),
+  onViewPanelShown: () => openViewPanel(),
   isObserver: () => isObserver(),
   cycleObserverView: (direction) => cycleRoamView(direction),
   getObserverViewLabel: () => getRoamLabel(),
@@ -4418,6 +4445,10 @@ window.addEventListener('DOMContentLoaded', () => {
       reader.readAsText(file);
     });
   }
+
+  attachSortFilter('viewServerTable', 'viewServerFilter');
+  attachSortFilter('viewMapTable', 'viewMapFilter');
+  document.getElementById('viewServerRefreshBtn')?.addEventListener('click', () => requestViewData());
 
   // Match Timer buttons: immediate actions like Upload above, not staged
   // config -- see "Match end" in AGENTS.md. `/countdown`/`/gameover` reach the
@@ -5198,6 +5229,12 @@ function handleServerMessage(message) {
       removePausedSphere(message.player.id);
       if (message.player.id === myPlayerId) {
         gameplayJoinConfirmed = true;
+        // The moment this join is confirmed, not before -- whatever is
+        // already applied (the live world on a fresh connection, or
+        // whichever map the entry dialog's Map Viewer preview settled on) is
+        // what this join is actually for, so its message says exactly once,
+        // never once per map cycled through while still choosing.
+        announceWorldMessages(currentWorldData);
         playerTeam = normalizePlayerTeam(message.player.team);
         // The view the spectator link asked for. Applied on every join rather
         // than once: a reconnect is how this client comes back from a server
@@ -5718,6 +5755,14 @@ function handleServerMessage(message) {
 
     case 'mapList':
       handleMapsList(message);
+      break;
+
+    case 'remoteServerList':
+      handleRemoteServerList(message);
+      break;
+
+    case 'importMapResult':
+      importMapResultReceived(message);
       break;
 
     case 'serverConfigUpdate':
@@ -6458,6 +6503,195 @@ function handleMapsList(message) {
   // to re-stage from them -- unless somebody is mid-edit, whose staged copy is
   // theirs until they commit or cancel.
   if (!operatorStaged) syncOperatorPanelFromServer();
+
+  populateViewMapTable(Array.isArray(message.viewableMaps) ? message.viewableMaps : []);
+}
+
+// The View dialog's own state. Two independent replies (`mapList` and
+// `remoteServerList`) can arrive in either order, and the remote table's
+// View/Import choice per row depends on both -- so each handler updates its
+// own cache and both funnel through `renderServerTable`, rather than the
+// remote-list handler trusting whichever `viewableMapFiles` happened to
+// already be there.
+let viewableMapFiles = new Set();
+// The full {file,hash,url} entries behind `viewableMapFiles`, so `viewMapFile`
+// can hand one straight to `loadWorldFile` without a round trip back to the
+// server just to ask for what it was already sent.
+let viewableMapEntries = [];
+let lastRemoteServers = [];
+
+// Mirrors `remoteMapFileName` in server.js -- the only other place this
+// naming is allowed to happen, so a check here and the file the server
+// actually wrote can never disagree.
+function remoteMapFileName(host, port) {
+  return `import-${host}_${port}`.replace(/[^A-Za-z0-9._-]/g, '_') + '.bzw';
+}
+
+function populateViewMapTable(viewableMaps) {
+  viewableMapFiles = new Set(viewableMaps.map((entry) => entry.file));
+  viewableMapEntries = viewableMaps;
+  const tbody = document.querySelector('#viewMapTable tbody');
+  if (tbody) {
+    tbody.innerHTML = '';
+    for (const entry of viewableMaps) {
+      const row = document.createElement('tr');
+      const nameCell = document.createElement('td');
+      nameCell.textContent = entry.file;
+      const actionCell = document.createElement('td');
+      const viewBtn = document.createElement('button');
+      viewBtn.type = 'button';
+      viewBtn.textContent = 'View';
+      viewBtn.addEventListener('click', () => viewMapFile(entry.file));
+      actionCell.appendChild(viewBtn);
+      row.append(nameCell, actionCell);
+      tbody.appendChild(row);
+    }
+  }
+  renderServerTable();
+}
+
+// The View dialog's remote-server table. `listRemoteServers` never connects
+// to any server it lists (see server.js) -- only pressing Import does that,
+// same as the /view page this mirrors.
+function handleRemoteServerList(message) {
+  lastRemoteServers = Array.isArray(message.servers) ? message.servers : [];
+  renderServerTable();
+}
+
+function renderServerTable() {
+  const tbody = document.querySelector('#viewServerTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  for (const server of lastRemoteServers) {
+    const fileName = remoteMapFileName(server.host, server.port);
+    const alreadyImported = viewableMapFiles.has(fileName);
+    const row = document.createElement('tr');
+    const cell = (text) => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      return td;
+    };
+    row.append(
+      cell(typeof server.players === 'number' ? String(server.players) : ''),
+      cell(typeof server.maxPlayers === 'number' ? String(server.maxPlayers) : ''),
+      cell(server.style || ''),
+      cell(server.title || ''),
+      cell(server.host),
+      cell(String(server.port)),
+    );
+    const actionCell = document.createElement('td');
+    if (alreadyImported) {
+      const viewBtn = document.createElement('button');
+      viewBtn.type = 'button';
+      viewBtn.textContent = 'View';
+      viewBtn.addEventListener('click', () => viewMapFile(fileName));
+      actionCell.appendChild(viewBtn);
+    }
+    const importBtn = document.createElement('button');
+    importBtn.type = 'button';
+    importBtn.textContent = alreadyImported ? 'Re-import' : 'Import';
+    importBtn.addEventListener('click', () => {
+      importBtn.disabled = true;
+      const label = importBtn.textContent;
+      importBtn.textContent = 'Importing…';
+      sendToServer({ type: 'importMap', hostPort: `${server.host}:${server.port}` });
+      setTimeout(() => {
+        importBtn.disabled = false;
+        importBtn.textContent = label;
+      }, 4000);
+    });
+    actionCell.appendChild(importBtn);
+    row.appendChild(actionCell);
+    tbody.appendChild(row);
+  }
+}
+
+// A rejoin, not a lighter-weight preview: this sends the same `joinGame` the
+// entry dialog's Map Viewer team already does (see `getJoinTeamFields`),
+// reachable here mid-game as well as before joining. Chat persists, score
+// resets and the tank colour changes exactly as switching to any other team
+// already does -- there is nothing View-specific about the mechanism, only
+// about how the player got here.
+//
+// Unlike the entry dialog, nothing already previewed this file's geometry
+// behind the dialog, so this has to do that part itself -- `applyWorldData`
+// here is what the entry dialog's `syncMapViewerPreview` does automatically
+// while cycling choices. The map's own message is not said here: it fires
+// once, from the join confirmation (`playerJoined`), the same trigger the
+// entry dialog's flow uses -- saying it here too would be twice for one
+// switch.
+function viewMapFile(file) {
+  selectedPlayerTeam = PLAYER_TEAM.MAP_VIEWER;
+  selectedViewMapFile = file;
+  syncPlayerTeamSelector();
+  const entry = viewableMapEntries.find((candidate) => candidate.file === file);
+  const worldPromise = entry ? loadWorldFile(entry).then((world) => applyWorldData(world)) : Promise.resolve();
+  worldPromise.finally(() => {
+    sendToServer({
+      type: 'joinGame',
+      name: myPlayerName,
+      isMobile,
+      tankModel: selectedTankModelId,
+      ...getJoinTeamFields(),
+    });
+  });
+  toggleViewPanel();
+}
+
+function requestViewData() {
+  sendToServer({ type: 'listRemoteServers' });
+  sendToServer({ type: 'getMaps' });
+}
+
+function openViewPanel() {
+  requestViewData();
+}
+
+function importMapResultReceived(message) {
+  if (message.success && message.file) {
+    // The reply already renamed the file it wrote; re-asking for the maps
+    // list is what turns that into a `viewableMapFiles` entry the remote
+    // table can offer a View button for. Cheap and always fresh, unlike the
+    // entry dialog's `init.viewableMaps`, which only updates on a reload.
+    sendToServer({ type: 'getMaps' });
+  }
+}
+
+// Shared by both View dialog tables (and mirrors the same few lines /view's
+// own inline script uses): click a header to sort by that column, type in
+// the filter box to hide rows that do not match anywhere in the row's text.
+function attachSortFilter(tableId, filterId) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  const tbody = table.tBodies[0];
+  Array.from(table.tHead.rows[0].cells).forEach((th, colIndex) => {
+    let dir = 1;
+    th.addEventListener('click', () => {
+      const numeric = th.dataset.sort === 'num';
+      const rows = Array.from(tbody.rows);
+      rows.sort((a, b) => {
+        let av = a.cells[colIndex]?.textContent.trim() || '';
+        let bv = b.cells[colIndex]?.textContent.trim() || '';
+        if (numeric) {
+          const an = parseFloat(av);
+          const bn = parseFloat(bv);
+          return ((Number.isNaN(an) ? -Infinity : an) - (Number.isNaN(bn) ? -Infinity : bn)) * dir;
+        }
+        return av.localeCompare(bv) * dir;
+      });
+      dir *= -1;
+      rows.forEach((row) => tbody.appendChild(row));
+    });
+  });
+  const filterInput = filterId && document.getElementById(filterId);
+  if (filterInput) {
+    filterInput.addEventListener('input', () => {
+      const q = filterInput.value.toLowerCase();
+      Array.from(tbody.rows).forEach((row) => {
+        row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+      });
+    });
+  }
 }
 
 function handleServerConfigUpdate(message) {

@@ -11,7 +11,19 @@ const logPath = require('path').join(__dirname, 'server.log');
 // Clear server.log on restart
 require('fs').writeFileSync(logPath, '');
 const http = require('http');
+const { URLSearchParams } = require('url');
 const { WebSocketServer } = require('ws');
+const {
+  DEFAULT_LIST_SERVER,
+  PROTOCOL_VERSION: BZFS_PROTOCOL_VERSION,
+  GAME_OPTION_BITS,
+  fetchServerList,
+  fetchWorldFromServer,
+  decodeGameSettings,
+  decodeQueryGame,
+  parseWorldDatabase,
+  buildBZWText,
+} = require('./server/remote-world-import.cjs');
 const {
   normalizeShotSlotCount,
   WORLD_WEAPON_PLAYER_ID,
@@ -801,6 +813,209 @@ app.get('/api/ready', (req, res) => {
   res.json({ ready: true, build: CLIENT_BUILD });
 });
 
+// A server-rendered, standalone page -- not part of the game client bundle,
+// no websocket -- listing what /view's two data sources already are: the
+// public BZFlag list server (`getRemoteServerList`, cached 5 minutes and
+// shared across every visitor) and bzo's own maps/ directory. Both viewing
+// and importing are open to anyone: importing costs this server one fetch
+// and one file (capped in remote-world-import.cjs), viewing costs only the
+// viewer's own client, so neither needs an operator -- only actually
+// switching the live match (`setMap`, from the game itself) does. Sorting
+// and filtering are a few lines of vanilla JS over the rows already in the
+// page -- there is no client-side framework anywhere else in bzo and two
+// short tables do not need one either.
+function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
+  const localMaps = listAvailableMapFiles().map((fileName) => ({
+    fileName,
+    hashed: fileName === 'random' || MAP_REGISTRY.has(fileName),
+  }));
+
+  const serverRows = servers.map((s) => {
+    const players = s.info && typeof s.info.players === 'number' ? String(s.info.players) : '';
+    const maxPlayers = s.info && typeof s.info.maxPlayers === 'number' ? String(s.info.maxPlayers) : '';
+    const maxShots = s.info && typeof s.info.maxShots === 'number' ? String(s.info.maxShots) : '';
+    const hasOption = (bit) => (s.info && (s.info.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
+    const importFileName = remoteMapFileName(s.host, s.port);
+    const viewLink = MAP_REGISTRY.has(importFileName)
+      ? `<a href="/?viewmap=${encodeURIComponent(importFileName)}">View</a> `
+      : '';
+    const importCell = viewLink
+      + `<form method="post" action="/view/import" class="inlineForm">`
+      + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
+      + `<input type="hidden" name="port" value="${s.port}">`
+      + `<button type="submit">${viewLink ? 'Re-import' : 'Import'}</button></form>`;
+    return `<tr><td>${players}</td><td>${maxPlayers}</td><td>${maxShots}</td>`
+      + `<td>${escapeHtml(s.info ? s.info.style : '')}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td><td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
+      + `<td>${escapeHtml(s.title)}</td><td>${escapeHtml(s.host)}</td><td>${s.port}</td>`
+      + `<td>${importCell}</td></tr>`;
+  }).join('\n');
+
+  const mapRows = localMaps.map((m) => `<tr><td>${escapeHtml(m.fileName)}</td>`
+    + `<td>${m.hashed ? 'yes' : 'hashing…'}</td>`
+    + `<td>${m.hashed ? `<a href="/?viewmap=${encodeURIComponent(m.fileName)}">View</a>` : ''}</td></tr>`).join('\n');
+
+  const flash = imported
+    ? `<p class="flash success">Imported <code>${escapeHtml(imported)}</code> -- it is in the local maps table below.</p>`
+    : importError
+      ? `<p class="flash error">Import failed: ${escapeHtml(importError)}</p>`
+      : '';
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>bzo servers</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  /* bzo's own palette (public/styles.css) -- this page links straight into the
+     game (View, /?viewmap=), so it reads as the same product rather than a
+     generic admin tool bolted on beside it. */
+  body {
+    font: 14px/1.4 Arial, sans-serif;
+    margin: 2rem;
+    color: #fff;
+    background: #000;
+  }
+  h1 { font-size: 1.3rem; margin: 2rem 0 0.5rem; color: #4CAF50; }
+  a { color: #66bb6a; }
+  .muted { color: #999; font-size: 0.9em; }
+  input[type=text] {
+    padding: 0.4rem 0.6rem;
+    margin: 0.5rem 0;
+    width: 20rem;
+    max-width: 100%;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid #4CAF50;
+    border-radius: 4px;
+    color: #fff;
+  }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 0.35rem 0.6rem; text-align: left; }
+  th {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    color: #4CAF50;
+    border-bottom: 2px solid #4CAF50;
+  }
+  th:hover { color: #66bb6a; }
+  tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.05); }
+  tbody tr:hover { background: rgba(76, 175, 80, 0.15); }
+  .inlineForm { display: inline; }
+  button {
+    padding: 0.2rem 0.7rem;
+    background: rgba(76, 175, 80, 0.15);
+    border: 1px solid #4CAF50;
+    border-radius: 4px;
+    color: #4CAF50;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(76, 175, 80, 0.35); border-color: #66bb6a; }
+  .flash { padding: 0.5rem 0.8rem; border-radius: 4px; border: 1px solid; }
+  .flash.success { background: #16321f; color: #b7e2c2; border-color: #4CAF50; }
+  .flash.error { background: #3a1a17; color: #f0b8b2; border-color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>Running BZFlag servers</h1>
+<p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
+<a href="/view">refresh</a>. Click a column heading to sort.</p>
+${flash}
+<input id="serverFilter" type="text" placeholder="Filter…">
+<table id="serverTable">
+<thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
+<th title="Jumping">Jump</th><th title="Superflags">Flag</th><th title="Ricochet">Rico</th>
+<th title="Antidote flag">Anti</th><th title="Handicap">Hcap</th><th title="No Team Kills (friendly fire off)">TK</th>
+<th>Title</th><th>Host</th><th data-sort="num">Port</th><th></th></tr></thead>
+<tbody>
+${serverRows}
+</tbody>
+</table>
+
+<h1>Local maps</h1>
+<p class="muted">Already in this server's <code>maps/</code>, including anything imported above.</p>
+<input id="mapFilter" type="text" placeholder="Filter…">
+<table id="mapTable">
+<thead><tr><th>File</th><th>Hashed</th><th></th></tr></thead>
+<tbody>
+${mapRows}
+</tbody>
+</table>
+
+<script>
+function attachTable(tableId, filterId) {
+  var table = document.getElementById(tableId);
+  if (!table) return;
+  var tbody = table.tBodies[0];
+  Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, colIndex) {
+    var dir = 1;
+    th.addEventListener('click', function () {
+      var numeric = th.dataset.sort === 'num';
+      var rows = Array.prototype.slice.call(tbody.rows);
+      rows.sort(function (a, b) {
+        var av = a.cells[colIndex].textContent.trim();
+        var bv = b.cells[colIndex].textContent.trim();
+        if (numeric) { av = parseFloat(av); bv = parseFloat(bv); av = isNaN(av) ? -Infinity : av; bv = isNaN(bv) ? -Infinity : bv; return (av - bv) * dir; }
+        return av.localeCompare(bv) * dir;
+      });
+      dir *= -1;
+      rows.forEach(function (row) { tbody.appendChild(row); });
+    });
+  });
+  var filterInput = filterId && document.getElementById(filterId);
+  if (filterInput) {
+    filterInput.addEventListener('input', function () {
+      var q = filterInput.value.toLowerCase();
+      Array.prototype.forEach.call(tbody.rows, function (row) {
+        row.style.display = row.textContent.toLowerCase().indexOf(q) === -1 ? 'none' : '';
+      });
+    });
+  }
+}
+attachTable('serverTable', 'serverFilter');
+attachTable('mapTable', 'mapFilter');
+</script>
+</body>
+</html>`;
+}
+
+app.get('/view', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const servers = [...await getRemoteServerList()]
+      .sort((a, b) => (b.info?.players ?? -1) - (a.info?.players ?? -1));
+    res.type('html').send(renderViewPage({
+      servers,
+      cacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
+      imported: typeof req.query.imported === 'string' ? req.query.imported : null,
+      importError: typeof req.query.error === 'string' ? req.query.error : null,
+    }));
+  } catch (error) {
+    logError('/view failed to reach the list server:', error);
+    res.status(502).type('text/plain').send('Could not reach the BZFlag list server. Try again shortly.\n');
+  }
+});
+
+app.post('/view/import', (req, res) => {
+  const target = parseHostPort(`${req.body?.host || ''}:${req.body?.port || ''}`);
+  if (!target) {
+    res.redirect(302, `/view?${new URLSearchParams({ error: 'Expected host:port' })}`);
+    return;
+  }
+  const { host, port } = target;
+  log(`/view is importing a remote map from ${host}:${port}`);
+  performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
+    log(`Imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes) via /view`);
+    res.redirect(302, `/view?${new URLSearchParams({ imported: safeMapName })}`);
+  }).catch((error) => {
+    logError(`Remote map import from ${host}:${port} failed (via /view):`, error);
+    res.redirect(302, `/view?${new URLSearchParams({ error: error.message })}`);
+  });
+});
+
 // The manifest is generated per request so the installed app is named after the
 // host the client asked for, verbatim. Two hosts pointing at different servers
 // then install as two separately-named apps. TLS terminates at a reverse proxy
@@ -987,6 +1202,67 @@ const BUNDLED_MAPS_DIR = path.join(__dirname, 'maps');
 const RUNTIME_MAPS_DIR = process.env.MAPS_PATH
   ? path.resolve(process.env.MAPS_PATH)
   : path.join(path.dirname(configPath), 'maps');
+
+// The Operator panel's "Import Remote Map" dropdown, and the public `/view`
+// page below, both read this -- one POST to the public list server decodes
+// every running server's live player count and game type (PingPacket's own
+// hex blob, see remote-world-import.cjs), so populating either one never
+// itself connects to any of the servers it lists. Cached and shared across
+// every caller (one process-wide entry, not one per visitor): the list
+// changes slowly enough that a few minutes stale is fine, and it keeps a
+// public page from putting one request to my.bzflag.org per visitor.
+const REMOTE_SERVER_LIST_TTL_MS = 5 * 60 * 1000;
+let remoteServerListCache = { at: 0, servers: [] };
+
+async function getRemoteServerList() {
+  if (Date.now() - remoteServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
+    return remoteServerListCache.servers;
+  }
+  const servers = await fetchServerList(DEFAULT_LIST_SERVER, BZFS_PROTOCOL_VERSION);
+  remoteServerListCache = { at: Date.now(), servers };
+  return servers;
+}
+
+// Parses "host:port", downloads that server's world over the real wire
+// protocol, and saves it as an ordinary .bzw in RUNTIME_MAPS_DIR -- the one
+// piece of work behind both the websocket `importMap` (used by the Operator
+// panel) and the `/view` page's plain HTTP form below. Throws with a message
+// safe to show the caller; does not hash the file or tell anyone about it --
+// that is the caller's job, since a websocket reply and an HTTP redirect say
+// it differently.
+function parseHostPort(hostPort) {
+  const trimmed = typeof hostPort === 'string' ? hostPort.trim() : '';
+  const match = trimmed.match(/^([^\s:]+):(\d{1,5})$/);
+  const port = match ? Number(match[2]) : NaN;
+  if (!match || !(port >= 1 && port <= 65535)) return null;
+  return { host: match[1], port };
+}
+
+// Shared with `/view`'s cross-reference below: the only place either one is
+// allowed to name a remote server's import file, so a check there and the
+// file `performRemoteMapImport` actually writes can never name it two ways.
+function remoteMapFileName(host, port) {
+  return `import-${host}_${port}`.replace(/[^A-Za-z0-9._-]/g, '_') + '.bzw';
+}
+
+async function performRemoteMapImport(host, port) {
+  const safeMapName = remoteMapFileName(host, port);
+  const { worldDatabase, gameSettings, queryGame } = await fetchWorldFromServer(host, port, 15000);
+  const tree = parseWorldDatabase(worldDatabase);
+  if (gameSettings && gameSettings.length >= 30) tree.gameSettings = decodeGameSettings(gameSettings);
+  if (queryGame && queryGame.length >= 44) tree.queryGame = decodeQueryGame(queryGame);
+  if (tree.gameSettings) tree.worldSize = tree.gameSettings.worldSize;
+  const text = buildBZWText({ host, port, title: '' }, tree, new Date().toISOString());
+  const filePath = path.join(RUNTIME_MAPS_DIR, safeMapName);
+  await fs.promises.writeFile(filePath, text);
+  // Hashed synchronously rather than left to the background trickle
+  // (`hashRemainingMapsInBackground`): this is the one file that just
+  // changed, so there is no reason to make the caller wait on a queue that
+  // also revisits everything else already sitting in maps/.
+  const mapData = parseBZWMap(filePath);
+  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages);
+  return { safeMapName, byteLength: worldDatabase.length };
+}
 
 function ensureRuntimeMapsDir(dirPath) {
   try {
@@ -1465,6 +1741,20 @@ function normalizeScoreLimit(score) {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+// Top-level BZW keywords a real map may use that bzo does not read at all --
+// not a passability keyword inside a box, a zone keyword, or anything else
+// already partially supported, but whole obstacle/material/animation types
+// with no bzo equivalent yet (docs/bzw.md is the full account of what is and
+// is not read). None of these ever set `current`/`currentLink`/`currentZone`/
+// `currentWeapon`, so their own inner lines (`vertex`, `face`, `dyncol`, ...)
+// already fall through the rest of parseBZWMap's dispatch untouched -- this
+// only has to recognize the *opening* keyword to say how many of each a map
+// asked for.
+const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
+  'mesh', 'arc', 'cone', 'sphere', 'tetra', 'group', 'define',
+  'physics', 'material', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
+]);
+
 function parseBZWServerOptions(lines) {
   let inOptions = false;
   // Every other field is left absent unless the map names it. `forbiddenFlags`
@@ -1722,6 +2012,11 @@ function parseBZWMap(filename) {
   let currentWeapon = null;
   const unreadWeaponKeywords = new Set();
   const unreadWeaponTypes = new Set();
+  // How many of each UNSUPPORTED_TOP_LEVEL_KEYWORDS block this map asked for,
+  // by keyword -- what turns into the player-facing chat message below and
+  // (with `serverOptions.serverMessages`, i.e. -srvmsg) this function's
+  // `messages` return value.
+  const unsupportedCounts = new Map();
 
   function getTeleporterEndpointName(teleporter, face) {
     return `${teleporter.linkName}:${face === 0 ? 'f' : 'b'}`;
@@ -2272,6 +2567,9 @@ function parseBZWMap(filename) {
 
       obstacles.push(current);
       current = null;
+    } else if (!current && !currentLink && !currentZone && !currentWeapon
+      && UNSUPPORTED_TOP_LEVEL_KEYWORDS.has(token)) {
+      unsupportedCounts.set(token, (unsupportedCounts.get(token) || 0) + 1);
     }
   }
 
@@ -2296,6 +2594,31 @@ function parseBZWMap(filename) {
     );
   }
 
+  // What a player actually sees when they view or join this map -- not just
+  // server.log. `-srvmsg` (serverOptions.serverMessages) reads as a message
+  // the *map* says to whoever arrives on it (bzfs.cxx:2507); the
+  // dropped-feature tally is the same kind of thing, so it rides along in the
+  // same list rather than a separate mechanism. Built here, once, per file
+  // (see registerMapFile): the client reads this from the map's own registry
+  // entry and says it locally the moment a player actually starts viewing
+  // that map, never during the entry dialog's preview-while-choosing.
+  const messages = [...serverOptions.serverMessages];
+  if (unsupportedCounts.size > 0) {
+    const included = obstacles.length;
+    const dropped = Array.from(unsupportedCounts.values()).reduce((sum, n) => sum + n, 0);
+    const droppedList = Array.from(unsupportedCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([keyword, count]) => `${count} ${keyword}`)
+      .join(', ');
+    messages.push(
+      `This map has ${included} obstacle${included === 1 ? '' : 's'} bzo reads `
+      + `(box/pyramid/base/teleporter) and dropped ${dropped} it doesn't yet: ${droppedList}.`
+    );
+    log(
+      `Ignoring unsupported blocks in ${filename}: ${droppedList}`
+    );
+  }
+
   const teleporterGraph = buildTeleporterLinks();
   return {
     obstacles,
@@ -2305,6 +2628,7 @@ function parseBZWMap(filename) {
     zones,
     weapons,
     mapSize,
+    messages,
   };
 }
 
@@ -2367,6 +2691,10 @@ let OBSTACLES;
 let TELEPORTER_GRAPH = { teleporters: [], links: [] };
 let mapTeamMode = null;
 let mapServerOptions = {};
+// What the live map says to a player who joins it -- -srvmsg lines and the
+// dropped-unsupported-feature tally (parseBZWMap), threaded into its
+// MAP_REGISTRY entry below the same way any other map's is.
+let mapMessages = [];
 // The map's `zone` blocks, in map order, so a flag slot can name the one it
 // belongs to by index the way upstream's `#<flagId>` qualifier does.
 let MAP_ZONES = [];
@@ -2383,6 +2711,7 @@ if (MAP_SOURCE === 'random') {
   TELEPORTER_GRAPH = mapData.teleporterGraph;
   mapTeamMode = mapData.teamMode;
   mapServerOptions = mapData.serverOptions;
+  mapMessages = mapData.messages;
   MAP_ZONES = mapData.zones;
   // The map's `world size` directive. Applied here, at the one call site that
   // loads the *live* map, rather than as a side effect inside `parseBZWMap`
@@ -2430,7 +2759,7 @@ try {
 // second, brotli-only cache would only complicate the pipeline for no real
 // disk saving, so this reuses it exactly as public/'s assets do, raw copy and
 // negotiated fallback included.
-function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize) {
+function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages) {
   // Seeded from the map's own geometry (not from `fileName`, so a map that is
   // renamed but not edited still lands on the same clouds and the same hash)
   // -- deterministic across processes, unlike `MAP_SOURCE === 'random'`'s
@@ -2447,6 +2776,12 @@ function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize
     // need to match whichever map it is looking at, not the live match's --
     // see the client's `applyWorldData`.
     mapSize: Number.isFinite(mapSize) ? mapSize : DEFAULT_MAP_SIZE,
+    // What this map says to a player who arrives on it -- -srvmsg lines and
+    // the dropped-unsupported-feature tally, both from parseBZWMap. Read by
+    // the client only at the moment it actually starts viewing this map
+    // (never during the entry dialog's preview-while-choosing); see
+    // `announceWorldMessages` in client.js.
+    messages: Array.isArray(messages) ? messages : [],
   };
   const json = JSON.stringify(entry);
   const hash = crypto.createHash('sha256').update(json).digest('hex').slice(0, 12);
@@ -2491,8 +2826,8 @@ function sweepMapCache() {
 }
 
 const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
-  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE)
-  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE);
+  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages)
+  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages);
 
 // A Map Viewer's requested map file, checked against what this process has
 // actually hashed -- the client fetched its preview from `init.viewableMaps`
@@ -2529,7 +2864,7 @@ function hashRemainingMapsInBackground() {
       const filePath = resolveMapFilePath(fileName);
       if (filePath) {
         const mapData = parseBZWMap(filePath);
-        registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize);
+        registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages);
       }
     } catch (error) {
       logError(`Could not hash map ${fileName}:`, error);
@@ -5761,12 +6096,6 @@ function describeBadFlagRelease() {
   if (ANTIDOTE_FLAGS) ways.push('on the antidote');
   return ways.length > 0 ? ways.join(' or ') : 'only on death';
 }
-// -srvmsg upstream. What the world says to each player as they arrive, in the
-// order the map wrote it. Upstream sends these as ordinary server chat rather
-// than as part of the world (bzfs.cxx:2507), so bzo does too -- which is also
-// why it is separate from `motd`, the label the entry dialog shows before anyone
-// has joined at all.
-const MAP_SERVER_MESSAGES = Object.freeze(mapServerOptions.serverMessages || []);
 // -f upstream. A map may take a flag type out of the pool by abbreviation, or a
 // whole quality out with `good` or `bad`, and nothing puts one back -- which is
 // how every other switch a map carries behaves. Settled at startup because the
@@ -8833,10 +9162,20 @@ function getAccelerationWindow(arrivalGap, clientSendGap) {
 
 
 // Helper to send the map list and current map to a given websocket
+// The same shape `init.viewableMaps` sends -- a map still hashing in the
+// background is simply absent until the next call, same caveat as `init`'s
+// own copy. Shared so the View dialog (which asks fresh, on demand, rather
+// than waiting for a reconnect) and `init` never compute this two ways.
+function getViewableMapsList() {
+  return Array.from(MAP_REGISTRY.values())
+    .map((entry) => ({ file: entry.fileName, hash: entry.hash, url: entry.url }));
+}
+
 function sendMapList(ws) {
   ws.send(JSON.stringify({
     type: 'mapList',
     maps: listAvailableMapFiles(),
+    viewableMaps: getViewableMapsList(),
     currentMap: MAP_SOURCE,
     shotMaxActive: GAME_CONFIG.SHOT_MAX_ACTIVE,
     ricochet: GAME_CONFIG.ALL_SHOTS_RICOCHET,
@@ -9001,9 +9340,9 @@ wss.on('connection', (ws, req) => {
     // Every map hashed so far, for the join dialog's Map Viewer picker
     // (issue #68). A map still hashing in the background is simply absent
     // until a later `init` -- i.e. until the player reloads -- rather than
-    // arriving as a push update.
-    viewableMaps: Array.from(MAP_REGISTRY.values())
-      .map((entry) => ({ file: entry.fileName, hash: entry.hash, url: entry.url })),
+    // arriving as a push update; the View dialog avoids that by asking fresh
+    // instead (`getMaps`/`mapList` carries the same list on demand).
+    viewableMaps: getViewableMapsList(),
     flags: getFlagStates(),
     worldTime,
     serverName: serverConfig.serverName || '',
@@ -9854,18 +10193,6 @@ wss.on('connection', (ws, req) => {
           handleRabbitSpawn(player);
           broadcastTeamScores();
           refreshVoiceRosters(true);
-          // The world's greeting, said only to whoever just arrived. Upstream
-          // sends it after the join is complete, so a player is in the roster
-          // and can answer before the server has finished talking.
-          for (const text of MAP_SERVER_MESSAGES) {
-            sendToPlayer(player, {
-              type: 'message',
-              src: -1,
-              dst: player.id,
-              msgType: 'server',
-              text,
-            });
-          }
           break;
         }
 
@@ -9898,8 +10225,9 @@ wss.on('connection', (ws, req) => {
           break;
 
         case 'getMaps': {
-          if (refuseNonOperator(ws, player, 'getMaps')) break;
-          // Reply with all .bzw files in maps/ plus 'random', and indicate current map
+          // Reply with all .bzw files in maps/ plus 'random', and indicate current map.
+          // Open to every player -- browsing and the View dialog need this list, and
+          // only `setMap` (switching the live match) stays operator-only below.
           sendMapList(ws);
           break;
         }
@@ -9991,6 +10319,64 @@ wss.on('connection', (ws, req) => {
           });
           break;
         }
+
+        // The View dialog's remote-server list -- decoded entirely from the
+        // list server's own reply, so this never connects to any of the
+        // servers it names. Open to every player, same as `getMaps`: viewing
+        // and importing cost the requester (a fetch, a render), not the live
+        // match, so only `setMap` needs an operator.
+        case 'listRemoteServers': {
+          getRemoteServerList().then((servers) => {
+            const summarized = servers
+              .map((s) => ({
+                host: s.host,
+                port: s.port,
+                title: s.title,
+                style: s.info?.style ?? null,
+                players: s.info?.players ?? null,
+                maxPlayers: s.info?.maxPlayers ?? null,
+              }))
+              .sort((a, b) => (b.players ?? -1) - (a.players ?? -1));
+            ws.send(JSON.stringify({ type: 'remoteServerList', servers: summarized }));
+          }).catch((error) => {
+            logError('Fetching the remote server list failed:', error);
+            ws.send(JSON.stringify({ error: 'Could not reach the BZFlag list server' }));
+          });
+          break;
+        }
+
+        // Downloads a live BZFlag server's world over the real wire protocol
+        // (see server/remote-world-import.cjs) and saves it as an ordinary
+        // .bzw -- one step, same as `uploadMap`. Open to every player: it
+        // costs this server one fetch and one file (capped by
+        // MAX_WORLD_DATABASE_BYTES in remote-world-import.cjs), not the live
+        // match, so there is nothing here that needs an operator. It does not
+        // touch the live match or select the new file anywhere -- switching
+        // the match to it is still `setMap`, still operator-only.
+        // `performRemoteMapImport` hashes the file synchronously, so it is
+        // viewable the moment this reply arrives, not after a background
+        // trickle or a reload.
+        case 'importMap': {
+          const target = parseHostPort(message.hostPort);
+          if (!target) {
+            ws.send(JSON.stringify({ error: 'Expected host:port' }));
+            break;
+          }
+          const { host, port } = target;
+          log(`"${player.name}" is importing a remote map from ${host}:${port}`);
+          performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
+            log(`"${player.name}" imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes)`);
+            ws.send(JSON.stringify({ type: 'importMapResult', success: true, file: safeMapName }));
+            replyToPlayer(player, `Imported ${safeMapName} from ${host}:${port} (${byteLength} bytes). `
+              + 'It is ready to View now.');
+            sendMapList(ws);
+          }).catch((error) => {
+            logError(`Remote map import from ${host}:${port} failed:`, error);
+            ws.send(JSON.stringify({ error: `Import failed: ${error.message}` }));
+          });
+          break;
+        }
+
         case 'setOperatorConfig': {
           if (refuseNonOperator(ws, player, 'setOperatorConfig')) break;
           const requested = {};

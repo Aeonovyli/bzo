@@ -673,6 +673,9 @@ const domRefs = {
   closeHelpBtn: null,
   operatorBtn: null,
   closeOperatorBtn: null,
+  viewBtn: null,
+  viewOverlay: null,
+  closeViewBtn: null,
   closeAudioBtn: null,
   wireframeBtn: null,
   playerLabelEl: null,
@@ -687,6 +690,11 @@ let settingsMenu = null;
 const XR_SETTINGS_EXCLUDED_IDS = new Set([
   'xrBtn',
   'closeSettingsHud',
+  // No XR screen for the View dialog yet -- a row that opened one, minimal
+  // arrow-cycle rows for the remote list, the view/import actions, would
+  // belong here alongside 'operator' once built. Until then this stays out
+  // of the XR list rather than being a submenu row that goes nowhere.
+  'viewBtn',
 ]);
 
 function isEditableElement(element) {
@@ -701,6 +709,11 @@ function isEditableElement(element) {
 function isOperatorPanelVisible() {
   if (!domRefs.operatorOverlay) return false;
   return window.getComputedStyle(domRefs.operatorOverlay).display !== 'none';
+}
+
+function isViewPanelVisible() {
+  if (!domRefs.viewOverlay) return false;
+  return window.getComputedStyle(domRefs.viewOverlay).display !== 'none';
 }
 
 function callOptionalHudCallback(names, ...args) {
@@ -1299,6 +1312,13 @@ function updateOperatorBtn() {
   domRefs.operatorBtn.title = isVisible ? 'Hide Operator Panel (O)' : 'Show Operator Panel (O)';
 }
 
+function updateViewBtn() {
+  if (!domRefs.viewBtn || !domRefs.viewOverlay) return;
+  const isVisible = window.getComputedStyle(domRefs.viewOverlay).display !== 'none';
+  domRefs.viewBtn.classList.toggle('active', isVisible);
+  domRefs.viewBtn.title = isVisible ? 'Hide View' : 'Show View';
+}
+
 export function toggleOperatorPanel() {
   if (!domRefs.operatorOverlay) return;
   // A disabled button cannot be clicked, so the button path needs no guard --
@@ -1349,6 +1369,26 @@ export function toggleOperatorPanel() {
   updateOperatorBtn();
 }
 
+// The View dialog is open to every player -- there is no disabled state to
+// check, unlike Operator -- so this is the simple half of `toggleOperatorPanel`
+// with nothing staged to discard on close either: the tables just repaint from
+// whatever the server sends back the next time this opens.
+export function toggleViewPanel() {
+  if (!domRefs.viewOverlay) return;
+  if (isViewPanelVisible()) {
+    hideDialog(domRefs.viewOverlay);
+    syncInputContextFromUi();
+    hudContext.showMessage('View: Hidden');
+  } else {
+    hideSettingsHudSilently();
+    setInputContext(INPUT_CONTEXT.DIALOG);
+    showDialog(domRefs.viewOverlay);
+    callOptionalHudCallback(['onViewPanelShown']);
+    hudContext.showMessage('View: Shown');
+  }
+  updateViewBtn();
+}
+
 // A click outside an open dialog dismisses it, the entry dialog included: it
 // dismisses the way Cancel and the `[X]` do, putting the staged draft back
 // rather than applying it. Escape already reached it through the shared menu
@@ -1392,6 +1432,10 @@ function dismissVisibleDialog(dialogId) {
     toggleOperatorPanel();
     return true;
   }
+  if (dialogId === 'viewOverlay') {
+    toggleViewPanel();
+    return true;
+  }
   if (dialogId === 'entryDialog' && typeof hudContext.toggleEntryDialog === 'function') {
     hudContext.toggleEntryDialog();
     return true;
@@ -1421,6 +1465,9 @@ function bindHudElements() {
   domRefs.closeHelpBtn = document.getElementById('closeHelpBtn');
   domRefs.operatorBtn = document.getElementById('operatorBtn');
   domRefs.closeOperatorBtn = document.getElementById('closeOperatorBtn');
+  domRefs.viewBtn = document.getElementById('viewBtn');
+  domRefs.viewOverlay = document.getElementById('viewOverlay');
+  domRefs.closeViewBtn = document.getElementById('closeViewBtn');
   domRefs.closeAudioBtn = document.getElementById('closeAudioBtn');
   domRefs.wireframeBtn = document.getElementById('wireframeBtn');
   // The whole label, not just the name: the flag beside it opens Settings too,
@@ -1440,6 +1487,7 @@ function bindHudElements() {
   stopPropagationForHud(['settingsHud'], false);
   stopPropagationForHud(['audioOverlay'], false);
   stopPropagationForHud(['operatorOverlay'], false);
+  stopPropagationForHud(['viewOverlay'], false);
 
   if (domRefs.wireframeBtn) {
     domRefs.wireframeBtn.addEventListener('click', (e) => {
@@ -1582,6 +1630,23 @@ function bindHudElements() {
     });
   }
 
+  if (domRefs.viewBtn) {
+    domRefs.viewBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSettingsHud();
+      toggleViewPanel();
+    });
+  }
+
+  if (domRefs.closeViewBtn) {
+    domRefs.closeViewBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleViewPanel();
+    });
+  }
+
   if (domRefs.playerLabelEl) {
     domRefs.playerLabelEl.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1707,6 +1772,7 @@ function bindHudElements() {
   updateSettingsBtn();
   updateHelpBtn();
   updateOperatorBtn();
+  updateViewBtn();
   updateVirtualControlsBtn();
   refreshHudButtons();
   settingsMenu = initSettingsMenu({

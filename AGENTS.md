@@ -392,6 +392,20 @@ The first two exist so a test session can be driven from the server alone. Re-te
 otherwise means walking to every browser, phone, and headset and clicking. They
 may change once that stops being the dominant cost.
 
+- **A map's `-srvmsg` is not server-pushed chat.** Upstream sends it as ordinary
+  chat after the join completes (bzfs.cxx:2507), and for a long time bzo did too.
+  It is map data (parsed once, from that file's `options` block) rather than
+  server runtime state, and bzo's Map Viewer can put a player on any registered
+  map file, not only the live match's -- so `parseBZWMap`'s `messages` (`-srvmsg`
+  lines, plus a tally of any top-level keyword it does not read: `mesh`, `arc`,
+  `group`, `material`, and the rest of `UNSUPPORTED_TOP_LEVEL_KEYWORDS`) rides in
+  that file's own `MAP_REGISTRY` entry instead, and the client says it locally
+  (`announceWorldMessages`) the moment a join for that file is confirmed
+  (`playerJoined`), not while the entry dialog's Map Viewer preview is merely
+  cycling through choices nobody has committed to. A message the server pushed
+  could only ever reach the live match; one carried in the map's own data
+  reaches whichever map a player actually lands on.
+
 ## Memory Policy
 
 - When the user asks to remember something, record it in this file so other
@@ -3314,7 +3328,13 @@ is zapped rather than dropped, which is what dying with it does, so the command
 cannot be used to plant a bad flag on somebody.
 
 **A probe has admin, so the pair is the whole workflow: `/mv` to the zone you
-want, then `/flag drop` to shed whatever you are already holding.** Reach for the
+want, then `/flag drop` to shed whatever you are already holding.** This is
+`localAdmin` in `server.json` (`isLocalAdminRequest` in `server/sessions.cjs`):
+a connection from loopback with no `X-Forwarded-For` header is trusted as an
+operator without signing in, specifically so a headless probe or a raw
+WebSocket script can drive admin-only commands and the Operator panel. It is
+off by default and must stay off on a real deployment (see the comment beside
+`LOCAL_ADMIN` in `server.js`) -- it is on for this dev server. Reach for the
 second half whether or not you meant to pick anything up. `bzo.bzw`'s flags sit
 on the four compass arms around the centre -- bad at radius 25, good at radius
 50, each arm only as wide as its own group -- and a probe crossing an arm
