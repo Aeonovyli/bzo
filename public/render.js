@@ -2586,7 +2586,7 @@ class RenderManager {
   }
 
 
-  createMapBoundaries(mapSize = 100) {
+  createMapBoundaries(mapSize = 100, noWalls = false) {
     if (!this.scene) return;
 
     // Remove old boundary meshes and debug labels if present
@@ -2616,6 +2616,19 @@ class RenderManager {
       if (marker.material) marker.material.dispose();
     });
     this.compassMarkers = [];
+
+    // `noWalls` -- a map's `world` block skipped the border entirely. There is
+    // nothing to draw, but the compass letters are still worth having: with no
+    // wall to judge direction by, they are the only orientation cue left.
+    if (noWalls) {
+      const markerHeight = Math.max(wallHeight + 8, this.maxObstacleHeight + 5);
+      this._addCompassMarker('N', 0xB20000, new THREE.Vector3(0, markerHeight, -mapSize / 2));
+      this._addCompassMarker('S', 0x1976D2, new THREE.Vector3(0, markerHeight, mapSize / 2));
+      this._addCompassMarker('E', 0x388E3C, new THREE.Vector3(mapSize / 2, markerHeight, 0));
+      this._addCompassMarker('W', 0x9C27B0, new THREE.Vector3(-mapSize / 2, markerHeight, 0));
+      this.boundaryMeshes = boundaryMeshes;
+      return;
+    }
 
     // Each wall drops the face that points away from the arena. Nothing is made
     // transparent: with the outward face gone, a camera outside the border meets

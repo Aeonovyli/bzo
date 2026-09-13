@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.10] - 2026-09-13
+
+### Added
+- **Four more BZW map keywords (issue #72).** A map's `world` block may now
+  set `flagHeight` (the clearance a superflag needs above where it spawns),
+  `noWalls` (no world border at all -- a new `noWalls.bzw` previews it), and
+  `freeCtfSpawns` (a colour team spawns in any of its zones every life, not
+  only its first and the ones right after a capture). A zone's `safety
+  <team...>` now names a landing spot for that team's flag when it is dropped
+  somewhere unsafe, closest match first; `bzo.bzw`'s four team-spawn pads
+  each carry their own team's now, so a flag dropped on an enemy base
+  returns home instead of to the map centre. A map's `-admsg <text>` also
+  repeats to everyone already playing every 15 minutes, the same way
+  `-srvmsg` already greets a joining player.
+
 ## [1.2.9] - 2026-09-13
 
 ### Added

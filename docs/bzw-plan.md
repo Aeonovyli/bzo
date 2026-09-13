@@ -261,54 +261,19 @@ just look at the sky.
       than porting `doLineRain`/`doBillBoards` as a second code path.
 - [ ] A small map naming one preset, to preview in Map Viewer.
 
-## World fields
-
-`flagHeight`, `noWalls`, `freeCtfSpawns` on the `world` block, next to `size`
-which bzo already reads. `src/bzfs/CustomWorld.cxx:41-49`.
-
-Cheap relative to the rest of this plan -- each is a single BZDB-style value or
-switch, the same shape as the `-set` variables `docs/bzw.md` already threads
-through `GAME_CONFIG`:
-
-- [ ] `flagHeight` -- the ceiling a superflag may spawn under. Plumb like
-      `_maxFlagGrabs`: a config default, replaced by the map's number.
-- [ ] `noWalls` -- skip building the world border entirely. `getWorldBorderColliders`
-      needs a caller that can decline to add it, and the client's edge-of-world
-      rendering (skybox, fog falloff) may assume a border exists somewhere the
-      way it does not need to once there is none. A small `noWalls` map of its
-      own is where to check this in Map Viewer -- drive the phantom tank
-      straight off the edge of `bzo.bzw` and there is nothing to hit either
-      way, so the real map cannot tell a working `noWalls` from a border that
-      silently failed to build.
-- [ ] `freeCtfSpawns` -- lets a colour team spawn in any of its zones on every
-      life, not only the first and post-capture ones `restartOnBase` gates
-      today (see "Team zones" in `docs/bzw.md`). This one touches
-      `getSpawnPosition` directly, and needs an actual respawn cycle on a live
-      team-mode server to see -- Map Viewer never spawns anyone.
-
-## Zone `safety`
-
-A zone's `safety` keyword, a Phantom Zone landing spot per team (or team 0 for
-anyone). `src/bzfs/CustomZone.cxx:188-205`.
-
-`docs/bzw.md` already covers `zoneflag` and `team` on a zone; `safety` is the
-one keyword left unread there. Small and self-contained -- wherever `PZ`'s
-landing point is chosen today gets a per-team zone list to draw from instead
-of (or alongside) whatever fallback it currently uses.
-
-- [ ] Parse `safety <team...>` on a zone the same way `team` already
-      accumulates onto one.
-- [ ] Wire it into `PZ`'s landing-point choice.
-
 ## Leftovers
 
 Small enough to fold into whichever section lands near them, or to take as a
 single pass once the rest of this plan is empty:
 
-- [ ] `-admsg` and `-helpmsg` on the `options` block -- a periodic broadcast
-      and a file-backed `/help` page, neither read today (`docs/bzw.md`,
-      "What is ignored").
 - [ ] Any `-set` variable beyond the three bzo already threads through
       (`_maxFlagGrabs`, `_wingsJumpCount`, `_maxBumpHeight`) stays a
       map-by-map judgment call -- add a config knob for one only when a map
       that needs it shows up, per `docs/flags.md`'s existing rule for these.
+
+Not planned: `-helpmsg`. Its argument is a path on the server's filesystem, and
+upstream itself refuses to take one from a world file
+(`checkFromWorldFile`, `CmdLineOptions.cxx:337-344`) for exactly the reason bzo
+would inherit worse -- every option here arrives through a map's `options`
+block, and a map is not only something an operator hand-wrote; see
+`docs/bzw.md`'s note on `-helpmsg` under "The options block".

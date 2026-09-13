@@ -1260,7 +1260,7 @@ async function performRemoteMapImport(host, port) {
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
   const mapData = parseBZWMap(filePath);
-  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages);
+  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls);
   return { safeMapName, byteLength: worldDatabase.length };
 }
 
@@ -1760,7 +1760,9 @@ function parseBZWServerOptions(lines) {
   // Every other field is left absent unless the map names it. `forbiddenFlags`
   // is the exception because `-f` may appear any number of times, and an empty
   // list says the same thing as no list.
-  const options = { forbiddenFlags: [], unreadBZDBVars: [], serverMessages: [] };
+  const options = {
+    forbiddenFlags: [], unreadBZDBVars: [], serverMessages: [], adMessages: [],
+  };
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -1889,6 +1891,18 @@ function parseBZWServerOptions(lines) {
       const text = quoted ? quoted[1] : rest;
       for (const messageLine of text.split('\\n')) options.serverMessages.push(messageLine);
     }
+    // -admsg <text>: the same accumulation and `\n` splitting as -srvmsg
+    // above, but said periodically to everyone already playing rather than
+    // once to a player as they join (bzfs.cxx:7555-7591, every 900 seconds).
+    // Upstream also takes a file-backed multi-line form (`-helpmsg`'s sibling
+    // in `textChunker`); bzo has only the inline-text form, the same limit
+    // `docs/bzw.md` already notes for `-helpmsg` itself.
+    if (option === '-admsg') {
+      const rest = line.replace(/^\S+\s*/, '');
+      const quoted = rest.match(/^"([\s\S]*)"$/);
+      const text = quoted ? quoted[1] : rest;
+      for (const messageLine of text.split('\\n')) options.adMessages.push(messageLine);
+    }
     // -set <variable> <value>: a BZDB assignment. bzo's world constants are
     // constants, so the only variable it can honour is one it already keeps a
     // configurable copy of. Every other name is collected and reported, because
@@ -1999,6 +2013,17 @@ function parseBZWMap(filename) {
   // let whichever map that trickle parses last silently resize the live
   // match for every later connection.
   let mapSize = null;
+  // `flagHeight`, `noWalls` and `freeCtfSpawns` on the `world` block --
+  // CustomWorld.cxx:41-49. `mapFlagHeight` is applied at the live-map call
+  // site the same way `mapSize` is, since `GAME_CONFIG.FLAG_HEIGHT` is shared
+  // state the background map-hashing trickle must not touch. `noWalls` and
+  // `freeCtfSpawns` ride along in this function's own return value instead --
+  // one because the client needs it in the map's own JSON (see `noWalls` in
+  // `registerMapFile`), the other because it only ever matters to
+  // `getSpawnPosition`, which already reads `mapServerOptions`.
+  let mapFlagHeight = null;
+  let mapNoWalls = false;
+  let mapFreeCtfSpawns = false;
   let current = null;
   let currentLink = null;
   let currentZone = null;
@@ -2296,10 +2321,23 @@ function parseBZWMap(filename) {
         }
         continue;
       }
-      // `flag` and `safety` are the rest of CustomZone::read: a zone that any
-      // flag of a named type spawns in, and a safety spot for a Phantom Zone
-      // tank. Neither is read yet.
-      if (token === 'flag' || token === 'safety') {
+      // `safety <n> [n ...]` -- CustomZone.cxx:184-206, the same accumulation
+      // as `team` above (upstream reads them in one shared branch), but a
+      // landing spot for a *dropped team flag*, not a spawn qualifier: see
+      // `getSafetyZonePosition`, used from `dropFlag`.
+      if (token === 'safety') {
+        const [, ...rest] = line.split(/\s+/);
+        for (const raw of rest) {
+          const teamIndex = parseInt(raw, 10);
+          if (Number.isInteger(teamIndex) && teamIndex >= 0 && teamIndex <= 4) {
+            currentZone.safety.add(teamIndex);
+          }
+        }
+        continue;
+      }
+      // `flag` is the rest of CustomZone::read: a zone that any flag of a
+      // named type spawns in. Not read yet.
+      if (token === 'flag') {
         unreadZoneKeywords.add(token);
         continue;
       }
@@ -2393,22 +2431,38 @@ function parseBZWMap(filename) {
         flagCounts: new Map(),
         unknownFlags: new Set(),
         teams: new Set(),
+        safety: new Set(),
       };
       continue;
     }
 
     if (token === 'world') {
-      // Look ahead for size
+      // Look ahead through the block for every field bzo reads on it, rather
+      // than stopping at the first one found -- a map may state `size` after
+      // `noWalls`, and upstream's own `WorldFileLocation::read` has no
+      // ordering requirement either.
       for (let j = i + 1; j < lines.length; j++) {
         const wline = lines[j].trim();
-        if (wline.split(/\s+/)[0].toLowerCase() === 'size') {
+        const wtoken = wline.split(/\s+/)[0].toLowerCase();
+        if (wtoken === 'end') break;
+        if (wtoken === 'size') {
           const [, size] = wline.split(/\s+/);
           if (size) {
             mapSize = parseFloat(size) * 2;
           }
-          break;
+        } else if (wtoken === 'flagheight') {
+          // No lower bound upstream (CustomWorld.cxx:39-42 sets `_fHeight`
+          // straight from the stream) -- 0 is a real value, not "unset", the
+          // same reasoning `docs/bzw.md` already gives box/pyramid `size` for
+          // "A zero height is a real height."
+          const [, height] = wline.split(/\s+/);
+          const parsed = parseFloat(height);
+          if (Number.isFinite(parsed) && parsed >= 0) mapFlagHeight = parsed;
+        } else if (wtoken === 'nowalls') {
+          mapNoWalls = true;
+        } else if (wtoken === 'freectfspawns') {
+          mapFreeCtfSpawns = true;
         }
-        if (wline.toLowerCase() === 'end') break;
       }
     // `rotation` is stated here rather than left to whether the block carries a
     // `rotation` line, because everything downstream turns it into a cosine: a
@@ -2628,6 +2682,9 @@ function parseBZWMap(filename) {
     zones,
     weapons,
     mapSize,
+    flagHeight: mapFlagHeight,
+    noWalls: mapNoWalls,
+    freeCtfSpawns: mapFreeCtfSpawns,
     messages,
   };
 }
@@ -2701,6 +2758,21 @@ let MAP_ZONES = [];
 // The map's `weapon` blocks. Upstream's `WorldWeapons` list, which is the
 // world's and not any player's.
 let WORLD_WEAPONS = [];
+// The ceiling `hasFlagClearance` searches under for a flag to spawn --
+// upstream's `_flagHeight` (default 10, CustomWorld.cxx:41-44), overridable by
+// a map's own `flagHeight` line. Purely a spawn-positioning detail: flags are
+// never predicted client-side, so unlike `MAP_SIZE` this never needs to leave
+// the server.
+let FLAG_HEIGHT = FLAG_CLEARANCE;
+// `noWalls` -- skips the world border entirely. Read by the client from its
+// own copy of the live map's JSON (see `registerMapFile`'s `noWalls` field),
+// not sent here, the same way `MAP_SIZE` is not.
+let mapNoWalls = false;
+// `freeCtfSpawns` -- a colour team spawns in any of its zones on every life,
+// not only the first and post-capture ones `restartOnBase` gates. Read by
+// `getSpawnPosition` alone, so this stays a plain module variable rather than
+// threading through `GAME_CONFIG` or the client's copy of the map.
+let mapFreeCtfSpawns = false;
 if (MAP_SOURCE === 'random') {
   OBSTACLES = generateObstacles();
   TELEPORTER_GRAPH = { teleporters: [], links: [] };
@@ -2720,6 +2792,14 @@ if (MAP_SOURCE === 'random') {
     GAME_CONFIG.MAP_SIZE = mapData.mapSize;
     log(`Map option world size: MAP_SIZE=${GAME_CONFIG.MAP_SIZE}`);
   }
+  if (Number.isFinite(mapData.flagHeight)) {
+    FLAG_HEIGHT = mapData.flagHeight;
+    log(`Map option flagHeight: ${FLAG_HEIGHT}`);
+  }
+  mapNoWalls = mapData.noWalls;
+  if (mapNoWalls) log('Map option noWalls: the world border will not be built');
+  mapFreeCtfSpawns = mapData.freeCtfSpawns;
+  if (mapFreeCtfSpawns) log('Map option freeCtfSpawns: a colour team spawns in any of its zones every life');
   log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
   log(`Loaded ${TELEPORTER_GRAPH.links.length} teleporter face links from ${mapPath}`);
   if (MAP_ZONES.length > 0) log(`Loaded ${MAP_ZONES.length} zones from ${mapPath}`);
@@ -2759,7 +2839,7 @@ try {
 // second, brotli-only cache would only complicate the pipeline for no real
 // disk saving, so this reuses it exactly as public/'s assets do, raw copy and
 // negotiated fallback included.
-function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages) {
+function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls) {
   // Seeded from the map's own geometry (not from `fileName`, so a map that is
   // renamed but not edited still lands on the same clouds and the same hash)
   // -- deterministic across processes, unlike `MAP_SOURCE === 'random'`'s
@@ -2776,6 +2856,11 @@ function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize
     // need to match whichever map it is looking at, not the live match's --
     // see the client's `applyWorldData`.
     mapSize: Number.isFinite(mapSize) ? mapSize : DEFAULT_MAP_SIZE,
+    // `noWalls` -- read here rather than derived from `mapSize`, since a Map
+    // Viewer preview builds this same border from this same JSON (see
+    // `applyWorldData`/`createMapBoundaries` in client.js/render.js) and has
+    // no other way to know a map asked for none.
+    noWalls: !!noWalls,
     // What this map says to a player who arrives on it -- -srvmsg lines and
     // the dropped-unsupported-feature tally, both from parseBZWMap. Read by
     // the client only at the moment it actually starts viewing this map
@@ -2826,8 +2911,8 @@ function sweepMapCache() {
 }
 
 const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
-  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages)
-  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages);
+  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls)
+  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls);
 
 // A Map Viewer's requested map file, checked against what this process has
 // actually hashed -- the client fetched its preview from `init.viewableMaps`
@@ -2864,7 +2949,7 @@ function hashRemainingMapsInBackground() {
       const filePath = resolveMapFilePath(fileName);
       if (filePath) {
         const mapData = parseBZWMap(filePath);
-        registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages);
+        registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls);
       }
     } catch (error) {
       logError(`Could not hash map ${fileName}:`, error);
@@ -5236,6 +5321,7 @@ function getBoxCollisionDistanceSquared(localX, localZ, halfW, halfD) {
 // Both flags are the ones a map's `shootthrough` and `drivethrough` keywords
 // set, which is what makes this the compatible way to say it.
 function getWorldBorderColliders() {
+  if (mapNoWalls) return [];
   const halfMap = GAME_CONFIG.MAP_SIZE / 2;
   const thickness = 4;
   const barrierHeight = 1000;
@@ -5377,7 +5463,11 @@ function getSpawnPosition(player) {
   if (testSpawn) return testSpawn;
 
   const colorIndex = getTeamColorIndex(player.team);
-  if (player.restartOnBase) {
+  // `freeCtfSpawns` (RandomSpawnPolicy.cxx:49) drops this whole branch from
+  // the choice rather than only skipping it once: `restartOnBase` is left set
+  // rather than cleared, because upstream never consults it again while the
+  // BZDB var is true, and a map may still flip it off mid-match.
+  if (player.restartOnBase && !mapFreeCtfSpawns) {
     player.restartOnBase = false;
     const base = getRandomTeamBase(colorIndex);
     if (base) {
@@ -6208,7 +6298,7 @@ function getSuperFlagPool() {
 // Only spawning uses this. A drop goes through dropTeamFlag, whose radius is 0
 // and which upstream's own comment calls "not a real clearance check".
 function hasFlagClearance(x, y, z) {
-  for (let offset = 0; offset < FLAG_CLEARANCE; offset += FLAG_DROP_TEST_RADIUS) {
+  for (let offset = 0; offset < FLAG_HEIGHT; offset += FLAG_DROP_TEST_RADIUS) {
     if (checkCollision(x, y + offset, z, FLAG_DROP_TEST_RADIUS, { suppressLog: true })) return false;
   }
   return true;
@@ -6420,6 +6510,30 @@ function findFlagLandingY(x, z, fromY) {
 function isOpposingBaseAt(position, colorIndex) {
   const baseTeam = getBaseTeamAtPoint(OBSTACLES, position.x, position.y, position.z);
   return baseTeam !== null && baseTeam !== colorIndex;
+}
+
+// WorldInfo::getFlagDropPoint / EntryZones::getClosePoint (CustomZone.cxx:
+// 184-206, EntryZones.cxx:128-153): a zone's `safety <team...>` names it as a
+// landing spot for that team's dropped flag. Unlike a spawn zone (weighted
+// random among every match), a safety zone is chosen by proximity to where
+// the flag actually came down, so it settles nearby rather than crossing the
+// map -- only `dropFlag` asks this, when a team flag has landed somewhere
+// unsafe (see `isOpposingBaseAt` above it in that chain).
+function getSafetyZonePosition(colorIndex, position) {
+  let closest = null;
+  let closestDistSq = Infinity;
+  for (const zone of MAP_ZONES) {
+    if (!zone.safety.has(colorIndex)) continue;
+    const dx = zone.x - position.x;
+    const dy = zone.y - position.y;
+    const dz = zone.z - position.z;
+    const distSq = (dx * dx) + (dy * dy) + (dz * dz);
+    if (distSq < closestDistSq) {
+      closestDistSq = distSq;
+      closest = zone;
+    }
+  }
+  return closest ? getRandomZonePoint(closest) : null;
 }
 
 // bzfs.cxx:3820. The timeout starts when the last held flag of an already empty
@@ -6736,15 +6850,20 @@ function dropFlag(flag, now = Date.now()) {
 
   if (teamFlag) {
     // A team flag never vanishes, so when it has nowhere safe to land upstream
-    // works down a chain: a drop zone, which bzo has none of, then the world
-    // centre, then its own base.
+    // works down a chain: the closest `safety` zone for this team, then the
+    // world centre, then its own base.
     if (isOpposingBaseAt(landing, flag.team)) {
-      const centre = { x: 0, y: 0, z: 0 };
-      if (isOpposingBaseAt(centre, flag.team)) {
-        const base = getRandomTeamBase(flag.team);
-        landing = base ? { x: base.x, y: getBaseTopY(base), z: base.z } : centre;
+      const safety = getSafetyZonePosition(flag.team, landing);
+      if (safety) {
+        landing = safety;
       } else {
-        landing = centre;
+        const centre = { x: 0, y: 0, z: 0 };
+        if (isOpposingBaseAt(centre, flag.team)) {
+          const base = getRandomTeamBase(flag.team);
+          landing = base ? { x: base.x, y: getBaseTopY(base), z: base.z } : centre;
+        } else {
+          landing = centre;
+        }
       }
     }
     startTeamFlagTimeoutIfAbandoned(flag);
@@ -9083,6 +9202,17 @@ if (ANTICHEAT_CONFIG.mode !== 'disabled') {
       });
     }
   }, 300000); // 5 minutes
+}
+
+// -admsg (bzfs.cxx:7555-7591): a periodic advertisement, every 900 seconds --
+// upstream's own static timer starts counting from server start, which
+// `setInterval`'s first callback already does.
+if (mapServerOptions.adMessages && mapServerOptions.adMessages.length > 0) {
+  setInterval(() => {
+    for (const line of mapServerOptions.adMessages) {
+      broadcastAll({ type: 'message', src: -1, dst: 0, msgType: 'server', text: line, ts: Date.now() });
+    }
+  }, 900000); // 15 minutes
 }
 
 // Function to force all clients to reload

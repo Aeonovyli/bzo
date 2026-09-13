@@ -1742,6 +1742,8 @@ const DEFAULT_MAP_SIZE = 800;
 // MAP_SIZE of its own to ask instead: this is the one place map size comes
 // from, live match or preview alike.
 let currentWorldMapSize = null;
+// `noWalls` -- read the same way and for the same reason as `currentWorldMapSize`.
+let currentWorldNoWalls = false;
 
 // Whichever world is actually on screen right now, live match or Map Viewer
 // preview alike -- set unconditionally at the bottom of `applyWorldData`, so
@@ -1800,9 +1802,10 @@ function applyWorldData(world) {
   // actually on screen -- the live match's, or a Map Viewer preview's. The
   // fallback only ever applies to a world that failed to fetch.
   currentWorldMapSize = Number.isFinite(world?.mapSize) ? world.mapSize : DEFAULT_MAP_SIZE;
+  currentWorldNoWalls = !!world?.noWalls;
   renderManager.buildGround(currentWorldMapSize);
   renderManager.setGroundGridEnabled(showDebugGeometry, currentWorldMapSize);
-  renderManager.createMapBoundaries(currentWorldMapSize);
+  renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls);
   renderManager.createMountains(currentWorldMapSize);
 }
 
@@ -7199,6 +7202,7 @@ function showMessage(text) {
 }
 
 function getWorldBorderColliders() {
+  if (currentWorldNoWalls) return [];
   if (cachedWorldBorderColliders.length > 0) return cachedWorldBorderColliders;
   const mapSize = currentWorldMapSize ?? DEFAULT_MAP_SIZE;
   const halfMap = mapSize / 2;

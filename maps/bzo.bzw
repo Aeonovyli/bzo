@@ -602,7 +602,9 @@ end
 # the way a flag's pad is tinted the flag's -- so a first spawn lands on the
 # base itself (`restartOnBase`, set on join and after a capture) and every
 # other death lands on the pad instead, the same fallback rogue's centre zone
-# answers. See docs/bzw.md, "Team zones".
+# answers. See docs/bzw.md, "Team zones". The same zone also carries `safety`
+# for its team, so a flag dropped on an enemy base lands back on its own pad
+# instead of the map centre.
 base
   name n_red_base
   position 0 100 0
@@ -614,6 +616,7 @@ zone
   position 0 130 0
   size 20 8 0
   team 1
+  safety 1
 end
 box
   name n_red_spawn
@@ -634,6 +637,7 @@ zone
   position 130 0 0
   size 8 20 0
   team 2
+  safety 2
 end
 box
   name e_green_spawn
@@ -654,6 +658,7 @@ zone
   position 0 -130 0
   size 20 8 0
   team 3
+  safety 3
 end
 box
   name s_blue_spawn
@@ -674,6 +679,7 @@ zone
   position -130 0 0
   size 8 20 0
   team 4
+  safety 4
 end
 box
   name w_purple_spawn

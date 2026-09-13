@@ -225,6 +225,7 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _wingsJumpCount <n>` | how many times `WG` Wings may flap before it needs the ground again |
 | `-set _maxBumpHeight <n>` | how high a step a tank may climb without jumping |
 | `-srvmsg <text>` | a line the world says to each player as they join |
+| `-admsg <text>` | a line said to everyone already playing, repeated every 15 minutes |
 
 ## A pad flush with the ground
 
@@ -308,8 +309,25 @@ shows a BZFlag project announcement, which no game server has any say in. bzo's
 resembles is `-srvmsg`, and the two are kept apart because they speak at
 different moments -- one before you join, one after.
 
-Not read: `-admsg`, upstream's periodic advertisement broadcast to everyone on a
-timer, and `-helpmsg`, which reads chunks out of a file.
+`-admsg` accumulates and splits the same way `-srvmsg` does, but is said to
+everyone already on the server on a repeating 15-minute timer
+(`bzfs.cxx:7555-7591`) rather than once to a player as they join. Upstream also
+takes a file-backed multi-line form (`textChunker`, the same mechanism
+`-helpmsg` uses); bzo has only the inline-text form.
+
+**Not read: `-helpmsg`.** Upstream itself refuses this one from a world file --
+`checkFromWorldFile` (`CmdLineOptions.cxx:337-344`) rejects `-helpmsg` (and a
+handful of others) the moment it sees one written in a map rather than typed on
+the server's own command line, because its argument is a **path on the
+server's filesystem** that the option then reads and serves back over `/help
+<name>`. A map is not command-line-typed trust upstream is willing to extend a
+file read to, and bzo's map is even less trusted than upstream's: every option
+here arrives through a map's `options` block, and a map is not only something
+an operator hand-wrote -- `server/remote-world-import.cjs` reconstructs one
+from whatever a live BZFlag server on the internet answered, minutes before
+bzo ever reads its `options` block. Reading a mapper-named path off local disk
+on the strength of that would be worse than upstream, not merely behind it, so
+this stays unread on purpose rather than pending.
 
 `-f` is a switch that happens to name its target: disallows accumulate, nothing
 puts one back, and `good` or `bad` takes a whole quality out at once. It filters
@@ -340,6 +358,40 @@ than rejecting the switch.
 
 A map with no `world` block gets upstream's own default: `_worldSize` 800, which
 is the full width, so the world spans +/-400.
+
+## World fields
+
+Three more `world`-block fields, next to `size` -- `CustomWorld.cxx:41-49`:
+
+| BZW | effect |
+|---|---|
+| `flagHeight <n>` | the ceiling `hasFlagClearance` searches under for a flag to spawn |
+| `noWalls` | the world border is not built at all |
+| `freeCtfSpawns` | a colour team spawns in any of its `team` zones every life, not only the first and the ones after a capture |
+
+`flagHeight` replaces upstream's `_flagHeight` (default 10), which is not the
+altitude a flag spawns *at* -- that is still a random point up to the tallest
+obstacle's top, `getMaxObstacleTopY` -- but the clearance above wherever it
+lands that has to be clear of any obstacle before the spot is accepted.
+`size w d 0`'s own rule applies: 0 is a real value here too, and turns the
+clearance search off rather than being read as "unset".
+
+`noWalls` removes the border everywhere it is built -- the server's and the
+client's own collision copy, and the visible boundary walls -- so a tank or a
+shot can cross the edge of the map in either direction, in every direction at
+once. Nothing else about the map changes: the mountains ringing the horizon are
+a distant backdrop keyed to `size` alone, on both sides of this project, and
+draw exactly as they would with a border in place. `maps/noWalls.bzw` is the
+small preview map for this, one marker box on each side where the wall would
+otherwise have stood.
+
+`freeCtfSpawns` only changes anything for a colour team that also has a
+`base`: `getSpawnPosition`'s base-priority branch (`restartOnBase`, set on join
+and after a capture -- see **Team zones** below) is skipped entirely while this
+is set, so every death asks a `team` zone or the map-wide random search
+instead, the same path rogue and a base-less colour team always take. Upstream
+never clears `restartOnBase` while the switch is on either, since the branch
+that would clear it is the one being skipped.
 
 ## Team zones
 
@@ -374,6 +426,24 @@ tinted that team's colour the way a flag's pad is tinted the flag's -- so a
 red tank's first life, and its first life after a capture, spawns on
 `n_red_base`, and every other death spawns on `n_red_spawn` instead, and the
 same for the other three.
+
+### Flag safety zones
+
+A zone's `safety <n> [n ...]` accumulates onto the same zone exactly as `team`
+does -- upstream reads both in one shared branch of `CustomZone::read`
+(`CustomZone.cxx:184-206`) -- but it answers a different question: not where a
+team spawns, but where a **team flag lands when it is dropped somewhere
+unsafe**. A team flag may never come to rest on an opposing team's base
+(anyone grabbing it there would carry it straight into enemy territory and
+blow up their own team on the spot), and upstream works down a chain when that
+happens: the closest `safety` zone for the flag's team, then the world centre,
+then the team's own base as a last resort. bzo's `dropFlag` follows the same
+chain, and `getSafetyZonePosition` is the same proximity pick as upstream's
+`EntryZones::getClosePoint` -- the nearest matching zone to where the flag
+actually came down, not a random one among every match the way a spawn zone
+is. `bzo.bzw`'s four team-spawn pads each carry their own team's `safety` too,
+so a flag dropped on an enemy base returns to its own team's pad rather than
+the map centre.
 
 ## World weapons
 
@@ -436,15 +506,12 @@ loads and plays with that part of it missing. The notable absences:
   and `diffuse` are read; see **Colour** above.
 - **Transforms**: `shift`, `scale`, `shear`, `spin`, `xform`, which upstream
   reads on any obstacle. An obstacle carrying one arrives untransformed.
-- **`world` fields other than `size`**: `flagHeight`, `noWalls`,
-  `freeCtfSpawns`.
 - **`water`, `physics`**.
-- **A `zone` block's `flag` and `safety` keywords.** `zoneflag` is read, so a
-  map's flag zones work, and `team` is read too -- see **Team zones** below.
-  `flag` names a type any flag of which spawns in the zone, and `safety` is a
-  Phantom Zone landing spot; a map using either is named in the load log rather
-  than skipped silently, because a spawn zone that is ignored moves every tank
-  in the world.
+- **A `zone` block's `flag` keyword.** `zoneflag`, `team` and `safety` are all
+  read -- see **Team zones** and **Flag safety zones** above. `flag` names a
+  type any flag of which spawns in the zone; a map using it is named in the
+  load log rather than skipped silently, because a spawn zone that is ignored
+  moves every tank in the world.
 - **Every `-set` variable but `_maxFlagGrabs`, `_wingsJumpCount` and
   `_maxBumpHeight`.** bzo's world constants are constants, and these three are
   the ones it already keeps a configurable copy of; see `docs/flags.md`. A map
