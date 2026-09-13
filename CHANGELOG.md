@@ -6,6 +6,27 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.9] - 2026-09-13
+
+### Added
+- **View dialog and remote map import (issue #73).** A new "View" button in
+  Settings, open to every player, lists servers currently running on the
+  public BZFlag server list alongside bzo's own local maps -- sortable and
+  searchable. Picking a server imports its world over the real BZFS wire
+  protocol; picking any map, imported or already on the server, switches to
+  viewing it, reachable mid-game as well as before joining. The same
+  browsing and import is also available, signed out, at `/view`. Only
+  switching the *live* match's map (Set Map, in the Operator panel) is still
+  operator-only.
+- **A map now says what it dropped.** A `.bzw` using a feature bzo doesn't
+  read yet -- `mesh`, `arc`, `cone`, `sphere`, `group`, `material`,
+  `physics`, and the rest -- reports how much of it loaded and how much was
+  skipped, in chat, the moment a player actually starts viewing that map
+  rather than during the join dialog's preview. A map's `-srvmsg` rides
+  along the same way, now carried in the map's own data instead of pushed by
+  the server on join -- which is also what lets it reach a Map Viewer
+  session and not only the live match.
+
 ## [1.2.8] - 2026-09-13
 
 ### Added
