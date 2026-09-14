@@ -6,6 +6,31 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.13] - 2026-09-14
+
+### Added
+- **BZW `material`/`matref` support (issue #72).** A map may now `material`
+  / `end` a named bundle of a texture and a tint, and pull it into a
+  `box` or `pyramid` with `matref <name>` instead of restating
+  `addtexture`/`diffuse` on every obstacle that wants the same look --
+  `addtexture`/`texture` and `noradar`/`nolighting` also work stated
+  directly on an obstacle, with no material block at all. A stock texture
+  name (`boxwall`, `wall`, `roof`, `pyrwall`, `telelink`, `caution`)
+  resolves against bzo's own local asset for it; `maps/bzo.bzw` carries a
+  labelled example next to its passability row.
+- **External texture URLs, loaded client-side only.** A map's
+  `addtexture`/`texture` naming an absolute `http`/`https` URL is now read
+  and forwarded to every client -- bzo's server never fetches one itself.
+  Each browser decides for itself whether to load it, against an allowlist
+  (its own origin, or `*images.bzflag.org`, upstream's own default trusted
+  host) and the browser's own CORS enforcement on top of that; an
+  untrusted host is never requested at all, and a trusted one that still
+  refuses the load falls back to the obstacle's plain default texture
+  rather than rendering blank. `maps/bzo.bzw`'s `thin_wall` names a real
+  `images.bzflag.org` picture as a permanent demonstration -- it shows
+  bzo's plain `boxwall` today, since that host sends no CORS header, and
+  will start showing the real texture on its own if that ever changes.
+
 ## [1.2.12] - 2026-09-14
 
 ### Added

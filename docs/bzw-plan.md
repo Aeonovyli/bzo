@@ -134,9 +134,16 @@ placed through one, which is also read now, the same as any other member.
 `shininess`, plus the flags `noradar` and `nolighting`.
 `src/bzfs/CustomMaterial.cxx`, `src/common/ParseMaterial.cxx`.
 
-bzo already reads `color`/`diffuse` (see "Colour" in `docs/bzw.md`) and
-textures obstacles by type rather than by material, lighting everything one
-way. Full material support is the rest of that pipeline:
+**`material`/`matref`/`addtexture`/`texture` are read now**, resolving a
+named stock texture against bzo's existing asset set exactly as "Evidence
+from real maps" below predicted, plus `color`/`diffuse` as a tint (already
+read on a plain obstacle; a `matref` is just a second way to state it),
+`noradar` and `nolighting`. **An external texture URL is read too, and
+forwarded to the client** -- the server itself never fetches one; each
+connected browser decides for itself whether to, against an allowlist (its
+own origin, or `*images.bzflag.org`) and the browser's own CORS enforcement
+on top of that. See "Materials" in `docs/bzw.md` for the full syntax, the
+stock-texture list, and what a material still cannot say. What is left:
 
 ### Evidence from real maps
 
@@ -150,30 +157,40 @@ it names one of two things:
 
 - Upstream's own stock texture, by name with no path -- `boxwall`, `wall`,
   `roof`, `pyrwall`, `telelink`, `caution`, and one called `mesh` (a stock
-  wireframe/grid texture, unrelated to mesh *geometry* -- worth a doc callout
-  once `material` lands, so the two "mesh"es are never confused with each
-  other). bzo already ships an equivalent PNG for nearly every one of these
-  under `public/textures/`.
+  wireframe/grid texture, unrelated to mesh *geometry* -- see the callout in
+  `docs/bzw.md`'s "Materials" section, so the two "mesh"es are never confused
+  with each other). bzo already shipped an equivalent PNG for six of these
+  under `public/textures/`, which is what `resolveBzwStockTexture` resolves
+  against.
 - One external URL, out of everything sampled:
   `http://images.bzflag.org/astevens/pine.png`, in a "wood" material. The
   BZFlag forums document uploading a texture there and linking it into a
   `material` block, so the host is real and mappers do use it -- just rarely,
-  next to naming a stock texture.
+  next to naming a stock texture. `maps/bzo.bzw`'s `thin_wall` names this
+  same URL now, permanently: the browser refuses the load (no
+  `Access-Control-Allow-Origin` from that host, checked directly) and it
+  falls back to `boxwall`, but it costs nothing to leave in and starts
+  showing the real picture the moment that ever changes.
 
-So `material`/`matref`/`addtexture` support pays off almost entirely by
-resolving a named texture against bzo's *existing* asset set, plus reading
-`diffuse` as a tint -- no network fetch, no CORS/CSP surface to think about --
-with an external-URL texture as a smaller, separately-risked follow-on once
-that is solid. Geometry-wise, two of the four sampled maps were pure
-box/pyramid plus `group`, zero mesh; the other two leaned on `arc` (a mesh
-generator) for curved walls, so mesh remains necessary eventually rather than
-skippable forever -- see "Mesh geometry" above.
+This is what made resolving a named texture against bzo's *existing* asset
+set almost the whole of what a real map's `material` block asks for, with an
+absolute URL -- the one thing left outside that asset set -- read too, but
+never fetched by bzo's own server: see "Materials" in `docs/bzw.md` for the
+client-side trust decision (`isExternalTextureUrlTrusted` in
+`public/texture.js`) and why upstream's own `images.bzflag.org` fails it at
+the browser's CORS check today regardless. Geometry-wise, two of the four
+sampled maps were pure box/pyramid plus `group`, zero mesh; the other two
+leaned on `arc` (a mesh generator) for curved walls, so mesh remains
+necessary eventually rather than skippable forever -- see "Mesh geometry"
+above, and every `matref` actually sampled turned out to be inside one of
+those unread `mesh` faces or `arc` primitives rather than on a plain
+`box`/`pyramid` -- material support pays off on today's real maps only once
+mesh geometry does too.
 
-- [ ] `material` / `matref` as a named bundle of the properties below, so an
-      obstacle can reference one instead of repeating `color` inline.
-- [ ] `texture` naming a specific image per obstacle/face rather than bzo's
-      fixed per-type texture, with `texsize`/`texoffset` scaling and shifting
-      the UVs upstream's own way.
+- [ ] `texsize`/`texoffset` scaling and shifting a `matref`'d or
+      `addtexture`'d picture's UVs upstream's own way, rather than every
+      obstacle of a kind sharing that kind's own baked-in tiling regardless
+      of what material it wears.
 - [ ] `dynamicColor` and `textureMatrix` -- animated tint and scrolling/
       rotating UVs. Both are upstream's `useQuality`-gated best-looking
       variants of a texture that is otherwise static, which is the case
@@ -183,8 +200,11 @@ skippable forever -- see "Mesh geometry" above.
       reads them -- bzo's renderer lights obstacles one way today, so this is
       the one item here that is a rendering-architecture question first and a
       parser task second.
-- [ ] `noradar` (omit from the radar) and `nolighting` (unlit) as per-material
-      flags read straight into the render and radar paths.
+- [ ] `matref`/`addtexture`/`tint` on a `group` instance, and on a `mesh`
+      face once mesh geometry itself is read -- the material registry does
+      not care which obstacle asks it for a texture, so a face's own `matref`
+      is a consumer of this section to add, not a second implementation of
+      it. See "Groups and transforms" and "Mesh geometry" above.
 
 ## Physics drivers
 

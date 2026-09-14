@@ -68,6 +68,8 @@ import {
   createTeleporterBorderTexture,
   createTeleporterPortalTexture,
   createGroundTexture,
+  createStockMaterialTexture,
+  loadExternalTexture,
 } from './texture.js';
 
 const DEFAULT_MUZZLE_FORWARD = 3.0;
@@ -519,6 +521,17 @@ function getObstacleTint(obs) {
   return [obs.wallColor || WHITE_OBSTACLE_TINT, obs.capColor || WHITE_OBSTACLE_TINT];
 }
 
+// Picks what a face group's material actually loads: a map's own stock-name
+// override, a map's own external URL (only if the browser trusts its host --
+// `loadExternalTexture` decides, and falls back to `fallbackPath` either way),
+// or this obstacle type's own plain default, in that order. Returns a
+// zero-arg factory, the shape `_getSharedObstacleMaterials` wants.
+function resolveObstacleTextureFactory(stockName, url, fallbackPath, fallbackFactory) {
+  if (stockName) return () => createStockMaterialTexture(stockName);
+  if (url) return () => loadExternalTexture(url, fallbackPath);
+  return fallbackFactory;
+}
+
 // A tinted obstacle's debug label wears its colour, so a map's painting can be
 // read off the label as well as off the obstacle. The cap first: the label hangs
 // over the top.
@@ -528,7 +541,11 @@ function getObstacleTintHex(obs) {
   const channel = (value) => Math.round(Math.max(0, Math.min(1, value)) * 0xff);
   return (channel(tint[0]) << 16) | (channel(tint[1]) << 8) | channel(tint[2]);
 }
-// The same, for a pyramid's slanted sides and its base.
+// A pyramid's slanted sides. CustomPyramid.cxx:53-57 paints its base with the
+// same "pyrwall" its sides get, at the same -8 texsize (CustomPyramid.cxx:
+// 59-64) -- bzo deliberately does not follow that: its base cap keeps a box's
+// own "roof" look instead, at a box cap's tighter scale (below). Intentional,
+// not a parity gap -- do not "fix" this to match upstream again.
 const PYRAMID_TEXTURE_SCALE = 8;
 const PYRAMID_ROOF_TEXTURE_SCALE = 2;
 const GROUND_CENTER_SIZE = 128; // upstream centerSize
@@ -2182,13 +2199,19 @@ class RenderManager {
   //
   // Shared, so never disposed with the mesh -- `clearObstacles` drops the cache
   // once every mesh using it is gone.
-  _getSharedObstacleMaterials(key, sideTextureFactory, topTextureFactory, options = {}) {
+  // `unlit.side`/`unlit.cap` is a material's own `nolighting` flag
+  // (docs/bzw.md, "Materials and appearance") -- upstream stops lighting the
+  // face rather than tinting it, so this swaps the class rather than adding
+  // an option Lambert would just ignore.
+  _getSharedObstacleMaterials(key, sideTextureFactory, topTextureFactory, options = {}, unlit = {}) {
     if (!this._sharedObstacleMaterials) this._sharedObstacleMaterials = new Map();
     const existing = this._sharedObstacleMaterials.get(key);
     if (existing) return existing;
+    const SideClass = unlit.side ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
+    const CapClass = unlit.cap ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
     const materials = [
-      new THREE.MeshLambertMaterial({ map: sideTextureFactory(), ...options }),
-      new THREE.MeshLambertMaterial({ map: topTextureFactory(), ...options }),
+      new SideClass({ map: sideTextureFactory(), ...options }),
+      new CapClass({ map: topTextureFactory(), ...options }),
     ];
     materials.forEach((material) => { material.userData.shared = true; });
     this._sharedObstacleMaterials.set(key, materials);
@@ -3043,13 +3066,36 @@ class RenderManager {
           });
         }
 
-        const pyramidKey = tint ? 'pyramidTinted' : 'pyramid';
+        // A map's own `matref`/`addtexture` names one of bzo's stock textures
+        // in place of a face's plain default -- see "Materials and
+        // appearance" in docs/bzw.md. Unnamed, a pyramid's sides keep bzo's
+        // own "pyrwall" default and its base cap keeps bzo's own "roof"
+        // default -- a deliberate deviation from upstream's CustomPyramid,
+        // which paints its base the same "pyrwall" as its sides. See the
+        // note on `PYRAMID_ROOF_TEXTURE_SCALE` above -- do not "fix" this.
+        const pyramidWallTexture = obs.wallTexture || null;
+        const pyramidCapTexture = obs.capTexture || null;
+        const pyramidWallUrl = obs.wallTextureUrl || null;
+        const pyramidCapUrl = obs.capTextureUrl || null;
+        const pyramidUnlit = { side: !!obs.wallNoLighting, cap: !!obs.capNoLighting };
+        const pyramidKey = [
+          tint ? 'pyramidTinted' : 'pyramid',
+          pyramidWallTexture ? `w-${pyramidWallTexture}` : '',
+          pyramidCapTexture ? `c-${pyramidCapTexture}` : '',
+          pyramidWallUrl ? `wu-${pyramidWallUrl}` : '',
+          pyramidCapUrl ? `cu-${pyramidCapUrl}` : '',
+          pyramidUnlit.side ? 'wl' : '',
+          pyramidUnlit.cap ? 'cl' : '',
+        ].join('');
         this._addObstacleFragment(
           fragments,
           pyramidKey,
           this._getSharedObstacleMaterials(
-            pyramidKey, createPyramidTexture, createRoofTexture,
-            tint ? { flatShading: true, vertexColors: true } : { flatShading: true }
+            pyramidKey,
+            resolveObstacleTextureFactory(pyramidWallTexture, pyramidWallUrl, '/textures/pyrwall.png', createPyramidTexture),
+            resolveObstacleTextureFactory(pyramidCapTexture, pyramidCapUrl, '/textures/roof.png', createRoofTexture),
+            tint ? { flatShading: true, vertexColors: true } : { flatShading: true },
+            pyramidUnlit,
           ),
           geometry,
           obstacleMatrix(),
@@ -3077,18 +3123,39 @@ class RenderManager {
         // colour rides on the vertices, so an untinted box would otherwise carry
         // three numbers per vertex to say white.
         const flatOnGround = h <= 0 && baseY <= 0;
-        const boxKey = `${flatOnGround ? 'boxFlat' : 'box'}${tint ? 'Tinted' : ''}`;
+        // A map's own `matref`/`addtexture` names one of bzo's stock textures
+        // in place of a face's plain default -- see "Materials and
+        // appearance" in docs/bzw.md. Unnamed, a box's walls are upstream's
+        // "boxwall" and its caps are "roof" (CustomBox.cxx:52-57).
+        const boxWallTexture = obs.wallTexture || null;
+        const boxCapTexture = obs.capTexture || null;
+        const boxWallUrl = obs.wallTextureUrl || null;
+        const boxCapUrl = obs.capTextureUrl || null;
+        const boxUnlit = { side: !!obs.wallNoLighting, cap: !!obs.capNoLighting };
+        const boxKey = [
+          flatOnGround ? 'boxFlat' : 'box',
+          tint ? 'Tinted' : '',
+          boxWallTexture ? `w-${boxWallTexture}` : '',
+          boxCapTexture ? `c-${boxCapTexture}` : '',
+          boxWallUrl ? `wu-${boxWallUrl}` : '',
+          boxCapUrl ? `cu-${boxCapUrl}` : '',
+          boxUnlit.side ? 'wl' : '',
+          boxUnlit.cap ? 'cl' : '',
+        ].join('');
         this._addObstacleFragment(
           fragments,
           boxKey,
           this._getSharedObstacleMaterials(
-            boxKey, createBoxWallTexture, createRoofTexture,
+            boxKey,
+            resolveObstacleTextureFactory(boxWallTexture, boxWallUrl, '/textures/boxwall.png', createBoxWallTexture),
+            resolveObstacleTextureFactory(boxCapTexture, boxCapUrl, '/textures/roof.png', createRoofTexture),
             {
               ...(flatOnGround
                 ? { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }
                 : {}),
               ...(tint ? { vertexColors: true } : {}),
-            }
+            },
+            boxUnlit,
           ),
           // BoxSceneNodeGenerator.cxx:66, in its own words: "Don't generate the
           // bottom polygon if on the ground (or lower)".

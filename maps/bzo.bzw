@@ -727,11 +727,20 @@ end
 
 # A wall a metre thick, thinner than the chase camera's trail, so backing
 # into it puts the eye out beyond the far face instead of inside the wall.
+#
+# Also bzo's example of an external texture URL (docs/bzw.md, "Materials and
+# appearance"): the one real map found to use one names this exact picture,
+# on `images.bzflag.org`, upstream's own trusted default host -- but that host
+# sends no `Access-Control-Allow-Origin` header today, so every client's own
+# browser refuses the load and this wall falls back to bzo's plain `boxwall`.
+# Left in on purpose rather than reverted, so the wall starts showing the
+# real picture the moment (if ever) that changes, with nothing here to update.
 box
   name thin_wall
   position 105 65 0
   rotation 0
   size 15 0.5 10
+  addtexture http://images.bzflag.org/astevens/pine.png
 end
 
 # North-west: two overlap tests. A pyramid, a box and a flipped pyramid
@@ -919,6 +928,26 @@ box
   rotation 0
   size 6.0 6.0 5.0
   RicoChet
+end
+
+# `material`/`matref` (docs/bzw.md, "Materials and appearance"): a named
+# bundle of a stock texture and a tint, pulled in by name instead of
+# restating `addtexture`/`diffuse` on every obstacle that wants it. This one
+# swaps the plain `boxwall` for upstream's own `caution` texture and tints it
+# the same amber the bad-flag ring above is painted, so both read as the same
+# warning colour -- one from a `color` line, this one from a material.
+material
+  name caution-amber
+  addtexture caution
+  diffuse 1.0 0.62745 0.12549
+end
+
+box
+  name matref
+  position 135 -125 0
+  rotation 0
+  size 6.0 6.0 5.0
+  matref caution-amber
 end
 
 # `pos`/`rot`, `WorldFileLocation::read`'s aliases of `position`/`rotation`,

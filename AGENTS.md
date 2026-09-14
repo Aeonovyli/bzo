@@ -132,6 +132,14 @@ These are deliberate. Do not "fix" them without being asked.
   none: it hides the cost it claims to manage. Frame *interval* in particular
   is not the measurement to build on, since a vsync-limited client reports its
   refresh rate however much headroom it has. Land the measurements first.
+- **A pyramid's base cap keeps a box's "roof" look, not upstream's "pyrwall".**
+  `CustomPyramid.cxx:53-57` paints all five of a pyramid's faces -- its four
+  slanted sides and its base -- with the same "pyrwall" texture, at the same
+  -8 texsize every face there gets. bzo's sides match that, but its base cap
+  intentionally keeps bzo's own "roof" texture, at a box cap's tighter -2
+  scale, matching what a box's own two caps wear instead. Deliberate, not a
+  parity gap -- do not "fix" the base cap to match upstream's `pyrwall`
+  again; see `PYRAMID_ROOF_TEXTURE_SCALE` in `public/render.js`.
 - **Tanks are selectable OBJ models, not one compiled-in model.** BZFlag ships a
   single tank in `src/geometry/models/tank/` at three LODs, varied only by the
   `animatedTreads` and `treadStyle` settings. bzo loads several models from

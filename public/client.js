@@ -11722,7 +11722,13 @@ function getRadarObstacles() {
   if (radarObstacleOrder.source !== OBSTACLES) {
     radarObstacleOrder = {
       source: OBSTACLES,
-      list: [...OBSTACLES].sort((left, right) => getRadarObstacleTopY(left) - getRadarObstacleTopY(right)),
+      // A material's `noradar` flag (docs/bzw.md, "Materials and appearance")
+      // -- upstream's RadarRenderer skips a face whose material asks for it;
+      // bzo has no per-face radar drawing to skip, so the whole obstacle sits
+      // out instead.
+      list: [...OBSTACLES]
+        .filter((obs) => !obs.noRadar)
+        .sort((left, right) => getRadarObstacleTopY(left) - getRadarObstacleTopY(right)),
     };
   }
   return radarObstacleOrder.list;

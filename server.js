@@ -1752,7 +1752,7 @@ function normalizeScoreLimit(score) {
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
   'mesh', 'arc', 'cone', 'sphere', 'tetra',
-  'physics', 'material', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
+  'physics', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
 
 function parseBZWServerOptions(lines) {
@@ -1997,6 +1997,59 @@ function parseBzwColor(words) {
   return values.slice(0, 3).map((value) => Math.max(0, Math.min(1, value)));
 }
 
+// Upstream's own stock texture names -- what `material`/`matref`/`addtexture`
+// almost always name in the wild (docs/bzw-plan.md's "Evidence from real
+// maps") -- that bzo also ships an asset for under `public/textures/`. Kept
+// in sync with `STOCK_MATERIAL_TEXTURE_FILES` in `public/texture.js`, which is
+// the other half of this: this set decides what a map is *allowed* to name,
+// that one decides what picture the name actually draws.
+//
+// A name not in this set -- another of upstream's own stock names (`mesh`,
+// its wireframe/grid texture, notably) or an external URL a map links a
+// texture in from -- resolves to nothing: no network fetch, no CORS/CSP
+// surface, and the obstacle keeps its type's plain default texture.
+const BZW_STOCK_TEXTURES = new Set(['boxwall', 'wall', 'roof', 'pyrwall', 'telelink', 'caution']);
+
+// A texture name as a `material`/`addtexture`/`texture` line states it --
+// upstream's own bare stock name, or a mapper's own file name or URL -- down
+// to whichever of bzo's local assets it might match: no path, no extension,
+// case-folded, the way upstream's TextureManager itself keys textures by name.
+function resolveBzwStockTexture(rawName) {
+  if (!rawName) return null;
+  const bare = rawName.trim().split(/[\\/]/).pop().replace(/\.[a-z0-9]+$/i, '').toLowerCase();
+  return BZW_STOCK_TEXTURES.has(bare) ? bare : null;
+}
+
+// An absolute `http`/`https` URL, the other thing a real map's `addtexture`
+// names (docs/bzw-plan.md's "Evidence from real maps" found exactly one:
+// `http://images.bzflag.org/astevens/pine.png`). This is a syntax check
+// only -- the server never fetches it, upstream's `ftp` is dropped since no
+// browser still fetches it for an image, and whether the *client* actually
+// trusts the host enough to load it is `isExternalTextureUrlTrusted` in
+// `public/texture.js`, a separate decision made in the browser rather than
+// here, so bzo's own server is never the one making an outbound request on
+// a mapper's say-so.
+function parseBzwTextureUrl(rawName) {
+  if (!rawName) return null;
+  try {
+    const parsed = new URL(rawName);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// Classifies one `addtexture`/`texture` argument -- a material's own, or a
+// bare one straight on an obstacle -- into whichever of the two things bzo
+// can do with it, or neither.
+function resolveBzwTextureName(rawName) {
+  const stock = resolveBzwStockTexture(rawName);
+  if (stock) return { stock };
+  const url = parseBzwTextureUrl(rawName);
+  if (url) return { url };
+  return null;
+}
+
 function parseBZWMap(filename) {
   const text = fs.readFileSync(filename, 'utf8');
   const lines = text.split(/\r?\n/);
@@ -2053,6 +2106,26 @@ function parseBZWMap(filename) {
   let currentWeapon = null;
   const unreadWeaponKeywords = new Set();
   const unreadWeaponTypes = new Set();
+  // `material` / `end` (CustomMaterial.cxx, ParseMaterial.cxx). A material is
+  // not an obstacle either -- it is a named bundle of a texture and a tint
+  // that a `matref` line looks up later, so it collects into its own registry
+  // the same way a zone or a weapon does. Keyed case-insensitively, the way
+  // upstream's own MaterialManager looks a name up.
+  let currentMaterial = null;
+  const materialsByName = new Map();
+  // A `matref` naming a material this file never defined.
+  const unresolvedMaterialRefs = new Set();
+  // A texture name (on a `material` or straight on an obstacle) bzo has no
+  // local asset for -- see `resolveBzwStockTexture` -- named on load rather
+  // than silently kept at the obstacle's plain default.
+  const unresolvedTextureNames = new Set();
+  // An absolute `http`/`https` texture URL a map names -- forwarded to the
+  // client as-is (see `resolveBzwTextureName`) rather than resolved here:
+  // the server never fetches one, and whether it is trusted enough to load
+  // is the client's own decision (`isExternalTextureUrlTrusted` in
+  // `public/texture.js`). Named on load so it is visible that a map asked
+  // for one, whether or not any connected client's host is on the allowlist.
+  const externalTextureUrls = new Set();
   // How many of each UNSUPPORTED_TOP_LEVEL_KEYWORDS block this map asked for,
   // by keyword -- what turns into the player-facing chat message below and
   // (with `serverOptions.serverMessages`, i.e. -srvmsg) this function's
@@ -2493,6 +2566,91 @@ function parseBZWMap(filename) {
       continue;
     }
 
+    // `material` / `end`. Registered by name for `matref` to look up, the way
+    // upstream's `CustomMaterial::writeToManager` adds it to the
+    // `MaterialManager` for later `matref` lookups to find.
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
+      && !currentMaterial && token === 'material') {
+      currentMaterial = {
+        name: null, texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+      };
+      continue;
+    }
+    if (currentMaterial) {
+      if (token === 'end') {
+        if (currentMaterial.name) {
+          materialsByName.set(currentMaterial.name.toLowerCase(), currentMaterial);
+        }
+        currentMaterial = null;
+        continue;
+      }
+      if (token === 'name') {
+        const [, ...nameParts] = line.split(/\s+/);
+        const materialName = nameParts.join(' ').replace(/"/g, '').trim();
+        if (materialName) currentMaterial.name = materialName;
+        continue;
+      }
+      // A material's own `matref <name>` copies another already-defined
+      // material wholesale (BzMaterial's plain struct assignment), which a
+      // property stated after it then overrides -- the same sequential-read
+      // semantics as everything else in this block.
+      if (token === 'matref') {
+        const [, refName] = line.split(/\s+/);
+        const referenced = refName && materialsByName.get(refName.toLowerCase());
+        if (referenced) {
+          currentMaterial.texture = referenced.texture;
+          currentMaterial.textureUrl = referenced.textureUrl;
+          currentMaterial.color = referenced.color;
+          currentMaterial.noRadar = referenced.noRadar;
+          currentMaterial.noLighting = referenced.noLighting;
+        } else if (refName) {
+          unresolvedMaterialRefs.add(refName);
+        }
+        continue;
+      }
+      if (token === 'color' || token === 'diffuse') {
+        const [, ...rest] = line.split(/\s+/);
+        const tint = parseBzwColor(rest);
+        if (tint) currentMaterial.color = tint;
+        continue;
+      }
+      if (token === 'addtexture' || token === 'texture') {
+        const [, ...rest] = line.split(/\s+/);
+        const rawName = rest.join(' ');
+        const resolved = resolveBzwTextureName(rawName);
+        if (resolved?.stock) {
+          currentMaterial.texture = resolved.stock;
+          currentMaterial.textureUrl = null;
+        } else if (resolved?.url) {
+          currentMaterial.textureUrl = resolved.url;
+          currentMaterial.texture = null;
+          externalTextureUrls.add(resolved.url);
+        } else if (rawName) {
+          unresolvedTextureNames.add(rawName);
+        }
+        continue;
+      }
+      if (token === 'notextures') {
+        currentMaterial.texture = null;
+        currentMaterial.textureUrl = null;
+        continue;
+      }
+      if (token === 'noradar') {
+        currentMaterial.noRadar = true;
+        continue;
+      }
+      if (token === 'nolighting') {
+        currentMaterial.noLighting = true;
+        continue;
+      }
+      // Everything else a material block can say -- ambient/specular/
+      // emission/shininess (need a lighting model bzo does not have yet),
+      // dyncol, texmat, shader/addshader/noshaders, alphathresh, noculling,
+      // nosorting, noshadow, occluder, groupAlpha, spheremap, notexalpha,
+      // notexcolor, resetmat -- is read and dropped.
+      continue;
+    }
+
     // `define <name>` / `enddef` (CustomGroup's template registry). Upstream
     // refuses to nest one define inside another (BZWReader.cxx warns and skips
     // it), so a `define` seen while one is already open is dropped the same way.
@@ -2645,14 +2803,17 @@ function parseBZWMap(filename) {
       const [, color] = line.split(/\s+/);
       const team = parseInt(color, 10);
       current.team = Number.isInteger(team) ? Math.max(1, Math.min(4, team)) : 1;
-    } else if (current && (BZW_FACE_GROUPS.has(token) || token === 'color' || token === 'diffuse')
+    } else if (current && (BZW_FACE_GROUPS.has(token) || token === 'color' || token === 'diffuse'
+      || token === 'matref' || token === 'addtexture' || token === 'texture'
+      || token === 'noradar' || token === 'nolighting')
       && current.kind !== 'base' && current.kind !== 'teleporter') {
-      // The colour a map paints an obstacle, which the branch above reads as a
-      // team on a base -- upstream's CustomBase takes the word that way too --
-      // and which a teleporter has no use for, since bzo's carries its own
-      // materials. Everything else a material block can say is skipped here
-      // rather than rejected: `top texture foo` names faces bzo understands and
-      // a property it does not, and arrives as an untextured box either way.
+      // The colour, texture or material a map paints an obstacle with, which
+      // the branch above reads as a team on a base -- upstream's CustomBase
+      // takes the word that way too -- and which a teleporter has no use for,
+      // since bzo's carries its own materials. Everything else a material
+      // block can say is skipped here rather than rejected: `top texsize 4 4`
+      // names a face bzo understands and a property it does not, and arrives
+      // as an untextured box either way.
       const words = line.split(/\s+/);
       const group = BZW_FACE_GROUPS.get(token);
       const keyword = (group ? words[1] || '' : words[0]).toLowerCase();
@@ -2662,6 +2823,49 @@ function parseBZWMap(filename) {
           if (group !== 'caps') current.wallColor = tint;
           if (group !== 'walls') current.capColor = tint;
         }
+      } else if (keyword === 'matref') {
+        // `matref <name>` pulls in a whole named material -- its texture, its
+        // tint and its noRadar/noLighting flags -- in one line, the same
+        // only-if-stated way a plain `addtexture`/`color` line does below.
+        // Read at this point in the sequence, so a property line stated after
+        // it (upstream's own read order) still overrides what the material gave.
+        const refName = (words[group ? 2 : 1] || '').toLowerCase();
+        const material = materialsByName.get(refName);
+        if (material) {
+          if (group !== 'caps') {
+            if (material.texture) { current.wallTexture = material.texture; current.wallTextureUrl = null; }
+            else if (material.textureUrl) { current.wallTextureUrl = material.textureUrl; current.wallTexture = null; }
+            if (material.color) current.wallColor = material.color;
+            if (material.noLighting) current.wallNoLighting = true;
+          }
+          if (group !== 'walls') {
+            if (material.texture) { current.capTexture = material.texture; current.capTextureUrl = null; }
+            else if (material.textureUrl) { current.capTextureUrl = material.textureUrl; current.capTexture = null; }
+            if (material.color) current.capColor = material.color;
+            if (material.noLighting) current.capNoLighting = true;
+          }
+          if (material.noRadar) current.noRadar = true;
+        } else if (refName) {
+          unresolvedMaterialRefs.add(refName);
+        }
+      } else if (keyword === 'addtexture' || keyword === 'texture') {
+        const rawName = words.slice(group ? 2 : 1).join(' ');
+        const resolved = resolveBzwTextureName(rawName);
+        if (resolved?.stock) {
+          if (group !== 'caps') { current.wallTexture = resolved.stock; current.wallTextureUrl = null; }
+          if (group !== 'walls') { current.capTexture = resolved.stock; current.capTextureUrl = null; }
+        } else if (resolved?.url) {
+          if (group !== 'caps') { current.wallTextureUrl = resolved.url; current.wallTexture = null; }
+          if (group !== 'walls') { current.capTextureUrl = resolved.url; current.capTexture = null; }
+          externalTextureUrls.add(resolved.url);
+        } else if (rawName) {
+          unresolvedTextureNames.add(rawName);
+        }
+      } else if (keyword === 'noradar') {
+        current.noRadar = true;
+      } else if (keyword === 'nolighting') {
+        if (group !== 'caps') current.wallNoLighting = true;
+        if (group !== 'walls') current.capNoLighting = true;
       }
     } else if (current && token === 'end') {
       if (current.type === 'group') {
@@ -2911,6 +3115,25 @@ function parseBZWMap(filename) {
       `Weapon types bzo does not have in ${filename}:`
       + ` ${Array.from(unreadWeaponTypes).sort().join(', ')}`
       + ' (those weapons fire an ordinary shell)'
+    );
+  }
+  if (unresolvedMaterialRefs.size > 0) {
+    log(
+      `Ignoring "matref" naming a material not defined in ${filename}:`
+      + ` ${Array.from(unresolvedMaterialRefs).sort().join(', ')}`
+    );
+  }
+  if (unresolvedTextureNames.size > 0) {
+    log(
+      `Texture name(s) bzo has no local asset for in ${filename}, kept at the `
+      + `obstacle's plain default: ${Array.from(unresolvedTextureNames).sort().join(', ')}`
+    );
+  }
+  if (externalTextureUrls.size > 0) {
+    log(
+      `External texture URL(s) in ${filename}, forwarded to each client which `
+      + `only loads one from a trusted host (its own origin, or *images.bzflag.org):`
+      + ` ${Array.from(externalTextureUrls).sort().join(', ')}`
     );
   }
 

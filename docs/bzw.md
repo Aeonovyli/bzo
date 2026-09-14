@@ -157,6 +157,122 @@ and nothing else, and in front of it the visible wall, `_wallHeight` tall and
 marked `drivethrough`, which stops shots and nothing else. See
 `getWorldBorderColliders`.
 
+## Materials
+
+`material` / `end` (`src/bzfs/CustomMaterial.cxx`, `src/bzfs/ParseMaterial.cxx`)
+is a named bundle of a texture and a tint, registered once and then pulled
+into a `box` or a `pyramid` by name -- `matref <name>` -- instead of
+restating `addtexture`/`diffuse` on every obstacle that wants the same look.
+`maps/bzo.bzw` carries a labelled example next to the passability row: a
+`caution-amber` material and a box that `matref`s it.
+
+```
+material
+  name caution-amber
+  addtexture caution
+  diffuse 1.0 0.62745 0.12549
+end
+
+box
+  name matref
+  ...
+  matref caution-amber
+end
+```
+
+A material's own fields:
+
+| keyword | effect |
+|---|---|
+| `name <string>` | what a `matref` line looks it up by, case-insensitively |
+| `addtexture <name>`, `texture <name>` | the texture -- see below |
+| `notextures` | clears a texture set earlier in the same block |
+| `color <r g b [a]>`, `diffuse <r g b [a]>` | the tint, read exactly as a plain obstacle's own (see **Colour**, above) |
+| `noradar` | the obstacle is left off the radar entirely |
+| `nolighting` | the face is drawn unlit -- its texture and tint at full brightness, untouched by the renderer's own lighting |
+| `matref <name>` | copies another already-defined material wholesale, which a line stated after it then overrides |
+
+A `matref` on an obstacle takes the same face selector a plain `color`/
+`diffuse` line does -- bare, or `top`/`bottom`/`sides`/`outside`/an axis
+name, resolved down to bzo's own walls/caps split (see **Colour**). Whatever
+the referenced material set -- texture, tint, `noradar`, `nolighting` -- lands
+on the face group named, and a property line stated *after* the `matref` on
+the same obstacle overrides it, the same sequential read as everything else
+here. `addtexture`/`texture` and `noradar`/`nolighting` are also read
+directly on an obstacle with no material block at all, the same as `color`/
+`diffuse` already are.
+
+**A texture name is one of bzo's own local assets, or an absolute URL.**
+Upstream names a texture either by its own stock name (`boxwall`, `wall`,
+`roof`, `pyrwall`, `telelink`, `caution`) or by a mapper-hosted file, and bzo
+reads both:
+
+- A stock name bzo also ships a picture for (six of upstream's) resolves to
+  that local asset -- see `resolveBzwStockTexture` in `server.js`, and
+  `STOCK_MATERIAL_TEXTURE_FILES` in `public/texture.js`, which must name the
+  same set. A stock name outside that set (`mesh`, upstream's own
+  wireframe/grid texture, most notably: a mapper who means "textureless
+  grid" is naming a completely different thing than bzo's own mesh
+  *geometry*) is logged on load and the obstacle's own type keeps its plain
+  default texture instead.
+- An absolute `http`/`https` URL -- the only kind of external texture any
+  real map sampled actually used (docs/bzw-plan.md's "Evidence from real
+  maps") -- is recognized by the server (`parseBzwTextureUrl`) and forwarded
+  to every client as-is, **never fetched by the server itself.** Whether it
+  is actually loaded is each connected browser's own decision:
+  `isExternalTextureUrlTrusted` in `public/texture.js` allows a URL whose
+  host is the same origin the client is already connected to, or matches
+  `*images.bzflag.org` (upstream's own default trusted host,
+  `DownloadAccess.txt`'s shipped `allow *images.bzflag.org` / `deny *`,
+  `Downloads.cxx:37-59` -- the leading `*` is upstream's own choice, not
+  bzo's, and stays as `*images.bzflag.org` rather than widening to
+  `*.bzflag.org`: a wildcard TLS certificate covers one label deep, so a
+  four-label host that pattern would additionally match is not something
+  upstream's own setup would produce anyway). Anything else -- another
+  domain entirely -- is never requested at all.
+
+  A trusted host still has to actually serve the picture: a texture load is
+  tagged `crossOrigin` (required for any WebGL texture, not only a
+  cross-origin one), which means the request carries a real `Origin` header
+  and the *response* must carry a matching `Access-Control-Allow-Origin` or
+  the browser refuses the load outright, the same as any other CORS-gated
+  resource -- there is no plain-image fallback the way an ordinary `<img>`
+  tag gets. Checked directly: `images.bzflag.org` sends no such header on
+  any response today, so a texture from there loads exactly as far as the
+  browser's own CORS check and then fails there, every time, until upstream's
+  own infrastructure adds one. Either way -- an untrusted host, or a trusted
+  one that still refuses the load -- the obstacle falls back to its type's
+  plain default texture, logged once to the console
+  (`loadExternalTexture`/`STOCK_MATERIAL_TEXTURE_FILES` in
+  `public/texture.js`) rather than left blank.
+
+Not yet read:
+
+- **`texsize`/`texoffset`**, so a `matref`'d or `addtexture`'d picture always
+  tiles at whatever UV density its obstacle type's own default already bakes
+  in (8 units per tile on a box's or a pyramid's walls, 2 on a box's caps --
+  see **Colour** and `_prepareBoxGeometry`) rather than at a size or an offset
+  the map may have asked for.
+- **`dynamicColor`, `textureMatrix`**, upstream's animated tint and
+  scrolling/rotating UVs.
+- **`ambient`/`specular`/`emission`/`shininess`.** bzo's renderer lights an
+  obstacle one way today; reading these needs a lighting model first, not
+  only a parser change.
+- **`matref`/`addtexture`/`tint` on a `group` instance**, the only-if-unset
+  override upstream's `CustomGroup` gives one over a member's own (see
+  **Groups**, below).
+- **`matref` inside a `mesh` face.** Every `matref` sampled in a real map
+  (docs/bzw-plan.md's "Evidence from real maps") turned out to be inside a
+  `mesh` `face` block or a mesh-generator primitive (`arc`), neither of which
+  bzo reads yet -- see **What is ignored**. The material registry itself does
+  not care which obstacle asks it for a texture, so this section is what a
+  face's own `matref` will draw on once mesh geometry lands, not a second
+  implementation.
+- **`dyncol`, `texmat`, `shader`/`addshader`/`noshaders`, `alphathresh`,
+  `noculling`, `nosorting`, `noshadow`, `occluder`, `groupAlpha`,
+  `spheremap`, `notexalpha`, `notexcolor`, `resetmat`.** Read and dropped,
+  the same as any other property this section does not act on.
+
 ## Teleporters and links
 
 A `teleporter` is a box with a `border`, and its two faces are named
@@ -557,12 +673,12 @@ loads and plays with that part of it missing. The notable absences:
 - **Mesh geometry**: `mesh`, `meshbox`, `meshpyr`, `arc`, `cone`, `sphere`,
   `tetra`. bzo has boxes and pyramids, so a map built out of meshes arrives
   mostly empty.
-- **Appearance other than `color`**: `material` blocks and the `matref` that
-  names one, `texture`, `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`,
-  `phydrv`, and the rest of what `parseMaterials` takes -- `ambient`,
-  `specular`, `emission`, `shininess`, `noradar`, `nolighting` and their
-  neighbours. bzo textures obstacles by type and lights them one way. `color`
-  and `diffuse` are read; see **Colour** above.
+- **Most of what a `material` block or a `matref` can still say**:
+  `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, `phydrv`, and the
+  lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see
+  **Materials** above for what a material *does* read now (`addtexture`/
+  `texture` against bzo's own stock assets, `color`/`diffuse`, `noradar`,
+  `nolighting`) and what of this list is closest to landing next.
 - **Transforms**: `shift`, `scale`, `shear`, `spin`, `xform`, which upstream
   reads on any obstacle. An obstacle carrying one arrives untransformed.
 - **`water`, `physics`**.

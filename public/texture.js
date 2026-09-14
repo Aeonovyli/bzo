@@ -89,6 +89,106 @@ export function createTeleporterPortalTexture() {
   return loadTexture('/textures/telelink.png');
 }
 
+// Upstream's own stock texture names, resolved against bzo's local asset for
+// each -- `material`/`matref`/`addtexture` naming one of these paints an
+// obstacle with the same picture bzo already ships for it (see "Materials
+// and appearance" in docs/bzw.md). This list has to agree with
+// `BZW_STOCK_TEXTURES` in server.js: that is what turns away, at parse time,
+// any name that is not one of these -- upstream's own "mesh" grid texture
+// among them, which bzo has no asset for, or an external URL a map links a
+// texture in from -- so a name reaching here always resolves.
+const STOCK_MATERIAL_TEXTURE_FILES = new Map([
+  ['boxwall', 'boxwall.png'],
+  ['wall', 'wall.png'],
+  ['roof', 'roof.png'],
+  ['pyrwall', 'pyrwall.png'],
+  ['telelink', 'telelink.png'],
+  ['caution', 'caution.png'],
+]);
+
+export function createStockMaterialTexture(name) {
+  const file = STOCK_MATERIAL_TEXTURE_FILES.get(name);
+  return file ? loadTexture(`/textures/${file}`) : null;
+}
+
+// A material's own texture may name an absolute URL instead of a stock name
+// (`server.js`'s `resolveBzwTextureName` sends either one through as
+// `wallTextureUrl`/`capTextureUrl`, never both). bzo never fetches one
+// server-side -- see the note there -- so this, in the browser, is the one
+// place that decides whether a map-named host is trusted enough to load.
+//
+// Same-origin needs no rule of its own: a texture hosted on bzo's own server
+// carries no cross-origin request at all. `*images.bzflag.org` is upstream's
+// own default (`DownloadAccess.txt`'s shipped `allow *images.bzflag.org` /
+// `deny *`, `Downloads.cxx:37-59`) -- a leading `*` rather than a fixed
+// subdomain, on purpose, since BZFlag's own image host has moved under a
+// different prefix before and may again (`newimages.bzflag.org`, etc.).
+// `*.bzflag.org` -- a whole extra label -- is deliberately not here: a
+// wildcard TLS certificate covers one label deep, so a mapper-named host
+// four labels deep (`x.images.bzflag.org`) is not a thing upstream's own
+// setup would ever produce either.
+const EXTERNAL_TEXTURE_HOST_PATTERNS = ['*images.bzflag.org'];
+
+function hostMatchesGlob(host, pattern) {
+  const escaped = pattern.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(`^${escaped}$`, 'i').test(host);
+}
+
+export function isExternalTextureUrlTrusted(url) {
+  let parsed;
+  try {
+    parsed = new URL(url, window.location.href);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.origin === window.location.origin) return true;
+  return EXTERNAL_TEXTURE_HOST_PATTERNS.some((pattern) => hostMatchesGlob(parsed.hostname, pattern));
+}
+
+const sharedExternalTextures = new Map();
+
+// `fallbackPath` is what this obstacle's own type would have drawn with no
+// material override at all (`/textures/boxwall.png`, `/textures/pyrwall.png`,
+// ...) -- used both for an untrusted host, which is never even requested,
+// and for a trusted one whose request still fails: a `crossOrigin`-tagged
+// image load is not "tainted, but shown" the way an ordinary cross-origin
+// `<img>` is, it is refused outright (`onerror`, not `onload`) the instant the
+// response carries no matching `Access-Control-Allow-Origin` -- which is
+// exactly what `images.bzflag.org` does today (no CORS header on any
+// response, checked directly), so every trusted-host load is expected to
+// fail this way until upstream's own infrastructure adds one.
+export function loadExternalTexture(url, fallbackPath) {
+  if (!isExternalTextureUrlTrusted(url)) return loadTexture(fallbackPath);
+
+  let entry = sharedExternalTextures.get(url);
+  if (!entry) {
+    entry = { texture: null, pending: [] };
+    entry.texture = configureTexture(textureLoader.load(
+      url,
+      () => resolveSharedTexture(entry),
+      undefined,
+      () => {
+        console.warn(`External texture blocked or failed to load, using this obstacle's plain default instead: ${url}`);
+        // Every clone already handed out for this URL still points at
+        // `entry.texture`'s ORIGINAL `Source` object -- `clone()`/`copy()`
+        // only copies the reference at the moment it runs (Texture.js's
+        // `copy()`: `this.source = source.source`), so reassigning
+        // `entry.texture.source` itself here would only ever reach a clone
+        // made *after* this line, not the ones already sitting in a mesh's
+        // material. Setting `.image` instead mutates that same original
+        // Source's `.data` in place (the `image` setter is just
+        // `this.source.data = value`), which every existing clone reads
+        // live through the Source object they already share.
+        entry.texture.image = loadTexture(fallbackPath).image;
+        resolveSharedTexture(entry);
+      },
+    ));
+    sharedExternalTextures.set(url, entry);
+  }
+  return cloneSharedTexture(entry);
+}
+
 function paintTintedTexture(path, tint, onReady) {
   const texture = configureTexture(new THREE.Texture());
 
