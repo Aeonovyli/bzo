@@ -506,6 +506,13 @@ const CELESTIAL_GLOW_RATIO = 1.5;
 // were the divisors on the per-face texture repeats and are now the divisors on
 // the baked UVs, so the tiling is unchanged.
 const BOX_TEXTURE_SCALES = { sideScale: 8, capScale: 2 };
+// `MeshSceneNodeGenerator::makeTexcoords`'s own `uvScale` -- upstream's tile
+// size for a mesh face's planar-projected default UVs, when it states none
+// of its own. Coincidentally the same 8 units `BOX_TEXTURE_SCALES.sideScale`
+// already tiles a box's own wall at; kept as its own constant since the two
+// are only related by upstream's own choice of matching defaults, not by
+// anything that has to stay in sync.
+const MESH_AUTO_UV_TILE_SIZE = 8;
 // BoxGeometry emits its faces in this order, four vertices and six indices each,
 // which is what _prepareBoxGeometry's loops count on.
 const BOX_FACE = Object.freeze({ PX: 0, NX: 1, PY: 2, NY: 3, PZ: 4, NZ: 5 });
@@ -923,6 +930,8 @@ class RenderManager {
     this._groundCenterZ = null;
     this.gridHelper = null;
     this.obstacleMeshes = [];
+    // One `THREE.Mesh` per parsed `mesh` block -- render-only, see `setMeshes`.
+    this.meshObjects = [];
     // Keyed by the obstacle the tank is inside, built on demand.
     this.insideBuildingNodes = new Map();
     this.visibleInsideBuildingNodes = [];
@@ -3186,6 +3195,187 @@ class RenderManager {
     // Update compass marker heights now that we know maxObstacleHeight
     this._updateCompassMarkerHeights();
     this._refreshProjectedShadowOverlay();
+  }
+
+  clearMeshes() {
+    if (!this.scene) return;
+    this.meshObjects.forEach((object3D) => {
+      this._clearObjectForRemoval(object3D);
+    });
+    this.meshObjects = [];
+  }
+
+  // A parsed `mesh` block, rendered directly rather than through
+  // `_addObstacleFragment`'s shared-material/buried-face system: unlike a box
+  // or a pyramid, a mesh's face count and texture set is different for every
+  // one of them, so there is nothing to usefully share, and a mesh has no
+  // wall/cap split to fold a colour into -- see `docs/bzw-plan.md`'s "Mesh
+  // geometry" for what is still missing (collision, radar, a `define`'s own
+  // meshes placed per `group` instance).
+  setMeshes(meshes = []) {
+    if (!this.scene) return;
+    this.clearMeshes();
+    meshes.forEach((meshObs, i) => {
+      const object3D = this._buildMeshObject(meshObs, i);
+      if (!object3D) return;
+      this.worldGroup.add(this._tagDraws(object3D, 'mesh'));
+      this.meshObjects.push(object3D);
+    });
+  }
+
+  // One `THREE.Mesh` per parsed `mesh` block, its faces fan-triangulated
+  // (`CustomMeshFace::write`'s own "triangulate if required", for the
+  // convex/planar n-gons a mapper actually states) into one buffer, grouped
+  // by each face's own resolved texture/tint so faces that share neither
+  // still share a draw call with their neighbours. Vertices already sit in
+  // bzo's world frame (`parseBZWMap`'s `vertex`/`normal` conversion), so
+  // nothing here repositions the mesh -- it is static geometry the way a
+  // box/pyramid fragment already is.
+  _buildMeshObject(meshObs, index) {
+    const verts = meshObs.vertices || [];
+    const norms = meshObs.normals || [];
+    const texcoords = meshObs.texcoords || [];
+    const faces = meshObs.faces || [];
+    if (!verts.length || !faces.length) return null;
+
+    const positions = [];
+    const normalsOut = [];
+    const uvsOut = [];
+    const indices = [];
+    const materials = [];
+    const materialIndexByKey = new Map();
+    const geometryGroups = [];
+    const edgeA = new THREE.Vector3();
+    const edgeB = new THREE.Vector3();
+
+    faces.forEach((face) => {
+      const vertexIndices = face.vertexIndices;
+      if (!vertexIndices || vertexIndices.length < 3) return;
+      const baseVertex = positions.length / 3;
+
+      // A face with no `normals` line of its own is flat-shaded off its
+      // first three corners, the same plane every fan triangle below cuts
+      // from -- `MeshObstacle`'s own per-face normal, for a face that never
+      // asked for smoother ones.
+      const hasOwnNormals = face.normalIndices && face.normalIndices.length === vertexIndices.length;
+      let flatNormalX = 0; let flatNormalY = 1; let flatNormalZ = 0;
+      if (!hasOwnNormals) {
+        const p0 = verts[vertexIndices[0]];
+        const p1 = verts[vertexIndices[1]];
+        const p2 = verts[vertexIndices[2]];
+        if (p0 && p1 && p2) {
+          edgeA.set(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+          edgeB.set(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+          edgeA.cross(edgeB).normalize();
+          if (edgeA.lengthSq() > 0) {
+            flatNormalX = edgeA.x; flatNormalY = edgeA.y; flatNormalZ = edgeA.z;
+          }
+        }
+      }
+      const hasOwnUvs = face.texcoordIndices && face.texcoordIndices.length === vertexIndices.length;
+
+      // A face with no `texcoords` line of its own is planar-projected
+      // instead of left at a single degenerate UV -- upstream's own
+      // `MeshSceneNodeGenerator::makeTexcoords`: vertex 0 pins (0,0), the
+      // first edge becomes the U axis, the face's own plane normal crossed
+      // with that becomes V, and every other vertex is that basis's own dot
+      // product with its offset from vertex 0, both divided by upstream's
+      // same 8-unit tile size (`BOX_TEXTURE_SCALES.sideScale`). Needs the
+      // face's own plane, which only exists once `finalizeMeshGeometry` has
+      // run server-side -- a face on a `define`'s own still-local template
+      // (never placed by any `group`) has none, and stays at (0,0) the way
+      // it always has.
+      let planarUVs = null;
+      if (!hasOwnUvs && face.plane) {
+        const p0 = verts[vertexIndices[0]];
+        const p1 = verts[vertexIndices[1]];
+        if (p0 && p1) {
+          const [nx, ny, nz] = face.plane;
+          const xLen = Math.hypot(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+          if (xLen > 0) {
+            const ux = (p1.x - p0.x) / xLen;
+            const uy = (p1.y - p0.y) / xLen;
+            const uz = (p1.z - p0.z) / xLen;
+            const vx = (ny * uz) - (nz * uy);
+            const vy = (nz * ux) - (nx * uz);
+            const vz = (nx * uy) - (ny * ux);
+            const vLen = Math.hypot(vx, vy, vz);
+            if (vLen > 0) {
+              const nvx = vx / vLen; const nvy = vy / vLen; const nvz = vz / vLen;
+              planarUVs = vertexIndices.map((vi) => {
+                const v = verts[vi];
+                if (!v) return [0, 0];
+                const dx = v.x - p0.x; const dy = v.y - p0.y; const dz = v.z - p0.z;
+                return [
+                  ((dx * ux) + (dy * uy) + (dz * uz)) / MESH_AUTO_UV_TILE_SIZE,
+                  ((dx * nvx) + (dy * nvy) + (dz * nvz)) / MESH_AUTO_UV_TILE_SIZE,
+                ];
+              });
+            }
+          }
+        }
+      }
+
+      vertexIndices.forEach((vertexIndex, localIndex) => {
+        const v = verts[vertexIndex];
+        positions.push(v ? v.x : 0, v ? v.y : 0, v ? v.z : 0);
+        if (hasOwnNormals) {
+          const n = norms[face.normalIndices[localIndex]];
+          normalsOut.push(n ? n.x : 0, n ? n.y : 1, n ? n.z : 0);
+        } else {
+          normalsOut.push(flatNormalX, flatNormalY, flatNormalZ);
+        }
+        if (hasOwnUvs) {
+          const t = texcoords[face.texcoordIndices[localIndex]];
+          uvsOut.push(t ? t.u : 0, t ? t.v : 0);
+        } else if (planarUVs) {
+          uvsOut.push(planarUVs[localIndex][0], planarUVs[localIndex][1]);
+        } else {
+          uvsOut.push(0, 0);
+        }
+      });
+
+      const triangleStart = indices.length;
+      for (let t = 1; t < vertexIndices.length - 1; t++) {
+        indices.push(baseVertex, baseVertex + t, baseVertex + t + 1);
+      }
+      const triangleCount = indices.length - triangleStart;
+      if (triangleCount <= 0) return;
+
+      const key = `${face.texture || ''}|${face.textureUrl || ''}|${(face.color || []).join(',')}`;
+      let materialIndex = materialIndexByKey.get(key);
+      if (materialIndex === undefined) {
+        const textureFactory = resolveObstacleTextureFactory(
+          face.texture, face.textureUrl, '/textures/boxwall.png', createBoxWallTexture,
+        );
+        const material = new THREE.MeshLambertMaterial({ map: textureFactory() });
+        if (face.color) material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);
+        materialIndex = materials.length;
+        materials.push(material);
+        materialIndexByKey.set(key, materialIndex);
+      }
+      geometryGroups.push({ start: triangleStart, count: triangleCount, materialIndex });
+    });
+
+    if (!indices.length) return null;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normalsOut, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvsOut, 2));
+    geometry.setIndex(indices);
+    geometryGroups.forEach(({ start, count, materialIndex }) => geometry.addGroup(start, count, materialIndex));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+
+    const mesh = new THREE.Mesh(geometry, materials);
+    mesh.name = meshObs.name || `Mesh ${index + 1}`;
+    // Static world geometry, same as a box/pyramid fragment -- see
+    // `_buildObstacleFragments`.
+    mesh.matrixAutoUpdate = false;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    return mesh;
   }
 
   // One eighth-dimension node per obstacle, built the first time a tank is

@@ -218,8 +218,30 @@ reads both:
 - An absolute `http`/`https` URL -- the only kind of external texture any
   real map sampled actually used (docs/bzw-plan.md's "Evidence from real
   maps") -- is recognized by the server (`parseBzwTextureUrl`) and forwarded
-  to every client as-is, **never fetched by the server itself.** Whether it
-  is actually loaded is each connected browser's own decision:
+  to every client as-is, **never fetched by the server itself.** `https://`
+  is the one to actually write: it loads unchanged whether a viewer reached
+  bzo over plain `http://` or behind TLS (a page only ever refuses to load
+  the *less* secure scheme than its own, never the more secure one), and it
+  is the only form real upstream `bzflag` has any chance of fetching too --
+  its own texture downloader (`Downloads.cxx`) hands the URL to libcurl
+  largely as stated, so an ordinary absolute URL of either scheme reaches it
+  intact; a bare protocol-relative `//host/path` does not; see below.
+  `maps/bzo.bzw`'s own `thin_wall` names its external texture this way, on
+  `images.bzflag.org`.
+
+  A protocol-relative URL (`//host/path`, no scheme at all) is recognized by
+  the server too, and forwarded exactly as written rather than resolved to a
+  scheme here -- the server has no page of its own to resolve one against,
+  only each connected browser does, so `isExternalTextureUrlTrusted` (below)
+  resolves it against that viewer's own `window.location.href`, the way a
+  protocol-relative `<img src>` already would in any browser. That is a
+  purely browser-side convenience, though, with no equivalent for real
+  upstream: `bzflag`'s own `BzfNetwork::parseURL` scans for a leading `:`
+  before it does anything else, so a string with no scheme at all fails to
+  parse before curl is ever involved. Reserve this spelling for a map that
+  only bzo will ever load; `https://` is the one that works everywhere.
+
+  Whether it is actually loaded is each connected browser's own decision:
   `isExternalTextureUrlTrusted` in `public/texture.js` allows a URL whose
   host is the same origin the client is already connected to, or matches
   `*images.bzflag.org` (upstream's own default trusted host,
@@ -356,6 +378,23 @@ Upstream writes that guard on the base alone, because a zero-height box is
 vanishingly rare there. Its box arithmetic has none, and the case that shows the
 difference is a **burrowed** tank: `BU` drives below zero, so its own span reaches
 up through a pad's `[0, 0]` and it stops dead on one.
+
+**A zero-height *box* still needs a real bzfs to agree it is one shape, not
+six degenerate ones.** `CustomBox::read` (`isOldBox`) takes bzo's own fast,
+always-valid path only while a box states nothing beyond
+`position`/`size`/`rotation`/passability -- a face selector, `phydrv`, or any
+material property at all (a bare `color` included) switches it to the general
+path every other transformed obstacle takes, which builds the box as eight
+explicit corners. At `size w d 0` the four "top" corners land exactly on the
+four "bottom" ones, so all four side faces collapse to zero area -- real bzfs
+drops each one with an "invalid mesh face" warning and keeps going (harmless:
+the top/bottom faces are still four *distinct* corners each, so the pad still
+draws flat and still collides the way this section describes; only its
+invisible vertical edge is what is missing). `maps/bzo.bzw`'s four
+team-coloured spawn pads hit exactly this -- `color` plus `size ... 0` -- and
+carry `size ... 0.01` instead for that reason: visually flush, but a real
+plane for upstream to build a side face from, so the map loads silently on a
+real `bzfs` as well as on bzo's own.
 
 A pad is still drawn, and still labelled by the debug labels: the passability
 flags are read only by the collision code, never by the renderer. That is what
@@ -618,6 +657,28 @@ size) rather than a half-extent. Placing an instance composes scale, then
 rotation, then position, the same order upstream's `MeshTransform` does, and
 applies that to a clone of every obstacle the named `define` holds.
 
+`shift`/`scale`/`spin` are `WorldFileLocation`'s own, more general names for
+that same triple -- `position`/`size`/`rotation` are `CustomGroup`'s shorthand
+for composing exactly one of each, in that order, and a real map may spell an
+instance's placement either way (`ahs3_Ironside_Battlefield.bzw`'s `table`/
+`table-complete`/`fence` groups all use `shift`/`spin` rather than `position`/
+`rotation`). bzo reads `shift` as `position`'s exact equivalent on **any**
+obstacle, group or not -- a pure translation never distorts a shape, so the
+two spellings are the same operation, not an approximation of each other.
+`scale` is read the same as `size`, but only inside a `group`: a plain box or
+pyramid's own `size` already means its literal half-extent rather than a
+multiplier, and there is no local evidence yet of a map naming a box's own
+extent through `scale` instead to say what that should do.
+
+`spin <deg> <ax> <ay> <az>` is read as `rotation <deg>`'s equivalent, again on
+any obstacle, but only when its axis is the map's own vertical (`0 0 1` or
+`0 0 -1`, the latter negating the angle) -- a spin about any other axis tips
+the shape out of bzo's axis-aligned box/pyramid model, the same as `shear`
+always does, so it is counted for the load to name instead
+(`ahs3_INCOMING.bzw`'s "3way" groups spin 90° about `1 0 0`, and are named
+this way on that map's load -- moot in practice today, since "3way" is itself
+a `mesh` define with nothing to place yet).
+
 A `define` may itself hold `group` instances of other definitions, and bzo
 recurses into them the way `GroupDefinition::makeGroups` does -- a definition
 that names itself again while still being placed, directly or through others,
@@ -659,28 +720,39 @@ this: `ahs3_Ironside_Battlefield.bzw`'s own links use patterns like `topf:*`.
 
 Not yet read:
 
-- `shift`/`scale`/`shear`/`spin`/`xform` lines, on a plain obstacle or inside a
-  `group` block -- `WorldFileLocation`'s more general transform, of which a
-  group's own `position`/`size`/`rotation` is only the common case. A named
-  `transform` block (`xform <name>`, referencing one built from these same
-  five lines) is unread for the same reason.
+- `shear`, on a plain obstacle or inside a `group` block -- it has no
+  representation in bzo's axis-aligned box/pyramid model at all, unlike
+  `shift`/`scale`/`spin` above.
+- A named `transform` block (`xform <name>`, referencing one built from
+  `shift`/`scale`/`shear`/`spin` lines) and the `xform <name>` line that
+  references one from inside a `group` block or a plain obstacle.
+- `scale` stated directly on a plain box or pyramid (no `group` involved),
+  rather than inside a `group` block -- see **Groups** above for why this one
+  differs from `shift`/`spin`, which are read either way.
 
 ## What is ignored
 
 Anything not listed above is skipped without comment, which means a map using it
 loads and plays with that part of it missing. The notable absences:
 
-- **Mesh geometry**: `mesh`, `meshbox`, `meshpyr`, `arc`, `cone`, `sphere`,
-  `tetra`. bzo has boxes and pyramids, so a map built out of meshes arrives
-  mostly empty.
+- **Mesh geometry collides with nothing**: `mesh` (`meshbox`/`meshpyr`, and
+  the `arc`/`cone`/`sphere`/`tetra` primitives that expand to one, are not
+  read at all yet). A `mesh` block's own geometry -- its vertex/face grammar,
+  in full -- is parsed and rendered, so a mapper sees it drawn, textured, and
+  passable per face-level `drivethrough`/`shootthrough` -- read, not yet
+  acted on. A tank drives straight through a mesh wall that looks entirely
+  solid, and no radar blip or debug label marks it either. See
+  `docs/bzw-plan.md`'s "Mesh geometry" for what still needs collision before
+  this stops being a visual trap.
 - **Most of what a `material` block or a `matref` can still say**:
   `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, `phydrv`, and the
   lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see
   **Materials** above for what a material *does* read now (`addtexture`/
   `texture` against bzo's own stock assets, `color`/`diffuse`, `noradar`,
   `nolighting`) and what of this list is closest to landing next.
-- **Transforms**: `shift`, `scale`, `shear`, `spin`, `xform`, which upstream
-  reads on any obstacle. An obstacle carrying one arrives untransformed.
+- **`shear`, `xform`, and a `spin` about anything but the vertical axis.**
+  `shift`, `scale` and a vertical `spin` are read now -- see **Groups**
+  above, and its "Not yet read" list for what of this line is left.
 - **`water`, `physics`**.
 - **A `zone` block's `flag` keyword.** `zoneflag`, `team` and `safety` are all
   read -- see **Team zones** and **Flag safety zones** above. `flag` names a

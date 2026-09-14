@@ -75,26 +75,139 @@ one face of a mesh can be `drivethrough` while its neighbour is solid.
 mesh for display while the face list above stays what collides.
 
 This is the largest single gap: it is what a mapper reaches for once boxes and
-pyramids run out, and it needs work on every surface bzo has. Validate the
-parser against the three complete example blocks on
-<https://wiki.bzflag.org/Mesh> -- a textured cube, a billboard built from
-explicit `texcoord`s, and a jump-through floor -- before trusting it against
-`maps/hix.bzw`'s or `bzo.bzw`'s own faked curves, which use boxes and
-pyramids, not mesh, and prove nothing about this path.
+pyramids run out, and it needs work on every surface bzo has.
 
-- [ ] Parse the vertex/normal/texcoord pools and the face list in
-      `parseBZWMap`, keeping bzo's coordinate conversion (`docs/bzw.md`'s
-      `position`/`rotation` table) consistent with a per-vertex read rather
-      than a single `position`.
-- [ ] A collision shape for an arbitrary closed convex-face mesh in the
-      `collision` pair -- `findTankObstacle`/`getTankHitNormal` need a case
-      that is not a box or a pyramid's fixed six or five faces. Concave meshes
-      (an arch, a tunnel) are the harder case; upstream handles them as a set
-      of independently-solid faces rather than one enclosed volume, which
-      `getHitNormal` already does per-plane -- read `MeshObstacle::getHitNormal`
-      before assuming convexity.
-- [ ] Rendering an arbitrary triangle list in `render.js`, textured per face
-      rather than per obstacle type.
+**The vertex/normal/texcoord pools and the face list are parsed now.**
+`parseBZWMap` reads a `mesh` block's own grammar in full -- the pools, a
+mesh's own defaults (`phydrv`, `noclusters`, `smoothbounce`, `decorative`,
+passability, `matref`/`addtexture`/`color`/etc, the same read
+`applyBzwMaterialToken` gives a `material` block), and each `face`/`endface`
+snapshotting those defaults at the moment it opens and overriding any of them
+itself -- validated against all three complete example blocks on
+<https://wiki.bzflag.org/Mesh> (a textured cube, a billboard built from
+explicit `texcoord`s, and a jump-through floor), and against
+`ahs3_INCOMING.bzw`'s own "3way" mesh, whose parsed vertex/normal/face counts
+match its own header comment (`# faces = 52`, `# vertices = 40`,
+`# normals = 40`) exactly.
+
+**Rendered now, and placed in `obstacles`.** A parsed mesh is a real entry in
+`OBSTACLES`/`obstacles` (`type: 'mesh'`) now, the same list every box/pyramid/
+teleporter/base is in -- so the radar, the buried-face test and the eighth-
+dimension nodes only ever have to skip a shape they don't handle, rather than
+learn a second array exists. `render.js`'s `setMeshes`/`_buildMeshObject`
+builds one `THREE.Mesh` per parsed mesh: every face fan-triangulated into a
+shared buffer, grouped by its own resolved texture/tint
+(`resolveObstacleTextureFactory`, the same read a box's own wall/cap textures
+use), flat-shaded off its own plane unless it gave `normal`s of its own. A
+face with no `texcoords` line of its own is planar-projected rather than left
+at vertex 0's own degenerate (0,0) for every corner -- upstream's own
+`MeshSceneNodeGenerator::makeTexcoords`, ported faithfully (the first edge as
+U, the face's own plane crossed with it as V, both at the same 8-unit tile
+size a box's own wall already uses) -- without it, a stock texture like
+`boxwall`/`pyrwall` samples one corner pixel across the whole face instead of
+tiling, which reads as a flat wash of colour rather than a texture at all.
+`maps/bzo.bzw` carries one of each of the three wiki.bzflag.org shapes now
+(`mesh_cube`, `mesh_billboard`, `mesh_jump_through_floor`, clear of the corner
+tests) as a real render-path fixture, not only a parser one -- confirmed
+rendering with the right vertex/group/material counts in a headless client,
+`renderer.stats`' own `mesh:N` draw tally among them.
+
+**The collision pair skips `type === 'mesh'` explicitly, and has to.**
+`findTankObstacle`/`findShotObstacle`/`findShotSegmentImpact` (both
+`server/collision.cjs` and `public/collision.mjs`) `continue` past one before
+any of the box/pyramid math runs, which is not just tidiness: a mesh's
+missing `w`/`d`/`h`/`x`/`z`/`rotation` do not fail safe. The vertical overlap
+test alone stays well-defined (`getObstacleHeight`'s `DEFAULT_OBSTACLE_HEIGHT`
+fallback, `baseY || 0`), so it can pass; `testOrigRectRect`'s corner
+classification then divides by the missing half-extents, and `NaN < x` and
+`NaN > x` are both false for every corner, which is the *inside* case in
+that function's own logic (`rx`/`rz` fall through to 0), so an unguarded mesh
+does not fail to collide -- it collides with everything, unconditionally.
+Merging mesh into `obstacles` without this guard shipped briefly and made
+every tank movement check return a hit; a debug log formatting the (also
+missing) `obs.x`/`obs.rotation` with `.toFixed()` turned that into a thrown
+exception on every collision message besides. Both are fixed by the same
+guard, landed together with the merge; `render.js`'s own box/pyramid/
+teleporter/base dispatch has no `type === 'mesh'` case either, so
+`applyWorldData` in `client.js` filters a mesh out of what it hands
+`setObstacles` (into `setMeshes` instead) rather than teaching that dispatch
+a fifth shape it would otherwise build from the same missing fields.
+
+**A `define`'s own meshes are placed through `group` now too**, the same way
+its box/pyramid members already were -- `resolveDefineMeshes`/
+`applyGroupInstanceTransformToMesh` are `resolveDefine`/
+`applyGroupInstanceTransform`'s own mesh equivalents (same scale/spin/shift,
+applied per vertex/checkpoint/normal instead of to one position), recursed
+through nested `group` instances the same way. This is most of what a real
+map's mesh content actually needs: every mesh sampled across
+`ahs3_INCOMING.bzw`, `ahs3_Paradise_Valley.bzw`, `ahs3_XUG_FFA.bzw`,
+`dw_missilewar3.bzw` and `import-Planet-MoFo.com_4202.bzw` sits inside a
+`define`, never at the map's own top level -- confirmed against that last
+one's own `base_pillar`/`base_oval` chain, four `group` levels deep
+(`all#0:base_pillars#0:base_pillar#0:base_oval#0`), landing 277 distinct
+placed meshes from 130 template ones, each at its own correctly transformed
+position.
+
+A map with a mesh still counts it toward the player-facing "dropped" tally,
+because nothing a player can *drive into* has changed -- `bzo.bzw`'s own three
+test shapes, and every placed mesh above, all still let a tank pass through
+untouched. What is left:
+
+- [ ] Merge a mesh's own adjacent same-material triangle ranges into one
+      `geometry` group rather than one per face -- `_buildMeshObject` adds a
+      group per face regardless, which is one draw call per face
+      (`renderer.stats`' `mesh:14` for three small test shapes) rather than
+      one per distinct texture. Fine at `bzo.bzw`'s scale; worth doing before
+      a 130-mesh map like `import-Planet-MoFo.com_4202.bzw` ever renders for
+      real.
+**A tank now collides with a mesh, per face -- concave shapes included.**
+Checking upstream first paid off: `MeshFace` is its own `Obstacle` subclass,
+tested as an independent flat polygon rather than upstream ever asking "is
+this point inside the enclosed volume" -- which is exactly why a concave
+mesh (an arch, a tunnel) needs nothing special, upstream or here. `obs.bounds`
+(a mesh's own AABB, `finalizeMeshGeometry`) rejects the whole mesh in one
+check before any face runs; each surviving face is tested with a JS port of
+upstream's own `testPolygonInAxisBox`/`projectAxisBox`/`projectPolygon`
+(`Intersect.cxx`) against `meshIntersectsCylinder` (`findTankObstacle`'s
+cylinder path in both `collision.cjs` and `collision.mjs`) -- a face's own
+world-space plane, precomputed the same best-of-every-triple-vertices way
+`MeshFace::finalize` picks one (`computeMeshFacePlane`, robust against a
+near-degenerate polygon). Verified against hand-built cases and against
+`bzo.bzw`'s own three real parsed mesh fixtures directly (not just synthetic
+data) before this reached the live server.
+
+Deliberately narrower than upstream, for now:
+
+- [ ] The oriented tank box is not a separate, more precise case -- both
+      `useTankBox` and the plain cylinder query the same square-footprint
+      approximation `meshIntersectsCylinder` gives everything, which is
+      actually what upstream's own `MeshFace::inCylinder` does too
+      (`inBox(p, 0, radius, radius, height)`, a square, never a true circle).
+      A real oriented-box case would need a translate-and-rotate version of
+      the same polygon-vs-box test, mirroring `MeshFace::inBox` in full.
+**Shots collide with a mesh now too.** `findShotObstacle`/
+`findShotSegmentImpact` (both files) reuse the same `meshIntersectsCylinder`
+the tank path added -- a shot is just a much smaller cylinder
+(`radius, radius`, the same convention `pyramidIntersectsCylinder` already
+uses for one). The segment-sweep case needed its own coarse bracket first,
+though: `getShotObstacleInterval`'s existing box/pyramid case clips the
+segment against a *rotated* obstacle via `getColliderLocalPoint`, which a
+mesh has no single rotation for -- `getMeshSegmentInterval` clips directly
+against `obs.bounds` instead, already axis-aligned in world space, no
+rotation step needed. `getShotObstacleNormal` also has a mesh case now
+(`getMeshHitNormal`), for the one path that needs it: a `ricochet` face, or
+a world that reflects every shot regardless -- both share `findMeshHitFace`
+with `meshIntersectsCylinder` rather than searching faces twice. Verified
+against hand-built geometry (hit fraction, miss case, and outward normal
+direction) before this reached the live server, the same way the tank case
+was.
+
+- [ ] `getTankHitNormal` has no mesh case, so a tank that does collide slides
+      along nothing -- it stops, rather than sliding the way it would off a
+      box's corner. `MeshFace::getHitNormal` just returns the face's own
+      plane normal; the harder part is picking the *right* face when a tank
+      is touching more than one, which `meshIntersectsCylinder` today does
+      not distinguish (first hit wins).
 - [ ] Radar footprint and depth shading (`getRadarObstacles`,
       `getRadarDepthScale`) for a shape that is not a rectangle or a cone.
 - [ ] Debug labels and collision-log naming for a mesh and its individual
@@ -115,17 +228,30 @@ makeGroups`, not the flat single level first shipped. See "Groups" in
 `docs/bzw.md` for what a `group` instance takes, how nesting composes, and how
 a member's name is kept unique at any depth -- including a `teleporter`
 placed through one, which is also read now, the same as any other member.
-`src/bzfs/CustomGroup.cxx` remains the reference for what is left:
+`src/bzfs/CustomGroup.cxx` remains the reference for what is left.
 
-- [ ] A bare `transform` / `enddef` block's `shift`/`scale`/`shear`/`spin`/
-      `xform` lines composed into one named matrix, and `xform <name>`
-      referencing it from inside a `group` block or a plain obstacle.
-- [ ] `shift`/`scale`/`shear`/`spin`/`xform` lines stated directly -- on a
-      *plain* obstacle (no group involved) or inside a `group` block -- rather
-      than through the position/size/rotation triple `CustomGroup` already
-      folds into the same transform. `shear` has no representation in bzo's
-      axis-aligned box/pyramid model at all, and would stay dropped even once
-      the rest of this line is read.
+`shift`/`scale`/`spin` are read now too, as `WorldFileLocation`'s own names
+for the position/size/rotation triple `CustomGroup` already folds into the
+same transform -- `shift` and a vertical-axis `spin` on any obstacle, `scale`
+only inside a `group` (a plain box's own `size` already means its literal
+half-extent, not a multiplier, and no local map names one through `scale`
+instead). See "Groups" in `docs/bzw.md` for the detail and the real map lines
+that motivated it (`ahs3_Ironside_Battlefield.bzw`'s `table`/`fence` groups).
+What is left:
+
+- [ ] A bare `transform` / `enddef` block's `shift`/`scale`/`shear`/`spin`
+      lines composed into one named matrix, and `xform <name>` referencing it
+      from inside a `group` block or a plain obstacle.
+- [ ] `shear`, on a plain obstacle or inside a `group` block -- no
+      representation in bzo's axis-aligned box/pyramid model at all.
+- [ ] `scale` stated directly on a plain box or pyramid, no `group` involved.
+- [ ] A `spin` about anything but the vertical axis -- tips a shape out of
+      bzo's axis-aligned model the same way `shear` does. Only real local use
+      is `ahs3_INCOMING.bzw`'s "3way" groups, and it is moot there today: that
+      define is pure `mesh`, so there is nothing yet to tip. Revisit once mesh
+      geometry lands, alongside a general oriented box/pyramid representation
+      or upstream's own mesh-conversion fallback -- whichever this needs by
+      then.
 
 ## Materials and appearance
 

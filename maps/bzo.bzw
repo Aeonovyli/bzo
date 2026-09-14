@@ -618,10 +618,20 @@ zone
   team 1
   safety 1
 end
+# A flush pad painting the zone above -- `color` on a box forces upstream's
+# own general mesh path (CustomBox.cxx: any material property sets
+# `isOldBox = false`, the same as a face selector or `phydrv`), and a truly
+# flush (`size ... 0`) box in that path degenerates into four zero-area side
+# faces, which real bzfs drops with an "invalid mesh face" warning per box --
+# harmless (the pad is still flat and still visible from above; only its
+# invisible vertical edge is at stake) but noisy. `0.01` keeps every one of
+# these four pads visually flush while giving upstream a real plane to work
+# with; `passable` is already stated outright, so nothing about drivethrough/
+# shootthrough leans on bzo's own "h === 0" auto-detection either way.
 box
   name n_red_spawn
   position 0 130 0
-  size 20 8 0
+  size 20 8 0.01
   color 1.0 0.0 0.0
   passable
 end
@@ -642,7 +652,7 @@ end
 box
   name e_green_spawn
   position 130 0 0
-  size 8 20 0
+  size 8 20 0.01
   color 0.0 1.0 0.0
   passable
 end
@@ -663,7 +673,7 @@ end
 box
   name s_blue_spawn
   position 0 -130 0
-  size 20 8 0
+  size 20 8 0.01
   color 0.101960784 0.2 1.0
   passable
 end
@@ -684,7 +694,7 @@ end
 box
   name w_purple_spawn
   position -130 0 0
-  size 8 20 0
+  size 8 20 0.01
   color 1.0 0.0 1.0
   passable
 end
@@ -740,7 +750,7 @@ box
   position 105 65 0
   rotation 0
   size 15 0.5 10
-  addtexture http://images.bzflag.org/astevens/pine.png
+  addtexture https://images.bzflag.org/astevens/pine.png
 end
 
 # North-west: two overlap tests. A pyramid, a box and a flipped pyramid
@@ -1078,4 +1088,102 @@ group Watchtower
   position -108 -118 0
   rotation 45
   size 1 1 1.5
+end
+
+# Mesh geometry, clear of the corner tests and the watchtowers. One of each
+# of the three shapes upstream's own wiki.bzflag.org/Mesh examples carry --
+# a solid cube, a texcoord'd two-sided billboard, and a jump-through floor --
+# so the render path (`docs/bzw-plan.md`'s "Mesh geometry") has real content
+# to check itself against in the client, not only in `parseBZWMap`. Rendered
+# only for now: nothing here collides yet, so a tank drives straight through
+# all three the same as it would through empty air.
+
+mesh
+  name mesh_cube
+  vertex -73 -73 0
+  vertex -67 -73 0
+  vertex -67 -67 0
+  vertex -73 -67 0
+  vertex -73 -73 6
+  vertex -67 -73 6
+  vertex -67 -67 6
+  vertex -73 -67 6
+  addtexture boxwall
+  face
+    vertices 0 1 5 4
+  endface
+  face
+    vertices 1 2 6 5
+  endface
+  face
+    vertices 2 3 7 6
+  endface
+  face
+    vertices 3 0 4 7
+  endface
+  face
+    vertices 0 1 2 3
+  endface
+  face
+    vertices 4 5 6 7
+    addtexture roof
+  endface
+end
+
+mesh
+  name mesh_billboard
+  vertex -60 -70 0
+  vertex -54 -70 0
+  vertex -54 -70 6
+  vertex -60 -70 6
+  texcoord 0 0
+  texcoord 1 0
+  texcoord 1 1
+  texcoord 0 1
+  addtexture wall
+  face
+    vertices 0 1 2 3
+    texcoords 0 1 2 3
+  endface
+  face #backside
+    vertices 1 0 3 2
+    texcoords 1 0 3 2
+  endface
+end
+
+mesh
+  name mesh_jump_through_floor
+  vertex -73 -63 3
+  vertex -67 -63 3
+  vertex -67 -57 3
+  vertex -73 -57 3
+  vertex -73 -63 6
+  vertex -67 -63 6
+  vertex -67 -57 6
+  vertex -73 -57 6
+  addtexture pyrwall
+  face
+    vertices 0 1 5 4
+    drivethrough
+  endface
+  face
+    vertices 1 2 6 5
+    drivethrough
+  endface
+  face
+    vertices 2 3 7 6
+    drivethrough
+  endface
+  face
+    vertices 3 0 4 7
+    drivethrough
+  endface
+  face
+    vertices 0 1 2 3
+    drivethrough
+  endface
+  face
+    vertices 4 5 6 7
+    addtexture roof
+  endface
 end

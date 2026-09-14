@@ -6,6 +6,56 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.14] - 2026-09-14
+
+### Added
+- **BZW `shift`/`scale`/vertical `spin` (part of #72).** A `group` instance
+  may now state these directly instead of only `position`/`size`/`rotation`
+  -- `shift` and a vertical `spin` are read the same way on a plain
+  box/pyramid/teleporter too, a pure translation or a yaw being exact
+  either way it is spelled. A `spin` about any axis but the vertical is
+  named on load rather than silently misapplied, since bzo's box/pyramid
+  model has no way to tip a shape that way.
+- **Mesh geometry: parsed, textured, and placed through groups (issue
+  #72).** A `mesh` block's full grammar now reads -- vertex/normal/texcoord
+  pools, `face`/`endface` with per-face `matref`/`phydrv`/passability --
+  validated against all three wiki.bzflag.org reference examples and
+  against real community maps' own mesh content. `render.js` builds and
+  textures each one, auto-generating planar UVs for a face that states
+  none of its own (upstream's own `makeTexcoords`) so a stock texture like
+  `boxwall` tiles instead of washing the whole face in one sampled pixel.
+  A `define`'s own meshes are now placed by a `group` instance the same
+  recursive way its box/pyramid members already are. `maps/bzo.bzw`
+  carries one of each of the three reference shapes as a permanent
+  fixture.
+- **A tank and a shot both collide with a mesh, face by face (issue
+  #72).** Upstream tests a mesh face as its own independent flat polygon,
+  never as one enclosed volume -- which is exactly why a concave mesh
+  needs nothing special, upstream or here. `meshIntersectsCylinder` ports
+  upstream's own `testPolygonInAxisBox`/`projectAxisBox`/`projectPolygon`
+  (a real separating-axis test, not an approximation), guarded by a
+  whole-mesh bounding-box reject before any one face runs. A tank stops at
+  a mesh wall; a shot stops at or ricochets off one, the same
+  square-footprint approximation upstream's own `MeshFace::inCylinder`
+  gives a "circular" occupant.
+
+### Fixed
+- A flush, coloured box no longer confuses a real `bzfs`. Any material
+  property on a box or pyramid -- a bare `color` included -- switches
+  upstream off its fast, always-valid path and onto one that builds eight
+  explicit corners; at exactly zero height that degenerates into four
+  zero-area side faces, which upstream drops with an "invalid mesh face"
+  warning. `bzo.bzw`'s four team-coloured spawn pads hit this exactly;
+  each is `0.01` tall now instead of perfectly flush, visually identical
+  but a real plane for upstream to build from.
+- An external texture URL may now be protocol-relative (`//host/path`) as
+  well as absolute -- recognized by the server and resolved by each
+  viewer's own browser against its own page, so one map line can serve
+  `http://` to a plain local server and `https://` to one that terminates
+  TLS. `https://` remains the one to write for a texture that also needs
+  to load in a real desktop `bzflag` client, which has no page to resolve
+  a schemeless URL against.
+
 ## [1.2.13] - 2026-09-14
 
 ### Added

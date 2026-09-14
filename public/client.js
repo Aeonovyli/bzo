@@ -1776,13 +1776,19 @@ function applyWorldData(world) {
   currentWorldData = world;
   if (world && world.obstacles) {
     OBSTACLES = world.obstacles;
-    refreshCollisionColliders();
-    renderManager.setObstacles(OBSTACLES);
   } else {
     OBSTACLES = [];
-    refreshCollisionColliders();
-    renderManager.setObstacles([]);
   }
+  refreshCollisionColliders();
+  // `OBSTACLES` includes `type === 'mesh'` entries now (the collision pair
+  // itself skips them explicitly -- see collision.mjs), but `setObstacles`'s
+  // own box/pyramid/teleporter/base dispatch has no case for one and would
+  // build a NaN-filled box from its missing w/d/h/rotation, corrupting the
+  // shared fragment buffer it merges into. `setMeshes` is a mesh's own render
+  // path instead, so each half of the split list gets only the shapes it
+  // knows how to draw.
+  renderManager.setObstacles(OBSTACLES.filter((obs) => obs.type !== 'mesh'));
+  renderManager.setMeshes(OBSTACLES.filter((obs) => obs.type === 'mesh'));
 
   if (world && world.teleporterGraph && typeof world.teleporterGraph === 'object') {
     TELEPORTER_GRAPH = world.teleporterGraph;
@@ -11725,9 +11731,11 @@ function getRadarObstacles() {
       // A material's `noradar` flag (docs/bzw.md, "Materials and appearance")
       // -- upstream's RadarRenderer skips a face whose material asks for it;
       // bzo has no per-face radar drawing to skip, so the whole obstacle sits
-      // out instead.
+      // out instead. A mesh has no radar footprint yet either
+      // (`docs/bzw-plan.md`'s "Mesh geometry") -- worth its own exclusion
+      // rather than leaning on its missing `x`/`z` clipping away silently.
       list: [...OBSTACLES]
-        .filter((obs) => !obs.noRadar)
+        .filter((obs) => !obs.noRadar && obs.type !== 'mesh')
         .sort((left, right) => getRadarObstacleTopY(left) - getRadarObstacleTopY(right)),
     };
   }

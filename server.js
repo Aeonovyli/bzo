@@ -1751,7 +1751,7 @@ function normalizeScoreLimit(score) {
 // only has to recognize the *opening* keyword to say how many of each a map
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'mesh', 'arc', 'cone', 'sphere', 'tetra',
+  'arc', 'cone', 'sphere', 'tetra',
   'physics', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
 
@@ -2031,6 +2031,22 @@ function resolveBzwStockTexture(rawName) {
 // a mapper's say-so.
 function parseBzwTextureUrl(rawName) {
   if (!rawName) return null;
+  // A protocol-relative URL (`//host/path`) has no scheme of its own to
+  // validate here -- only the browser that eventually loads it has a page
+  // to resolve one against, so this borrows a throwaway scheme just to
+  // confirm the rest still parses as a real URL, and forwards the original
+  // protocol-relative string rather than the resolved one. Each connected
+  // client re-resolves it against its own `window.location.href`
+  // (`isExternalTextureUrlTrusted`, public/texture.js), which is what lets
+  // the same map serve `http://` on a plain local server and `https://` on
+  // one that terminates TLS, from the one line a mapper wrote.
+  if (rawName.startsWith('//')) {
+    try {
+      return new URL(`https:${rawName}`).host ? rawName : null;
+    } catch {
+      return null;
+    }
+  }
   try {
     const parsed = new URL(rawName);
     return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
@@ -2059,6 +2075,14 @@ function parseBZWMap(filename) {
   const teleporters = [];
   const parsedLinks = [];
   const zones = [];
+  // A `mesh` block's own vertex/normal/texcoord pools and face list, parsed
+  // in full (CustomMesh.cxx, CustomMeshFace.cxx) but not yet placed into
+  // `obstacles` -- there is no collision, render or radar path for arbitrary
+  // geometry yet (`docs/bzw-plan.md`'s "Mesh geometry"). Kept here purely so
+  // the parser itself can be validated against a real map's mesh content;
+  // a mesh still counts toward the player-facing "dropped" tally below,
+  // because nothing about what a player sees or drives into has changed.
+  const meshes = [];
   // The map's `world size` directive, applied to `GAME_CONFIG.MAP_SIZE` only
   // at the call site that loads the live map -- never inside this function,
   // which the background map-hashing trickle (see `MAP_REGISTRY`) also calls
@@ -2080,6 +2104,12 @@ function parseBZWMap(filename) {
   let current = null;
   let currentLink = null;
   let currentZone = null;
+  // The one `face` / `endface` block currently open inside a `mesh` --
+  // a second scope nested inside `current` (still the mesh itself), since a
+  // face's own properties start from the mesh's defaults at the moment
+  // `face` was read (`CustomMeshFace`'s constructor snapshot) and nothing
+  // else parsed here has that shape.
+  let currentMeshFace = null;
   // `define <name>` / `enddef`. Everything closed while this is set collects
   // into its obstacle list instead of `obstacles`, keyed by name so any number
   // of `group` instances can place transformed copies of it later.
@@ -2096,6 +2126,12 @@ function parseBZWMap(filename) {
   // hanging or overflowing the stack. Ordinary, non-cyclic nesting recurses
   // freely; this is only ever a cycle.
   const groupCycleWarnings = new Set();
+  // A `spin <deg> <ax> <ay> <az>` line whose axis isn't the map's own
+  // vertical -- tips the shape off bzo's axis-aligned box/pyramid model the
+  // same way `shear` always does, so it is counted here and named once
+  // rather than applied wrong. A spin about the vertical is read like
+  // `rotation` (see the `spin` branch below); this is only the rest of it.
+  let nonVerticalSpinCount = 0;
   // Which zone keywords a map asked for that bzo does not act on, gathered so
   // the load can say so once rather than for every zone. `zone` blocks are
   // otherwise the one place a map states something invisible: a spawn zone that
@@ -2352,6 +2388,65 @@ function parseBZWMap(filename) {
     };
   }
 
+  // The one texture/tint/flag bundle a `material` block, a mesh's own
+  // defaults, and a mesh face's own overrides all read the same way --
+  // `matref`/`color`/`diffuse`/`addtexture`/`texture`/`notextures`/
+  // `noradar`/`nolighting` -- each setting `target`'s own texture/
+  // textureUrl/color/noRadar/noLighting fields in the same read-order-wins
+  // sequence every caller already gives its own block. Returns whether
+  // `token` was one of these, so a caller falls through to whatever else
+  // its own block reads for anything this returns false for.
+  function applyBzwMaterialToken(target, token, words) {
+    if (token === 'matref') {
+      const refName = (words[1] || '').toLowerCase();
+      const referenced = materialsByName.get(refName);
+      if (referenced) {
+        target.texture = referenced.texture;
+        target.textureUrl = referenced.textureUrl;
+        target.color = referenced.color;
+        target.noRadar = referenced.noRadar;
+        target.noLighting = referenced.noLighting;
+      } else if (refName) {
+        unresolvedMaterialRefs.add(refName);
+      }
+      return true;
+    }
+    if (token === 'color' || token === 'diffuse') {
+      const tint = parseBzwColor(words.slice(1));
+      if (tint) target.color = tint;
+      return true;
+    }
+    if (token === 'addtexture' || token === 'texture') {
+      const rawName = words.slice(1).join(' ');
+      const resolved = resolveBzwTextureName(rawName);
+      if (resolved?.stock) {
+        target.texture = resolved.stock;
+        target.textureUrl = null;
+      } else if (resolved?.url) {
+        target.textureUrl = resolved.url;
+        target.texture = null;
+        externalTextureUrls.add(resolved.url);
+      } else if (rawName) {
+        unresolvedTextureNames.add(rawName);
+      }
+      return true;
+    }
+    if (token === 'notextures') {
+      target.texture = null;
+      target.textureUrl = null;
+      return true;
+    }
+    if (token === 'noradar') {
+      target.noRadar = true;
+      return true;
+    }
+    if (token === 'nolighting') {
+      target.noLighting = true;
+      return true;
+    }
+    return false;
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith('#')) {
@@ -2590,57 +2685,14 @@ function parseBZWMap(filename) {
         if (materialName) currentMaterial.name = materialName;
         continue;
       }
-      // A material's own `matref <name>` copies another already-defined
-      // material wholesale (BzMaterial's plain struct assignment), which a
-      // property stated after it then overrides -- the same sequential-read
-      // semantics as everything else in this block.
-      if (token === 'matref') {
-        const [, refName] = line.split(/\s+/);
-        const referenced = refName && materialsByName.get(refName.toLowerCase());
-        if (referenced) {
-          currentMaterial.texture = referenced.texture;
-          currentMaterial.textureUrl = referenced.textureUrl;
-          currentMaterial.color = referenced.color;
-          currentMaterial.noRadar = referenced.noRadar;
-          currentMaterial.noLighting = referenced.noLighting;
-        } else if (refName) {
-          unresolvedMaterialRefs.add(refName);
-        }
-        continue;
-      }
-      if (token === 'color' || token === 'diffuse') {
-        const [, ...rest] = line.split(/\s+/);
-        const tint = parseBzwColor(rest);
-        if (tint) currentMaterial.color = tint;
-        continue;
-      }
-      if (token === 'addtexture' || token === 'texture') {
-        const [, ...rest] = line.split(/\s+/);
-        const rawName = rest.join(' ');
-        const resolved = resolveBzwTextureName(rawName);
-        if (resolved?.stock) {
-          currentMaterial.texture = resolved.stock;
-          currentMaterial.textureUrl = null;
-        } else if (resolved?.url) {
-          currentMaterial.textureUrl = resolved.url;
-          currentMaterial.texture = null;
-          externalTextureUrls.add(resolved.url);
-        } else if (rawName) {
-          unresolvedTextureNames.add(rawName);
-        }
-        continue;
-      }
-      if (token === 'notextures') {
-        currentMaterial.texture = null;
-        currentMaterial.textureUrl = null;
-        continue;
-      }
-      if (token === 'noradar') {
-        currentMaterial.noRadar = true;
-        continue;
-      }
-      if (token === 'nolighting') {
-        currentMaterial.noLighting = true;
+      // `matref`/`color`/`diffuse`/`addtexture`/`texture`/`notextures`/
+      // `noradar`/`nolighting` -- a material's own `matref <name>` copies
+      // another already-defined material wholesale (BzMaterial's plain
+      // struct assignment), which a property stated after it then
+      // overrides, the same sequential-read semantics as everything else
+      // in this block. `applyBzwMaterialToken` is the same read a mesh's
+      // own defaults and a mesh face's own overrides use.
+      if (applyBzwMaterialToken(currentMaterial, token, line.split(/\s+/))) {
         continue;
       }
       // Everything else a material block can say -- ambient/specular/
@@ -2657,7 +2709,7 @@ function parseBZWMap(filename) {
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine && token === 'define') {
       const [, name] = line.split(/\s+/);
       if (name) {
-        currentDefine = { name, obstacles: [], groupInstances: [] };
+        currentDefine = { name, obstacles: [], groupInstances: [], meshes: [] };
       } else {
         log(`Ignoring "define" with no name in ${filename}`);
       }
@@ -2670,7 +2722,12 @@ function parseBZWMap(filename) {
       defineTemplates.set(currentDefine.name, {
         obstacles: currentDefine.obstacles,
         groupInstances: currentDefine.groupInstances,
+        meshes: currentDefine.meshes,
       });
+      // A definition's own meshes reach `meshes` only once a `group`
+      // instance actually places it (below), same as its box/pyramid
+      // members already reach `obstacles` -- a definition nothing ever
+      // instantiates contributes nothing, meshes included.
       currentDefine = null;
       continue;
     }
@@ -2746,9 +2803,127 @@ function parseBZWMap(filename) {
       // `rotation`/`rot` branch, where both get set from the same line.
       const [, groupDefName] = line.split(/\s+/);
       current = { type: 'group', groupDefName: groupDefName || '', rotation: 0, spin: 0, scale: [1, 1, 1] };
-    } else if (current && current.type === 'group' && token === 'size') {
-      // A group's `size` is CustomGroup's scale factor (MeshTransform::addScale),
-      // not a box's half-extent -- 1 1 1 leaves every member at its own size.
+    } else if (token === 'mesh') {
+      // CustomMesh's own defaults -- a mesh's default texture is upstream's
+      // stock "mesh" (a wireframe/grid picture, unrelated to mesh geometry --
+      // see the callout in docs/bzw.md's Materials section), and driveThrough/
+      // shootThrough/ricochet/phydrv/noclusters/smoothBounce all start unset,
+      // the same as `WorldFileObstacle`'s own obstacle defaults.
+      current = {
+        type: 'mesh', name: null,
+        // Which `define` this mesh was read inside, if any -- kept on a
+        // placed copy too (see `applyGroupInstanceTransformToMesh`) purely
+        // for debugging which template a mesh reaching the client came from.
+        definedIn: currentDefine ? currentDefine.name : null,
+        vertices: [], normals: [], texcoords: [], faces: [], checkPoints: [],
+        phydrv: null, noclusters: false, smoothBounce: false, decorative: false,
+        driveThrough: false, shootThrough: false, ricochet: false,
+        texture: 'mesh', textureUrl: null, color: null, noRadar: false, noLighting: false,
+      };
+      currentMeshFace = null;
+    } else if (current && current.type === 'mesh') {
+      // A mesh's own grammar -- its vertex/normal/texcoord pools, its
+      // checkpoints, its own defaults, and the `face`/`endface` blocks that
+      // read off them -- kept self-contained here rather than folded into
+      // the generic per-obstacle branches below, since nothing else parsed
+      // in this function has a face nested inside it.
+      const words = line.split(/\s+/);
+      if (currentMeshFace) {
+        // Inside `face` / `endface`. Every property here is scoped to this
+        // one face, which already started from the mesh's own defaults at
+        // the moment `face` was read, below -- CustomMeshFace's own
+        // constructor snapshot.
+        if (token === 'endface') {
+          if (currentMeshFace.vertexIndices.length < 3) {
+            log(`Ignoring a mesh face with fewer than 3 vertices in ${filename}`);
+          } else {
+            current.faces.push(currentMeshFace);
+          }
+          currentMeshFace = null;
+        } else if (token === 'vertices') {
+          currentMeshFace.vertexIndices = words.slice(1).map(Number).filter(Number.isInteger);
+        } else if (token === 'normals') {
+          currentMeshFace.normalIndices = words.slice(1).map(Number).filter(Number.isInteger);
+        } else if (token === 'texcoords') {
+          currentMeshFace.texcoordIndices = words.slice(1).map(Number).filter(Number.isInteger);
+        } else if (token === 'phydrv') {
+          currentMeshFace.phydrv = words[1] || null;
+        } else if (token === 'smoothbounce') {
+          currentMeshFace.smoothBounce = true;
+        } else if (token === 'noclusters') {
+          currentMeshFace.noclusters = true;
+        } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
+          Object.assign(currentMeshFace, BZW_PASSABILITY_KEYWORDS.get(token));
+        } else {
+          applyBzwMaterialToken(currentMeshFace, token, words);
+        }
+      } else if (token === 'end') {
+        // A mesh still counts toward the player-facing "dropped" tally --
+        // see the note on `meshes` above -- rather than folding into the
+        // generic `current && token === 'end'` obstacle-closing branch
+        // below, which assumes a finished box/pyramid/group.
+        if (currentDefine) {
+          // Still a template in its own local frame -- `finalizeMeshGeometry`
+          // runs later, once a `group` instance places it (or not at all, if
+          // nothing ever does), never here.
+          currentDefine.meshes.push(current);
+        } else {
+          meshes.push(finalizeMeshGeometry(current));
+        }
+        unsupportedCounts.set('mesh', (unsupportedCounts.get('mesh') || 0) + 1);
+        current = null;
+      } else if (token === 'vertex') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.vertices.push({ x: x || 0, y: z || 0, z: -(y || 0) });
+      } else if (token === 'normal') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.normals.push({ x: x || 0, y: z || 0, z: -(y || 0) });
+      } else if (token === 'texcoord') {
+        const [u, v] = words.slice(1).map(Number);
+        current.texcoords.push({ u: u || 0, v: v || 0 });
+      } else if (token === 'inside' || token === 'outside') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.checkPoints.push({ x: x || 0, y: z || 0, z: -(y || 0), inside: token === 'inside' });
+      } else if (token === 'phydrv') {
+        current.phydrv = words[1] || null;
+      } else if (token === 'smoothbounce') {
+        current.smoothBounce = true;
+      } else if (token === 'noclusters') {
+        current.noclusters = true;
+      } else if (token === 'decorative') {
+        current.decorative = true;
+      } else if (token === 'face') {
+        // CustomMeshFace's own constructor -- a snapshot of the mesh's
+        // defaults as they stand right now, not a live reference to them:
+        // a mesh-level line stated after this `face` affects only a later
+        // face, never one already open or already closed.
+        currentMeshFace = {
+          vertexIndices: [], normalIndices: [], texcoordIndices: [],
+          phydrv: current.phydrv, noclusters: current.noclusters,
+          smoothBounce: current.smoothBounce,
+          driveThrough: current.driveThrough, shootThrough: current.shootThrough,
+          ricochet: false,
+          texture: current.texture, textureUrl: current.textureUrl,
+          color: current.color, noRadar: current.noRadar, noLighting: current.noLighting,
+        };
+      } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
+        Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
+      } else if (token === 'name') {
+        const [, ...nameParts] = words;
+        const name = nameParts.join(' ').replace(/"/g, '').trim();
+        if (name) current.name = name;
+      } else {
+        // `lod`, `drawInfo`, and a mesh's own position/size/rotation (its
+        // transform -- not read yet, see docs/bzw-plan.md) all fall here,
+        // read and dropped like any other property this parser does not
+        // act on yet.
+        applyBzwMaterialToken(current, token, words);
+      }
+    } else if (current && current.type === 'group' && (token === 'size' || token === 'scale')) {
+      // A group's `size` is CustomGroup's own name for what WorldFileLocation
+      // itself calls `scale` (MeshTransform::addScale) -- both spellings are
+      // read here, and a mapper may state either -- not a box's
+      // half-extent: 1 1 1 leaves every member at its own size.
       const [, sx, sy, sz] = line.split(/\s+/);
       const parsedX = parseFloat(sx);
       const parsedY = parseFloat(sy);
@@ -2765,9 +2940,14 @@ function parseBZWMap(filename) {
       const [, ...nameParts] = line.split(/\s+/);
       const name = nameParts.join(' ').replace(/"/g, '').trim();
       if (name) current.name = name;
-    } else if (current && (token === 'position' || token === 'pos')) {
-      // position x y z, or its `pos` alias (WorldFileLocation::read).
-      // BZFlag +Y north maps to our -Z north.
+    } else if (current && (token === 'position' || token === 'pos' || token === 'shift')) {
+      // position x y z, its `pos` alias, or `shift` -- WorldFileLocation's own
+      // translate primitive, which `position` is shorthand for composing
+      // with `size`/`rotation` (CustomGroup.cxx, CustomBox.cxx). A pure
+      // translation never distorts a shape, so reading it the same as
+      // `position` is exact, not an approximation -- unlike `scale`/`spin`,
+      // which only line up with `size`/`rotation` on a `group` (see the
+      // branches for each). BZFlag +Y north maps to our -Z north.
       const [, x, y, z] = line.split(/\s+/);
       current.x = parseFloat(x);
       current.z = -parseFloat(y); // BZFlag +Y (north) -> our -Z (north)
@@ -2793,6 +2973,25 @@ function parseBZWMap(filename) {
       current.rotation = (parseFloat(deg) || 0) * Math.PI / 180 + Math.PI;
       if (current.type === 'group') {
         current.spin = (parseFloat(deg) || 0) * Math.PI / 180;
+      }
+    } else if (current && token === 'spin') {
+      // spin <deg> <ax> <ay> <az> (WorldFileLocation::read) -- the more
+      // general primitive `rotation` is shorthand for, about the map's own
+      // vertical axis. About any other axis it tips the shape off bzo's
+      // axis-aligned box/pyramid model the same way `shear` always does, so
+      // only a spin about the vertical is read here; any other axis is
+      // counted for the load to name, same as an unresolved matref.
+      const [, rawAngle, rawAx, rawAy, rawAz] = line.split(/\s+/).map(Number);
+      const isVertical = Math.abs(rawAx || 0) < 1e-6 && Math.abs(rawAy || 0) < 1e-6
+        && Math.abs(rawAz || 0) > 1e-6;
+      if (isVertical) {
+        const signedDeg = (rawAngle || 0) * Math.sign(rawAz);
+        current.rotation = (signedDeg * Math.PI / 180) + Math.PI;
+        if (current.type === 'group') {
+          current.spin = signedDeg * Math.PI / 180;
+        }
+      } else {
+        nonVerticalSpinCount++;
       }
     } else if (current && current.type === 'pyramid' && token === 'flipz') {
       current.inverted = true;
@@ -3014,6 +3213,161 @@ function parseBZWMap(filename) {
     });
   }
 
+  // A group instance's own scale/spin, applied to one point in the
+  // definition's local frame -- a mesh vertex or checkpoint (translated by
+  // `request.x`/`baseY`/`z` after this, the same as a member's own position
+  // above) or a mesh normal (left untranslated, `scaleX`/`Y`/`Z` all 1 --
+  // a direction has no position to scale, and no rigorous inverse-transpose
+  // for a non-uniform one either; real local usage only ever scales a mesh
+  // uniformly, so a plain rotation is exact there and a close approximation
+  // otherwise).
+  function transformGroupPoint(point, scaleX, scaleY, scaleZ, cos, sin) {
+    const localX = (point.x || 0) * scaleX;
+    const localZ = (point.z || 0) * scaleY;
+    const localY = (point.y || 0) * scaleZ;
+    return {
+      x: (localX * cos) + (localZ * sin),
+      y: localY,
+      z: (-localX * sin) + (localZ * cos),
+    };
+  }
+
+  // The mesh equivalent of `applyGroupInstanceTransform` above -- same
+  // scale/spin/shift, applied per vertex/checkpoint (and per normal, minus
+  // the translation) rather than to one obstacle position, since a mesh's
+  // geometry is many points rather than a position plus a size.
+  function applyGroupInstanceTransformToMesh(mesh, request, instanceLabel) {
+    const [scaleX, scaleY, scaleZ] = request.scale;
+    const cos = Math.cos(request.spin);
+    const sin = Math.sin(request.spin);
+    const placePoint = (point) => {
+      const local = transformGroupPoint(point, scaleX, scaleY, scaleZ, cos, sin);
+      return { x: request.x + local.x, y: request.baseY + local.y, z: request.z + local.z };
+    };
+    const placedMesh = {
+      ...mesh,
+      name: `${instanceLabel}:${mesh.name || 'Mesh'}`,
+      vertices: mesh.vertices.map(placePoint),
+      normals: mesh.normals.map((n) => transformGroupPoint(n, 1, 1, 1, cos, sin)),
+      checkPoints: mesh.checkPoints.map((p) => ({ ...placePoint(p), inside: p.inside })),
+      // Fresh face objects, never the template's own -- the same definition
+      // may be placed more than once, each with its own transform, and
+      // `finalizeMeshGeometry` below writes a world-space `plane` onto each
+      // face in place. Reusing the template's array would let the last
+      // instance placed overwrite every earlier one's collision plane.
+      faces: mesh.faces.map((face) => ({ ...face })),
+    };
+    finalizeMeshGeometry(placedMesh);
+    return placedMesh;
+  }
+
+  // A vertex pool's own axis-aligned bounding box -- `MeshObstacle::finalize`
+  // builds the same thing by expanding over every face's extents, and prints
+  // it back as a real map's own `# mins`/`# maxs` comment. Used as a cheap
+  // whole-mesh reject before a collision check ever looks at an individual
+  // face -- see `meshIntersectsCylinder` in the collision pair -- so a tank
+  // nowhere near a 100-face mesh costs one bounds check, not 100 polygon ones.
+  function computeMeshBounds(vertices) {
+    if (!vertices.length) return null;
+    let minX = Infinity; let maxX = -Infinity;
+    let minY = Infinity; let maxY = -Infinity;
+    let minZ = Infinity; let maxZ = -Infinity;
+    for (const v of vertices) {
+      if (v.x < minX) minX = v.x;
+      if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y;
+      if (v.y > maxY) maxY = v.y;
+      if (v.z < minZ) minZ = v.z;
+      if (v.z > maxZ) maxZ = v.z;
+    }
+    return { minX, maxX, minY, maxY, minZ, maxZ };
+  }
+
+  // The plane a mesh face's own vertices define, as `[nx, ny, nz, d]` with
+  // `nx*x + ny*y + nz*z + d === 0` on the plane -- `MeshFace::finalize`'s own
+  // best-of-every-triple search, kept for the same reason: three corners that
+  // happen to be near-collinear give a plane close to (0,0,0), and the
+  // largest cross product among every triple is the one least likely to be
+  // that unlucky, on an otherwise-valid but oddly-ordered polygon. Returns
+  // null for a face with no real plane at all -- upstream's own "invalid mesh
+  // face" case (bzo.bzw's own real-bzfs pass turned up the same failure mode
+  // on a flush, tinted box; see docs/bzw.md, "A pad flush with the ground").
+  function computeMeshFacePlane(vertices, vertexIndices) {
+    let bestLenSq = 0;
+    let bestCross = null;
+    let bestAt = null;
+    const n = vertexIndices.length;
+    for (let i = 0; i < n - 2; i++) {
+      const vi = vertices[vertexIndices[i]];
+      for (let j = i + 1; j < n - 1; j++) {
+        const vj = vertices[vertexIndices[j]];
+        const edge2 = { x: vi.x - vj.x, y: vi.y - vj.y, z: vi.z - vj.z };
+        for (let k = j + 1; k < n; k++) {
+          const vk = vertices[vertexIndices[k]];
+          const edge1 = { x: vk.x - vj.x, y: vk.y - vj.y, z: vk.z - vj.z };
+          const cx = (edge1.y * edge2.z) - (edge1.z * edge2.y);
+          const cy = (edge1.z * edge2.x) - (edge1.x * edge2.z);
+          const cz = (edge1.x * edge2.y) - (edge1.y * edge2.x);
+          const lenSq = (cx * cx) + (cy * cy) + (cz * cz);
+          if (lenSq > bestLenSq) {
+            bestLenSq = lenSq;
+            bestCross = { cx, cy, cz };
+            bestAt = vj;
+          }
+        }
+      }
+    }
+    if (!bestCross || bestLenSq < 1e-20) return null;
+    const len = Math.sqrt(bestLenSq);
+    const nx = bestCross.cx / len;
+    const ny = bestCross.cy / len;
+    const nz = bestCross.cz / len;
+    const d = -((nx * bestAt.x) + (ny * bestAt.y) + (nz * bestAt.z));
+    return [nx, ny, nz, d];
+  }
+
+  // Bounds plus a per-face plane, computed once a mesh's vertices are in
+  // their final world positions -- a top-level mesh right when it closes, or
+  // a `group`-placed one right after its own transform, never on a
+  // `define`'s own still-local template (`resolveDefineMeshes` holds those
+  // unfinalized, since the same definition may be placed more than once,
+  // each landing somewhere different). `baseY` matches every other
+  // obstacle's own field, so `getObstacleHeight`/the collision pair's height
+  // gate read a mesh the same way they already read a box or a pyramid.
+  function finalizeMeshGeometry(mesh) {
+    mesh.bounds = computeMeshBounds(mesh.vertices);
+    mesh.baseY = mesh.bounds ? mesh.bounds.minY : 0;
+    for (const face of mesh.faces) {
+      face.plane = computeMeshFacePlane(mesh.vertices, face.vertexIndices);
+    }
+    return mesh;
+  }
+
+  // Resolves a `define` into the meshes it holds, the same way `resolveDefine`
+  // below resolves its plain obstacles -- its own meshes, plus every nested
+  // `group` instance's own definition recursively resolved and placed by that
+  // instance's transform. A definition `resolveDefine` already found unknown
+  // or cyclic reports it for both; this only ever returns fewer meshes in
+  // that case, never a second warning for the same thing.
+  function resolveDefineMeshes(defName, visiting) {
+    const template = defineTemplates.get(defName);
+    if (!template || visiting.has(defName)) return [];
+    visiting.add(defName);
+
+    const resolved = [...template.meshes];
+    const nestedOrdinals = new Map();
+    for (const nestedRequest of template.groupInstances) {
+      const ordinal = nestedOrdinals.get(nestedRequest.groupDefName) || 0;
+      nestedOrdinals.set(nestedRequest.groupDefName, ordinal + 1);
+      const nestedLabel = nestedRequest.name || `${nestedRequest.groupDefName}#${ordinal}`;
+      const nestedMeshes = resolveDefineMeshes(nestedRequest.groupDefName, visiting);
+      resolved.push(...nestedMeshes.map((m) => applyGroupInstanceTransformToMesh(m, nestedRequest, nestedLabel)));
+    }
+
+    visiting.delete(defName);
+    return resolved;
+  }
+
   // Resolves a `define` into the obstacles it holds, in its own local frame --
   // its plain obstacles as written, plus every nested `group` instance's own
   // definition recursively resolved and placed by that instance's transform.
@@ -3082,6 +3436,15 @@ function parseBZWMap(filename) {
       if (member.kind === 'teleporter') registerTeleporter(member);
     }
     obstacles.push(...placed);
+
+    // Same instance, its definition's own meshes rather than its box/pyramid
+    // members -- `resolveDefineMeshes`/`applyGroupInstanceTransformToMesh`
+    // are `resolveDefine`/`applyGroupInstanceTransform`'s own mesh
+    // equivalents, so a `group` placing a mesh-only definition (real local
+    // maps do this -- `import-Planet-MoFo.com_4202.bzw`'s "base_pillar")
+    // reaches `meshes` the same way a box/pyramid one reaches `obstacles`.
+    const definedMeshes = resolveDefineMeshes(request.groupDefName, new Set());
+    meshes.push(...definedMeshes.map((m) => applyGroupInstanceTransformToMesh(m, request, instanceLabel)));
   }
   if (unknownGroupDefs.size > 0) {
     log(
@@ -3097,6 +3460,12 @@ function parseBZWMap(filename) {
     );
   }
 
+  if (nonVerticalSpinCount > 0) {
+    log(
+      `Ignoring ${nonVerticalSpinCount} "spin" line(s) about an axis other than `
+      + `vertical in ${filename} -- bzo's box/pyramid model can't tip that way`
+    );
+  }
   if (unreadZoneKeywords.size > 0) {
     log(
       `Ignoring zone keywords bzo does not read in ${filename}:`
@@ -3161,6 +3530,15 @@ function parseBZWMap(filename) {
       `Ignoring unsupported blocks in ${filename}: ${droppedList}`
     );
   }
+
+  // Joins `obstacles` here, after the tally above, so "included" still counts
+  // only what actually collides -- a mesh still contributes nothing there
+  // (`docs/bzw-plan.md`'s "Mesh geometry"; the collision pair skips
+  // `type === 'mesh'` explicitly rather than by accident). Placed in the same
+  // list as everything else a client draws, though, so the radar, the buried-
+  // face test and the box/pyramid fragment builder all see one obstacle list
+  // and only have to skip a shape they don't handle, not learn a second array.
+  obstacles.push(...meshes);
 
   const teleporterGraph = buildTeleporterLinks();
   return {
@@ -3290,6 +3668,10 @@ if (MAP_SOURCE === 'random') {
   mapFreeCtfSpawns = mapData.freeCtfSpawns;
   if (mapFreeCtfSpawns) log('Map option freeCtfSpawns: a colour team spawns in any of its zones every life');
   log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
+  const meshObstacleCount = OBSTACLES.filter((obs) => obs.type === 'mesh').length;
+  if (meshObstacleCount > 0) {
+    log(`${meshObstacleCount} of those are meshes from ${mapPath} (rendered only, no collision yet)`);
+  }
   log(`Loaded ${TELEPORTER_GRAPH.links.length} teleporter face links from ${mapPath}`);
   if (MAP_ZONES.length > 0) log(`Loaded ${MAP_ZONES.length} zones from ${mapPath}`);
   WORLD_WEAPONS = mapData.weapons;

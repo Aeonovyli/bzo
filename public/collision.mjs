@@ -245,6 +245,7 @@ export function getPyramidHeight(obs) {
 export const DEFAULT_OBSTACLE_HEIGHT = 4;
 
 export function getObstacleHeight(obs) {
+  if (obs?.type === 'mesh' && obs.bounds) return obs.bounds.maxY - obs.bounds.minY;
   return Number.isFinite(obs?.h) ? obs.h : DEFAULT_OBSTACLE_HEIGHT;
 }
 
@@ -374,6 +375,124 @@ export function pyramidIntersectsTank(obs, x, y, z, rotation, height, slack = 0,
   );
 }
 
+// A box's own extreme corner along `dir`, and the opposite one -- the two
+// candidates any separating-axis test ever needs from an axis-aligned box,
+// upstream's own `projectAxisBox` (Intersect.cxx). `mins`/`maxs` are each
+// `[x, y, z]`; returns `[min, max]` of the box's projection onto `dir`.
+export function projectAxisBox(dir, mins, maxs) {
+  let ix; let iy; let iz;
+  let ox; let oy; let oz;
+  if (dir[0] > 0) { ix = maxs[0]; ox = mins[0]; } else { ix = mins[0]; ox = maxs[0]; }
+  if (dir[1] > 0) { iy = maxs[1]; oy = mins[1]; } else { iy = mins[1]; oy = maxs[1]; }
+  if (dir[2] > 0) { iz = maxs[2]; oz = mins[2]; } else { iz = mins[2]; oz = maxs[2]; }
+  const idist = (dir[0] * ix) + (dir[1] * iy) + (dir[2] * iz);
+  const odist = (dir[0] * ox) + (dir[1] * oy) + (dir[2] * oz);
+  return idist < odist ? [idist, odist] : [odist, idist];
+}
+
+// A polygon's own projection onto `dir` -- upstream's own `projectPolygon`.
+// `points` is an array of `[x, y, z]`.
+export function projectPolygon(dir, points) {
+  let minDist = Infinity;
+  let maxDist = -Infinity;
+  for (const p of points) {
+    const dist = (p[0] * dir[0]) + (p[1] * dir[1]) + (p[2] * dir[2]);
+    if (dist < minDist) minDist = dist;
+    if (dist > maxDist) maxDist = dist;
+  }
+  return [minDist, maxDist];
+}
+
+// Does a planar polygon touch an axis-aligned box, both already expressed in
+// the same frame -- upstream's own `testPolygonInAxisBox` (Intersect.cxx),
+// the general routine every wall/mesh scene node and `MeshFace::inBox` itself
+// build on. `plane` is the polygon's own `[nx, ny, nz, d]`; `points` its
+// vertices, `[x, y, z]` each, in face-winding order. Two kinds of separating
+// axis rule this out: the polygon's own plane (does the box straddle it at
+// all), then each edge crossed with each of the box's three face normals --
+// the box's own face normals need no test of their own, since they *are* the
+// coordinate axes here and the plane test already covers the polygon's.
+export function testPolygonInAxisBox(points, plane, mins, maxs) {
+  const i = [0, 0, 0];
+  const o = [0, 0, 0];
+  for (let t = 0; t < 3; t++) {
+    if (plane[t] > 0) { i[t] = maxs[t]; o[t] = mins[t]; } else { i[t] = mins[t]; o[t] = maxs[t]; }
+  }
+  const icross = (plane[0] * i[0]) + (plane[1] * i[1]) + (plane[2] * i[2]) + plane[3];
+  const ocross = (plane[0] * o[0]) + (plane[1] * o[1]) + (plane[2] * o[2]) + plane[3];
+  if (icross * ocross > 0) return false;
+
+  const axisNormals = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const n = points.length;
+  for (let t = 0; t < n; t++) {
+    const next = (t + 1) % n;
+    const edge = [
+      points[next][0] - points[t][0],
+      points[next][1] - points[t][1],
+      points[next][2] - points[t][2],
+    ];
+    for (let a = 0; a < 3; a++) {
+      const axis = axisNormals[a];
+      const cross = [
+        (edge[1] * axis[2]) - (edge[2] * axis[1]),
+        (edge[2] * axis[0]) - (edge[0] * axis[2]),
+        (edge[0] * axis[1]) - (edge[1] * axis[0]),
+      ];
+      const lenSq = (cross[0] * cross[0]) + (cross[1] * cross[1]) + (cross[2] * cross[2]);
+      if (lenSq < 0.001) continue;
+      const [boxMin, boxMax] = projectAxisBox(cross, mins, maxs);
+      const [polyMin, polyMax] = projectPolygon(cross, points);
+      if (boxMin > polyMax || boxMax < polyMin) return false;
+    }
+  }
+  return true;
+}
+
+// A mesh against a vertical cylinder, face by face -- `MeshFace::inCylinder`
+// is itself `inBox(p, 0, radius, radius, height)` upstream (a square
+// footprint, not a true circle), so that is what this tests too: each face
+// translated into the cylinder's own frame (never rotated -- a cylinder has
+// none), against an axis-aligned box `radius` out on X and Z, `height` tall
+// on Y. `obs.bounds` rejects the whole mesh in one check before any face's
+// own polygon test runs, the same win a broad-phase octree gives upstream --
+// see `docs/bzw-plan.md`'s "Mesh geometry".
+export function findMeshHitFace(obs, x, y, z, radius, height) {
+  const { bounds } = obs;
+  if (bounds && (x + radius < bounds.minX || x - radius > bounds.maxX
+    || z + radius < bounds.minZ || z - radius > bounds.maxZ)) {
+    return null;
+  }
+  const boxMins = [-radius, 0, -radius];
+  const boxMaxs = [radius, height, radius];
+  for (const face of obs.faces) {
+    if (!face.plane) continue;
+    const localPoints = face.vertexIndices.map((vi) => {
+      const v = obs.vertices[vi];
+      return [v.x - x, v.y - y, v.z - z];
+    });
+    const [nx, ny, nz, d] = face.plane;
+    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return face;
+  }
+  return null;
+}
+
+export function meshIntersectsCylinder(obs, x, y, z, radius, height) {
+  return findMeshHitFace(obs, x, y, z, radius, height) !== null;
+}
+
+// The plane normal of whichever face `findMeshHitFace` would report a hit
+// against -- `getShotObstacleNormal`'s mesh case, needed only when a shot
+// ricochets off one (a face itself marked `ricochet`, or a world that
+// reflects every shot regardless). Picks whichever face the shared search
+// finds first, the same "first hit wins" bzo's tank collision already
+// accepts for a mesh -- see docs/bzw-plan.md's "Mesh geometry".
+export function getMeshHitNormal(obs, x, y, z, radius) {
+  const face = findMeshHitFace(obs, x, y, z, radius, radius);
+  if (!face) return { x: 0, y: 1, z: 0 };
+  return { x: face.plane[0], y: face.plane[1], z: face.plane[2] };
+}
+
 // A teleporter's frame and the opening inside it. The importer resolves the
 // frame itself into `w`/`d`/`h` before the world goes on the wire, so this
 // derives only the portal, which is the frame minus its border.
@@ -468,6 +587,18 @@ export function findTankObstacle(obstacles, x, y, z, options = {}) {
         ? pyramidIntersectsTank(obs, x, y, z, rotation, height, slack, tankScale)
         : pyramidIntersectsCylinder(obs, x, y, z, radius - slack, height);
       if (hits) return obs;
+      continue;
+    }
+
+    if (obs.type === 'mesh') {
+      // Upstream's own `MeshFace::inCylinder` is `inBox(p, 0, radius, radius,
+      // height)` -- a square, not a true circle -- so the oriented tank box
+      // isn't a separate, more precise case here the way it is for a box or a
+      // pyramid; both paths get the same square-footprint approximation for
+      // now, matching what upstream itself tests a mesh face against. See
+      // docs/bzw-plan.md's "Mesh geometry" for the oriented case as a
+      // follow-up, once there is a use for the extra precision.
+      if (meshIntersectsCylinder(obs, x, y, z, radius - slack, height)) return obs;
       continue;
     }
 
@@ -743,6 +874,12 @@ function rotateNormalToWorld(obs, localX, localY, localZ) {
 
 // True when a shot centred at (x, y, z) is inside this obstacle's solid volume.
 export function shotInsideObstacle(obs, x, y, z, radius) {
+  // A mesh has no single flat top/bottom to name the way a box or a pyramid
+  // does, so it skips that pair of epsilon checks entirely and goes straight
+  // to its own per-face test, which already includes its own vertical gate.
+  if (obs.type === 'mesh') {
+    return meshIntersectsCylinder(obs, x, y, z, radius, radius);
+  }
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
   if (y + radius <= base + SHOT_VERTICAL_EPSILON) return false;
@@ -811,7 +948,40 @@ export function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, ra
 //
 // Vertical bounds are shotInsideObstacle's own, so the two agree about what
 // counts as inside.
+// The segment-vs-box slab clip every other interval here uses, against a
+// mesh's own `bounds` -- already axis-aligned in world space, so this needs
+// no `getColliderLocalPoint` step first the way the rotated box case below
+// does. The coarse bracket `findShotSegmentImpact` samples within before
+// bisecting down to the actual face; `meshIntersectsCylinder` is the fine
+// test throughout, same as `pyramidIntersectsCylinder` is for a pyramid.
+export function getMeshSegmentInterval(obs, from, to, radius) {
+  const { bounds } = obs;
+  if (!bounds) return null;
+  let tMin = 0;
+  let tMax = 1;
+  const clip = (a, b, low, high) => {
+    const delta = b - a;
+    if (Math.abs(delta) < ZERO_TOLERANCE) return a >= low && a <= high;
+    let near = (low - a) / delta;
+    let far = (high - a) / delta;
+    if (near > far) {
+      const swap = near;
+      near = far;
+      far = swap;
+    }
+    if (near > tMin) tMin = near;
+    if (far < tMax) tMax = far;
+    return tMin <= tMax;
+  };
+  if (!clip(from.x, to.x, bounds.minX - radius, bounds.maxX + radius)) return null;
+  if (!clip(from.y, to.y, bounds.minY - radius, bounds.maxY + radius)) return null;
+  if (!clip(from.z, to.z, bounds.minZ - radius, bounds.maxZ + radius)) return null;
+  if (tMax < 0 || tMin > 1) return null;
+  return { tMin: Math.max(0, tMin), tMax: Math.min(1, tMax) };
+}
+
 export function getShotObstacleInterval(obs, from, to, radius) {
+  if (obs.type === 'mesh') return getMeshSegmentInterval(obs, from, to, radius);
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
   const lowest = base + SHOT_VERTICAL_EPSILON - radius;
@@ -919,6 +1089,7 @@ export function findShotSegmentImpact(obstacles, from, to, radius) {
 // stay outside, and everything else falls through to the cross-section's
 // horizontal normal -- which, as getNormalOrigRect does, always answers.
 export function getShotObstacleNormal(obs, x, y, z, radius) {
+  if (obs.type === 'mesh') return getMeshHitNormal(obs, x, y, z, radius);
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
 
