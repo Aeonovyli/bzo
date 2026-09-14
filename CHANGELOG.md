@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.11] - 2026-09-14
+
+### Added
+- **`define`/`group` map geometry (issue #72).** A map may now `define` a
+  template of boxes/pyramids/bases and `group` place transformed copies of
+  it, composing scale, then rotation, then position the same order upstream
+  does -- so a repeated structure like `bzo.bzw`'s new watchtower example no
+  longer has to be laid out by hand. Each copy is named for the instance it
+  came from, so placing one definition twice never collides on a name.
+
+### Fixed
+- A group-derived (or any long) obstacle name no longer gets clipped by the
+  debug label's fixed-size canvas -- the label now grows to fit the text and
+  scales to match, reading at the same size whatever its length.
+
 ## [1.2.10] - 2026-09-13
 
 ### Added
