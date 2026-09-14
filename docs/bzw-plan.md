@@ -109,20 +109,14 @@ pyramids, not mesh, and prove nothing about this path.
 
 ## Groups and transforms
 
-`define` / `enddef` / `group` are read now -- see "Groups" in `docs/bzw.md`
-for what a `group` instance takes and how a member's name is kept unique
-across instances. `src/bzfs/CustomGroup.cxx` remains the reference for what is
-left:
+`define` / `enddef` / `group` are read now, including a `group` instance
+nested inside a `define` -- real recursion, matching `GroupDefinition::
+makeGroups`, not the flat single level first shipped. See "Groups" in
+`docs/bzw.md` for what a `group` instance takes, how nesting composes, and how
+a member's name is kept unique at any depth -- including a `teleporter`
+placed through one, which is also read now, the same as any other member.
+`src/bzfs/CustomGroup.cxx` remains the reference for what is left:
 
-- [ ] A `group` instance nested inside a `define`. Dropped and logged today,
-      the same as upstream drops the recursion (`GroupDefinition::makeGroups`
-      guards against it) -- but a live map surfaced this (see "Evidence from
-      real maps" under Materials below: `ahs3_Ironside_Battlefield.bzw` nests
-      four), so it is worth doing rather than a permanent gap.
-- [ ] A `teleporter` inside a `define`. Dropped and logged today for the same
-      reason a nested group is -- its face index and link graph have no
-      single sensible meaning multiplied across however many instances place
-      the definition.
 - [ ] A bare `transform` / `enddef` block's `shift`/`scale`/`shear`/`spin`/
       `xform` lines composed into one named matrix, and `xform <name>`
       referencing it from inside a `group` block or a plain obstacle.

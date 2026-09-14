@@ -2037,8 +2037,12 @@ function parseBZWMap(filename) {
   // resolution upstream gives it -- and expanded once the whole file is read.
   const groupInstanceRequests = [];
   const unknownGroupDefs = new Set();
-  let droppedDefineTeleporters = 0;
-  let droppedNestedGroups = 0;
+  // A definition that names itself again while still being placed, directly
+  // or through others -- `GroupDefinition::makeGroups`'s own `active` guard,
+  // logged the same way upstream does ("avoided recursion") rather than
+  // hanging or overflowing the stack. Ordinary, non-cyclic nesting recurses
+  // freely; this is only ever a cycle.
+  const groupCycleWarnings = new Set();
   // Which zone keywords a map asked for that bzo does not act on, gathered so
   // the load can say so once rather than for every zone. `zone` blocks are
   // otherwise the one place a map states something invisible: a spawn zone that
@@ -2057,6 +2061,64 @@ function parseBZWMap(filename) {
 
   function getTeleporterEndpointName(teleporter, face) {
     return `${teleporter.linkName}:${face === 0 ? 'f' : 'b'}`;
+  }
+
+  // CustomGate's constructor, for a teleporter that gave no size or border of
+  // its own: half width 0.5 * _teleportWidth, half breadth _teleportBreadth,
+  // height 2 * _teleportHeight, and a border twice the half width. Filled in
+  // here rather than left to each reader, because a dimension left undefined
+  // is not a small teleporter -- it is NaN, and testOrigRectRect answers
+  // "overlapping" for a NaN half extent, since every comparison against NaN
+  // is false and the corner is classified into the obstacle. One sizeless
+  // obstacle then supports a tank anywhere in the world.
+  //
+  // Applied once, at parse time, whether the teleporter is a plain top-level
+  // one or a `define` template member -- upstream resolves a `CustomGate`'s
+  // dimensions the same way regardless, before any group instance ever
+  // copies or transforms it (`ObstacleMgr.cxx`'s `copyWithTransform`).
+  function applyTeleporterDefaults(teleporter) {
+    if (!Number.isFinite(teleporter.w)) teleporter.w = BZW_TELEPORTER_DEFAULTS.w;
+    if (!Number.isFinite(teleporter.d)) teleporter.d = BZW_TELEPORTER_DEFAULTS.d;
+    if (!Number.isFinite(teleporter.h)) teleporter.h = BZW_TELEPORTER_DEFAULTS.h;
+    if (!Number.isFinite(teleporter.border)) teleporter.border = BZW_TELEPORTER_DEFAULTS.border;
+    // Teleporter::finalize (Teleporter.cxx). The border grows the solid --
+    // `size[1] = origSize[1] + border * 2`, `size[2] = origSize[2] + border`
+    // -- and those grown values *are* the obstacle's extents, so they are
+    // what collides, what supports a tank and what is drawn.
+    //
+    // Applied here, once, so `w`/`d`/`h` on a teleporter mean the same thing
+    // they mean on a box: the solid. Three separate readers each open-coded
+    // this and two of them got it wrong, because the stated size is the hole
+    // rather than the frame and reading it directly is the easy mistake.
+    // getShotTeleporterDims is now a reader rather than a calculator.
+    const statedBorder = Math.max(0.12, teleporter.border);
+    const statedHalfWidth = Math.max(0.25, teleporter.w / 2);
+    const statedHalfBreadth = Math.max(0.25, teleporter.d / 2);
+    const statedHeight = Math.max(1.0, teleporter.h);
+    teleporter.border = statedBorder;
+    // Upstream takes the larger of the border half-width and the stated
+    // width for the x extent, which is its own line in finalize().
+    teleporter.w = Math.max(statedBorder * 0.5, statedHalfWidth) * 2;
+    teleporter.d = (statedHalfBreadth + (statedBorder * 2)) * 2;
+    teleporter.h = statedHeight + statedBorder;
+  }
+
+  // Gives a teleporter its place in the world's flat teleporter list -- a
+  // sequential face index and an entry `buildTeleporterLinks` can match a
+  // `link` block's endpoint name against. Called once per *real* placement,
+  // whether that is an ordinary top-level teleporter or one a `group`
+  // instance places from a `define` -- never for a template member still
+  // sitting in `defineTemplates`, which is not a placement yet.
+  function registerTeleporter(teleporter) {
+    const teleporterIndex = teleporters.length;
+    const linkName = teleporter.name || `teleporter_${teleporterIndex}`;
+    teleporter.teleporterIndex = teleporterIndex;
+    teleporter.linkName = linkName;
+    teleporters.push({
+      teleporterIndex,
+      linkName,
+      obstacle: teleporter,
+    });
   }
 
   function escapeRegExp(value) {
@@ -2437,7 +2499,7 @@ function parseBZWMap(filename) {
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine && token === 'define') {
       const [, name] = line.split(/\s+/);
       if (name) {
-        currentDefine = { name, obstacles: [] };
+        currentDefine = { name, obstacles: [], groupInstances: [] };
       } else {
         log(`Ignoring "define" with no name in ${filename}`);
       }
@@ -2447,7 +2509,10 @@ function parseBZWMap(filename) {
       if (defineTemplates.has(currentDefine.name)) {
         log(`Duplicate group definition "${currentDefine.name}" in ${filename}, using the newest`);
       }
-      defineTemplates.set(currentDefine.name, currentDefine.obstacles);
+      defineTemplates.set(currentDefine.name, {
+        obstacles: currentDefine.obstacles,
+        groupInstances: currentDefine.groupInstances,
+      });
       currentDefine = null;
       continue;
     }
@@ -2603,26 +2668,28 @@ function parseBZWMap(filename) {
         // No geometry of its own to place yet -- a `group` may name a `define`
         // the file hasn't reached, the same deferred resolution upstream gives
         // it, so every instance waits for the expansion pass below, once every
-        // `define` in the file is known.
+        // `define` in the file is known. One found inside a `define` block is
+        // itself a template entry rather than a placement -- upstream's own
+        // `GroupDefinition` holds its nested `group` instances the same way,
+        // recursing into them only once something actually places *this*
+        // definition (`GroupDefinition::makeGroups`).
+        const instanceRequest = {
+          groupDefName: current.groupDefName,
+          name: current.name || null,
+          x: current.x || 0,
+          z: current.z || 0,
+          baseY: current.baseY || 0,
+          rotation: current.rotation || 0,
+          spin: current.spin || 0,
+          scale: current.scale || [1, 1, 1],
+          driveThrough: !!current.driveThrough,
+          shootThrough: !!current.shootThrough,
+          ricochet: !!current.ricochet,
+        };
         if (currentDefine) {
-          // Upstream doesn't support this either (GroupDefinition::makeGroups
-          // guards against the recursion), reached only by a `group` line
-          // inside a `define` block.
-          droppedNestedGroups++;
+          currentDefine.groupInstances.push(instanceRequest);
         } else {
-          groupInstanceRequests.push({
-            groupDefName: current.groupDefName,
-            name: current.name || null,
-            x: current.x || 0,
-            z: current.z || 0,
-            baseY: current.baseY || 0,
-            rotation: current.rotation || 0,
-            spin: current.spin || 0,
-            scale: current.scale || [1, 1, 1],
-            driveThrough: !!current.driveThrough,
-            shootThrough: !!current.shootThrough,
-            ricochet: !!current.ricochet,
-          });
+          groupInstanceRequests.push(instanceRequest);
         }
         current = null;
       } else {
@@ -2649,17 +2716,17 @@ function parseBZWMap(filename) {
         }
 
         if (currentDefine) {
-          // A define's contents are a template, not finished obstacles -- names
-          // and teleporter registration wait for a `group` instance to place a
-          // copy, in the expansion pass below. A teleporter's global face index
-          // and link graph have no sensible meaning multiplied across however
-          // many instances place this define, so it is dropped rather than
-          // guessed at.
+          // A define's contents are a template, not finished obstacles --
+          // names and teleporter registration wait for a `group` instance to
+          // place a copy, in the expansion pass below (matching upstream:
+          // `GroupDefinition::makeGroups` calls `makeTeleName` and adds a
+          // teleporter to the world's teleporter list once per real
+          // placement, not once per template). Its own dimensions are
+          // resolved now regardless -- see `applyTeleporterDefaults`.
           if (current.kind === 'teleporter') {
-            droppedDefineTeleporters++;
-          } else {
-            currentDefine.obstacles.push(current);
+            applyTeleporterDefaults(current);
           }
+          currentDefine.obstacles.push(current);
           current = null;
         } else {
           // Use BZW name if present, otherwise assign a generated name
@@ -2672,48 +2739,8 @@ function parseBZWMap(filename) {
           }
 
           if (current.kind === 'teleporter') {
-            // CustomGate's constructor, for a teleporter that gave no size or
-            // border of its own: half width 0.5 * _teleportWidth, half breadth
-            // _teleportBreadth, height 2 * _teleportHeight, and a border twice the
-            // half width. Filled in here rather than left to each reader, because a
-            // dimension left undefined is not a small teleporter -- it is NaN, and
-            // testOrigRectRect answers "overlapping" for a NaN half extent, since
-            // every comparison against NaN is false and the corner is classified
-            // into the obstacle. One sizeless obstacle then supports a tank
-            // anywhere in the world.
-            if (!Number.isFinite(current.w)) current.w = BZW_TELEPORTER_DEFAULTS.w;
-            if (!Number.isFinite(current.d)) current.d = BZW_TELEPORTER_DEFAULTS.d;
-            if (!Number.isFinite(current.h)) current.h = BZW_TELEPORTER_DEFAULTS.h;
-            if (!Number.isFinite(current.border)) current.border = BZW_TELEPORTER_DEFAULTS.border;
-            // Teleporter::finalize (Teleporter.cxx). The border grows the solid --
-            // `size[1] = origSize[1] + border * 2`, `size[2] = origSize[2] + border`
-            // -- and those grown values *are* the obstacle's extents, so they are
-            // what collides, what supports a tank and what is drawn.
-            //
-            // Applied here, once, so `w`/`d`/`h` on a teleporter mean the same thing
-            // they mean on a box: the solid. Three separate readers each open-coded
-            // this and two of them got it wrong, because the stated size is the hole
-            // rather than the frame and reading it directly is the easy mistake.
-            // getShotTeleporterDims is now a reader rather than a calculator.
-            const statedBorder = Math.max(0.12, current.border);
-            const statedHalfWidth = Math.max(0.25, current.w / 2);
-            const statedHalfBreadth = Math.max(0.25, current.d / 2);
-            const statedHeight = Math.max(1.0, current.h);
-            current.border = statedBorder;
-            // Upstream takes the larger of the border half-width and the stated
-            // width for the x extent, which is its own line in finalize().
-            current.w = Math.max(statedBorder * 0.5, statedHalfWidth) * 2;
-            current.d = (statedHalfBreadth + (statedBorder * 2)) * 2;
-            current.h = statedHeight + statedBorder;
-            const teleporterIndex = teleporters.length;
-            const linkName = current.name || `teleporter_${teleporterIndex}`;
-            current.teleporterIndex = teleporterIndex;
-            current.linkName = linkName;
-            teleporters.push({
-              teleporterIndex,
-              linkName,
-              obstacle: current,
-            });
+            applyTeleporterDefaults(current);
+            registerTeleporter(current);
           }
 
           obstacles.push(current);
@@ -2726,28 +2753,19 @@ function parseBZWMap(filename) {
     }
   }
 
-  // Expand every `group` instance into cloned, transformed copies of its
-  // `define` block's obstacles, now that the whole file (and every `define` in
-  // it, however late) has been read. CustomGroup::writeToGroupDef composes
-  // scale, then spin, then shift; a member absent its own name is named for its
-  // place in the definition, not the flat obstacle count, so two instances of
-  // one definition don't collide on it the way two unnamed top-level obstacles
-  // never do either.
-  const groupInstanceOrdinals = new Map();
-  for (const request of groupInstanceRequests) {
-    const template = defineTemplates.get(request.groupDefName);
-    if (!template) {
-      unknownGroupDefs.add(request.groupDefName);
-      continue;
-    }
-    const ordinal = groupInstanceOrdinals.get(request.groupDefName) || 0;
-    groupInstanceOrdinals.set(request.groupDefName, ordinal + 1);
-    const instanceLabel = request.name || `${request.groupDefName}#${ordinal}`;
+  // Applies one `group` instance's composed transform (scale, then spin, then
+  // shift -- CustomGroup::writeToGroupDef's order) to a list of members
+  // already resolved in the frame the instance itself sits in -- either a
+  // definition's own plain obstacles, or a nested instance's own already-
+  // placed output, one level in. Applying it once per level as nesting
+  // unwinds is what makes recursion work without composing an N-level
+  // transform up front.
+  function applyGroupInstanceTransform(members, request, instanceLabel) {
     const [scaleX, scaleY, scaleZ] = request.scale;
     const cos = Math.cos(request.spin);
     const sin = Math.sin(request.spin);
 
-    template.forEach((member, memberIndex) => {
+    return members.map((member, memberIndex) => {
       // BZFlag's y (north) is bzo's z, so the group's scale.y stretches a
       // member's z position and depth the way scale.x stretches x and width.
       const localX = (member.x || 0) * scaleX;
@@ -2761,7 +2779,7 @@ function parseBZWMap(filename) {
       const worldX = (localX * cos) + (localZ * sin);
       const worldZ = (-localX * sin) + (localZ * cos);
 
-      const clone = {
+      return {
         ...member,
         x: request.x + worldX,
         z: request.z + worldZ,
@@ -2771,6 +2789,7 @@ function parseBZWMap(filename) {
         // define may hold (box, pyramid) is symmetric under exactly that half
         // turn, the same reason a box with no stated `rotation` line (0, not
         // +π) already renders identically to one with an explicit `rotation 0`.
+        // The same holds at every nesting depth, for the same reason.
         rotation: (member.rotation || 0) + request.rotation,
         w: (member.w || 0) * Math.abs(scaleX),
         d: (member.d || 0) * Math.abs(scaleY),
@@ -2780,10 +2799,85 @@ function parseBZWMap(filename) {
         driveThrough: !!member.driveThrough || request.driveThrough,
         shootThrough: !!member.shootThrough || request.shootThrough,
         ricochet: !!member.ricochet || request.ricochet,
-        name: `${instanceLabel}:${member.name || `${(member.type || 'O')[0].toUpperCase()}${memberIndex}`}`,
+        // A member already named -- one that came back from a nested `group`,
+        // already carrying its own instance prefix -- keeps that name; only a
+        // still-bare plain obstacle falls back to its place in the
+        // definition, `t<n>` for a teleporter (upstream's own default,
+        // `GroupDefinition::makeTeleName`) rather than a type-letter one.
+        name: `${instanceLabel}:${member.name
+          || (member.kind === 'teleporter' ? `t${memberIndex}` : `${(member.type || 'O')[0].toUpperCase()}${memberIndex}`)}`,
       };
-      obstacles.push(clone);
     });
+  }
+
+  // Resolves a `define` into the obstacles it holds, in its own local frame --
+  // its plain obstacles as written, plus every nested `group` instance's own
+  // definition recursively resolved and placed by that instance's transform.
+  // This is real recursion, matching `GroupDefinition::makeGroups`, not the
+  // flat single level bzo read before: a `group` found while parsing inside a
+  // `define` is a template entry (see the `token === 'group'` branch above),
+  // expanded only once something actually places *this* definition.
+  //
+  // `visiting` is this one call's own root-to-here path, mirroring
+  // `GroupDefinition`'s own `active` flag: a definition already on this path
+  // is a cycle (through itself, or through others), not ordinary reuse -- two
+  // independent instances of the same definition, the way `bzo.bzw`'s two
+  // `Watchtower`s are, never touch it, since each starts its own empty path.
+  function resolveDefine(defName, visiting) {
+    const template = defineTemplates.get(defName);
+    if (!template) {
+      unknownGroupDefs.add(defName);
+      return [];
+    }
+    if (visiting.has(defName)) {
+      groupCycleWarnings.add(defName);
+      return [];
+    }
+    visiting.add(defName);
+
+    const resolved = [...template.obstacles];
+    // Ordinal counting is local to this one definition's own nested
+    // instances, not shared with the world's top-level list or any other
+    // definition's -- `GroupDefinition::appendGroupName` counts only within
+    // the one `groups` vector a definition owns, so the same definition
+    // placed from two different parents independently starts back at `#0`.
+    const nestedOrdinals = new Map();
+    for (const nestedRequest of template.groupInstances) {
+      const ordinal = nestedOrdinals.get(nestedRequest.groupDefName) || 0;
+      nestedOrdinals.set(nestedRequest.groupDefName, ordinal + 1);
+      const nestedLabel = nestedRequest.name || `${nestedRequest.groupDefName}#${ordinal}`;
+      const nestedMembers = resolveDefine(nestedRequest.groupDefName, visiting);
+      resolved.push(...applyGroupInstanceTransform(nestedMembers, nestedRequest, nestedLabel));
+    }
+
+    visiting.delete(defName);
+    return resolved;
+  }
+
+  // Expand every top-level `group` instance now that the whole file (and
+  // every `define` in it, however late) has been read -- `group` may name a
+  // `define` the file states later, the same deferred resolution upstream
+  // gives it.
+  const topGroupOrdinals = new Map();
+  for (const request of groupInstanceRequests) {
+    const ordinal = topGroupOrdinals.get(request.groupDefName) || 0;
+    topGroupOrdinals.set(request.groupDefName, ordinal + 1);
+    const instanceLabel = request.name || `${request.groupDefName}#${ordinal}`;
+    const members = resolveDefine(request.groupDefName, new Set());
+    const placed = applyGroupInstanceTransform(members, request, instanceLabel);
+    // A teleporter only becomes a real, linkable placement here, at the
+    // outermost instance -- one full pass through every enclosing transform,
+    // however many levels deep it started. `buildTeleporterLinks` (below,
+    // once every instance in the file has run this) glob-matches a `link`
+    // block's endpoint names against this list the same way upstream's own
+    // `LinkManager::doLinking` does against `OBSTACLEMGR.getTeles()` -- a
+    // `link` is never itself scoped inside a `define` (`CustomLink::
+    // usesGroupDef` is false upstream), so one written with a wildcard
+    // matches every instance uniformly rather than needing one per instance.
+    for (const member of placed) {
+      if (member.kind === 'teleporter') registerTeleporter(member);
+    }
+    obstacles.push(...placed);
   }
   if (unknownGroupDefs.size > 0) {
     log(
@@ -2791,11 +2885,12 @@ function parseBZWMap(filename) {
       + ` ${Array.from(unknownGroupDefs).sort().join(', ')}`
     );
   }
-  if (droppedNestedGroups > 0) {
-    log(`Ignoring ${droppedNestedGroups} "group" instance(s) nested inside a "define" in ${filename}`);
-  }
-  if (droppedDefineTeleporters > 0) {
-    log(`Ignoring ${droppedDefineTeleporters} teleporter(s) inside a "define" in ${filename}`);
+  if (groupCycleWarnings.size > 0) {
+    log(
+      `Avoided recursion in ${filename}: definition(s) `
+      + `${Array.from(groupCycleWarnings).sort().join(', ')} reference themselves `
+      + 'through a group instance, directly or through others'
+    );
   }
 
   if (unreadZoneKeywords.size > 0) {

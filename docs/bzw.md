@@ -502,28 +502,47 @@ size) rather than a half-extent. Placing an instance composes scale, then
 rotation, then position, the same order upstream's `MeshTransform` does, and
 applies that to a clone of every obstacle the named `define` holds.
 
+A `define` may itself hold `group` instances of other definitions, and bzo
+recurses into them the way `GroupDefinition::makeGroups` does -- a definition
+that names itself again while still being placed, directly or through others,
+is the one case that stops rather than recursing forever, logged once as
+"avoided recursion" the way upstream's own `active` guard does. Ordinary
+nesting, and the same definition placed from two unrelated places, are both
+just more obstacles.
+
 A member with no `name` of its own is given one for its position in the
 `define`, the same way an unnamed top-level obstacle is named for its position
 in the file. Either way, the finished name is prefixed with the instance it
 came from -- the `group` line's own `name` if it gave one, otherwise
-`<definition>#<n>` counting earlier instances of the same definition -- so
-`Watchtower` placed twice does not produce two boxes both named `Base`.
-`maps/bzo.bzw` carries a two-instance example.
+`<definition>#<n>` counting earlier instances of the same definition *within
+that one enclosing definition*, so a nested definition placed from two
+different parents starts back at `#0` under each. Nesting composes the prefix
+the same way: an unnamed box two levels deep in `bzo.bzw`'s example reads
+`table-complete#0:table#0:B0`. `maps/bzo.bzw` carries a two-instance example
+of its own.
 
 `drivethrough`/`shootthrough`/`ricochet` on the `group` line add permission to
 whatever a member already has rather than replacing it -- the only-if-unset
 rule upstream's `matref`/`phydrv`/`tint` give a group instance over a member's
 own too, which bzo does not read on either (see **What is ignored**).
 
+A `teleporter` in a `define` is placed the same way any other member is --
+named `t<n>` for its place in the definition if it gave no name of its own,
+the same default a plain top-level teleporter gets, then instance-prefixed
+like everything else. It only becomes a real, linkable face once an instance
+actually places it, which is also where upstream draws the line: a `link`
+block is never itself scoped inside a `define` (`CustomLink::usesGroupDef` is
+`false`), so it cannot know which instance it means. A `link` naming an
+endpoint by its bare, unprefixed name only ever matches a plain top-level
+teleporter -- to reach one or more instances of a defined one, write the
+`link` at the map's own top level with a glob pattern (`*` and `?`) against
+the instance-prefixed name each one actually gets, the same wildcard matching
+upstream's own `LinkManager::findTelesByName` does, and the same mechanism
+bzo already had for any other teleporter link. A real map may already rely on
+this: `ahs3_Ironside_Battlefield.bzw`'s own links use patterns like `topf:*`.
+
 Not yet read:
 
-- A `group` instance nested inside a `define`. Upstream doesn't expand this
-  case either (`GroupDefinition::makeGroups` guards against the recursion), so
-  it is dropped and named once in the load log rather than silently producing
-  nothing.
-- A `teleporter` inside a `define`. Its face index and link graph have no
-  single sensible meaning multiplied across however many instances place the
-  definition, so it is dropped and named once rather than guessed at.
 - `shift`/`scale`/`shear`/`spin`/`xform` lines, on a plain obstacle or inside a
   `group` block -- `WorldFileLocation`'s more general transform, of which a
   group's own `position`/`size`/`rotation` is only the common case. A named

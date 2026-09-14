@@ -8,7 +8,13 @@ sessions.json
 data/
 cache/
 
-# Community maps pulled in to validate the BZW parser against real usage --
-# client saves with no license of their own, kept locally for testing only.
-/maps/ahs3_Ironside_Battlefield.bzw
+# Pulled in to validate the BZW parser against real usage, but licensed "Ask
+# author to host" (maparchive/maps.json) -- not a grant, so it stays local
+# and out of git rather than checked in.
 /maps/dw_missilewar3.bzw
+
+# CC BY 4.0, so the license isn't what's holding this one back -- it's 45x
+# the size of any other map here and loads 0 obstacles (all mesh/sphere,
+# which bzo doesn't read yet). Good to have locally for a large-map test;
+# revisit checking it in once mesh support makes it render anything.
+/maps/ahs3_Paradise_Valley.bzw
