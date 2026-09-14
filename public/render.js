@@ -4404,24 +4404,43 @@ class RenderManager {
     if (sprite.userData.labelKey === labelKey && sprite.material.map) return;
     sprite.userData.labelKey = labelKey;
 
+    const FONT = 'bold 36px Arial';
+    const DEFAULT_WIDTH = 256;
+    const MAX_WIDTH = 1024;
+    const HORIZONTAL_PADDING = 24;
+
     if (!sprite.material.map) {
       const canvas = document.createElement('canvas');
-      canvas.width = 256;
+      canvas.width = DEFAULT_WIDTH;
       canvas.height = 64;
       sprite.material.map = new THREE.CanvasTexture(canvas);
       sprite.material.needsUpdate = true;
+      // The width-to-world-unit ratio the caller chose (an obstacle or a
+      // flag wears its label wider than a tank wears its callsign) --
+      // captured once, from the scale already set before this first call,
+      // so a name longer than fits at that width grows the sprite to match
+      // rather than squeezing into it. `Watchtower#0:Base` needs to read at
+      // the same size as `B3`, not smaller.
+      sprite.userData.unitsPerPixel = sprite.scale.x / canvas.width;
     }
 
     const texture = sprite.material.map;
     const canvas = texture.image;
     const context = canvas.getContext('2d');
+    context.font = FONT;
+    const measuredWidth = Math.ceil(context.measureText(name).width) + HORIZONTAL_PADDING * 2;
+    const width = Math.min(MAX_WIDTH, Math.max(DEFAULT_WIDTH, measuredWidth));
+    if (canvas.width !== width) {
+      canvas.width = width; // resizing clears the canvas and resets context state
+      context.font = FONT;
+    }
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.font = 'bold 36px Arial';
     context.fillStyle = cssColor;
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.fillText(name, canvas.width / 2, canvas.height / 2);
+    context.fillText(name, canvas.width / 2, canvas.height / 2, width - HORIZONTAL_PADDING * 2);
     texture.needsUpdate = true;
+    sprite.scale.x = canvas.width * sprite.userData.unitsPerPixel;
   }
 
   _getSharedImage(path) {

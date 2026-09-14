@@ -1020,3 +1020,33 @@ box
   position -135 -70 20.16
   size 0.56 6.72 1.12
 end
+
+# `define`/`group`, clear of the corner tests and the base ring. One
+# definition -- a two-box watchtower -- placed twice, so the composed
+# transform (`docs/bzw.md`, "Groups") is visible rather than asserted: the
+# second instance is turned 45 degrees and stretched taller, and neither copy
+# names its own boxes, so the per-instance naming that keeps `Base`/`Cap`
+# from colliding between the two (`Watchtower#0:Base`, `Watchtower#1:Base`,
+# ...) is on display in the debug label too.
+define Watchtower
+box
+  name Base
+  position 0 0 0
+  size 3 3 6
+end
+box
+  name Cap
+  position 0 0 6
+  size 4 4 1
+end
+enddef
+
+group Watchtower
+  position -120 -130 0
+end
+
+group Watchtower
+  position -108 -118 0
+  rotation 45
+  size 1 1 1.5
+end

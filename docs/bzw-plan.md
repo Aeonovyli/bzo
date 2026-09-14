@@ -109,39 +109,29 @@ pyramids, not mesh, and prove nothing about this path.
 
 ## Groups and transforms
 
-`define` / `enddef` / `group`, and the transform keywords any obstacle may
-carry: `shift`, `scale`, `shear`, `spin`, `xform`. `src/bzfs/CustomGroup.cxx`,
-`src/bzfs/CustomMeshTransform.cxx`.
+`define` / `enddef` / `group` are read now -- see "Groups" in `docs/bzw.md`
+for what a `group` instance takes and how a member's name is kept unique
+across instances. `src/bzfs/CustomGroup.cxx` remains the reference for what is
+left:
 
-A `group` instance is simpler than it looks: `CustomGroup` reads an ordinary
-`position`/`size`/`rotation` like any obstacle and folds them into one
-`MeshTransform` (scale, then spin, then shift), optionally chained after a
-named `transform` block built from `shift`/`scale`/`shear`/`spin`/`xform`
-lines. So placing a group is the position/rotation handling bzo already has
-for every obstacle, plus applying that composed transform to a copy of
-whatever obstacles the matching `define` block contains. `matref`,
-`phydrv` and `tint` on the `group` line override the same property on every
-member that does not set its own.
-
-Validate against the four-team fort at
-<https://projects.porteighty.org/bzw_docs/documentation/world-design/keywords/group/>
--- a `define`/`enddef` block placed four times with `group`/`spin`/`team`,
-which is the same shape as the CTF forts `bzo.bzw` already lays out by hand.
-
-- [ ] Parse `define <name>` / `enddef` as a template of obstacles, held by
-      name rather than placed immediately.
-- [ ] Parse a bare `transform` / `enddef` block's `shift`/`scale`/`shear`/
-      `spin`/`xform` lines into one composed matrix.
-- [ ] Apply a `group` instance's position/size/rotation and any named
-      transform to a cloned copy of its `define` block's obstacles before
-      they reach the rest of `parseBZWMap` -- if this lands after obstacles
-      are otherwise fully parsed, every existing importer, collider and
-      renderer sees only ordinary boxes/pyramids/meshes and needs no change
-      of its own.
-- [ ] A shift/scale/shear/spin/xform on a *plain* obstacle (no group
-      involved) is the same transform math applied once instead of per
-      instance -- worth landing first, since it is testable without groups
-      at all.
+- [ ] A `group` instance nested inside a `define`. Dropped and logged today,
+      the same as upstream drops the recursion (`GroupDefinition::makeGroups`
+      guards against it) -- but a live map surfaced this (see "Evidence from
+      real maps" under Materials below: `ahs3_Ironside_Battlefield.bzw` nests
+      four), so it is worth doing rather than a permanent gap.
+- [ ] A `teleporter` inside a `define`. Dropped and logged today for the same
+      reason a nested group is -- its face index and link graph have no
+      single sensible meaning multiplied across however many instances place
+      the definition.
+- [ ] A bare `transform` / `enddef` block's `shift`/`scale`/`shear`/`spin`/
+      `xform` lines composed into one named matrix, and `xform <name>`
+      referencing it from inside a `group` block or a plain obstacle.
+- [ ] `shift`/`scale`/`shear`/`spin`/`xform` lines stated directly -- on a
+      *plain* obstacle (no group involved) or inside a `group` block -- rather
+      than through the position/size/rotation triple `CustomGroup` already
+      folds into the same transform. `shear` has no representation in bzo's
+      axis-aligned box/pyramid model at all, and would stay dropped even once
+      the rest of this line is read.
 
 ## Materials and appearance
 
@@ -153,6 +143,37 @@ which is the same shape as the CTF forts `bzo.bzw` already lays out by hand.
 bzo already reads `color`/`diffuse` (see "Colour" in `docs/bzw.md`) and
 textures obstacles by type rather than by material, lighting everything one
 way. Full material support is the rest of that pipeline:
+
+### Evidence from real maps
+
+Pulled four real maps rather than guess at what a `material` block actually
+says in the wild -- `bz-next/bz-next.github.io`'s `maparchive/`, which matches
+names still on the public server list today (`bzflag.allejo.io`'s "Ironside
+Battlefield FFA", and a "Missile War" lineage several DarkWorld-descended
+servers still run). Every texture-naming line in them is `addtexture` (the
+real keyword upstream writes; a bare `texture` line never appeared once), and
+it names one of two things:
+
+- Upstream's own stock texture, by name with no path -- `boxwall`, `wall`,
+  `roof`, `pyrwall`, `telelink`, `caution`, and one called `mesh` (a stock
+  wireframe/grid texture, unrelated to mesh *geometry* -- worth a doc callout
+  once `material` lands, so the two "mesh"es are never confused with each
+  other). bzo already ships an equivalent PNG for nearly every one of these
+  under `public/textures/`.
+- One external URL, out of everything sampled:
+  `http://images.bzflag.org/astevens/pine.png`, in a "wood" material. The
+  BZFlag forums document uploading a texture there and linking it into a
+  `material` block, so the host is real and mappers do use it -- just rarely,
+  next to naming a stock texture.
+
+So `material`/`matref`/`addtexture` support pays off almost entirely by
+resolving a named texture against bzo's *existing* asset set, plus reading
+`diffuse` as a tint -- no network fetch, no CORS/CSP surface to think about --
+with an external-URL texture as a smaller, separately-risked follow-on once
+that is solid. Geometry-wise, two of the four sampled maps were pure
+box/pyramid plus `group`, zero mesh; the other two leaned on `arc` (a mesh
+generator) for curved walls, so mesh remains necessary eventually rather than
+skippable forever -- see "Mesh geometry" above.
 
 - [ ] `material` / `matref` as a named bundle of the properties below, so an
       obstacle can reference one instead of repeating `color` inline.

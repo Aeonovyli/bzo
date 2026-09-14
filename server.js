@@ -1751,7 +1751,7 @@ function normalizeScoreLimit(score) {
 // only has to recognize the *opening* keyword to say how many of each a map
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'mesh', 'arc', 'cone', 'sphere', 'tetra', 'group', 'define',
+  'mesh', 'arc', 'cone', 'sphere', 'tetra',
   'physics', 'material', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
 
@@ -2027,6 +2027,18 @@ function parseBZWMap(filename) {
   let current = null;
   let currentLink = null;
   let currentZone = null;
+  // `define <name>` / `enddef`. Everything closed while this is set collects
+  // into its obstacle list instead of `obstacles`, keyed by name so any number
+  // of `group` instances can place transformed copies of it later.
+  let currentDefine = null;
+  const defineTemplates = new Map();
+  // A `group <name>` instance is recorded here rather than expanded in place --
+  // `group` may reference a `define` the file states later, the same deferred
+  // resolution upstream gives it -- and expanded once the whole file is read.
+  const groupInstanceRequests = [];
+  const unknownGroupDefs = new Set();
+  let droppedDefineTeleporters = 0;
+  let droppedNestedGroups = 0;
   // Which zone keywords a map asked for that bzo does not act on, gathered so
   // the load can say so once rather than for every zone. `zone` blocks are
   // otherwise the one place a map states something invisible: a spawn zone that
@@ -2419,6 +2431,27 @@ function parseBZWMap(filename) {
       continue;
     }
 
+    // `define <name>` / `enddef` (CustomGroup's template registry). Upstream
+    // refuses to nest one define inside another (BZWReader.cxx warns and skips
+    // it), so a `define` seen while one is already open is dropped the same way.
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine && token === 'define') {
+      const [, name] = line.split(/\s+/);
+      if (name) {
+        currentDefine = { name, obstacles: [] };
+      } else {
+        log(`Ignoring "define" with no name in ${filename}`);
+      }
+      continue;
+    }
+    if (currentDefine && !current && token === 'enddef') {
+      if (defineTemplates.has(currentDefine.name)) {
+        log(`Duplicate group definition "${currentDefine.name}" in ${filename}, using the newest`);
+      }
+      defineTemplates.set(currentDefine.name, currentDefine.obstacles);
+      currentDefine = null;
+      continue;
+    }
+
     if (!current && !currentLink && token === 'zone') {
       currentZone = {
         index: zones.length,
@@ -2483,6 +2516,25 @@ function parseBZWMap(filename) {
       if (inlineTeleporterName) {
         current.name = inlineTeleporterName;
       }
+    } else if (token === 'group') {
+      // `spin` is the group's own rotation kept in raw radians (no +π) --
+      // `rotation` below is the +π one every obstacle's own facing carries, and
+      // placing a member is a position rotation, a different operator. See the
+      // `rotation`/`rot` branch, where both get set from the same line.
+      const [, groupDefName] = line.split(/\s+/);
+      current = { type: 'group', groupDefName: groupDefName || '', rotation: 0, spin: 0, scale: [1, 1, 1] };
+    } else if (current && current.type === 'group' && token === 'size') {
+      // A group's `size` is CustomGroup's scale factor (MeshTransform::addScale),
+      // not a box's half-extent -- 1 1 1 leaves every member at its own size.
+      const [, sx, sy, sz] = line.split(/\s+/);
+      const parsedX = parseFloat(sx);
+      const parsedY = parseFloat(sy);
+      const parsedZ = parseFloat(sz);
+      current.scale = [
+        Number.isFinite(parsedX) ? parsedX : 1,
+        Number.isFinite(parsedY) ? parsedY : 1,
+        Number.isFinite(parsedZ) ? parsedZ : 1,
+      ];
     } else if (current && BZW_PASSABILITY_KEYWORDS.has(token)) {
       Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
     } else if (current && token === 'name') {
@@ -2516,6 +2568,9 @@ function parseBZWMap(filename) {
       // which flips the depth axis. The correct conversion is +deg + π.
       const [, deg] = line.split(/\s+/);
       current.rotation = (parseFloat(deg) || 0) * Math.PI / 180 + Math.PI;
+      if (current.type === 'group') {
+        current.spin = (parseFloat(deg) || 0) * Math.PI / 180;
+      }
     } else if (current && current.type === 'pyramid' && token === 'flipz') {
       current.inverted = true;
     } else if (current && token === 'border') {
@@ -2544,87 +2599,203 @@ function parseBZWMap(filename) {
         }
       }
     } else if (current && token === 'end') {
-      // BaseBuilding::inMovingBox (BaseBuilding.cxx:77), in upstream's own words:
-      // "if a base is just the ground (z == 0 && height == 0) no collision --
-      // ground is already handled". A pad with no height is not something
-      // anything can hit, so no map has to say so: a flush base or box is
-      // passable by construction, to shots as much as to tanks.
-      //
-      // Upstream writes that guard on the base alone, because a zero-height box
-      // is vanishingly rare there. Its *box* arithmetic has none, and the case
-      // that exposes the difference is a burrowed tank: it drives below zero, so
-      // its own span reaches up through a pad's [0, 0] and it stops dead on one.
-      // `bzo.bzw` puts a pad under every flag zone, which turned that into
-      // forty-two places a `BU` tank came to a halt.
-      //
-      // Read from the dimensions rather than from the keyword, so it is true of
-      // every flush pad and not only of the ones somebody remembered to mark.
-      // Teleporters are excluded because theirs are not final yet -- the block
-      // below fills in a sizeless one from CustomGate's defaults.
-      if (current.kind !== 'teleporter' && current.h === 0 && (current.baseY || 0) === 0) {
-        current.driveThrough = true;
-        current.shootThrough = true;
-      }
-      // Use BZW name if present, otherwise assign a generated name
-      if (!current.name) {
-        if (current.kind === 'teleporter') {
-          current.name = `t${teleporters.length}`;
+      if (current.type === 'group') {
+        // No geometry of its own to place yet -- a `group` may name a `define`
+        // the file hasn't reached, the same deferred resolution upstream gives
+        // it, so every instance waits for the expansion pass below, once every
+        // `define` in the file is known.
+        if (currentDefine) {
+          // Upstream doesn't support this either (GroupDefinition::makeGroups
+          // guards against the recursion), reached only by a `group` line
+          // inside a `define` block.
+          droppedNestedGroups++;
         } else {
-          current.name = `${current.type[0].toUpperCase()}${obstacles.length}`;
+          groupInstanceRequests.push({
+            groupDefName: current.groupDefName,
+            name: current.name || null,
+            x: current.x || 0,
+            z: current.z || 0,
+            baseY: current.baseY || 0,
+            rotation: current.rotation || 0,
+            spin: current.spin || 0,
+            scale: current.scale || [1, 1, 1],
+            driveThrough: !!current.driveThrough,
+            shootThrough: !!current.shootThrough,
+            ricochet: !!current.ricochet,
+          });
+        }
+        current = null;
+      } else {
+        // BaseBuilding::inMovingBox (BaseBuilding.cxx:77), in upstream's own words:
+        // "if a base is just the ground (z == 0 && height == 0) no collision --
+        // ground is already handled". A pad with no height is not something
+        // anything can hit, so no map has to say so: a flush base or box is
+        // passable by construction, to shots as much as to tanks.
+        //
+        // Upstream writes that guard on the base alone, because a zero-height box
+        // is vanishingly rare there. Its *box* arithmetic has none, and the case
+        // that exposes the difference is a burrowed tank: it drives below zero, so
+        // its own span reaches up through a pad's [0, 0] and it stops dead on one.
+        // `bzo.bzw` puts a pad under every flag zone, which turned that into
+        // forty-two places a `BU` tank came to a halt.
+        //
+        // Read from the dimensions rather than from the keyword, so it is true of
+        // every flush pad and not only of the ones somebody remembered to mark.
+        // Teleporters are excluded because theirs are not final yet -- the block
+        // below fills in a sizeless one from CustomGate's defaults.
+        if (current.kind !== 'teleporter' && current.h === 0 && (current.baseY || 0) === 0) {
+          current.driveThrough = true;
+          current.shootThrough = true;
+        }
+
+        if (currentDefine) {
+          // A define's contents are a template, not finished obstacles -- names
+          // and teleporter registration wait for a `group` instance to place a
+          // copy, in the expansion pass below. A teleporter's global face index
+          // and link graph have no sensible meaning multiplied across however
+          // many instances place this define, so it is dropped rather than
+          // guessed at.
+          if (current.kind === 'teleporter') {
+            droppedDefineTeleporters++;
+          } else {
+            currentDefine.obstacles.push(current);
+          }
+          current = null;
+        } else {
+          // Use BZW name if present, otherwise assign a generated name
+          if (!current.name) {
+            if (current.kind === 'teleporter') {
+              current.name = `t${teleporters.length}`;
+            } else {
+              current.name = `${current.type[0].toUpperCase()}${obstacles.length}`;
+            }
+          }
+
+          if (current.kind === 'teleporter') {
+            // CustomGate's constructor, for a teleporter that gave no size or
+            // border of its own: half width 0.5 * _teleportWidth, half breadth
+            // _teleportBreadth, height 2 * _teleportHeight, and a border twice the
+            // half width. Filled in here rather than left to each reader, because a
+            // dimension left undefined is not a small teleporter -- it is NaN, and
+            // testOrigRectRect answers "overlapping" for a NaN half extent, since
+            // every comparison against NaN is false and the corner is classified
+            // into the obstacle. One sizeless obstacle then supports a tank
+            // anywhere in the world.
+            if (!Number.isFinite(current.w)) current.w = BZW_TELEPORTER_DEFAULTS.w;
+            if (!Number.isFinite(current.d)) current.d = BZW_TELEPORTER_DEFAULTS.d;
+            if (!Number.isFinite(current.h)) current.h = BZW_TELEPORTER_DEFAULTS.h;
+            if (!Number.isFinite(current.border)) current.border = BZW_TELEPORTER_DEFAULTS.border;
+            // Teleporter::finalize (Teleporter.cxx). The border grows the solid --
+            // `size[1] = origSize[1] + border * 2`, `size[2] = origSize[2] + border`
+            // -- and those grown values *are* the obstacle's extents, so they are
+            // what collides, what supports a tank and what is drawn.
+            //
+            // Applied here, once, so `w`/`d`/`h` on a teleporter mean the same thing
+            // they mean on a box: the solid. Three separate readers each open-coded
+            // this and two of them got it wrong, because the stated size is the hole
+            // rather than the frame and reading it directly is the easy mistake.
+            // getShotTeleporterDims is now a reader rather than a calculator.
+            const statedBorder = Math.max(0.12, current.border);
+            const statedHalfWidth = Math.max(0.25, current.w / 2);
+            const statedHalfBreadth = Math.max(0.25, current.d / 2);
+            const statedHeight = Math.max(1.0, current.h);
+            current.border = statedBorder;
+            // Upstream takes the larger of the border half-width and the stated
+            // width for the x extent, which is its own line in finalize().
+            current.w = Math.max(statedBorder * 0.5, statedHalfWidth) * 2;
+            current.d = (statedHalfBreadth + (statedBorder * 2)) * 2;
+            current.h = statedHeight + statedBorder;
+            const teleporterIndex = teleporters.length;
+            const linkName = current.name || `teleporter_${teleporterIndex}`;
+            current.teleporterIndex = teleporterIndex;
+            current.linkName = linkName;
+            teleporters.push({
+              teleporterIndex,
+              linkName,
+              obstacle: current,
+            });
+          }
+
+          obstacles.push(current);
+          current = null;
         }
       }
-
-      if (current.kind === 'teleporter') {
-        // CustomGate's constructor, for a teleporter that gave no size or
-        // border of its own: half width 0.5 * _teleportWidth, half breadth
-        // _teleportBreadth, height 2 * _teleportHeight, and a border twice the
-        // half width. Filled in here rather than left to each reader, because a
-        // dimension left undefined is not a small teleporter -- it is NaN, and
-        // testOrigRectRect answers "overlapping" for a NaN half extent, since
-        // every comparison against NaN is false and the corner is classified
-        // into the obstacle. One sizeless obstacle then supports a tank
-        // anywhere in the world.
-        if (!Number.isFinite(current.w)) current.w = BZW_TELEPORTER_DEFAULTS.w;
-        if (!Number.isFinite(current.d)) current.d = BZW_TELEPORTER_DEFAULTS.d;
-        if (!Number.isFinite(current.h)) current.h = BZW_TELEPORTER_DEFAULTS.h;
-        if (!Number.isFinite(current.border)) current.border = BZW_TELEPORTER_DEFAULTS.border;
-        // Teleporter::finalize (Teleporter.cxx). The border grows the solid --
-        // `size[1] = origSize[1] + border * 2`, `size[2] = origSize[2] + border`
-        // -- and those grown values *are* the obstacle's extents, so they are
-        // what collides, what supports a tank and what is drawn.
-        //
-        // Applied here, once, so `w`/`d`/`h` on a teleporter mean the same thing
-        // they mean on a box: the solid. Three separate readers each open-coded
-        // this and two of them got it wrong, because the stated size is the hole
-        // rather than the frame and reading it directly is the easy mistake.
-        // getShotTeleporterDims is now a reader rather than a calculator.
-        const statedBorder = Math.max(0.12, current.border);
-        const statedHalfWidth = Math.max(0.25, current.w / 2);
-        const statedHalfBreadth = Math.max(0.25, current.d / 2);
-        const statedHeight = Math.max(1.0, current.h);
-        current.border = statedBorder;
-        // Upstream takes the larger of the border half-width and the stated
-        // width for the x extent, which is its own line in finalize().
-        current.w = Math.max(statedBorder * 0.5, statedHalfWidth) * 2;
-        current.d = (statedHalfBreadth + (statedBorder * 2)) * 2;
-        current.h = statedHeight + statedBorder;
-        const teleporterIndex = teleporters.length;
-        const linkName = current.name || `teleporter_${teleporterIndex}`;
-        current.teleporterIndex = teleporterIndex;
-        current.linkName = linkName;
-        teleporters.push({
-          teleporterIndex,
-          linkName,
-          obstacle: current,
-        });
-      }
-
-      obstacles.push(current);
-      current = null;
     } else if (!current && !currentLink && !currentZone && !currentWeapon
       && UNSUPPORTED_TOP_LEVEL_KEYWORDS.has(token)) {
       unsupportedCounts.set(token, (unsupportedCounts.get(token) || 0) + 1);
     }
+  }
+
+  // Expand every `group` instance into cloned, transformed copies of its
+  // `define` block's obstacles, now that the whole file (and every `define` in
+  // it, however late) has been read. CustomGroup::writeToGroupDef composes
+  // scale, then spin, then shift; a member absent its own name is named for its
+  // place in the definition, not the flat obstacle count, so two instances of
+  // one definition don't collide on it the way two unnamed top-level obstacles
+  // never do either.
+  const groupInstanceOrdinals = new Map();
+  for (const request of groupInstanceRequests) {
+    const template = defineTemplates.get(request.groupDefName);
+    if (!template) {
+      unknownGroupDefs.add(request.groupDefName);
+      continue;
+    }
+    const ordinal = groupInstanceOrdinals.get(request.groupDefName) || 0;
+    groupInstanceOrdinals.set(request.groupDefName, ordinal + 1);
+    const instanceLabel = request.name || `${request.groupDefName}#${ordinal}`;
+    const [scaleX, scaleY, scaleZ] = request.scale;
+    const cos = Math.cos(request.spin);
+    const sin = Math.sin(request.spin);
+
+    template.forEach((member, memberIndex) => {
+      // BZFlag's y (north) is bzo's z, so the group's scale.y stretches a
+      // member's z position and depth the way scale.x stretches x and width.
+      const localX = (member.x || 0) * scaleX;
+      const localZ = (member.z || 0) * scaleY;
+      const localY = (member.baseY || 0) * scaleZ;
+      // The same local-to-world rotation render.js/collision.cjs already use
+      // for an obstacle's own facing (`getColliderLocalPoint`'s inverse), here
+      // rotating a member's position around the group's origin rather than
+      // orienting a single shape -- a different operator, so it takes the raw
+      // spin rather than the +π `rotation` a facing carries.
+      const worldX = (localX * cos) + (localZ * sin);
+      const worldZ = (-localX * sin) + (localZ * cos);
+
+      const clone = {
+        ...member,
+        x: request.x + worldX,
+        z: request.z + worldZ,
+        baseY: request.baseY + localY,
+        // Composing two already-+π-adjusted facings by addition is off by one
+        // extra π from the true sum -- invisible here, since every shape a
+        // define may hold (box, pyramid) is symmetric under exactly that half
+        // turn, the same reason a box with no stated `rotation` line (0, not
+        // +π) already renders identically to one with an explicit `rotation 0`.
+        rotation: (member.rotation || 0) + request.rotation,
+        w: (member.w || 0) * Math.abs(scaleX),
+        d: (member.d || 0) * Math.abs(scaleY),
+        h: (member.h || 0) * Math.abs(scaleZ),
+        // The group's own passability only adds permission, the same as matref/
+        // phydrv/tint overriding a member only when it does not set its own.
+        driveThrough: !!member.driveThrough || request.driveThrough,
+        shootThrough: !!member.shootThrough || request.shootThrough,
+        ricochet: !!member.ricochet || request.ricochet,
+        name: `${instanceLabel}:${member.name || `${(member.type || 'O')[0].toUpperCase()}${memberIndex}`}`,
+      };
+      obstacles.push(clone);
+    });
+  }
+  if (unknownGroupDefs.size > 0) {
+    log(
+      `Ignoring "group" instances naming a "define" not in ${filename}:`
+      + ` ${Array.from(unknownGroupDefs).sort().join(', ')}`
+    );
+  }
+  if (droppedNestedGroups > 0) {
+    log(`Ignoring ${droppedNestedGroups} "group" instance(s) nested inside a "define" in ${filename}`);
+  }
+  if (droppedDefineTeleporters > 0) {
+    log(`Ignoring ${droppedDefineTeleporters} teleporter(s) inside a "define" in ${filename}`);
   }
 
   if (unreadZoneKeywords.size > 0) {

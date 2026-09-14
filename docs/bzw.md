@@ -488,6 +488,48 @@ because `lookupPlayer` finds the pseudo-player by name and never by id.
 bzo has no event hooks to hang one on, so a map using either is named on load and
 that weapon fires on its timer.
 
+## Groups
+
+`define <name>` / `enddef` collects a template of `box`/`pyramid`/`base`
+blocks under a name instead of placing them; `group <name>` places a
+transformed copy of that template. `CustomGroup.cxx`, `GroupDefinition`
+(`ObstacleMgr.cxx`).
+
+A `group` instance is parsed like any other obstacle -- `name`, `position`,
+`rotation` and the four passability keywords all mean what they do on a box --
+except `size`, which is a scale factor (`1 1 1` leaves every member at its own
+size) rather than a half-extent. Placing an instance composes scale, then
+rotation, then position, the same order upstream's `MeshTransform` does, and
+applies that to a clone of every obstacle the named `define` holds.
+
+A member with no `name` of its own is given one for its position in the
+`define`, the same way an unnamed top-level obstacle is named for its position
+in the file. Either way, the finished name is prefixed with the instance it
+came from -- the `group` line's own `name` if it gave one, otherwise
+`<definition>#<n>` counting earlier instances of the same definition -- so
+`Watchtower` placed twice does not produce two boxes both named `Base`.
+`maps/bzo.bzw` carries a two-instance example.
+
+`drivethrough`/`shootthrough`/`ricochet` on the `group` line add permission to
+whatever a member already has rather than replacing it -- the only-if-unset
+rule upstream's `matref`/`phydrv`/`tint` give a group instance over a member's
+own too, which bzo does not read on either (see **What is ignored**).
+
+Not yet read:
+
+- A `group` instance nested inside a `define`. Upstream doesn't expand this
+  case either (`GroupDefinition::makeGroups` guards against the recursion), so
+  it is dropped and named once in the load log rather than silently producing
+  nothing.
+- A `teleporter` inside a `define`. Its face index and link graph have no
+  single sensible meaning multiplied across however many instances place the
+  definition, so it is dropped and named once rather than guessed at.
+- `shift`/`scale`/`shear`/`spin`/`xform` lines, on a plain obstacle or inside a
+  `group` block -- `WorldFileLocation`'s more general transform, of which a
+  group's own `position`/`size`/`rotation` is only the common case. A named
+  `transform` block (`xform <name>`, referencing one built from these same
+  five lines) is unread for the same reason.
+
 ## What is ignored
 
 Anything not listed above is skipped without comment, which means a map using it
@@ -496,8 +538,6 @@ loads and plays with that part of it missing. The notable absences:
 - **Mesh geometry**: `mesh`, `meshbox`, `meshpyr`, `arc`, `cone`, `sphere`,
   `tetra`. bzo has boxes and pyramids, so a map built out of meshes arrives
   mostly empty.
-- **Groups**: `define` / `enddef` / `group`, and the instancing that goes with
-  them. A grouped map arrives without whatever the groups contained.
 - **Appearance other than `color`**: `material` blocks and the `matref` that
   names one, `texture`, `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`,
   `phydrv`, and the rest of what `parseMaterials` takes -- `ambient`,
