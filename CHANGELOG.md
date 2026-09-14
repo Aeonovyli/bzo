@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.12] - 2026-09-14
+
+### Added
+- **Nested `group`/`define` and teleporters in groups (issue #72).** A
+  `define` may now hold `group` instances of other definitions, recursed
+  the way upstream's `GroupDefinition::makeGroups` does -- a definition
+  that names itself again while still being placed is the one case that
+  stops rather than recursing forever, logged as "avoided recursion" the
+  same way upstream's own guard does. A teleporter inside a `define` is
+  now placed and named like any other member, and `link` blocks (already
+  global and glob-matched) resolve against however many instances a
+  definition produces, without needing one link per instance.
+- Three more real community maps for testing -- `ahs3_INCOMING.bzw`,
+  `ahs3_Ironside_Battlefield.bzw`, `ahs3_XUG_FFA.bzw` -- each carrying a
+  clear, AGPLv3-compatible license (GPL3 or CC BY 4.0) noted in its own
+  header comment.
+
 ## [1.2.11] - 2026-09-14
 
 ### Added
