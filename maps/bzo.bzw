@@ -753,6 +753,75 @@ box
   addtexture https://images.bzflag.org/astevens/pine.png
 end
 
+# The same octagon again, but as one real mesh instead of four overlapping
+# boxes -- same footprint (its 8 vertices are `oct_0`..`oct_135`'s own
+# corners, local to this `define` so `group`'s own `position` below does the
+# placing, `docs/bzw.md`'s "Groups" the same way `Watchtower` further down
+# does) and the same 0..12 height, so driving into it and standing in it are
+# a direct A/B against the plank emulation above. The eighth-dimension
+# (`OO`) point is the real difference `docs/bzw-plan.md`'s "Mesh geometry"
+# still calls out: a tank near the planks' shared centre can be inside as
+# many as four separate obstacles at once (each with its own eighth-
+# dimension node), where this is one obstacle and, once meshes get an
+# eighth-dimension node of their own, would be one node.
+define Octagon
+mesh
+  name Prism
+  vertex -14.485281 -6.000000 0
+  vertex -6.000000 -14.485281 0
+  vertex 6.000000 -14.485281 0
+  vertex 14.485281 -6.000000 0
+  vertex 14.485281 6.000000 0
+  vertex 6.000000 14.485281 0
+  vertex -6.000000 14.485281 0
+  vertex -14.485281 6.000000 0
+  vertex -14.485281 -6.000000 12
+  vertex -6.000000 -14.485281 12
+  vertex 6.000000 -14.485281 12
+  vertex 14.485281 -6.000000 12
+  vertex 14.485281 6.000000 12
+  vertex 6.000000 14.485281 12
+  vertex -6.000000 14.485281 12
+  vertex -14.485281 6.000000 12
+  addtexture boxwall
+  face
+    vertices 0 1 9 8
+  endface
+  face
+    vertices 1 2 10 9
+  endface
+  face
+    vertices 2 3 11 10
+  endface
+  face
+    vertices 3 4 12 11
+  endface
+  face
+    vertices 4 5 13 12
+  endface
+  face
+    vertices 5 6 14 13
+  endface
+  face
+    vertices 6 7 15 14
+  endface
+  face
+    vertices 7 0 8 15
+  endface
+  face
+    vertices 7 6 5 4 3 2 1 0
+  endface
+  face
+    vertices 8 9 10 11 12 13 14 15
+    addtexture roof
+  endface
+end
+enddef
+
+group Octagon
+  position 50 105 0
+end
+
 # North-west: two overlap tests. A pyramid, a box and a flipped pyramid
 # stand edge to edge -- climb the first, cross the flat top of the second,
 # and the third flares out above you rather than tapering to a point. Below
@@ -1093,10 +1162,11 @@ end
 # Mesh geometry, clear of the corner tests and the watchtowers. One of each
 # of the three shapes upstream's own wiki.bzflag.org/Mesh examples carry --
 # a solid cube, a texcoord'd two-sided billboard, and a jump-through floor --
-# so the render path (`docs/bzw-plan.md`'s "Mesh geometry") has real content
-# to check itself against in the client, not only in `parseBZWMap`. Rendered
-# only for now: nothing here collides yet, so a tank drives straight through
-# all three the same as it would through empty air.
+# so the render and collision paths (`docs/bzw-plan.md`'s "Mesh geometry")
+# have real content to check themselves against in the client, not only in
+# `parseBZWMap`. A tank stops at the cube and the floor's own solid top face,
+# slides along either the way it would off a box corner, and drives straight
+# through the billboard and the floor's own drivethrough underside.
 
 mesh
   name mesh_cube
@@ -1186,4 +1256,56 @@ mesh
     vertices 4 5 6 7
     addtexture roof
   endface
+end
+
+# Primitives bzo does not parse yet -- `arc`/`cone`/`sphere`/`tetra`, and
+# `meshbox`/`meshpyr` (upstream's own mesh-generator forms of `arc`/`cone`,
+# CustomArc.cxx/CustomCone.cxx, not CustomBox.cxx/CustomPyramid.cxx despite
+# the names). bzo drops all six as unrecognized tokens today
+# (`docs/bzw-plan.md`'s "Mesh geometry"), so this whole section is here
+# purely for a real bzfs/bzflag to render, to see what each looks like
+# before any of them get a parser of their own. Clear of every other test,
+# a free strip north of the centre rings and short of the north base.
+arc
+  name test_arc
+  position -75 70 0
+  size 8 8 6
+  rotation 30
+  divisions 16
+  angle 270
+end
+
+cone
+  name test_cone
+  position -45 70 0
+  size 6 6 10
+  divisions 12
+end
+
+sphere
+  name test_sphere
+  position -15 70 6
+  radius 6
+  divisions 4
+end
+
+tetra
+  name test_tetra
+  vertex 10 65 0
+  vertex 20 65 0
+  vertex 15 75 0
+  vertex 15 70 8
+end
+
+meshbox
+  name test_meshbox
+  position 45 70 0
+  size 6 6 6
+  rotation 15
+end
+
+meshpyr
+  name test_meshpyr
+  position 75 70 0
+  size 6 6 8
 end

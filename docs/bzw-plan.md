@@ -148,10 +148,10 @@ one's own `base_pillar`/`base_oval` chain, four `group` levels deep
 placed meshes from 130 template ones, each at its own correctly transformed
 position.
 
-A map with a mesh still counts it toward the player-facing "dropped" tally,
-because nothing a player can *drive into* has changed -- `bzo.bzw`'s own three
-test shapes, and every placed mesh above, all still let a tank pass through
-untouched. What is left:
+A mesh no longer counts toward the player-facing "dropped" tally at all --
+`parseBZWMap` merges it into `obstacles` before that tally runs now, the same
+point box/pyramid/base/teleporter join at, since a mesh renders, collides and
+shows on radar the same as they do. What is left:
 
 - [ ] Merge a mesh's own adjacent same-material triangle ranges into one
       `geometry` group rather than one per face -- `_buildMeshObject` adds a
@@ -176,49 +176,206 @@ near-degenerate polygon). Verified against hand-built cases and against
 `bzo.bzw`'s own three real parsed mesh fixtures directly (not just synthetic
 data) before this reached the live server.
 
-Deliberately narrower than upstream, for now:
+**The oriented tank box is a separate, precise case now.** `MeshFace::inBox`
+(MeshFace.cxx:454) is `inCylinder`'s own real ancestor -- `inCylinder(p,
+radius, height)` is just `inBox(p, 0, radius, radius, height)`, the square
+footprint collapsed to zero rotation -- so the general case only needed the
+angle upstream already carries: `findMeshHitFaceOriented` translates each
+face to the tank's position and rotates it by the tank's own heading
+(upstream's own reasoning for rotating the polygon rather than the box:
+cheaper, tris and quads being the common case), then runs the same
+`testPolygonInAxisBox` against a plain axis-aligned box sized to the tank's
+actual `halfWidth`/`halfLength` rather than a `radius` circle. `findTankObstacle`'s
+mesh branch now matches its box and pyramid neighbours exactly: `useTankBox`
+picks `meshIntersectsTank`, otherwise the existing `meshIntersectsCylinder`.
+Verified against hand-built cases where the two disagree by construction: a
+tank facing a narrow wall nose-on reaches it with its `halfLength` (3 units)
+and hits, the same tank turned broadside reaches only its `halfWidth` (1.4
+units) and misses -- exactly where the old circular approximation still
+reported a hit either way.
+**Shots collide with a mesh now too -- with a real ray-vs-face test, not the
+tank's own box-overlap approximation.** The first version reused
+`meshIntersectsCylinder` for shots exactly as the tank path does, and it
+shipped, worked in easy testing, and was wrong: a mesh face has none of a
+box or a pyramid's real volume to be "inside" of, so the endpoint-only
+`findShotImpact` (an ordinary shot's own per-tick path) only ever catches a
+face if a single ~1.6-unit tick happens to land within `SHOT_COLLISION_RADIUS`
+(a tenth of a unit) of the exact plane -- checked upstream and found the
+reason it never has this problem: `ShotStrategy::getFirstBuilding`
+(ShotStrategy.cxx:84) calls `obs->intersect(ray)`, a real ray/geometry
+intersection, immune to step size, not a discretized sample. `findMeshFaceCrossing`
+now does the same: an exact ray-vs-plane crossing (offset by the shot's own
+radius, so its surface reaches the face before its centre point does), then
+`pointInMeshFacePolygon` checks the crossing point against the face's actual
+boundary rather than its infinite plane (upstream's own dominant-axis-drop
+trick). `findMeshRayImpact` folds this into both `findShotImpact` (the
+ordinary per-tick path) and `findShotSegmentImpact` (the Laser's whole-
+lifetime-in-one-segment path, which drops a mesh from its own coarse-sample
+candidate loop entirely now and answers for it here instead). Reproduced the
+original bug first, then confirmed the fix, with a real per-tick simulation
+at `SHOT_SPEED`'s default (100u/s) against `bzo.bzw`'s own parsed
+`mesh_octagon`: a shot fired straight up through its floor, straight down
+through its roof, and straight in through a wall all now stop exactly at
+each plane; all three passed clean through before this landed.
 
-- [ ] The oriented tank box is not a separate, more precise case -- both
-      `useTankBox` and the plain cylinder query the same square-footprint
-      approximation `meshIntersectsCylinder` gives everything, which is
-      actually what upstream's own `MeshFace::inCylinder` does too
-      (`inBox(p, 0, radius, radius, height)`, a square, never a true circle).
-      A real oriented-box case would need a translate-and-rotate version of
-      the same polygon-vs-box test, mirroring `MeshFace::inBox` in full.
-**Shots collide with a mesh now too.** `findShotObstacle`/
-`findShotSegmentImpact` (both files) reuse the same `meshIntersectsCylinder`
-the tank path added -- a shot is just a much smaller cylinder
-(`radius, radius`, the same convention `pyramidIntersectsCylinder` already
-uses for one). The segment-sweep case needed its own coarse bracket first,
-though: `getShotObstacleInterval`'s existing box/pyramid case clips the
-segment against a *rotated* obstacle via `getColliderLocalPoint`, which a
-mesh has no single rotation for -- `getMeshSegmentInterval` clips directly
-against `obs.bounds` instead, already axis-aligned in world space, no
-rotation step needed. `getShotObstacleNormal` also has a mesh case now
-(`getMeshHitNormal`), for the one path that needs it: a `ricochet` face, or
-a world that reflects every shot regardless -- both share `findMeshHitFace`
-with `meshIntersectsCylinder` rather than searching faces twice. Verified
-against hand-built geometry (hit fraction, miss case, and outward normal
-direction) before this reached the live server, the same way the tank case
-was.
+**Per-face `drivethrough`/`shootthrough` are read into every face
+(`parseBZWMap` always did), but nothing checked them until now.**
+`findMeshHitFace`, `findMeshHitFaceOriented`, `meshIntersectsCylinder` and
+`meshIntersectsTank` all take a `passField` naming which of a face's own two
+flags this particular query cares about -- `driveThrough` for a tank,
+`shootThrough` for a shot and for `findMeshFaceCrossing`'s own per-face
+skip -- so a face a tank passes through still stops a shot and the reverse,
+matching docs/bzw.md's own claim that "one face of a mesh can be
+`drivethrough` while its neighbour is solid." Found by testing
+`mesh_jump_through_floor`'s own drivethrough side wall directly: a tank
+collided with it before this, despite `drivethrough` being right there on
+the parsed face the whole time.
 
-- [ ] `getTankHitNormal` has no mesh case, so a tank that does collide slides
-      along nothing -- it stops, rather than sliding the way it would off a
-      box's corner. `MeshFace::getHitNormal` just returns the face's own
-      plane normal; the harder part is picking the *right* face when a tank
-      is touching more than one, which `meshIntersectsCylinder` today does
-      not distinguish (first hit wins).
-- [ ] Radar footprint and depth shading (`getRadarObstacles`,
-      `getRadarDepthScale`) for a shape that is not a rectangle or a cone.
-- [ ] Debug labels and collision-log naming for a mesh and its individual
-      faces, the way a box's face selectors are named today.
+**A tank now slides off a mesh face instead of stopping dead against it.**
+Checking upstream first paid off again: `MeshFace::getHitNormal`
+(MeshFace.cxx:437) is explicitly marked "FIXME - all geometry after this
+point is currently JUNK" and ignores every argument it takes -- it just
+returns whichever face's own plane, full stop. No top/bottom split, no
+picking the "right" face among several touched at once; `findMeshHitFace`'s
+own first-match face already is upstream's whole answer, so
+`getTankHitNormal`'s new mesh case is one line, `getMeshHitNormal` reused
+as-is from the shot path. Before this, a mesh fell through to the box-shaped
+`getSideNormal` fallback, dividing by a mesh's missing `w`/`d` -- verified
+against hand-built wall and floor faces (a vertical face returns its
+horizontal normal, a horizontal one its vertical) before this reached the
+live server.
+
+**A tank no longer hangs motionless driving off a mesh edge, or stalls
+sliding along one at an angle.** `resolveTankMotion`'s own search resolves
+a hit by binary-searching the step for the last clear moment, *then* asks
+whether the hit's normal actually opposed the tank's velocity -- but a
+mesh's per-face test can report "still touching this one wall" for the
+tank's entire own length of travel (`2 * TANK_HALF_LENGTH`, six units)
+while it walks out through a full-height wall from the inside (off the
+edge of `mesh_octagon`'s own roof, where the roof and a wall meet) or
+slides along one at an angle. Since a single frame's motion never covers
+six units, the search resolves to "no progress possible" every single
+frame -- a Zeno stall, not a fall or a slide. A box never reaches this
+state, because its *combined* footprint test reports "outside" the instant
+a tank truly clears it, with no lingering per-face "still touching" to get
+stuck in.
+
+Checked upstream rather than inventing a fix: `World::hitBuilding`
+(World.cxx:367-380) does not even accept a candidate face as a hit unless
+it is a flat top/bottom (`MeshFace::isUpPlane`/`isDownPlane`, a fudge off
+dead flat) or the query's own velocity actually dots negative against the
+face's outward normal (`scratchPad < 0.0`) -- a face the query is moving
+*along* or *away from* is never a blocker, no matter how much of its own
+extent still geometrically overlaps that face's plane. bzo had the check
+backwards: it accepted the geometric overlap as the hit first, and only
+consulted the normal afterward to decide whether to cancel velocity, by
+which point the search had already collapsed to zero progress. Ported as
+`meshFaceBlocksDirection`, threaded through `findMeshHitFace`/
+`findMeshHitFaceOriented` (and so `findTankObstacle`'s and
+`getTankHitNormal`'s own mesh branches, the client's `hitTest`/`getNormal`
+pair) as an optional `direction` -- null for a static, non-directional
+query (upstream's own `!directional`), which still treats every touching
+face as blocking exactly as before this existed. Confirmed against
+`mesh_octagon`'s own real parsed geometry: driving straight off the roof's
+edge now falls and lands; sliding along a diagonal wall at an angle now
+keeps sliding past it rather than freezing after the first frame; a
+straight head-on approach from outside still stops flush against the
+wall, unchanged.
+
+Two more bugs turned up chasing this live against a real player's own
+reported position, both fixed the same way -- checking the actual answer
+the search's own callbacks gave rather than guessing:
+
+- `getTankHitNormal`'s own face re-lookup queried at the resolved *clear*
+  position, a few thousandths of a unit back from wherever `hitTest` had
+  actually confirmed a touch. Right at a mesh's own corner (two faces
+  meeting) that sliver was sometimes enough for the identical SAT test to
+  disagree with itself between the clear point and the touching one,
+  finding no face at all and falling back to a made-up "roof" normal --
+  which then misclassified an ordinary slide as a landing and froze
+  it. Fixed by querying at `sweep.hitX`/`hitZ` (already available in the
+  `getNormal` callback, just never threaded through) instead of the clear
+  position.
+- A flat top/bottom's always-blocks exemption (needed so resting with zero
+  vertical velocity still holds a tank up) does not check whether the
+  query is actually within that face's own footprint. Right at a corner
+  where a wall's own span ends, a query box wide enough to still reach the
+  floor's polygon from a position genuinely outside the mesh -- past the
+  wall that already, correctly, stopped blocking -- got re-blocked by the
+  floor instead, with no wall involved at all: a tank standing at ground
+  level near a corner could be unable to drive forward in one specific
+  direction, for no reason visible from the wall it was nowhere near.
+  Reproduced against a live player's own exact position (`/api/players`)
+  before fixing: `meshFaceBlocksDirection` now checks
+  `pointInMeshFacePolygon` for a flat face, so the exemption only fires
+  within the face's real footprint, and the query falls through to the
+  ordinary dot-product test (effectively: never blocks) once outside it.
+
+**A mesh draws on the radar now too, face by face.** Upstream's own
+`RadarRenderer.cxx` treats a mesh face the same independent-polygon way its
+collision does: no single footprint the way a box's `w`/`d` gives one, so
+`getRadarMeshFaces` (client.js) walks every face instead, in its own cached
+list next to `getRadarObstacles`'s. Two of upstream's own rules carried over
+exactly: only a face angled at least partly upward draws at all
+(`plane[1] > 0`, bzo's Y the up axis upstream's Z is) -- its own "enhanced"
+mode, the higher-quality of upstream's two, and the one bzo takes unasked
+per "bzo does not mirror BZFlag's client display options" (AGENTS.md) -- and
+a face's own `noradar` (inherited from the mesh's default the same as any
+other material property) drops it. Depth shading uses the *mesh's* own
+vertical span rather than one infinitely thin face's, upstream's own
+`useMeshForRadar` fallback for exactly that reason. Confirmed against
+`bzo.bzw`'s own three fixtures directly: `mesh_billboard`'s two faces are
+both vertical and neither draws; `mesh_cube`'s top face draws, matching
+upstream's real behaviour exactly -- including a wrinkle borrowed straight
+from the wiki.bzflag.org cube example rather than authored by bzo:
+`mesh_cube`'s *bottom* face also has an upward-pointing plane (its winding
+was never made outward-consistent, since collision -- the only thing that
+reads a mesh face's plane until now -- never cared about the sign), so it
+draws too. Not a bug in the port; a property of unwound test data, worth
+remembering if a real map's own mesh floors look doubled on radar.
+
+- [ ] Collision-log naming for a mesh's own individual faces, the way a
+      box's face selectors are named today -- a debug label is not: a mesh
+      now gets one the same way a box or a pyramid does, `_addDebugLabel`
+      reading its own already-computed geometry bounding box, `'mesh'` its
+      own type for `_clearDebugLabels` to sweep independent of
+      `clearObstacles`'s own `'obstacle'` sweep. Confirmed against the three
+      `bzo.bzw` fixtures directly: each carries a label, correctly named and
+      floating at its own true top plus 2, not a hardcoded one.
+
+**Debug Geometry's own support-surface outline has a mesh case now too.**
+`getMotionSurfaceOutlinePoints` (client.js) used to read `obstacle.w`/`.d`/
+`.rotation` unconditionally -- all `undefined` for a mesh, so standing on one
+with Debug Geometry on drew no outline at all rather than a broken one (the
+point count stayed 4, just every point `NaN`). A mesh needs none of that
+reconstruction anyway: its faces already are its footprint, in world space
+already, so the fix finds whichever face the tank is actually touching (the
+same oriented-box/cylinder split `getTankHitNormal` uses) and outlines that
+face's own real vertices directly.
 - [ ] `arc`/`cone`/`sphere`/`tetra` as mesh generators once mesh itself works
       -- each expands to a `mesh` upstream (`CustomArc.cxx`, `CustomCone.cxx`,
       `CustomSphere.cxx`, `CustomTetra.cxx`), so they are a parser-side
       convenience on top of the same collision and render path, not a second
       implementation. Lowest priority of the four kinds of geometry here: no
       example map and no finished doc page for any of them turned up, so there
-      is nothing to validate against but the upstream source itself.
+      is nothing to validate against but the upstream source itself. `bzo.bzw`'s
+      own `mesh_octagon` (added to test the oriented tank box, see above) is a
+      hand-built stand-in for what a `cone` with 8 sides would generate, so
+      there is now at least one non-rectangular collidable mesh to test
+      against without this.
+- [ ] The eighth dimension (`OO`) has no mesh case. `_getInsideBuildingNode`
+      (render.js) reads `obs.w`/`obs.d` directly, both `undefined` for a mesh,
+      so every scattered point comes out `NaN` -- discovered by
+      `mesh_octagon` above (the whole reason it exists: one mesh a tank can
+      stand inside, instead of the box-emulated octagon's four, which already
+      had this problem before anyone noticed since `OO` was never carried
+      into the merge that added meshes to `obstacles`). Not a quick fix:
+      upstream's own `SceneDatabaseBuilder::addMesh` does not reuse
+      `EighthDBoxSceneNode`'s random-point-cloud approach at all for a mesh --
+      `EighthDimShellNode` wraps the mesh's own already-built render nodes and
+      draws each triangle as a translucent "shell" instead, which is a
+      genuinely different technique, not a bounds-based version of the
+      existing one.
 
 ## Groups and transforms
 

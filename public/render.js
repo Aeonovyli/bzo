@@ -3203,6 +3203,11 @@ class RenderManager {
       this._clearObjectForRemoval(object3D);
     });
     this.meshObjects = [];
+    // The labels themselves come down with their own mesh object already
+    // (each is a child of it, per `_addDebugLabel`) -- this only clears the
+    // bookkeeping entry `_updateDebugLabelsVisibility` would otherwise still
+    // walk, same as `clearObstacles`'s own `_clearDebugLabels('obstacle')`.
+    this._clearDebugLabels('mesh');
   }
 
   // A parsed `mesh` block, rendered directly rather than through
@@ -3220,6 +3225,11 @@ class RenderManager {
       if (!object3D) return;
       this.worldGroup.add(this._tagDraws(object3D, 'mesh'));
       this.meshObjects.push(object3D);
+      // `_addDebugLabel` reads the object's own geometry bounding box for
+      // where to float the label -- already computed in `_buildMeshObject`,
+      // and already in world space, since a mesh's vertices are baked in
+      // directly rather than carried as a position a matrix would move.
+      this._addDebugLabel(object3D, 'mesh');
     });
   }
 
@@ -3796,8 +3806,18 @@ class RenderManager {
     const label = this._tagDraws(this._createDebugLabelSprite(object3D.name), 'debug');
     // Ensure boundingBox is computed for label placement
     if (object3D.geometry && !object3D.geometry.boundingBox) object3D.geometry.computeBoundingBox();
-    const y = (object3D.geometry && object3D.geometry.boundingBox ? object3D.geometry.boundingBox.max.y : object3D.position.y) + 2;
-    label.position.set(0, y, 0);
+    const box = object3D.geometry && object3D.geometry.boundingBox;
+    // A box/pyramid fragment's geometry is centred on its own local origin,
+    // with the object itself carrying the world position -- so the box's own
+    // x/z centre is always (0,0) there and this changes nothing for them. A
+    // mesh's geometry instead bakes absolute world coordinates straight in
+    // (see `_buildMeshObject`) with the object left at identity, so without
+    // its own x/z centre here every mesh label would float at the world
+    // origin instead of over the mesh it is meant to label.
+    const x = box ? (box.min.x + box.max.x) / 2 : 0;
+    const z = box ? (box.min.z + box.max.z) / 2 : 0;
+    const y = (box ? box.max.y : object3D.position.y) + 2;
+    label.position.set(x, y, z);
     object3D.add(label);
     label.visible = this.debugLabelsEnabled;
     this.debugLabels.push({ label, object3D, type });

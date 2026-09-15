@@ -6,6 +6,72 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.15] - 2026-09-15
+
+### Added
+- **Map Viewer camera and position parameters, and a Share View Link
+  button.** `?viewmap=map.bzw` now also takes `cam=free|fp|tp` and
+  `pos=x,y,z,rotation`, so a link can drop a viewer at a specific spot
+  looking a specific way instead of always starting in free roam at the
+  map's own spawn. A "Share View Link" button in the settings menu builds
+  one from the current map, camera and position and copies it to the
+  clipboard.
+- **The radar shows the local player's own position.** Previously only other
+  players drew a blip; an observer or a Map Viewer session watching an empty
+  map had nothing to orient by. The local player's own marker is now exempt
+  from the health/visibility gates that otherwise hide an observer's
+  invisible virtual tank.
+- **`bzo.bzw`: a real mesh octagon (`Octagon`/`mesh_octagon`), placed through
+  a `define`/`group`, matching the existing four-box-plank octagon's exact
+  footprint and height** -- a direct A/B test of mesh vs. box collision at
+  the same shape, and a non-rectangular collidable mesh for testing the
+  oriented tank box against (part of #72).
+- **The six BZW primitives bzo does not parse yet -- `arc`, `cone`,
+  `sphere`, `tetra`, `meshbox`, `meshpyr` -- added to `bzo.bzw`** for
+  comparison against a real bzfs/bzflag. bzo's own "features this map uses
+  that it can't render yet" tally now counts all six (`meshbox`/`meshpyr`
+  were missing from that list before).
+
+### Changed
+- Self-Destruct moved from `Q` to `Delete`, matching upstream BZFlag's own
+  default binding.
+- Switching camera mode (free roam to first/third person and back) now
+  preserves position -- previously, dropping out of first/third person
+  resumed free roam from wherever it had been parked *before* driving
+  started, rather than where driving actually left the tank.
+
+### Fixed
+- **A mesh's per-face `drivethrough`/`shootthrough` are now actually
+  checked.** `parseBZWMap` always read them onto each face, but nothing
+  consulted them until now -- a tank could be stopped by a face marked
+  `drivethrough`, and a shot could ricochet off one marked `shootthrough`.
+- **A shot could pass straight through a thin mesh face.** An ordinary
+  shot's per-tick collision check only asked whether that tick's own
+  endpoint landed inside a target -- fine for a box or a pyramid's real
+  volume, but a mesh face has none, so a normal-speed shot could step clean
+  over its narrow catch band. Replaced with an exact ray-vs-face crossing
+  test (matching upstream's own `Obstacle::intersect`, a real
+  ray/geometry intersection rather than a discrete sample), used by both an
+  ordinary shot's per-tick path and the Laser's own whole-lifetime segment.
+- **A tank could get stuck motionless driving off a mesh edge, or sliding
+  along one at an angle, rather than falling or continuing to slide.**
+  Checked upstream directly: `World::hitBuilding` never accepts a face as a
+  blocking hit unless it is a flat top/bottom or the query is actually
+  moving into its outward normal -- bzo had this backwards, accepting the
+  geometric overlap as the hit first and only checking the normal
+  afterward, by which point the search had already stalled. Two related
+  cases surfaced fixing this: the hit-normal lookup could disagree with the
+  search right at a mesh's own corner (querying a few thousandths of a unit
+  off from where a touch was actually confirmed), and a flat top/bottom's
+  own "always blocks" exemption (needed so resting still holds a tank up
+  regardless of horizontal velocity) did not check whether the query was
+  actually within that face's own footprint, so it could re-block a
+  direction a wall had already, correctly, let through.
+- Debug Geometry's support-surface outline now covers a mesh obstacle --
+  previously silent (a mesh has no `w`/`d`/`rotation` for the box/pyramid
+  reconstruction this reused) rather than broken, but drew nothing either
+  way.
+
 ## [1.2.14] - 2026-09-14
 
 ### Added

@@ -448,6 +448,50 @@ function testPolygonInAxisBox(points, plane, mins, maxs) {
   return true;
 }
 
+// A face's own normal is exactly vertical (upstream's `UpPlane`/`DownPlane`,
+// MeshFace.cxx:220-236 -- a fudge of 1e-5 off dead flat) rather than merely
+// tilted some: the one case `meshFaceBlocksDirection` must treat as always
+// blocking regardless of travel direction, because resting on one with zero
+// vertical velocity has nothing meaningful to dot against, and it still has
+// to hold the tank up.
+const MESH_FLAT_PLANE_THRESHOLD = 1 - 1e-5;
+
+// Whether a face blocks a query travelling in `direction` -- upstream's own
+// filter, and the reason it never gets the straddle bug bzo's first version
+// had: `World::hitBuilding` (World.cxx:367-380) does not accept a candidate
+// face as a hit at all unless it is a flat top/bottom or the query is
+// actually moving into its outward normal (`scratchPad < 0.0`); a face the
+// query is moving *along* or *away from* is not a blocker no matter how much
+// of the query's own extent still geometrically overlaps its plane. Without
+// this, a tank exiting a mesh through one of its own full-height walls --
+// off the edge of a roof, or sliding along a wall at an angle -- can find
+// that same wall "still touching" for its own entire body length while
+// straddling the exit, and since a single frame's motion never covers that
+// whole length, the search this file's own binary search runs resolves to
+// "no progress possible" every single frame: not a fall or a slide, a
+// motionless stall. `direction` is null for a static, non-directional query
+// (upstream's own `!directional`), which always blocks regardless -- the
+// same as never having read this function at all.
+//
+// A flat top/bottom's own always-block exemption is *only* good within its
+// own actual footprint, though -- `pointInMeshFacePolygon` gates it there.
+// A query box is wide enough to still overlap a floor's polygon (a corner
+// candidate) from a position genuinely outside it, past whichever wall
+// meets it there, exactly the same straddle this function otherwise
+// prevents -- but that wall has already correctly let the query pass, since
+// it is a wall and gets the dot-product test above. Without this gate the
+// floor overrode that answer, its own flat exemption blocking motion no
+// wall was blocking a step outside the mesh's footprint at the mesh's own
+// ground level was ever going to be near in the first place.
+function meshFaceBlocksDirection(face, direction, obs, x, y, z) {
+  if (!direction) return true;
+  if (Math.abs(face.plane[1]) >= MESH_FLAT_PLANE_THRESHOLD) {
+    return pointInMeshFacePolygon(obs, face, x, y, z);
+  }
+  const dot = (face.plane[0] * direction.x) + (face.plane[1] * direction.y) + (face.plane[2] * direction.z);
+  return dot < 0;
+}
+
 // A mesh against a vertical cylinder, face by face -- `MeshFace::inCylinder`
 // is itself `inBox(p, 0, radius, radius, height)` upstream (a square
 // footprint, not a true circle), so that is what this tests too: each face
@@ -455,8 +499,13 @@ function testPolygonInAxisBox(points, plane, mins, maxs) {
 // none), against an axis-aligned box `radius` out on X and Z, `height` tall
 // on Y. `obs.bounds` rejects the whole mesh in one check before any face's
 // own polygon test runs, the same win a broad-phase octree gives upstream --
-// see `docs/bzw-plan.md`'s "Mesh geometry".
-function findMeshHitFace(obs, x, y, z, radius, height) {
+// see `docs/bzw-plan.md`'s "Mesh geometry". `passField` names whichever of a
+// face's own two passability flags this query cares about -- `driveThrough`
+// for a tank, `shootThrough` for a shot -- so a face let through by one still
+// stops the other, the same per-face split every other obstacle only gets at
+// the whole-obstacle level. `direction`, when given, additionally filters
+// through `meshFaceBlocksDirection` -- see its own comment.
+function findMeshHitFace(obs, x, y, z, radius, height, passField = 'driveThrough', direction = null) {
   const { bounds } = obs;
   if (bounds && (x + radius < bounds.minX || x - radius > bounds.maxX
     || z + radius < bounds.minZ || z - radius > bounds.maxZ)) {
@@ -465,7 +514,7 @@ function findMeshHitFace(obs, x, y, z, radius, height) {
   const boxMins = [-radius, 0, -radius];
   const boxMaxs = [radius, height, radius];
   for (const face of obs.faces) {
-    if (!face.plane) continue;
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
     const localPoints = face.vertexIndices.map((vi) => {
       const v = obs.vertices[vi];
       return [v.x - x, v.y - y, v.z - z];
@@ -477,18 +526,78 @@ function findMeshHitFace(obs, x, y, z, radius, height) {
   return null;
 }
 
-function meshIntersectsCylinder(obs, x, y, z, radius, height) {
-  return findMeshHitFace(obs, x, y, z, radius, height) !== null;
+function meshIntersectsCylinder(obs, x, y, z, radius, height, passField = 'driveThrough', direction = null) {
+  return findMeshHitFace(obs, x, y, z, radius, height, passField, direction) !== null;
+}
+
+// The tank box against a mesh, face by face -- `MeshFace::inBox`
+// (MeshFace.cxx:454) with a real `_angle`, rather than the `inCylinder`
+// square it collapses to at zero. Upstream's own comment on why it rotates
+// the polygon rather than the box applies here too ("this assumes that it is
+// cheaper to move the polygon than the box"): each face's own vertices and
+// plane are translated to the tank's position and rotated by its heading, so
+// the box being tested against is the plain axis-aligned one below, aligned
+// with the tank's own lateral (X) and forward (Z) axes rather than the
+// world's. `rotation` is bzo's own tank heading (forward is
+// `(-sin r, -cos r)`, everywhere else in this file too) -- at `rotation`
+// zero that points forward at local -Z, which is why `halfLength` is this
+// box's Z half-extent and `halfWidth` its X one.
+function findMeshHitFaceOriented(
+  obs, x, y, z, rotation, halfWidth, halfLength, height, passField = 'driveThrough', direction = null,
+) {
+  const { bounds } = obs;
+  // A circular reject cheap enough to run before any face's own rotation --
+  // the tank box's own bounding radius around its centre, so this never
+  // rejects a face the precise test below would still have caught.
+  const boundingRadius = Math.hypot(halfWidth, halfLength);
+  if (bounds && (x + boundingRadius < bounds.minX || x - boundingRadius > bounds.maxX
+    || z + boundingRadius < bounds.minZ || z - boundingRadius > bounds.maxZ)) {
+    return null;
+  }
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const boxMins = [-halfWidth, 0, -halfLength];
+  const boxMaxs = [halfWidth, height, halfLength];
+  for (const face of obs.faces) {
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    const localPoints = face.vertexIndices.map((vi) => {
+      const v = obs.vertices[vi];
+      const dx = v.x - x;
+      const dz = v.z - z;
+      return [(dx * cos) - (dz * sin), v.y - y, (dx * sin) + (dz * cos)];
+    });
+    const [nx, ny, nz, d] = face.plane;
+    const localPlane = [
+      (nx * cos) - (nz * sin),
+      ny,
+      (nx * sin) + (nz * cos),
+      d + (nx * x) + (ny * y) + (nz * z),
+    ];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return face;
+  }
+  return null;
+}
+
+function meshIntersectsTank(obs, x, y, z, rotation, height, slack = 0, tankScale = null, direction = null) {
+  const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
+  const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+  const trim = Math.max(0, Math.min(slack, halfWidth));
+  return findMeshHitFaceOriented(
+    obs, x, y, z, rotation, halfWidth - trim, halfLength - trim, height, 'driveThrough', direction,
+  ) !== null;
 }
 
 // The plane normal of whichever face `findMeshHitFace` would report a hit
 // against -- `getShotObstacleNormal`'s mesh case, needed only when a shot
 // ricochets off one (a face itself marked `ricochet`, or a world that
-// reflects every shot regardless). Picks whichever face the shared search
-// finds first, the same "first hit wins" bzo's tank collision already
-// accepts for a mesh -- see docs/bzw-plan.md's "Mesh geometry".
+// reflects every shot regardless), so this always reads a face's own
+// `shootThrough` rather than the `driveThrough` default -- a shot ricochets
+// off exactly the faces that stop a shot, not the ones that stop a tank.
+// Picks whichever face the shared search finds first, the same "first hit
+// wins" bzo's tank collision already accepts for a mesh -- see
+// docs/bzw-plan.md's "Mesh geometry".
 function getMeshHitNormal(obs, x, y, z, radius) {
-  const face = findMeshHitFace(obs, x, y, z, radius, radius);
+  const face = findMeshHitFace(obs, x, y, z, radius, radius, 'shootThrough');
   if (!face) return { x: 0, y: 1, z: 0 };
   return { x: face.plane[0], y: face.plane[1], z: face.plane[2] };
 }
@@ -546,6 +655,15 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
   const height = Number.isFinite(options.height) ? options.height : radius;
   const fromY = Number.isFinite(options.fromY) ? options.fromY : y;
   const slack = Math.max(0, Math.min(options.slack || 0, radius));
+  // The direction this particular query is travelling, for a mesh's own
+  // `meshFaceBlocksDirection` filter -- null (always-blocking, upstream's
+  // own `!directional`) unless the caller actually knows where it came
+  // from. Only meaningful with a real step behind it, so a static "is this
+  // point clear" query (no `fromX`/`fromZ` given) still treats every
+  // touching face as a hit, same as before this existed.
+  const direction = (Number.isFinite(options.fromX) && Number.isFinite(options.fromZ))
+    ? { x: x - options.fromX, y: y - fromY, z: z - options.fromZ }
+    : null;
   const tankScale = options.tankScale || null;
   const phased = options.phased === true;
   const reversingOnGround = options.reversingOnGround === true;
@@ -591,14 +709,10 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
     }
 
     if (obs.type === 'mesh') {
-      // Upstream's own `MeshFace::inCylinder` is `inBox(p, 0, radius, radius,
-      // height)` -- a square, not a true circle -- so the oriented tank box
-      // isn't a separate, more precise case here the way it is for a box or a
-      // pyramid; both paths get the same square-footprint approximation for
-      // now, matching what upstream itself tests a mesh face against. See
-      // docs/bzw-plan.md's "Mesh geometry" for the oriented case as a
-      // follow-up, once there is a use for the extra precision.
-      if (meshIntersectsCylinder(obs, x, y, z, radius - slack, height)) return obs;
+      const hits = useTankBox
+        ? meshIntersectsTank(obs, x, y, z, rotation, height, slack, tankScale, direction)
+        : meshIntersectsCylinder(obs, x, y, z, radius - slack, height, 'driveThrough', direction);
+      if (hits) return obs;
       continue;
     }
 
@@ -878,7 +992,7 @@ function shotInsideObstacle(obs, x, y, z, radius) {
   // does, so it skips that pair of epsilon checks entirely and goes straight
   // to its own per-face test, which already includes its own vertical gate.
   if (obs.type === 'mesh') {
-    return meshIntersectsCylinder(obs, x, y, z, radius, radius);
+    return meshIntersectsCylinder(obs, x, y, z, radius, radius, 'shootThrough');
   }
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
@@ -915,73 +1029,152 @@ function findShotObstacle(obstacles, x, y, z, radius) {
 // impact is drawn and where a bounce starts from. Eight bisections is a fixed
 // and deliberately small budget: it resolves the impact to a fraction of a
 // world unit, and the reflected shot leaves the surface anyway.
+//
+// That bisection only ever runs once `findShotObstacle` already says the
+// segment's own endpoint landed inside something -- fine for a box or a
+// pyramid's real volume, which stays "inside" for the rest of a step once
+// entered, but a mesh face has none: `findMeshRayImpact` is folded in
+// alongside it, an exact ray-vs-face crossing this endpoint check alone
+// would otherwise miss whenever the far end of a fast step happens to clear
+// a razor-thin face's own tiny catch radius. See its own comment.
 function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius) {
   let obstacle = findShotObstacle(obstacles, toX, toY, toZ, radius);
-  if (!obstacle) return null;
+  let best = null;
 
-  let lo = 0;
-  let hi = 1;
-  for (let i = 0; i < 8; i++) {
-    const mid = (lo + hi) * 0.5;
-    const hit = findShotObstacle(
-      obstacles,
-      fromX + (toX - fromX) * mid,
-      fromY + (toY - fromY) * mid,
-      fromZ + (toZ - fromZ) * mid,
-      radius
-    );
-    if (hit) {
-      hi = mid;
-      obstacle = hit;
-    } else {
-      lo = mid;
+  if (obstacle) {
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 8; i++) {
+      const mid = (lo + hi) * 0.5;
+      const hit = findShotObstacle(
+        obstacles,
+        fromX + (toX - fromX) * mid,
+        fromY + (toY - fromY) * mid,
+        fromZ + (toZ - fromZ) * mid,
+        radius
+      );
+      if (hit) {
+        hi = mid;
+        obstacle = hit;
+      } else {
+        lo = mid;
+      }
     }
+    best = { fraction: lo, obstacle };
   }
-  return { fraction: lo, obstacle };
+
+  const meshHit = findMeshRayImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius);
+  if (meshHit && (!best || meshHit.fraction < best.fraction)) best = meshHit;
+
+  return best;
 }
 
-// The parametric interval over which a segment overlaps one obstacle's oriented
-// bounding box, grown by the shot's radius, or null when it never does. The box
-// is the exact solid for a box, a base and the world border; for a pyramid it is
-// a hull the solid sits inside, which is why the caller still asks
-// shotInsideObstacle within the interval it gets back.
-//
-// Vertical bounds are shotInsideObstacle's own, so the two agree about what
-// counts as inside.
-// The segment-vs-box slab clip every other interval here uses, against a
-// mesh's own `bounds` -- already axis-aligned in world space, so this needs
-// no `getColliderLocalPoint` step first the way the rotated box case below
-// does. The coarse bracket `findShotSegmentImpact` samples within before
-// bisecting down to the actual face; `meshIntersectsCylinder` is the fine
-// test throughout, same as `pyramidIntersectsCylinder` is for a pyramid.
-function getMeshSegmentInterval(obs, from, to, radius) {
+// Whether a point lies inside a planar face's own boundary, projected flat
+// -- upstream's own `Obstacle::intersect` answers this by dropping into 2D
+// along whichever axis the face is most nearly perpendicular to (the same
+// choice `MeshSceneNodeGenerator::makeTexcoords`-style code always makes),
+// then a standard point-in-convex-polygon test: consistently signed on every
+// edge means inside, any edge that disagrees means outside. Every face a
+// mapper writes is required to be planar and convex (CustomMeshFace.cxx),
+// so this never has to handle a concave one.
+function pointInMeshFacePolygon(obs, face, px, py, pz) {
+  const [nx, ny, nz] = face.plane;
+  const absX = Math.abs(nx);
+  const absY = Math.abs(ny);
+  const absZ = Math.abs(nz);
+  const project = (absY >= absX && absY >= absZ)
+    ? (vx, vy, vz) => [vx, vz]
+    : (absX >= absZ)
+      ? (vx, vy, vz) => [vy, vz]
+      : (vx, vy) => [vx, vy];
+  const [px2, pz2] = project(px, py, pz);
+  const vertexIndices = face.vertexIndices;
+  const n = vertexIndices.length;
+  let sign = 0;
+  for (let i = 0; i < n; i++) {
+    const a = obs.vertices[vertexIndices[i]];
+    const b = obs.vertices[vertexIndices[(i + 1) % n]];
+    const [ax, az] = project(a.x, a.y, a.z);
+    const [bx, bz] = project(b.x, b.y, b.z);
+    const cross = ((bx - ax) * (pz2 - az)) - ((bz - az) * (px2 - ax));
+    if (Math.abs(cross) < 1e-9) continue;
+    const s = cross > 0 ? 1 : -1;
+    if (sign === 0) sign = s;
+    else if (s !== sign) return false;
+  }
+  return true;
+}
+
+// Where a segment crosses one of a mesh's own faces, exactly -- upstream's
+// own `Obstacle::intersect` (ShotStrategy.cxx:84's `getFirstBuilding`) is a
+// real ray-vs-geometry test, immune to how far a single step travels. A
+// mesh face has none of a box or a pyramid's real volume to be "inside" of,
+// so the coarse sample-then-bisect approach every other shape here uses can
+// step clean over one: `SHOT_COLLISION_RADIUS` is a tenth of a unit, an
+// ordinary shot's own per-tick step is on the order of a unit and a half at
+// `SHOT_SPEED`'s default, and `findShotImpact`'s endpoint-only check only
+// ever catches a face if that single step happens to land within its own
+// radius of the exact plane -- which a fast, perpendicular crossing of a
+// razor-thin polygon very often does not. This asks the exact question
+// instead: where the segment's own line crosses each face's plane, offset
+// by `radius` so the shot's own surface reaches the face before its centre
+// point does, then whether that crossing point actually lands inside the
+// face's own boundary rather than merely its infinite plane.
+function findMeshFaceCrossing(obs, fromX, fromY, fromZ, toX, toY, toZ, radius) {
   const { bounds } = obs;
-  if (!bounds) return null;
-  let tMin = 0;
-  let tMax = 1;
-  const clip = (a, b, low, high) => {
-    const delta = b - a;
-    if (Math.abs(delta) < ZERO_TOLERANCE) return a >= low && a <= high;
-    let near = (low - a) / delta;
-    let far = (high - a) / delta;
-    if (near > far) {
-      const swap = near;
-      near = far;
-      far = swap;
-    }
-    if (near > tMin) tMin = near;
-    if (far < tMax) tMax = far;
-    return tMin <= tMax;
-  };
-  if (!clip(from.x, to.x, bounds.minX - radius, bounds.maxX + radius)) return null;
-  if (!clip(from.y, to.y, bounds.minY - radius, bounds.maxY + radius)) return null;
-  if (!clip(from.z, to.z, bounds.minZ - radius, bounds.maxZ + radius)) return null;
-  if (tMax < 0 || tMin > 1) return null;
-  return { tMin: Math.max(0, tMin), tMax: Math.min(1, tMax) };
+  if (bounds && (Math.max(fromX, toX) + radius < bounds.minX
+    || Math.min(fromX, toX) - radius > bounds.maxX
+    || Math.max(fromY, toY) + radius < bounds.minY
+    || Math.min(fromY, toY) - radius > bounds.maxY
+    || Math.max(fromZ, toZ) + radius < bounds.minZ
+    || Math.min(fromZ, toZ) - radius > bounds.maxZ)) {
+    return null;
+  }
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const dz = toZ - fromZ;
+  let best = null;
+  for (const face of obs.faces) {
+    if (!face.plane || face.shootThrough) continue;
+    const [nx, ny, nz, d] = face.plane;
+    const denom = (nx * dx) + (ny * dy) + (nz * dz);
+    if (Math.abs(denom) < 1e-9) continue; // travelling parallel to the face
+    const fromDist = (nx * fromX) + (ny * fromY) + (nz * fromZ) + d;
+    // Whichever side of the plane the segment starts on is the side its own
+    // radius has to close before the surface, not the centre, has reached it.
+    const sign = fromDist >= 0 ? 1 : -1;
+    const t = ((sign * radius) - fromDist) / denom;
+    if (t < 0 || t > 1) continue;
+    if (best !== null && t >= best.fraction) continue;
+    const px = fromX + (dx * t);
+    const py = fromY + (dy * t);
+    const pz = fromZ + (dz * t);
+    if (!pointInMeshFacePolygon(obs, face, px, py, pz)) continue;
+    best = { fraction: t, obstacle: obs };
+  }
+  return best;
 }
 
+// The earliest exact mesh-face crossing across every mesh in the list --
+// `findShotImpact` and `findShotSegmentImpact` both fold this in alongside
+// their own box/pyramid/base search, since neither of those needs it (a
+// box's own solid cross-section has no thin-plane gap for a coarse sample to
+// miss) but a mesh always does.
+function findMeshRayImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius) {
+  let best = null;
+  for (const obs of obstacles) {
+    if (obs.type !== 'mesh' || obs.shootThrough) continue;
+    const hit = findMeshFaceCrossing(obs, fromX, fromY, fromZ, toX, toY, toZ, radius);
+    if (hit && (!best || hit.fraction < best.fraction)) best = hit;
+  }
+  return best;
+}
+
+// findShotSegmentImpact's own candidate loop never calls this for a mesh --
+// it skips straight to findMeshRayImpact's exact face test instead -- so
+// every obstacle reaching here is a box, a pyramid, a base or the world
+// border, all real solids with an actual bounding box to clip against.
 function getShotObstacleInterval(obs, from, to, radius) {
-  if (obs.type === 'mesh') return getMeshSegmentInterval(obs, from, to, radius);
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
   const lowest = base + SHOT_VERTICAL_EPSILON - radius;
@@ -1031,6 +1224,11 @@ const SHOT_INTERVAL_SAMPLES = 12;
 // obstacle lies inside that obstacle's own interval, so once an interval starts
 // later than the best hit found there is nothing left that could beat it.
 //
+// A mesh sits out this coarse sample-then-bisect search entirely -- its own
+// face has no volume to be "inside" of the way a box or a pyramid's
+// cross-section does, so `findMeshRayImpact`'s exact ray-vs-face crossing
+// answers for it instead, folded in below.
+//
 // Returns the same shape findShotImpact does, and by the same convention: the
 // last point still outside, which is where the impact is drawn and where a
 // bounce starts from.
@@ -1039,6 +1237,7 @@ function findShotSegmentImpact(obstacles, from, to, radius) {
   for (const obs of obstacles) {
     if (obs.kind === 'teleporter') continue;
     if (obs.shootThrough) continue;
+    if (obs.type === 'mesh') continue;
     const interval = getShotObstacleInterval(obs, from, to, radius);
     if (interval) candidates.push({ obs, tMin: interval.tMin, tMax: interval.tMax });
   }
@@ -1078,6 +1277,10 @@ function findShotSegmentImpact(obstacles, from, to, radius) {
     }
     if (!best || lo < best.fraction) best = { fraction: lo, obstacle: candidate.obs };
   }
+
+  const meshHit = findMeshRayImpact(obstacles, from.x, from.y, from.z, to.x, to.y, to.z, radius);
+  if (meshHit && (!best || meshHit.fraction < best.fraction)) best = meshHit;
+
   return best;
 }
 
@@ -1324,6 +1527,41 @@ function getTankHitNormal(obs, x, y, z, rotation, toY, height, sweep = null) {
     return rotateNormalToWorld(obs, face.x, face.y, face.z);
   }
 
+  if (obs.type === 'mesh') {
+    // MeshFace::getHitNormal (MeshFace.cxx:437) ignores every argument it is
+    // given and just returns whichever face's own plane -- explicitly marked
+    // upstream's own "FIXME - all geometry after this point is currently
+    // JUNK", so there is no top/bottom split to port here the way a box or a
+    // pyramid gets: whichever face the search finds is the whole answer, the
+    // same one `getMeshHitNormal` already picks for a shot's ricochet. The
+    // search itself has to match whatever shape actually found the hit,
+    // though (`findTankObstacle`'s own `useTankBox` split) -- a plain
+    // square-cylinder query can miss a face the oriented tank box actually
+    // reached nose- or tail-first, along its longer `halfLength` axis. It
+    // also needs the same `meshFaceBlocksDirection` filter `findTankObstacle`
+    // itself uses now, built from the same pass's own start/end -- otherwise
+    // this can name a face `hitTest` already rejected as non-blocking (the
+    // tank moving along or away from it, not into it), which is exactly
+    // backwards from what actually stopped the tank here.
+    //
+    // Queried at `sweep.hitX`/`hitZ` -- the position the search actually
+    // confirmed as touching -- rather than `x`/`z`, the resolved *clear*
+    // position a few thousandths of a unit back from it: right at a
+    // polygon's own edge (two mesh faces meeting at a corner, say) that
+    // sliver is sometimes enough for the exact same SAT test to disagree
+    // with itself between the two, and finding nothing here falls through
+    // to a made-up "roof" normal that is wrong in every way that matters --
+    // upstream has no equivalent gap, since `getHitNormal` never has to
+    // relocate anything, it already knows which face it is.
+    const queryX = (sweep && Number.isFinite(sweep.hitX)) ? sweep.hitX : x;
+    const queryZ = (sweep && Number.isFinite(sweep.hitZ)) ? sweep.hitZ : z;
+    const direction = sweep ? { x: sweep.toX - sweep.fromX, y: toY - y, z: sweep.toZ - sweep.fromZ } : null;
+    const face = (sweep && Number.isFinite(rotation))
+      ? findMeshHitFaceOriented(obs, queryX, low, queryZ, rotation, sweep.halfWidth, sweep.halfLength, height, 'driveThrough', direction)
+      : findMeshHitFace(obs, queryX, low, queryZ, height, height, 'driveThrough', direction);
+    return face ? { x: face.plane[0], y: face.plane[1], z: face.plane[2] } : { x: 0, y: 1, z: 0 };
+  }
+
   if (crossedFlatTop(base + getObstacleHeight(obs), y, toY)) return { x: 0, y: 1, z: 0 };
   if (low + height < base) return { x: 0, y: -1, z: 0 };
 
@@ -1528,8 +1766,13 @@ module.exports = {
   testPolygonInAxisBox,
   meshIntersectsCylinder,
   findMeshHitFace,
+  findMeshHitFaceOriented,
+  meshIntersectsTank,
+  meshFaceBlocksDirection,
   getMeshHitNormal,
-  getMeshSegmentInterval,
+  pointInMeshFacePolygon,
+  findMeshFaceCrossing,
+  findMeshRayImpact,
   getShotTeleporterDims,
   findTankObstacle,
   getBaseTopY,

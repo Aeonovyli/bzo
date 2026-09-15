@@ -735,15 +735,16 @@ Not yet read:
 Anything not listed above is skipped without comment, which means a map using it
 loads and plays with that part of it missing. The notable absences:
 
-- **Mesh geometry collides with nothing**: `mesh` (`meshbox`/`meshpyr`, and
-  the `arc`/`cone`/`sphere`/`tetra` primitives that expand to one, are not
-  read at all yet). A `mesh` block's own geometry -- its vertex/face grammar,
-  in full -- is parsed and rendered, so a mapper sees it drawn, textured, and
-  passable per face-level `drivethrough`/`shootthrough` -- read, not yet
-  acted on. A tank drives straight through a mesh wall that looks entirely
-  solid, and no radar blip or debug label marks it either. See
-  `docs/bzw-plan.md`'s "Mesh geometry" for what still needs collision before
-  this stops being a visual trap.
+- **`meshbox`/`meshpyr`, and the `arc`/`cone`/`sphere`/`tetra` primitives that
+  expand to a `mesh`.** `mesh` itself is parsed, textured, placed through
+  `group` instances, debug-labelled, radar-drawn, and collided with (a tank
+  and a shot both stop at a mesh face, per face-level
+  `drivethrough`/`shootthrough`, a tank slides off one the same way it slides
+  off a box corner, and the oriented tank box is its own precise case rather
+  than a circle standing in for it) -- see **Groups** above. See
+  `docs/bzw-plan.md`'s "Mesh geometry" for what is still left (mainly a
+  perf pass merging same-material triangles, and these four primitives
+  themselves).
 - **Most of what a `material` block or a `matref` can still say**:
   `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, `phydrv`, and the
   lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see

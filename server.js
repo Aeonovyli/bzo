@@ -1751,7 +1751,7 @@ function normalizeScoreLimit(score) {
 // only has to recognize the *opening* keyword to say how many of each a map
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'arc', 'cone', 'sphere', 'tetra',
+  'arc', 'cone', 'sphere', 'tetra', 'meshbox', 'meshpyr',
   'physics', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
 
@@ -2076,12 +2076,15 @@ function parseBZWMap(filename) {
   const parsedLinks = [];
   const zones = [];
   // A `mesh` block's own vertex/normal/texcoord pools and face list, parsed
-  // in full (CustomMesh.cxx, CustomMeshFace.cxx) but not yet placed into
-  // `obstacles` -- there is no collision, render or radar path for arbitrary
-  // geometry yet (`docs/bzw-plan.md`'s "Mesh geometry"). Kept here purely so
-  // the parser itself can be validated against a real map's mesh content;
-  // a mesh still counts toward the player-facing "dropped" tally below,
-  // because nothing about what a player sees or drives into has changed.
+  // in full (CustomMesh.cxx, CustomMeshFace.cxx) and merged into `obstacles`
+  // below (see the merge just above the dropped-feature tally) -- a mesh
+  // renders, collides (tank and shot alike, oriented tank box included),
+  // shows on radar and gets a debug label the same as a box or a pyramid
+  // now, so it counts as a supported obstacle rather than a dropped one.
+  // What is still missing is in `docs/bzw-plan.md`'s "Mesh geometry": mainly
+  // the `meshbox`/`meshpyr`/`arc`/`cone`/`sphere`/`tetra` generators, which
+  // still fall through to the generic dropped-token tally below like any
+  // other unhandled keyword.
   const meshes = [];
   // The map's `world size` directive, applied to `GAME_CONFIG.MAP_SIZE` only
   // at the call site that loads the live map -- never inside this function,
@@ -2858,9 +2861,9 @@ function parseBZWMap(filename) {
           applyBzwMaterialToken(currentMeshFace, token, words);
         }
       } else if (token === 'end') {
-        // A mesh still counts toward the player-facing "dropped" tally --
-        // see the note on `meshes` above -- rather than folding into the
-        // generic `current && token === 'end'` obstacle-closing branch
+        // A supported obstacle now (see the note on `meshes` above), so this
+        // does not touch `unsupportedCounts` -- but still does not fold into
+        // the generic `current && token === 'end'` obstacle-closing branch
         // below, which assumes a finished box/pyramid/group.
         if (currentDefine) {
           // Still a template in its own local frame -- `finalizeMeshGeometry`
@@ -2870,7 +2873,6 @@ function parseBZWMap(filename) {
         } else {
           meshes.push(finalizeMeshGeometry(current));
         }
-        unsupportedCounts.set('mesh', (unsupportedCounts.get('mesh') || 0) + 1);
         current = null;
       } else if (token === 'vertex') {
         const [x, y, z] = words.slice(1).map(Number);
@@ -3506,6 +3508,14 @@ function parseBZWMap(filename) {
     );
   }
 
+  // Joined into `obstacles` before the tally below, so "included" counts a
+  // mesh along with everything else that actually collides, renders, and
+  // shows on radar now -- the same list a client draws from, so the radar,
+  // the buried-face test and the box/pyramid fragment builder all see one
+  // obstacle list and only have to skip a shape they don't handle, not learn
+  // a second array.
+  obstacles.push(...meshes);
+
   // What a player actually sees when they view or join this map -- not just
   // server.log. `-srvmsg` (serverOptions.serverMessages) reads as a message
   // the *map* says to whoever arrives on it (bzfs.cxx:2507); the
@@ -3524,21 +3534,13 @@ function parseBZWMap(filename) {
       .join(', ');
     messages.push(
       `This map has ${included} obstacle${included === 1 ? '' : 's'} bzo reads `
-      + `(box/pyramid/base/teleporter) and dropped ${dropped} it doesn't yet: ${droppedList}.`
+      + `(box/pyramid/base/teleporter/mesh) and dropped ${dropped} it doesn't `
+      + `yet: ${droppedList}.`
     );
     log(
       `Ignoring unsupported blocks in ${filename}: ${droppedList}`
     );
   }
-
-  // Joins `obstacles` here, after the tally above, so "included" still counts
-  // only what actually collides -- a mesh still contributes nothing there
-  // (`docs/bzw-plan.md`'s "Mesh geometry"; the collision pair skips
-  // `type === 'mesh'` explicitly rather than by accident). Placed in the same
-  // list as everything else a client draws, though, so the radar, the buried-
-  // face test and the box/pyramid fragment builder all see one obstacle list
-  // and only have to skip a shape they don't handle, not learn a second array.
-  obstacles.push(...meshes);
 
   const teleporterGraph = buildTeleporterLinks();
   return {

@@ -291,6 +291,8 @@ import {
   getTankHitNormal,
   getShotTeleporterDims,
   findTankObstacle,
+  findMeshHitFace,
+  findMeshHitFaceOriented,
   isOverFlatTop,
   getPyramidHeight,
   isPyramidFlatTop,
@@ -753,6 +755,53 @@ function readViewMapTarget() {
   return requested || null;
 }
 const autoViewMapTarget = readViewMapTarget();
+
+// `?cam=free|fp|tp` alongside `?viewmap=` -- which roam view a shared Map
+// Viewer link starts in. The three named are the only ones a link can
+// reproduce at all: every other `ROAM_VIEW` rides a specific player or flag,
+// which a generic link has no way to name. Read once and applied on every
+// (re)join the same way `autoFollowTarget` already is, below.
+function readViewCamTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const raw = (params.get('cam') || '').trim().toLowerCase();
+  if (raw === 'free') return ROAM_VIEW.FREE;
+  if (raw === 'fp') return ROAM_VIEW.DRIVE_FP;
+  if (raw === 'tp') return ROAM_VIEW.DRIVE_TP;
+  return null;
+}
+const autoViewCamTarget = readViewCamTarget();
+
+// `?pos=x,y,z,deg` -- where a shared Map Viewer link starts, and which way it
+// faces. Degrees rather than radians: this is the one part of the link a
+// person might actually read or type by hand, the same reason `-set`'s own
+// `rotation` line in a `.bzw` is degrees and not radians.
+function readViewPosTarget() {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has('pos')) return null;
+  const parts = (params.get('pos') || '').split(',').map(Number);
+  if (parts.length !== 4 || !parts.every(Number.isFinite)) return null;
+  const [x, y, z, deg] = parts;
+  return { x, y, z, rotation: (deg * Math.PI) / 180 };
+}
+const autoViewPosTarget = readViewPosTarget();
+
+// The current view, as a link -- what the "Share View Link" button hands
+// back. Only meaningful while genuinely in Map Viewer: a live match has no
+// `viewmap` of its own to send someone back to, so this is null rather than
+// a link to nowhere in particular otherwise. `cam=` is omitted for a roam
+// view the link format cannot name (`roamViewNeedsTarget`'s own list --
+// TRACK/FOLLOW/FPS/FLAG all ride a specific player or flag), leaving the
+// receiving end to fall back to its own default rather than claim a view
+// this one is not actually in.
+function buildShareViewLink() {
+  if (!selectedViewMapFile) return null;
+  const camNames = { [ROAM_VIEW.FREE]: 'free', [ROAM_VIEW.DRIVE_FP]: 'fp', [ROAM_VIEW.DRIVE_TP]: 'tp' };
+  const cam = camNames[roamView];
+  const deg = ((playerRotation * 180) / Math.PI).toFixed(1);
+  const pos = `${playerX.toFixed(1)},${playerY.toFixed(1)},${playerZ.toFixed(1)},${deg}`;
+  const query = `viewmap=${encodeURIComponent(selectedViewMapFile)}${cam ? `&cam=${cam}` : ''}&pos=${pos}`;
+  return `${window.location.origin}${window.location.pathname}?${query}`;
+}
 let selectedVoiceInputDeviceId = '';
 // One level per VOLUME_CHANNELS row, restored before the first sound plays so
 // nothing is ever briefly loud on the way to the level the player chose.
@@ -3473,6 +3522,12 @@ let playerY = 0; // Y is vertical position
 let playerZ = 0;
 // The observer's roaming camera, held only while observing. See roam.mjs.
 let roamCamera = null;
+// Set while phantom-driving (DRIVE_FP/DRIVE_TP), whose own tank physics move
+// `myTank` without touching `roamCamera` at all -- read on the frame that
+// drops back out of it, so free roam (and every other camera-driven view)
+// picks up from wherever driving actually left the tank rather than resuming
+// the stale spot `roamCamera` was still parked at from before driving began.
+let wasPhantomDriving = false;
 let roamView = ROAM_VIEW.FREE;
 // null is upstream's `targetManual == -1`: follow whoever is leading.
 let roamTargetId = null;
@@ -3933,6 +3988,49 @@ function hideSurfaceOutlineDebug() {
 function getMotionSurfaceOutlinePoints(obstacle) {
   if (!obstacle) return null;
   const epsilon = 0.06;
+
+  // A mesh has no `w`/`d`/`rotation` to reconstruct a footprint from -- its
+  // own faces already are the footprint, in world space already, so the
+  // outline is simply whichever face the tank is actually touching, found
+  // the same way `getTankHitNormal`'s own mesh case does (the oriented box
+  // when there is a heading to orient it by, the plain cylinder otherwise).
+  //
+  // A stop square-on to a face backs the tank off by `TINY_DISTANCE * mag`
+  // (motion.cjs), and `mag` there is the *full* velocity dotted against the
+  // normal -- largest precisely when the hit is square-on, smallest at a
+  // shallow slide. A re-query at the tank's exact resting spot, with no
+  // slack of its own, finds a shallow-angle face fine and just misses a
+  // square one it backed off from a hair further -- `DEBUG_OUTLINE_SLACK`
+  // is comfortably past any speed a tank actually reaches (see V_High_Speed,
+  // `flags.mjs`) so this reads as "touching" either way, the way the debug
+  // outline always should for whatever the tank is actually resting against.
+  if (obstacle.type === 'mesh') {
+    // The query box only ever reaches upward from the point it is asked
+    // at (`findMeshHitFaceOriented`'s own `[0, height]`, matching a tank's
+    // feet-at-the-query-point shape) -- fine for a wall, where the slack
+    // above only needs to widen the footprint, but resting square on a
+    // *roof* backs `playerY` off upward by that same tiny amount, which can
+    // leave the roof's own plane just below this query's floor instead of
+    // inside it. Asking a touch below `playerY` instead, with the extra
+    // slack folded into `queryHeight` on top of that, straddles the true
+    // surface regardless of which side the backoff nudged it to.
+    const DEBUG_OUTLINE_SLACK = 0.5;
+    const tankScale = getMyTankScale();
+    const halfWidth = (TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1)) + DEBUG_OUTLINE_SLACK;
+    const halfLength = (TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1)) + DEBUG_OUTLINE_SLACK;
+    const queryY = playerY - DEBUG_OUTLINE_SLACK;
+    const queryHeight = TANK_COLLISION_HEIGHT + (2 * DEBUG_OUTLINE_SLACK);
+    const face = findMeshHitFaceOriented(
+      obstacle, playerX, queryY, playerZ, playerRotation, halfWidth, halfLength, queryHeight,
+    ) || findMeshHitFace(obstacle, playerX, queryY, playerZ, queryHeight, queryHeight);
+    if (!face) return null;
+    const offset = new THREE.Vector3(face.plane[0], face.plane[1], face.plane[2]).multiplyScalar(epsilon);
+    return face.vertexIndices.map((vi) => {
+      const v = obstacle.vertices[vi];
+      return new THREE.Vector3(v.x, v.y, v.z).add(offset);
+    });
+  }
+
   const cos = Math.cos(obstacle.rotation);
   const sin = Math.sin(obstacle.rotation);
   const toWorldPoint = (lx, ly, lz) => new THREE.Vector3(
@@ -4276,7 +4374,8 @@ function handleGameplayKeydown(event) {
   }
   // cmdDestruct (clientCommands.cxx:400): five seconds, and the key again calls
   // it off. The request goes when the count runs out, in updateDestructCountdown.
-  if (event.code === 'KeyQ' && ws && ws.readyState === WebSocket.OPEN) {
+  // `Delete` is upstream's own default binding (ActionBinding.cxx:122).
+  if (event.code === 'Delete' && ws && ws.readyState === WebSocket.OPEN) {
     const outcome = destructCountdown.pressDestructKey(frameEpochMs, {
       observer: isObserver(),
       alive: isMyTankAlive(),
@@ -4489,6 +4588,22 @@ window.addEventListener('DOMContentLoaded', () => {
     });
     updateDebugLabelsButton();
   }
+
+  document.getElementById('shareViewBtn')?.addEventListener('click', async () => {
+    const link = buildShareViewLink();
+    if (!link) {
+      showMessage('Share View Link: only available while viewing a map');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+      showMessage('View link copied to clipboard');
+    } catch {
+      // No clipboard permission (or no secure context) -- the chat log is
+      // still a place to read it from and select it by hand.
+      showMessage(link);
+    }
+  });
 
   // Initialize WebXR support
   window.addEventListener('webxrsessionchange', event => {
@@ -5270,6 +5385,29 @@ function handleServerMessage(message) {
         playerY = message.player.y;
         playerZ = message.player.z;
         playerRotation = message.player.rotation;
+
+        // The view a shared Map Viewer link asked for -- applied on every
+        // join, same reasoning as `autoFollowTarget` just above. A position
+        // override resets `roamCamera` too, so free-roam's own lazy pickup
+        // (`handleRoamMotion`) re-derives from the new spot on its next
+        // frame rather than the one still sitting in it from before.
+        if (isObserverTeam(playerTeam)) {
+          if (autoViewCamTarget) {
+            roamView = autoViewCamTarget;
+          } else if (autoViewMapTarget) {
+            // A bare `?viewmap=` with no explicit `cam=` starts driving
+            // rather than free-floating -- closer to "walk around and look"
+            // than a spawn in empty air pointed at nothing in particular.
+            roamView = ROAM_VIEW.DRIVE_FP;
+          }
+          if (autoViewPosTarget) {
+            playerX = autoViewPosTarget.x;
+            playerY = autoViewPosTarget.y;
+            playerZ = autoViewPosTarget.z;
+            playerRotation = autoViewPosTarget.rotation;
+            roamCamera = null;
+          }
+        }
 
         // Save the name to localStorage (server may have kept our requested name or assigned default)
         localStorage.setItem('playerName', myPlayerName);
@@ -7362,11 +7500,13 @@ function amInsideBuilding() {
 // local tank is. Every call is for the local player, so the heading defaults to
 // theirs -- a call site that silently fell back to a circle would disagree with
 // the server about the shape being tested.
-function checkCollision(x, y, z, rotation = playerRotation, fromY = y) {
+function checkCollision(x, y, z, rotation = playerRotation, fromY = y, fromX, fromZ) {
   const phased = amPhased();
   return findTankObstacle(getCollisionColliders(), x, y, z, {
     rotation,
     fromY,
+    fromX,
+    fromZ,
     radius: TANK_COLLISION_HEIGHT,
     tankScale: getMyTankScale(),
     phased,
@@ -7415,12 +7555,12 @@ function resolveTankStep(velocityX, velocityY, velocityZ, angularVelocity, delta
     // occupant's vertical extent covers the span it crossed -- upstream's
     // inMovingBox, and what stops a fast fall passing through a roof.
     hitTest: (fromX, fromY, fromZ, fromAz, toX, toY, toZ, toAz) => (
-      checkCollision(toX, toY, toZ, toAz, fromY)
+      checkCollision(toX, toY, toZ, toAz, fromY, fromX, fromZ)
     ),
     getNormal: (obs, px, py, pz, paz, hitX, hitY, hitZ, hitAz, fromX, fromZ, fromAz, toX, toZ, toAz) => {
       const tankScale = getMyTankScale();
       const sweep = {
-        fromX, fromZ, fromAz, toX, toZ, toAz,
+        fromX, fromZ, fromAz, toX, toZ, toAz, hitX, hitZ,
         halfWidth: TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
         halfLength: TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1),
       };
@@ -8505,8 +8645,19 @@ function handleRoamMotion(deltaTime) {
     myTank.visible = true;
     if (myTank.userData.ghostMesh) myTank.userData.ghostMesh.visible = false;
     if (myTank.userData.jumpPredictionDebug) myTank.userData.jumpPredictionDebug.visible = false;
+    wasPhantomDriving = true;
     sendObserverUpdate();
     return;
+  }
+  // Dropping back out of DRIVE_FP/DRIVE_TP: the tank's own physics just left
+  // `myTank` wherever driving ended, but `roamCamera` was never touched while
+  // that ran (see above) and still holds wherever free roam was parked before
+  // driving started. Clearing it here forces the `!roamCamera` init below to
+  // re-seed it from `myTank`'s current position instead of resuming that
+  // stale one.
+  if (wasPhantomDriving) {
+    roamCamera = null;
+    wasPhantomDriving = false;
   }
 
   // Cycling used to answer Fire here too, but Fire is wanted free for a
@@ -11731,15 +11882,46 @@ function getRadarObstacles() {
       // A material's `noradar` flag (docs/bzw.md, "Materials and appearance")
       // -- upstream's RadarRenderer skips a face whose material asks for it;
       // bzo has no per-face radar drawing to skip, so the whole obstacle sits
-      // out instead. A mesh has no radar footprint yet either
-      // (`docs/bzw-plan.md`'s "Mesh geometry") -- worth its own exclusion
-      // rather than leaning on its missing `x`/`z` clipping away silently.
+      // out instead. A mesh draws through `getRadarMeshFaces` below instead of
+      // here -- it has no single footprint the way a box's `w`/`d` gives one.
       list: [...OBSTACLES]
         .filter((obs) => !obs.noRadar && obs.type !== 'mesh')
         .sort((left, right) => getRadarObstacleTopY(left) - getRadarObstacleTopY(right)),
     };
   }
   return radarObstacleOrder.list;
+}
+
+// A mesh's own radar footprint -- upstream's own "enhanced" radar mode
+// (RadarRenderer.cxx), the higher-quality one of its two ("bzo does not
+// mirror BZFlag's client display options", AGENTS.md): each face draws for
+// itself rather than the mesh as one shape, and only a face angled at least
+// partly upward (`plane[1] > 0`, bzo's Y the same up axis upstream's Z is)
+// draws at all from a plan view -- a vertical wall would draw edge-on as
+// noise, not signal, the same reason upstream skips it. A face's own
+// `noradar` (inherited from the mesh's own default, same as any other
+// material property a face does not restate) drops it same as any other
+// obstacle's. Sorted and cached the same way `getRadarObstacles` is.
+let radarMeshFaceOrder = { source: null, list: [] };
+
+function getRadarMeshFaces() {
+  if (radarMeshFaceOrder.source !== OBSTACLES) {
+    const entries = [];
+    OBSTACLES.forEach((obs) => {
+      if (obs.type !== 'mesh' || !obs.bounds) return;
+      obs.faces.forEach((face) => {
+        if (!face.plane || face.plane[1] <= 0 || face.noRadar) return;
+        entries.push({ obs, face, topY: obs.bounds.maxY });
+      });
+    });
+    radarMeshFaceOrder = {
+      source: OBSTACLES,
+      list: entries
+        .sort((left, right) => left.topY - right.topY)
+        .map(({ obs, face }) => ({ obs, face })),
+    };
+  }
+  return radarMeshFaceOrder.list;
 }
 
 // Team::getRadarColor is what upstream's radar draws a base in
@@ -12153,6 +12335,42 @@ function updateRadar() {
     });
   }
 
+  // Draw a mesh's own upward-facing faces -- see `getRadarMeshFaces`. Each
+  // face's own vertices are already in world space (no obstacle rotation to
+  // apply, unlike a box), so this projects them directly rather than
+  // rotating a local rectangle the way the obstacle loop above does.
+  if (typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES)) {
+    getRadarMeshFaces().forEach(({ obs, face }) => {
+      const radarPolygon = face.vertexIndices.map((vi) => {
+        const v = obs.vertices[vi];
+        return toRadarRelative(v.x, v.z);
+      });
+      const clippedPolygon = clipPolygonToRadarSquare(radarPolygon, radarDistance);
+      if (clippedPolygon.length < 3) return;
+
+      // A single face has no height of its own to speak of -- upstream's own
+      // `BZDBCache::useMeshForRadar` fallback for exactly this, using the
+      // whole mesh's own vertical span instead of one infinitely thin face.
+      const opacity = getRadarOpacity(py, obs.bounds.minY, obs.bounds.maxY - obs.bounds.minY);
+
+      radarCtx.save();
+      radarCtx.globalAlpha = opacity;
+      radarCtx.fillStyle = face.color ? getRadarTintFill(face.color) : RADAR_NEUTRAL_FILL;
+      radarCtx.beginPath();
+      clippedPolygon.forEach((point, index) => {
+        const panel = radarToCanvas(point.x, point.y);
+        if (index === 0) {
+          radarCtx.moveTo(panel.x, panel.y);
+        } else {
+          radarCtx.lineTo(panel.x, panel.y);
+        }
+      });
+      radarCtx.closePath();
+      radarCtx.fill();
+      radarCtx.restore();
+    });
+  }
+
   // Draw projectiles (shots) within radar distance
   const shotRadarColorOf = (proj) => proj.userData?.radarColor || '#FFD700';
   if (typeof projectiles !== 'undefined' && projectiles.forEach) {
@@ -12234,14 +12452,19 @@ function updateRadar() {
   // Draw tanks within radar distance, or as edge dots if beyond
   tanks.forEach((tank, playerId) => {
     if (!tank.position) return;
-    // Only show on radar if alive and visible
     const state = tank.userData && tank.userData.playerState;
-    if ((state && state.health <= 0) || tank.visible === false) return;
+    const isSelf = playerId === myPlayerId;
+    // An observer's own tank carries no health and is invisible in the 3D
+    // world by design (see handleRoamMotion's "nothing draws it"), which
+    // would otherwise hide it here same as anyone else's -- but a Map Viewer
+    // or spectator has no other reference point on an empty radar without it,
+    // so the local player's own marker is exempt from both gates.
+    if (!isSelf && ((state && state.health <= 0) || tank.visible === false)) return;
     // RadarRenderer.cxx:628. A stealthed tank has no blip at all rather than a
     // dim one, and Seer is the only thing that brings it back. A cloaked tank is
     // the mirror image and stays on the radar: `CL` hides you from the window,
     // `ST` hides you from the panel, and carrying one does not buy the other.
-    if (state && isHiddenFromRadar(state.id)) return;
+    if (!isSelf && state && isHiddenFromRadar(state.id)) return;
 
     // Get player color (convert from hex number to CSS string). RadarRenderer.cxx
     // asks the same question of every blip it draws: colourblindness reaches the
