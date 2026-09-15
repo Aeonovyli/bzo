@@ -762,31 +762,48 @@ Not yet read:
   rather than inside a `group` block -- see **Groups** above for why this one
   differs from `shift`/`spin`, which are read either way.
 
+## Mesh and its primitives
+
+`mesh` is parsed, textured, placed through `group` instances, debug-labelled,
+radar-drawn, and collided with (a tank and a shot both stop at a mesh face,
+per face-level `drivethrough`/`shootthrough`, a tank slides off one the same
+way it slides off a box corner, and the oriented tank box is its own precise
+case rather than a circle standing in for it) -- see **Groups** above.
+
+All six primitives that expand to a mesh upstream are read too:
+
+- **`tetra`** parses its four vertices and per-face materials, corrects the
+  vertex winding the same way upstream's own `TetraBuilding::checkVertexOrder`
+  does, and builds a real four-face mesh.
+- **`cone`/`meshpyr`** and **`arc`/`meshbox`** are each upstream's own same
+  generator built two ways (`CustomCone.cxx`, `CustomArc.cxx` --
+  `meshpyr`/`meshbox` just built with `pyramid=true`/`box=true`) -- position,
+  size, a `divisions`-sided sweep (`angle`, defaulting to a full 360 degrees),
+  per-face materials, `texsize`, `smoothbounce`/`flatshading`, and each one's
+  own further difference: a `meshpyr`'s `flipz`; an `arc`'s own `ratio` (1,
+  the default, collapses its inner radius to zero, an ordinary solid wedge or
+  disc; anything less is a genuinely hollow tube, with its own `inside`
+  wall).
+- **`sphere`** (`CustomSphere.cxx`/`SphereObstacle.cxx`) -- `radius` (setting
+  all three axes of `size` at once, for a true sphere rather than an
+  ellipsoid), `divisions`, `hemisphere`/`hemi` (a dome, closed by a flat
+  `bottom` disc rather than a matching lower half), and the same
+  `texsize`/`smoothbounce`/`flatshading`/materials (`edge`, `bottom`) as the
+  others. Defaults to `position 0 0 10` rather than the origin, so a mapper
+  who never states one still gets a radius-10 sphere resting on the ground.
+
+All four build a real explicit-texcoord (and, unless `flatshading`/a
+`meshpyr`'s own default says otherwise, smooth-normal) mesh, matching
+upstream's own wrap-around texturing rather than falling back to bzo's
+per-face auto-planar UV. See `docs/bzw-plan.md`'s "Mesh geometry" for what is
+still left on the mesh side generally (mainly a perf pass merging
+same-material triangles).
+
 ## What is ignored
 
 Anything not listed above is skipped without comment, which means a map using it
 loads and plays with that part of it missing. The notable absences:
 
-- **`meshbox`, and the `arc`/`sphere` primitives that expand to a `mesh`.**
-  `tetra`, `cone` and `meshpyr` are the three of the six already read.
-  `tetra` parses its four vertices and per-face materials, corrects the
-  vertex winding the same way upstream's own `checkVertexOrder` does, and
-  builds a real four-face mesh. `cone` and `meshpyr` are upstream's own same
-  generator (`CustomCone.cxx`, `meshpyr` just built with `pyramid=true`) --
-  position, size, a `divisions`-sided sweep (`angle`, defaulting to a full
-  360 degrees), per-face materials (`edge`/`bottom`/`startside`/`endside`,
-  or a bare line for all four), `texsize`, `smoothbounce`/`flatshading`, and
-  a `meshpyr`'s own `flipz`. Both build a real explicit-texcoord (and, unless
-  `flatshading`/a `meshpyr`'s own default says otherwise, smooth-normal)
-  mesh, matching upstream's own wrap-around texturing rather than falling
-  back to bzo's per-face auto-planar UV. `mesh` itself is parsed, textured,
-  placed through `group` instances, debug-labelled, radar-drawn, and collided
-  with (a tank and a shot both stop at a mesh face, per face-level
-  `drivethrough`/`shootthrough`, a tank slides off one the same way it slides
-  off a box corner, and the oriented tank box is its own precise case rather
-  than a circle standing in for it) -- see **Groups** above. See
-  `docs/bzw-plan.md`'s "Mesh geometry" for what is still left (mainly a
-  perf pass merging same-material triangles, and `arc`/`sphere`/`meshbox`).
 - **Most of what a `material` block or a `matref` can still say**:
   `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, `phydrv`, and the
   lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see

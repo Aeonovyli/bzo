@@ -1258,13 +1258,12 @@ mesh
   endface
 end
 
-# Primitives bzo does not parse yet -- `arc`/`sphere`, and `meshbox`
-# (upstream's own mesh-generator form of `arc`, CustomArc.cxx, not
-# CustomBox.cxx despite the name). `tetra`, `cone` and `meshpyr` (the last
-# two both `CustomCone.cxx`, `meshpyr` just built with `pyramid=true`) are
-# now read -- see `docs/bzw-plan.md`'s "Mesh geometry" for what is still
-# left. Clear of every other test, a free strip north of the centre rings
-# and short of the north base.
+# All six primitives that expand to a mesh upstream are read now --
+# `tetra`, `cone`/`meshpyr`, `arc`/`meshbox`, and `sphere` -- see
+# `docs/bzw-plan.md`'s "Mesh geometry" for what is still left on the mesh
+# side generally (mainly a perf pass merging same-material triangles).
+# Clear of every other test, a free strip north of the centre rings and
+# short of the north base.
 arc
   name test_arc
   position -75 70 0
@@ -1272,6 +1271,19 @@ arc
   rotation 30
   divisions 16
   angle 270
+end
+
+# `arc`'s own `ratio` < 1 -- a genuinely hollow tube (`ArcObstacle::makeRing`)
+# rather than the solid wedge/disc `ratio`'s default of 1 collapses to
+# (`makePie`, what the plain `test_arc` above exercises). A wedge too, so
+# this is also the only fixture testing `startside`/`endside` on an `arc`.
+arc
+  name test_arc_ring
+  position 105 85 0
+  size 8 8 6
+  ratio 0.5
+  divisions 16
+  angle 300
 end
 
 cone
@@ -1286,6 +1298,19 @@ sphere
   position -15 70 6
   radius 6
   divisions 4
+end
+
+# `hemisphere` -- the flat cap that closes it sits at `position`'s own
+# height rather than `radius` below the dome's own top, unlike a full
+# sphere (`test_sphere` above sets `position`'s own z to its radius so the
+# whole thing clears the ground; this one leaves it at zero so the cap does
+# instead).
+sphere
+  name test_sphere_hemi
+  position -15 90 0
+  radius 6
+  divisions 4
+  hemisphere
 end
 
 tetra

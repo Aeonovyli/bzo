@@ -1751,7 +1751,6 @@ function normalizeScoreLimit(score) {
 // only has to recognize the *opening* keyword to say how many of each a map
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'arc', 'sphere', 'meshbox',
   'physics', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
 
@@ -1941,11 +1940,32 @@ function buildConeMesh(cone) {
     }
   }
 
-  // Local (pre-`position`) coordinates so far; shift to world space, then
-  // into bzo's own axes -- the same single conversion `buildTetraMesh` uses.
+  // Local (pre-`position`) coordinates so far. A `meshpyr`'s own `rotation`
+  // never went into `baseHeading` above -- that is upstream's fixed
+  // 45-degree twist -- because upstream applies the mapper's own heading as
+  // a genuine second transform on top of that (`xform.addSpin(rotation,
+  // zAxis)`, CustomCone.cxx, right before `xform.addShift(pos)`), the same
+  // outer `MeshTransform` a `group` instance's own rotation goes through.
+  // Composing that as a real transform stack is more machinery than baking
+  // one more rotation into this same local-frame convention, so it lands
+  // here instead: spin around the vertical axis, then shift, then convert --
+  // a plain `cone`'s own `rotation` is already spent as `baseHeading`, so it
+  // spins by nothing extra here.
   const pos = cone.posBzf;
-  const toBzo = (p) => ({ x: p.x + pos.x, y: p.z + pos.z, z: -(p.y + pos.y) });
-  const toBzoDir = (n) => ({ x: n.x, y: n.z, z: -n.y });
+  const spinAngle = cone.isPyramid ? cone.rotationRad : 0;
+  const cosSpin = Math.cos(spinAngle);
+  const sinSpin = Math.sin(spinAngle);
+  const spin = (p) => (spinAngle === 0 ? p : {
+    x: (p.x * cosSpin) - (p.y * sinSpin), y: (p.x * sinSpin) + (p.y * cosSpin), z: p.z,
+  });
+  const toBzo = (p) => {
+    const s = spin(p);
+    return { x: s.x + pos.x, y: s.z + pos.z, z: -(s.y + pos.y) };
+  };
+  const toBzoDir = (n) => {
+    const s = spin(n);
+    return { x: s.x, y: s.z, z: -s.y };
+  };
 
   const vertices = ringVertsLocal.map(toBzo);
   const vlen = vertices.length;
@@ -2034,6 +2054,567 @@ function buildConeMesh(cone) {
     checkPoints: [{ ...checkPoint, inside: true }],
     phydrv: cone.phydrv, noclusters: false, smoothBounce: cone.smoothBounce, decorative: false,
     driveThrough: cone.driveThrough, shootThrough: cone.shootThrough, ricochet: cone.ricochet,
+    texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+  };
+}
+
+// `ArcObstacle::makeMesh` (ArcObstacle.cxx:93-182), ported the same way as
+// `buildConeMesh` above. Unlike a cone, an arc never tapers -- its cross-
+// section is the same at every height -- and it has a `ratio` (0..1) between
+// its inner and outer radius: `ratio=1` (the default) collapses the inner
+// radius to zero, `isPie` in upstream's own terms, an ordinary solid wedge;
+// anything less is a genuinely hollow tube with its own `inside` wall.
+// `meshbox` is the exact same generator upstream itself reuses
+// (`CustomArc(true)`, `BZWReader.cxx`): 4 divisions, defaults pulled from
+// BZDB's `_boxBase`/`_boxHeight` (30 and `6*_muzzleHeight` = 9.42 here,
+// bzo having no BZDB to read them from live), and upstream rebuilds it at
+// the origin with a 45-degree internal twist and a sqrt(2) size scale --
+// see `buildConeMesh`'s own comment for why this port folds that into the
+// sweep's own start angle instead of composing upstream's transform stack.
+// `checkPoints` is upstream's own aid for telling a mesh's inside from its
+// outside on an arbitrary, possibly non-convex shape -- bzo's own collision
+// never reads a mesh's `checkPoints` at all (every test here is per-face),
+// so this keeps one simple, always-correct point rather than porting
+// upstream's own six-point `CheckOutside` ring verbatim for something
+// nothing downstream looks at.
+const ARC_MIN_SIZE = 1e-6;
+// `_boxBase`/`_boxHeight` (BZDB, `30.0`/`6.0*_muzzleHeight`, `_muzzleHeight`
+// = 1.57) -- `meshbox`'s own default `size` when a mapper gives none, same
+// as a plain `box`'s.
+const MESHBOX_DEFAULT_BASE = 30.0;
+const MESHBOX_DEFAULT_HEIGHT = 6.0 * 1.57;
+// `CustomArc.h`'s own material enum order, and the side names
+// `parseMaterialsByName` matches a line's first word against.
+const ARC_SIDE_NAMES = new Map([
+  ['top', 0], ['bottom', 1], ['inside', 2], ['outside', 3], ['startside', 4], ['endside', 5],
+]);
+
+// A solid wedge (`ratio` collapses the inner radius to ~0) -- `ArcObstacle::
+// makePie` (ArcObstacle.cxx:185-365). All in the arc's own local frame (no
+// `position` yet, heading already folded into `r`); the edge ring's own
+// vertices/normals/texcoords come first, then the two disc centres, matching
+// upstream's own array layout exactly since the face index math below
+// depends on it.
+function buildArcPieLocal(a, r, h, radius, squish, texU, texV, texDiscU, texDiscV, divisions, useNormals, isCircle) {
+  const astep = a / divisions;
+  const ringVerts = [];
+  const ringNorms = useNormals ? [] : null;
+  const texcoords = [];
+
+  for (let i = 0; i <= divisions; i++) {
+    const ang = r + (astep * i);
+    const cosv = Math.cos(ang);
+    const sinv = Math.sin(ang);
+    if (!isCircle || i !== divisions) {
+      const dx = cosv * radius;
+      const dy = sinv * radius * squish;
+      ringVerts.push({ x: dx, y: dy, z: 0 });
+      ringVerts.push({ x: dx, y: dy, z: h });
+      if (useNormals) {
+        let nx = cosv * squish;
+        let ny = sinv;
+        const len = Math.sqrt((nx * nx) + (ny * ny)) || 1;
+        nx /= len; ny /= len;
+        ringNorms.push({ x: nx, y: ny, z: 0 });
+      }
+    }
+    const t0 = texU * (i / divisions);
+    texcoords.push({ u: t0, v: 0 });
+    texcoords.push({ u: t0, v: texV });
+  }
+  // The disc's own radial UV -- always from angle zero, regardless of the
+  // sweep's own start angle `r`; upstream's own `astep * i`, not `r + ...`.
+  for (let i = 0; i <= divisions; i++) {
+    const ang = astep * i;
+    texcoords.push({
+      u: texDiscU * (0.5 + (0.5 * Math.cos(ang))),
+      v: texDiscV * (0.5 + (0.5 * Math.sin(ang))),
+    });
+  }
+
+  const vertices = ringVerts;
+  const vlen = vertices.length;
+  const vbotIndex = vlen;
+  const vtopIndex = vlen + 1;
+  vertices.push({ x: 0, y: 0, z: 0 });
+  vertices.push({ x: 0, y: 0, z: h });
+
+  const normals = useNormals ? ringNorms : [];
+  const nlen = normals.length;
+
+  const tmidIndex = texcoords.length;
+  texcoords.push({ u: texDiscU * 0.5, v: texDiscV * 0.5 });
+
+  const faces = [];
+  for (let i = 0; i < divisions; i++) {
+    const PV = (x) => (x + (i * 2)) % vlen;
+    const PN = (x) => (x + i) % nlen;
+    const PTO = (x) => x + (i * 2);
+    const PTC = (x) => ((divisions + 1) * 2) + x + i;
+    const PTCI = (x) => ((divisions + 1) * 3) - x - i - 1;
+
+    faces.push({
+      vertexIndices: [PV(0), PV(2), PV(3), PV(1)],
+      normalIndices: useNormals ? [PN(0), PN(1), PN(1), PN(0)] : [],
+      texcoordIndices: [PTO(0), PTO(2), PTO(3), PTO(1)],
+      side: 3, // Outside_
+    });
+    faces.push({
+      vertexIndices: [vtopIndex, PV(1), PV(3)],
+      normalIndices: [],
+      texcoordIndices: [tmidIndex, PTC(0), PTC(1)],
+      side: 0, // Top
+    });
+    faces.push({
+      vertexIndices: [vbotIndex, PV(2), PV(0)],
+      normalIndices: [],
+      texcoordIndices: [tmidIndex, PTCI(1), PTCI(0)],
+      side: 1, // Bottom
+    });
+  }
+  if (!isCircle) {
+    const tc = divisions * 2;
+    faces.push({
+      vertexIndices: [vbotIndex, 0, 1, vtopIndex],
+      normalIndices: [], texcoordIndices: [0, tc, tc + 1, 1], side: 4, // StartFace
+    });
+    const e = divisions * 2;
+    faces.push({
+      vertexIndices: [e, vbotIndex, vtopIndex, e + 1],
+      normalIndices: [], texcoordIndices: [0, tc, tc + 1, 1], side: 5, // EndFace
+    });
+  }
+
+  const checkLocal = isCircle
+    ? { x: 0, y: 0 }
+    : { x: Math.cos(r + (0.5 * a)) * radius * 0.5, y: Math.sin(r + (0.5 * a)) * radius * 0.5 * squish };
+  return {
+    vertices, normals, texcoords, faces,
+    checkPoint: { x: checkLocal.x, y: checkLocal.y, z: 0.5 * h },
+  };
+}
+
+// A hollow tube -- `ArcObstacle::makeRing` (ArcObstacle.cxx:368-558). Same
+// local-frame convention as the pie builder above; every ring index pushes
+// four vertices (inside-bottom, inside-top, outside-bottom, outside-top) and
+// two normals (inside, outside) rather than the pie's two and one, and has
+// no disc centre or radial UV at all -- a hollow tube's top and bottom are
+// plain quads between the inside and outside walls, not a fan to a point.
+function buildArcRingLocal(a, r, h, inrad, outrad, squish, texU, texV, divisions, useNormals, isCircle) {
+  const astep = a / divisions;
+  const vertices = [];
+  const norms = useNormals ? [] : null;
+  const texcoords = [];
+
+  for (let i = 0; i <= divisions; i++) {
+    const ang = r + (astep * i);
+    const cosv = Math.cos(ang);
+    const sinv = Math.sin(ang);
+    if (!isCircle || i !== divisions) {
+      const ix = cosv * inrad;
+      const iy = squish * sinv * inrad;
+      const ox = cosv * outrad;
+      const oy = squish * sinv * outrad;
+      vertices.push({ x: ix, y: iy, z: 0 });
+      vertices.push({ x: ix, y: iy, z: h });
+      vertices.push({ x: ox, y: oy, z: 0 });
+      vertices.push({ x: ox, y: oy, z: h });
+      if (useNormals) {
+        let nx = -cosv * squish;
+        let ny = -sinv;
+        const len = Math.sqrt((nx * nx) + (ny * ny)) || 1;
+        nx /= len; ny /= len;
+        norms.push({ x: nx, y: ny, z: 0 });
+        norms.push({ x: -nx, y: -ny, z: 0 });
+      }
+    }
+    const t0 = texU * (i / divisions);
+    texcoords.push({ u: t0, v: 0 });
+    texcoords.push({ u: t0, v: texV });
+  }
+
+  const vlen = vertices.length;
+  const normals = useNormals ? norms : [];
+  const nlen = normals.length;
+
+  const faces = [];
+  for (let i = 0; i < divisions; i++) {
+    const RV = (x) => (x + (i * 4)) % vlen;
+    const RN = (x) => (x + (i * 2)) % nlen;
+    const RT = (x) => x + (i * 2);
+    const RIT = (x) => ((divisions + (x % 2)) * 2) - (x + (i * 2));
+
+    faces.push({
+      vertexIndices: [RV(4), RV(0), RV(1), RV(5)],
+      normalIndices: useNormals ? [RN(2), RN(0), RN(0), RN(2)] : [],
+      texcoordIndices: [RIT(2), RIT(0), RIT(1), RIT(3)],
+      side: 2, // Inside
+    });
+    faces.push({
+      vertexIndices: [RV(2), RV(6), RV(7), RV(3)],
+      normalIndices: useNormals ? [RN(1), RN(3), RN(3), RN(1)] : [],
+      texcoordIndices: [RT(0), RT(2), RT(3), RT(1)],
+      side: 3, // Outside_
+    });
+    faces.push({
+      vertexIndices: [RV(3), RV(7), RV(5), RV(1)],
+      normalIndices: [],
+      texcoordIndices: [RT(0), RT(2), RT(3), RT(1)],
+      side: 0, // Top
+    });
+    faces.push({
+      vertexIndices: [RV(0), RV(4), RV(6), RV(2)],
+      normalIndices: [],
+      texcoordIndices: [RT(0), RT(2), RT(3), RT(1)],
+      side: 1, // Bottom
+    });
+  }
+  if (!isCircle) {
+    const tc = divisions * 2;
+    faces.push({
+      vertexIndices: [0, 2, 3, 1],
+      normalIndices: [], texcoordIndices: [0, tc, tc + 1, 1], side: 4, // StartFace
+    });
+    const e = divisions * 4;
+    faces.push({
+      vertexIndices: [e + 2, e, e + 1, e + 3],
+      normalIndices: [], texcoordIndices: [0, tc, tc + 1, 1], side: 5, // EndFace
+    });
+  }
+
+  const midAng = isCircle ? r : (r + (0.5 * a));
+  const midRad = (inrad + outrad) * 0.5;
+  return {
+    vertices, normals, texcoords, faces,
+    checkPoint: { x: Math.cos(midAng) * midRad, y: Math.sin(midAng) * midRad * squish, z: 0.5 * h },
+  };
+}
+
+function buildArcMesh(arc) {
+  const rawSize = arc.sizeBzf;
+  const sz = arc.isBox
+    ? { x: Math.abs(rawSize.x) * Math.SQRT2, y: Math.abs(rawSize.y) * Math.SQRT2, z: Math.abs(rawSize.z) }
+    : { x: Math.abs(rawSize.x), y: Math.abs(rawSize.y), z: Math.abs(rawSize.z) };
+
+  let texU = arc.texsize.u;
+  let texV = arc.texsize.v;
+  let texDiscU = arc.texsize.du;
+  let texDiscV = arc.texsize.dv;
+  if (sz.x < ARC_MIN_SIZE || sz.y < ARC_MIN_SIZE || sz.z < ARC_MIN_SIZE
+    || Math.abs(texU) < ARC_MIN_SIZE || Math.abs(texV) < ARC_MIN_SIZE
+    || Math.abs(texDiscU) < ARC_MIN_SIZE || Math.abs(texDiscV) < ARC_MIN_SIZE
+    || arc.ratio < 0 || arc.ratio > 1) {
+    return null;
+  }
+
+  if (texU < 0) {
+    const circ = Math.PI * ((3 * (sz.x + sz.y))
+      - Math.sqrt((sz.x + (3 * sz.y)) * (sz.y + (3 * sz.x))));
+    texU = -Math.floor(circ / texU);
+  }
+  if (texV < 0) texV = -(sz.z / texV);
+
+  const baseHeading = arc.isBox ? (Math.PI / 4) : arc.rotationRad;
+  let r = baseHeading;
+  let a = arc.sweepDeg;
+  if (a > 360) a = 360;
+  if (a < -360) a = -360;
+  a *= Math.PI / 180;
+  if (a < 0) {
+    r += a;
+    a = -a;
+  }
+  if (arc.divisions <= Math.floor((a + ARC_MIN_SIZE) / Math.PI)) return null;
+  const isCircle = Math.abs(Math.PI - (((a + Math.PI) % (2 * Math.PI)) + (2 * Math.PI)) % (2 * Math.PI))
+    < ARC_MIN_SIZE;
+
+  let inrad = sz.x * (1 - arc.ratio);
+  let outrad = sz.x;
+  if (inrad > outrad) {
+    const tmp = inrad;
+    inrad = outrad;
+    outrad = tmp;
+  }
+  if (outrad < ARC_MIN_SIZE || (outrad - inrad) < ARC_MIN_SIZE) return null;
+  const isPie = inrad < ARC_MIN_SIZE;
+  const squish = sz.y / sz.x;
+  if (isPie) {
+    if (texDiscU < 0) texDiscU = -((2 * outrad) / texDiscU);
+    if (texDiscV < 0) texDiscV = -((2 * outrad * squish) / texDiscV);
+  }
+
+  const built = isPie
+    ? buildArcPieLocal(a, r, sz.z, outrad, squish, texU, texV, texDiscU, texDiscV, arc.divisions, arc.useNormals, isCircle)
+    : buildArcRingLocal(a, r, sz.z, inrad, outrad, squish, texU, texV, arc.divisions, arc.useNormals, isCircle);
+
+  // See `buildConeMesh`'s own comment on `spinAngle` -- the same reasoning
+  // applies here: a `meshbox`'s own `rotation` is upstream's own second
+  // transform on top of the fixed 45-degree twist, not part of `baseHeading`.
+  const pos = arc.posBzf;
+  const spinAngle = arc.isBox ? arc.rotationRad : 0;
+  const cosSpin = Math.cos(spinAngle);
+  const sinSpin = Math.sin(spinAngle);
+  const spin = (p) => (spinAngle === 0 ? p : {
+    x: (p.x * cosSpin) - (p.y * sinSpin), y: (p.x * sinSpin) + (p.y * cosSpin), z: p.z,
+  });
+  const toBzo = (p) => {
+    const s = spin(p);
+    return { x: s.x + pos.x, y: s.z + pos.z, z: -(s.y + pos.y) };
+  };
+  const toBzoDir = (n) => {
+    const s = spin(n);
+    return { x: s.x, y: s.z, z: -s.y };
+  };
+
+  const vertices = built.vertices.map(toBzo);
+  const normals = built.normals.map(toBzoDir);
+  const { texcoords } = built;
+
+  const faceBase = {
+    phydrv: arc.phydrv, noclusters: false, smoothBounce: false,
+    driveThrough: false, shootThrough: false, ricochet: false,
+  };
+  const matFields = (m) => ({
+    texture: m.texture, textureUrl: m.textureUrl, color: m.color, noRadar: m.noRadar, noLighting: m.noLighting,
+  });
+  const faces = built.faces.map(({ side, ...face }) => ({
+    ...faceBase, ...face, ...matFields(arc.materials[side]),
+  }));
+
+  const checkPoint = toBzo(built.checkPoint);
+
+  return {
+    type: 'mesh', name: arc.name, definedIn: arc.definedIn,
+    vertices, normals, texcoords, faces,
+    checkPoints: [{ ...checkPoint, inside: true }],
+    phydrv: arc.phydrv, noclusters: false, smoothBounce: arc.smoothBounce, decorative: false,
+    driveThrough: arc.driveThrough, shootThrough: arc.shootThrough, ricochet: arc.ricochet,
+    texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+  };
+}
+
+// `SphereObstacle::makeMesh` (SphereObstacle.cxx:86-433), the least like any
+// of the other three -- not a swept cross-section at all, but a recursive
+// triangular subdivision of a quarter-sphere, mirrored four ways around
+// (the `q` loop) and, for a full sphere, once more top-to-bottom (`factor`
+// doubling every ring vertex except the shared equator). Ported the same
+// way as the others (local frame, upstream's own variable names kept as
+// close as JS allows so this can be checked against the source line for
+// line), but this one earned real hand-verification before trusting it at
+// all: traced `divisions=1` by hand, vertex by vertex and face by face,
+// checked every one of its 8 faces against the octant it sits in, before
+// ever running it -- the index math (`((k*k)+k)*2`, `ringOffset`,
+// `lastStrip`/`lastCircle`) is upstream's own triangular-number recursion,
+// not something to trust by inspection alone. The fuzz sweep afterward
+// (see the `cone`/`arc` entries above for the method) is what actually
+// confirms it across every `divisions` this hand trace didn't cover.
+const SPHERE_MIN_SIZE = 1e-6;
+const SPHERE_SIDE_NAMES = new Map([['edge', 0], ['bottom', 1]]);
+
+function buildSphereMesh(sphere) {
+  const factor = sphere.hemisphere ? 1 : 2;
+  const sz = {
+    x: Math.abs(sphere.sizeBzf.x), y: Math.abs(sphere.sizeBzf.y), z: Math.abs(sphere.sizeBzf.z),
+  };
+  let texU = sphere.texsize.u;
+  let texV = sphere.texsize.v;
+  if (texU < 0) {
+    const circ = Math.PI * ((3 * (sz.x + sz.y))
+      - Math.sqrt((sz.x + (3 * sz.y)) * (sz.y + (3 * sz.x))));
+    texU = -Math.floor(circ / texU);
+  }
+  if (texV < 0) texV = -((2 * sz.z) / texV);
+
+  const { divisions } = sphere;
+  if (divisions < 1 || Math.abs(texU) < SPHERE_MIN_SIZE || Math.abs(texV) < SPHERE_MIN_SIZE
+    || sz.x < SPHERE_MIN_SIZE || sz.y < SPHERE_MIN_SIZE || sz.z < SPHERE_MIN_SIZE) {
+    return null;
+  }
+
+  const r = sphere.rotationRad;
+  const { useNormals, hemisphere } = sphere;
+  const vertices = [];
+  const normals = useNormals ? [] : null;
+  const texcoords = [];
+
+  vertices.push({ x: 0, y: 0, z: sz.z });
+  if (!hemisphere) vertices.push({ x: 0, y: 0, z: -sz.z });
+  if (useNormals) {
+    normals.push({ x: 0, y: 0, z: 1 });
+    if (!hemisphere) normals.push({ x: 0, y: 0, z: -1 });
+  }
+  texcoords.push({ u: 0.5, v: 1.0 });
+  if (!hemisphere) texcoords.push({ u: 0.5, v: 0.0 });
+
+  for (let i = 0; i < divisions; i++) {
+    const ringCount = 4 * (i + 1);
+    for (let j = 0; j < ringCount; j++) {
+      const hAngle = (((2 * Math.PI) * j) / ringCount) + r;
+      const vAngle = ((Math.PI / 2) * (divisions - i - 1)) / divisions;
+      const cosV = Math.cos(vAngle);
+      const ux = Math.cos(hAngle) * cosV;
+      const uy = Math.sin(hAngle) * cosV;
+      const uz = Math.sin(vAngle);
+      vertices.push({ x: sz.x * ux, y: sz.y * uy, z: sz.z * uz });
+
+      let nx = 0; let ny = 0; let nz = 0;
+      if (useNormals) {
+        nx = ux / sz.x; ny = uy / sz.y; nz = uz / sz.z;
+        const len = Math.sqrt((nx * nx) + (ny * ny) + (nz * nz)) || 1;
+        nx /= len; ny /= len; nz /= len;
+        normals.push({ x: nx, y: ny, z: nz });
+      }
+
+      let vFrac = (divisions - i - 1) / divisions;
+      if (!hemisphere) vFrac = 0.5 + (0.5 * vFrac);
+      const scaledV = vFrac * texV;
+      texcoords.push({ u: (j / ringCount) * texU, v: scaledV });
+
+      if (!hemisphere && i !== divisions - 1) {
+        vertices.push({ x: sz.x * ux, y: sz.y * uy, z: -sz.z * uz });
+        if (useNormals) normals.push({ x: nx, y: ny, z: -nz });
+        texcoords.push({ u: (j / ringCount) * texU, v: texV - scaledV });
+      }
+    }
+  }
+
+  // The closing strip -- one more texcoord per ring (and the two poles) for
+  // the seam where `j` wraps from the last position back to zero, needing
+  // U at the *far* edge (`texU`) rather than wrapping back to the near one.
+  const texStripOffset = texcoords.length;
+  texcoords.push({ u: texU * 0.5, v: texV });
+  if (!hemisphere) texcoords.push({ u: texU * 0.5, v: 0 });
+  for (let i = 0; i < divisions; i++) {
+    let vFrac = (divisions - i - 1) / divisions;
+    if (!hemisphere) vFrac = 0.5 + (0.5 * vFrac);
+    const scaledV = texV * vFrac;
+    texcoords.push({ u: texU, v: scaledV });
+    if (!hemisphere && i !== divisions - 1) {
+      texcoords.push({ u: texU, v: texV - scaledV });
+    }
+  }
+
+  // A hemisphere's own flat bottom cap, textured like a cone/arc's disc.
+  const bottomTexOffset = texcoords.length;
+  if (hemisphere) {
+    const astep = (2 * Math.PI) / (divisions * 4);
+    for (let i = 0; i < divisions * 4; i++) {
+      const ang = astep * i;
+      texcoords.push({
+        u: texU * (0.5 + (0.5 * Math.cos(ang))), v: texV * (0.5 + (0.5 * Math.sin(ang))),
+      });
+    }
+  }
+
+  const faces = [];
+  const kLast = divisions - 1;
+  const ringOffset = hemisphere ? 0 : 1 + (((kLast * kLast) + kLast) * 2);
+
+  for (let q = 0; q < 4; q++) {
+    for (let i = 0; i < divisions; i++) {
+      for (let j = 0; j < i + 1; j++) {
+        const lastStrip = q === 3 && j === i;
+        const lastCircle = i === divisions - 1;
+
+        let a;
+        if (i > 0) {
+          const k = i - 1;
+          a = lastStrip
+            ? 1 + (((k * k) + k) * 2)
+            : 1 + (((k * k) + k) * 2) + (q * (k + 1)) + j;
+        } else {
+          a = 0;
+        }
+        let b = 1 + (((i * i) + i) * 2) + (q * (i + 1)) + j;
+        let c = lastStrip ? 1 + (((i * i) + i) * 2) : b + 1;
+        const kNext = i + 1;
+        let d = 1 + (((kNext * kNext) + kNext) * 2) + (q * (kNext + 1)) + (j + 1);
+
+        a *= factor;
+        if (!lastCircle) {
+          b *= factor;
+          c *= factor;
+        } else {
+          b += ringOffset;
+          c += ringOffset;
+        }
+        if (i !== divisions - 2) d *= factor;
+        else d += ringOffset;
+
+        let ta;
+        let tc;
+        if (!lastStrip) {
+          ta = a;
+          tc = c;
+        } else {
+          ta = texStripOffset + (i * factor);
+          tc = texStripOffset + ((i + 1) * factor);
+        }
+
+        faces.push({ vertexIndices: [a, b, c], normalIndices: useNormals ? [a, b, c] : [], texcoordIndices: [ta, b, tc], side: 0 });
+        if (!lastCircle) {
+          faces.push({ vertexIndices: [b, d, c], normalIndices: useNormals ? [b, d, c] : [], texcoordIndices: [b, d, tc], side: 0 });
+        }
+
+        if (!hemisphere) {
+          a += 1;
+          ta += 1;
+          if (!lastCircle) {
+            b += 1;
+            c += 1;
+            tc += 1;
+          }
+          if (i !== divisions - 2) d += 1;
+          faces.push({ vertexIndices: [a, c, b], normalIndices: useNormals ? [a, c, b] : [], texcoordIndices: [ta, tc, b], side: 0 });
+          if (!lastCircle) {
+            faces.push({ vertexIndices: [b, c, d], normalIndices: useNormals ? [b, c, d] : [], texcoordIndices: [b, tc, d], side: 0 });
+          }
+        }
+      }
+    }
+  }
+
+  if (hemisphere) {
+    const offset = 1 + (((kLast * kLast) + kLast) * 2);
+    const discVertexIndices = [];
+    const discTexcoordIndices = [];
+    for (let i = 0; i < divisions * 4; i++) {
+      const vv = (divisions * 4) - i - 1;
+      discVertexIndices.push(vv + offset);
+      discTexcoordIndices.push(i + bottomTexOffset);
+    }
+    faces.push({
+      vertexIndices: discVertexIndices, normalIndices: [], texcoordIndices: discTexcoordIndices, side: 1,
+    });
+  }
+
+  const pos = sphere.posBzf;
+  const toBzo = (p) => ({ x: p.x + pos.x, y: p.z + pos.z, z: -(p.y + pos.y) });
+  const toBzoDir = (n) => ({ x: n.x, y: n.z, z: -n.y });
+
+  const outVertices = vertices.map(toBzo);
+  const outNormals = useNormals ? normals.map(toBzoDir) : [];
+
+  const faceBase = {
+    phydrv: sphere.phydrv, noclusters: false, smoothBounce: false,
+    driveThrough: false, shootThrough: false, ricochet: false,
+  };
+  const matFields = (m) => ({
+    texture: m.texture, textureUrl: m.textureUrl, color: m.color, noRadar: m.noRadar, noLighting: m.noLighting,
+  });
+  const outFaces = faces.map(({ side, ...face }) => ({
+    ...faceBase, ...face, ...matFields(sphere.materials[side]),
+  }));
+
+  const checkLocal = { x: 0, y: 0, z: hemisphere ? 0.5 * sz.z : 0 };
+  const checkPoint = toBzo(checkLocal);
+
+  return {
+    type: 'mesh', name: sphere.name, definedIn: sphere.definedIn,
+    vertices: outVertices, normals: outNormals, texcoords, faces: outFaces,
+    checkPoints: [{ ...checkPoint, inside: true }],
+    phydrv: sphere.phydrv, noclusters: false, smoothBounce: sphere.smoothBounce, decorative: false,
+    driveThrough: sphere.driveThrough, shootThrough: sphere.shootThrough, ricochet: sphere.ricochet,
     texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
   };
 }
@@ -3259,6 +3840,171 @@ function parseBZWMap(filename) {
       } else if (CONE_SIDE_NAMES.has(token)) {
         const subWords = words.slice(1);
         applyBzwMaterialToken(current.materials[CONE_SIDE_NAMES.get(token)], (subWords[0] || '').toLowerCase(), subWords);
+      } else {
+        current.materials.forEach((mat) => applyBzwMaterialToken(mat, token, words));
+      }
+    } else if (token === 'arc' || token === 'meshbox') {
+      // `CustomArc`'s own defaults (CustomArc.cxx:44-73): `meshbox` is the
+      // exact same generator as `arc`, just constructed with `box=true`
+      // (`BZWReader.cxx`'s own `new CustomArc(true)` for the keyword) -- 4
+      // divisions instead of 16, flat shading instead of smooth, its own
+      // default size pulled from a plain box's (`_boxBase`/`_boxHeight`),
+      // but the *same* default materials as a plain `arc` -- unlike
+      // `meshpyr`, `CustomArc`'s constructor never branches on `boxStyle` to
+      // change them. `ratio` (1 collapses the inner radius to zero, an
+      // ordinary solid wedge; less than that is a genuinely hollow tube)
+      // and a 4-value `texsize` (edge U, edge V, disc U, disc V -- the last
+      // two only used by the solid case) are `arc`'s own two differences
+      // from `cone`.
+      const isBox = token === 'meshbox';
+      current = {
+        type: 'arc', name: null,
+        definedIn: currentDefine ? currentDefine.name : null,
+        isBox,
+        posBzf: { x: 0, y: 0, z: 0 },
+        sizeBzf: isBox
+          ? { x: MESHBOX_DEFAULT_BASE, y: MESHBOX_DEFAULT_BASE, z: MESHBOX_DEFAULT_HEIGHT }
+          : { x: 10, y: 10, z: 10 },
+        rotationRad: 0,
+        sweepDeg: 360,
+        ratio: 1,
+        divisions: isBox ? 4 : 16,
+        texsize: {
+          u: -8, v: -8, du: -8, dv: -8,
+        },
+        useNormals: !isBox,
+        smoothBounce: false,
+        phydrv: null,
+        driveThrough: false, shootThrough: false, ricochet: false,
+        materials: ['roof', 'roof', 'boxwall', 'boxwall', 'wall', 'wall'].map((texture) => (
+          { texture, textureUrl: null, color: null, noRadar: false, noLighting: false }
+        )),
+      };
+    } else if (current && current.type === 'arc') {
+      const words = line.split(/\s+/);
+      if (token === 'end') {
+        const arcMesh = buildArcMesh(current);
+        if (!arcMesh) {
+          log(`Not creating ${current.isBox ? 'meshbox' : 'arc'} in ${filename}, invalid size/divisions/ratio/texsize`);
+        } else if (currentDefine) {
+          currentDefine.meshes.push(arcMesh);
+        } else {
+          meshes.push(finalizeMeshGeometry(arcMesh));
+        }
+        current = null;
+      } else if (token === 'position' || token === 'pos') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.posBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'size') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.sizeBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'rotation' || token === 'rot') {
+        current.rotationRad = (parseFloat(words[1]) || 0) * Math.PI / 180;
+      } else if (token === 'divisions') {
+        const n = parseInt(words[1], 10);
+        if (Number.isInteger(n)) current.divisions = n;
+      } else if (token === 'angle') {
+        const deg = parseFloat(words[1]);
+        if (!Number.isNaN(deg)) current.sweepDeg = deg;
+      } else if (token === 'ratio') {
+        const ratio = parseFloat(words[1]);
+        if (!Number.isNaN(ratio)) current.ratio = ratio;
+      } else if (token === 'texsize') {
+        const [, u, v, du, dv] = words;
+        current.texsize = {
+          u: parseFloat(u) || current.texsize.u,
+          v: parseFloat(v) || current.texsize.v,
+          du: parseFloat(du) || current.texsize.du,
+          dv: parseFloat(dv) || current.texsize.dv,
+        };
+      } else if (token === 'phydrv') {
+        current.phydrv = words[1] || null;
+      } else if (token === 'smoothbounce') {
+        current.smoothBounce = true;
+      } else if (token === 'flatshading') {
+        current.useNormals = false;
+      } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
+        Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
+      } else if (token === 'name') {
+        const [, ...nameParts] = words;
+        const name = nameParts.join(' ').replace(/"/g, '').trim();
+        if (name) current.name = name;
+      } else if (ARC_SIDE_NAMES.has(token)) {
+        const subWords = words.slice(1);
+        applyBzwMaterialToken(current.materials[ARC_SIDE_NAMES.get(token)], (subWords[0] || '').toLowerCase(), subWords);
+      } else {
+        current.materials.forEach((mat) => applyBzwMaterialToken(mat, token, words));
+      }
+    } else if (token === 'sphere') {
+      // `CustomSphere`'s own defaults (CustomSphere.cxx:34-47) -- notably a
+      // default `position` of `0 0 10` (not the usual origin), so a mapper
+      // who never writes one still gets a radius-10 sphere resting on the
+      // ground rather than centred on it, and `divisions` defaulting to 4
+      // rather than a cone's 16 (this generator's own face count grows with
+      // the *square* of `divisions`, `divisions**2 * 8`, not linearly).
+      current = {
+        type: 'sphere', name: null,
+        definedIn: currentDefine ? currentDefine.name : null,
+        posBzf: { x: 0, y: 0, z: 10 },
+        sizeBzf: { x: 10, y: 10, z: 10 },
+        rotationRad: 0,
+        divisions: 4,
+        hemisphere: false,
+        texsize: { u: -4, v: -4 },
+        useNormals: true,
+        smoothBounce: false,
+        phydrv: null,
+        driveThrough: false, shootThrough: false, ricochet: false,
+        materials: ['boxwall', 'roof'].map((texture) => (
+          { texture, textureUrl: null, color: null, noRadar: false, noLighting: false }
+        )),
+      };
+    } else if (current && current.type === 'sphere') {
+      const words = line.split(/\s+/);
+      if (token === 'end') {
+        const sphereMesh = buildSphereMesh(current);
+        if (!sphereMesh) {
+          log(`Not creating sphere in ${filename}, invalid size/divisions/texsize`);
+        } else if (currentDefine) {
+          currentDefine.meshes.push(sphereMesh);
+        } else {
+          meshes.push(finalizeMeshGeometry(sphereMesh));
+        }
+        current = null;
+      } else if (token === 'position' || token === 'pos') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.posBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'size') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.sizeBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'radius') {
+        const radius = parseFloat(words[1]);
+        if (!Number.isNaN(radius)) current.sizeBzf = { x: radius, y: radius, z: radius };
+      } else if (token === 'rotation' || token === 'rot') {
+        current.rotationRad = (parseFloat(words[1]) || 0) * Math.PI / 180;
+      } else if (token === 'divisions') {
+        const n = parseInt(words[1], 10);
+        if (Number.isInteger(n)) current.divisions = n;
+      } else if (token === 'hemi' || token === 'hemisphere') {
+        current.hemisphere = true;
+      } else if (token === 'texsize') {
+        const [, u, v] = words;
+        current.texsize = { u: parseFloat(u) || current.texsize.u, v: parseFloat(v) || current.texsize.v };
+      } else if (token === 'phydrv') {
+        current.phydrv = words[1] || null;
+      } else if (token === 'smoothbounce') {
+        current.smoothBounce = true;
+      } else if (token === 'flatshading') {
+        current.useNormals = false;
+      } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
+        Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
+      } else if (token === 'name') {
+        const [, ...nameParts] = words;
+        const name = nameParts.join(' ').replace(/"/g, '').trim();
+        if (name) current.name = name;
+      } else if (SPHERE_SIDE_NAMES.has(token)) {
+        const subWords = words.slice(1);
+        applyBzwMaterialToken(current.materials[SPHERE_SIDE_NAMES.get(token)], (subWords[0] || '').toLowerCase(), subWords);
       } else {
         current.materials.forEach((mat) => applyBzwMaterialToken(mat, token, words));
       }

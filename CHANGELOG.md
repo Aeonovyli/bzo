@@ -6,6 +6,34 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.17] - 2026-09-15
+
+### Added
+- **`arc` and `meshbox` are now supported BZW primitives** -- upstream's own
+  same generator built two ways (`CustomArc.cxx`, `meshbox` just constructed
+  with `box=true`). Unlike `cone`, an arc never tapers, and its own `ratio`
+  (0..1, between inner and outer radius) branches the whole shape in two:
+  the default `ratio=1` collapses to an ordinary solid wedge or disc,
+  anything less is a genuinely hollow tube with its own `inside` wall, six
+  materials (`top`/`bottom`/`inside`/`outside`/`startside`/`endside`), and
+  quad faces throughout rather than triangles.
+- **`sphere` is now supported too, completing all six BZW primitives that
+  expand to a mesh.** Recursively subdivides a quarter-sphere into a
+  triangular grid from pole to equator, mirrored four ways around for the
+  full circle and top-to-bottom for a complete sphere -- or closed with a
+  flat disc instead, for `hemisphere`/`hemi`. `radius` sets all three axes
+  of `size` at once for a true sphere; a plain `size x y z` still gives an
+  ellipsoid.
+
+### Fixed
+- **A `meshpyr`/`meshbox`'s own `rotation` was silently doing nothing.**
+  Upstream applies a mapper's rotation on these two as a genuine second
+  transform stacked on top of the fixed 45-degree twist that turns the
+  underlying cone/arc generator into a square footprint, not folded into the
+  sweep angle the way a plain `cone`/`arc`'s rotation is. `bzo.bzw`'s own
+  `test_meshbox` fixture had been silently ignoring its own `rotation` line
+  since `meshpyr` first shipped.
+
 ## [1.2.16] - 2026-09-15
 
 ### Added

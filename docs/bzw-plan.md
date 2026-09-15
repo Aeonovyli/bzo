@@ -425,16 +425,71 @@ face's own real vertices directly.
       vertex -- the same tie a thick ray touching a real corner would leave
       for any face-based collision system, upstream included, not a
       remaining bug in this one.
-- [ ] `arc`/`sphere` as mesh generators once mesh itself works -- each
-      expands to a `mesh` upstream (`CustomArc.cxx`, `CustomSphere.cxx`), so
-      they are a parser-side convenience on top of the same collision and
-      render path, not a second implementation. No example map and no
-      finished doc page for either turned up, so there is nothing to
-      validate against but the upstream source itself. `bzo.bzw`'s own
-      `mesh_octagon` (added to test the oriented tank box, see above) is a
-      hand-built stand-in for what an `arc` with 8 sides would generate, so
-      there is now at least one non-rectangular collidable mesh to test
-      against without this.
+- [x] `arc`/`meshbox` as a mesh generator -- `CustomArc.cxx`/`ArcObstacle.cxx`
+      ported directly, `meshbox` being upstream's own same class built with
+      `box=true` rather than a second implementation, the same relationship
+      `meshpyr` has to `cone`. Genuinely more involved than `cone`: an arc
+      never tapers (its cross-section is the same at every height), and its
+      own `ratio` (0..1, between inner and outer radius) branches the whole
+      generator in two -- `ratio=1` (the default) collapses the inner radius
+      to zero, an ordinary solid wedge or disc (`ArcObstacle::makePie`);
+      anything less is a genuinely hollow tube with its own `inside` wall
+      (`ArcObstacle::makeRing`), six materials instead of a cone's four
+      (`top`/`bottom`/`inside`/`outside`/`startside`/`endside`), and quad
+      faces throughout rather than triangles (bzo's own mesh pipeline
+      already renders/collides an N-gon face generically, so this needed no
+      changes there). `meshbox`'s own 45-degree twist + sqrt(2) footprint
+      scale is ported the same way `meshpyr`'s is -- and this is where a real
+      bug in that same porting turned up on the *second* primitive to use it:
+      a `meshpyr`/`meshbox`'s own `rotation` was silently doing nothing,
+      because upstream applies it as a genuine second transform on top of
+      the fixed 45-degree twist (`xform.addSpin(rotation, zAxis)`,
+      right after the twist, right before `addShift(pos)`), never folded into
+      the internal sweep angle the way a plain `cone`/`arc`'s own `rotation`
+      is. `test_meshbox` (already in `bzo.bzw`, predating this) sets a real
+      `rotation` and had been silently ignoring it since `meshpyr` first
+      shipped -- caught by hand-checking a `meshbox`'s own bounding box
+      against what a rotated square's should be, not by anything a test
+      suite would have flagged, since nothing before this checked a
+      `meshpyr`/`meshbox` fixture's rotation at all. Fixed in both
+      generators together (the same local-frame spin-then-shift, added right
+      before the existing bzo-axis conversion). Verified the same way as
+      `cone`/`meshpyr`: hand-checked outward-facing planes for the solid and
+      hollow cases, wedges, ellipses, and the box/pyramid twist+rotation
+      combination, then a fuzz sweep (findMeshFaceCrossing against thousands
+      of rays) confirming zero wrong-direction reflections across all of it.
+      `checkPoints` -- upstream's own aid for telling a mesh's inside from
+      its outside on an arbitrary shape -- is not ported faithfully (a single
+      always-correct point stands in for upstream's own six-point
+      `CheckOutside` ring), since bzo's own collision never reads a mesh's
+      `checkPoints` at all.
+- [x] `sphere` as a mesh generator -- `CustomSphere.cxx`/`SphereObstacle.cxx`,
+      the last of the six primitives, and the only one not a swept
+      cross-section at all: it recursively subdivides a quarter-sphere into
+      a triangular grid from pole to equator, mirrors that four ways around
+      (upstream's own `q` loop) for the full circle, and once more
+      top-to-bottom (`factor` doubling every ring vertex except the shared
+      equator) unless `hemisphere`/`hemi` asks for a dome instead, closed
+      with a flat `bottom` disc rather than a matching lower half. `radius`
+      is its own convenience for setting all three axes of `size` at once
+      (a plain `size x y z` still gives an ellipsoid); its default
+      `position` is `0 0 10`, not the origin, so a mapper who never states
+      one still gets a radius-10 sphere resting on the ground rather than
+      centred on it. The index math (`((k*k)+k)*2` triangular numbers, a
+      `ringOffset` for the shared equator, `lastStrip`/`lastCircle` edge
+      cases at the seam and the pole) is upstream's own recursion, not
+      something to trust from inspection -- traced `divisions=1` by hand
+      first, every one of its 8 faces checked against the octant it sits in,
+      before ever running the port. The fuzz sweep afterward (same method as
+      `cone`/`arc`) needed its own fix before it meant anything: aiming
+      through a mesh's own centre, `cone`/`arc`'s own working method, is
+      exactly where a sphere's own faces all converge, so the same technique
+      that validated those was flagging correct geometry as wrong here.
+      Switched to aiming each ray at the exact analytic point on the
+      ellipsoid's own surface in a random direction instead of anywhere
+      near its centre, which is what actually confirmed zero wrong-direction
+      reflections across full spheres, hemispheres, ellipsoids, rotation,
+      and flat shading, at several `divisions`.
 - [x] The eighth dimension (`OO`) now has a mesh case. `_getInsideBuildingNode`
       (render.js) used to read `obs.w`/`obs.d` directly, both `undefined` for
       a mesh, so every scattered point came out `NaN` -- discovered by
