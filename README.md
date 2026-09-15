@@ -245,7 +245,7 @@ If you want automatic container updates, use your preferred container update man
 - `Enter` — shoot
 - `Tab` — jump
 - `Space` — drop flag
-- `Q` — self-destruct, after a five second countdown; `Q` again calls it off
+- `Delete` — self-destruct, after a five second countdown; `Delete` again calls it off
 - `P` — pause/resume
 - `N` — open chat (or click the `Send` button)
 - `Enter` — send chat (while chat input is focused, or click `Send` again)

@@ -58,9 +58,9 @@ const canonicalChecks = [
     help: /<strong>Space<\/strong>\s*—\s*Drop Flag/i,
   },
   {
-    name: 'self-destruct control (Q)',
-    readme: /`Q`\s*—\s*self-destruct/i,
-    help: /<strong>Q<\/strong>\s*—\s*Self-Destruct/i,
+    name: 'self-destruct control (Delete)',
+    readme: /`Delete`\s*—\s*self-destruct/i,
+    help: /<strong>Delete<\/strong>\s*—\s*Self-Destruct/i,
   },
   {
     name: 'pause control (P)',
