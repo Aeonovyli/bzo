@@ -112,6 +112,8 @@ const {
   getBaseTopY,
   getShotTeleporterDims,
   findTankObstacle,
+  findPhysicsSurfaceObstacle,
+  resolvePhysicsDriverAt,
   getColliderLocalPoint,
   getObstacleHeight,
   getShotObstacleNormal,
@@ -1252,7 +1254,19 @@ async function performRemoteMapImport(host, port) {
   if (gameSettings && gameSettings.length >= 30) tree.gameSettings = decodeGameSettings(gameSettings);
   if (queryGame && queryGame.length >= 44) tree.queryGame = decodeQueryGame(queryGame);
   if (tree.gameSettings) tree.worldSize = tree.gameSettings.worldSize;
-  const text = buildBZWText({ host, port, title: '' }, tree, new Date().toISOString());
+  // Neither the title nor the per-team maximums travel over the direct
+  // connection above -- both are the list server's own words about this
+  // host:port (`fetchServerList`), cached from whichever `/view` load or
+  // background refresh last populated it. A server an operator names by
+  // hand rather than picking from that list simply has no cache entry, and
+  // both fall back to nothing, the same as any other field this import
+  // cannot discover.
+  const cachedEntry = remoteServerListCache.servers.find((s) => s.host === host && s.port === port);
+  const text = buildBZWText(
+    { host, port, title: cachedEntry?.title || '', listInfo: cachedEntry?.info || null },
+    tree,
+    new Date().toISOString(),
+  );
   const filePath = path.join(RUNTIME_MAPS_DIR, safeMapName);
   await fs.promises.writeFile(filePath, text);
   // Hashed synchronously rather than left to the background trickle
@@ -1751,7 +1765,7 @@ function normalizeScoreLimit(score) {
 // only has to recognize the *opening* keyword to say how many of each a map
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'physics', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
+  'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
 
 // `TetraBuilding::makeMesh`'s own fixed face topology (`MeshUtils.h`'s
@@ -2897,11 +2911,11 @@ function resolveBzwStockTexture(rawName) {
 // names (docs/bzw-plan.md's "Evidence from real maps" found exactly one:
 // `http://images.bzflag.org/astevens/pine.png`). This is a syntax check
 // only -- the server never fetches it, upstream's `ftp` is dropped since no
-// browser still fetches it for an image, and whether the *client* actually
-// trusts the host enough to load it is `isExternalTextureUrlTrusted` in
-// `public/texture.js`, a separate decision made in the browser rather than
-// here, so bzo's own server is never the one making an outbound request on
-// a mapper's say-so.
+// browser still fetches it for an image, and whether the picture actually
+// *loads* is `isExternalTextureUrlLoadable` in `public/texture.js`, a
+// separate decision made in the browser rather than here (every host is
+// attempted; see that file for why), so bzo's own server is never the one
+// making an outbound request on a mapper's say-so.
 function parseBzwTextureUrl(rawName) {
   if (!rawName) return null;
   // A protocol-relative URL (`//host/path`) has no scheme of its own to
@@ -2910,7 +2924,7 @@ function parseBzwTextureUrl(rawName) {
   // confirm the rest still parses as a real URL, and forwards the original
   // protocol-relative string rather than the resolved one. Each connected
   // client re-resolves it against its own `window.location.href`
-  // (`isExternalTextureUrlTrusted`, public/texture.js), which is what lets
+  // (`isExternalTextureUrlLoadable`, public/texture.js), which is what lets
   // the same map serve `http://` on a plain local server and `https://` on
   // one that terminates TLS, from the one line a mapper wrote.
   if (rawName.startsWith('//')) {
@@ -2933,7 +2947,7 @@ function parseBzwTextureUrl(rawName) {
     // notably), so this strips the scheme down to protocol-relative before
     // forwarding -- exactly the form a mapper-written `//host/path` line
     // already takes above, and each client already re-resolves against its
-    // own page's protocol (`isExternalTextureUrlTrusted`, public/texture.js).
+    // own page's protocol (`isExternalTextureUrlLoadable`, public/texture.js).
     return rawName.replace(/^https?:/i, '');
   } catch {
     return null;
@@ -3048,16 +3062,36 @@ function parseBZWMap(filename) {
   const materialRegistry = [];
   // A `matref` naming a material this file never defined.
   const unresolvedMaterialRefs = new Set();
+  // `physics` / `end` (`CustomPhysicsDriver.cxx`, `PhysicsDriver.cxx`). A
+  // physics driver is not an obstacle either -- it is a named velocity (and,
+  // separately, a named instant-kill message) a `phydrv` line looks up
+  // later, collected the same way a material is. `findDriver`'s own
+  // digit-first branch (`PhysicsDriver.cxx:78-89`) is the exact same
+  // convention `BzMaterial::findMaterial` uses for `matref`, so this keeps
+  // the same file-order registry plus case-insensitive name map.
+  let currentPhysicsDriver = null;
+  const physicsDriversByName = new Map();
+  const physicsDriverRegistry = [];
+  // A `phydrv` naming a driver this file never defined.
+  const unresolvedPhysicsDriverRefs = new Set();
+  // `angular`/`radial`/`slide` lines inside a `physics` block -- read as far
+  // as recognizing the keyword so it never falls through as a stray unknown
+  // token, but not applied to motion: no real map sampled uses any of the
+  // three (`docs/bzw-plan.md`, "Physics drivers"), and upstream's own
+  // `radial` has no consumer anywhere in its renderer either. Counted the
+  // same way `unsupportedCounts` tracks any other partially-read block.
+  const unreadPhysicsDriverKeywords = new Set();
   // A texture name (on a `material` or straight on an obstacle) bzo has no
   // local asset for -- see `resolveBzwStockTexture` -- named on load rather
   // than silently kept at the obstacle's plain default.
   const unresolvedTextureNames = new Set();
   // An absolute `http`/`https` texture URL a map names -- forwarded to the
   // client as-is (see `resolveBzwTextureName`) rather than resolved here:
-  // the server never fetches one, and whether it is trusted enough to load
-  // is the client's own decision (`isExternalTextureUrlTrusted` in
-  // `public/texture.js`). Named on load so it is visible that a map asked
-  // for one, whether or not any connected client's host is on the allowlist.
+  // the server never fetches one, and whether it actually loads is each
+  // client's own decision (`isExternalTextureUrlLoadable` in
+  // `public/texture.js` -- every host is attempted, so this is a CORS/
+  // load-failure outcome, not a host it refused to try). Named on load so
+  // it is visible that a map asked for one at all.
   const externalTextureUrls = new Set();
   // How many of each UNSUPPORTED_TOP_LEVEL_KEYWORDS block this map asked for,
   // by keyword -- what turns into the player-facing chat message below and
@@ -3324,6 +3358,23 @@ function parseBZWMap(filename) {
       return true;
     }
     if (token === 'addtexture' || token === 'texture') {
+      // Upstream keeps every texture a material names, in order --
+      // `BzMaterial::addTexture` (`BzMaterial.cxx:812-822`) always appends a
+      // new slot, while `texture`'s `setTexture` (`:833-838`) replaces the
+      // *last* one instead (or creates the first, if the list is still
+      // empty). But every renderer that draws a material -- `OpenGLUtils.cxx`,
+      // `MeshSceneNode.cxx`, `MeshSceneNodeGenerator.cxx`,
+      // `BackgroundRenderer.cxx` -- reads only slot 0
+      // (`getTextureLocal(0)`/`getUseColorOnTexture(0)`/`getTextureMatrix(0)`),
+      // with no exception anywhere in the tree. A stacked second or third
+      // `addtexture` is therefore inert in real play: only the first texture
+      // a material names is ever drawn. bzo has no multi-texture model, so an
+      // `addtexture` once a texture is already set is the same no-op it is
+      // upstream, and only a `texture` line (or the first `addtexture`,
+      // `notextures` having cleared the slot) actually changes what shows.
+      if (token === 'addtexture' && (target.texture || target.textureUrl)) {
+        return true;
+      }
       const rawName = words.slice(1).join(' ');
       const resolved = resolveBzwTextureName(rawName);
       if (resolved?.stock) {
@@ -3626,6 +3677,55 @@ function parseBZWMap(filename) {
       // dyncol, texmat, shader/addshader/noshaders, alphathresh, noculling,
       // nosorting, noshadow, occluder, groupAlpha, spheremap, notexalpha,
       // notexcolor, resetmat -- is read and dropped.
+      continue;
+    }
+
+    // `physics` / `end` (`CustomPhysicsDriver.cxx`). Registered by name (or
+    // left to resolve by file-order index, the same as a `material` with no
+    // `name`) for `phydrv` to look up later.
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
+      && !currentMaterial && !currentPhysicsDriver && token === 'physics') {
+      currentPhysicsDriver = { name: null, linear: null, death: null };
+      continue;
+    }
+    if (currentPhysicsDriver) {
+      if (token === 'end') {
+        physicsDriverRegistry.push(currentPhysicsDriver);
+        if (currentPhysicsDriver.name) {
+          physicsDriversByName.set(currentPhysicsDriver.name.toLowerCase(), currentPhysicsDriver);
+        }
+        currentPhysicsDriver = null;
+        continue;
+      }
+      if (token === 'name') {
+        const [, ...nameParts] = line.split(/\s+/);
+        const driverName = nameParts.join(' ').replace(/"/g, '').trim();
+        if (driverName) currentPhysicsDriver.name = driverName;
+        continue;
+      }
+      if (token === 'linear') {
+        // BZFlag (x, y, z) -> bzo (x, y=vertical, z=-y): the same remap
+        // `position`/`shift` already apply, since a velocity and a
+        // displacement share the same axis convention.
+        const [, vx, vy, vz] = line.split(/\s+/).map(Number);
+        currentPhysicsDriver.linear = [
+          Number.isFinite(vx) ? vx : 0,
+          Number.isFinite(vz) ? vz : 0,
+          Number.isFinite(vy) ? -vy : 0,
+        ];
+        continue;
+      }
+      if (token === 'death') {
+        // `CustomPhysicsDriver.cxx` reads the rest of the line verbatim as
+        // the message shown to whoever dies on this surface.
+        const [, ...rest] = line.split(/\s+/);
+        currentPhysicsDriver.death = rest.join(' ').trim() || null;
+        continue;
+      }
+      if (token === 'angular' || token === 'radial' || token === 'slide') {
+        unreadPhysicsDriverKeywords.add(token);
+        continue;
+      }
       continue;
     }
 
@@ -4240,10 +4340,32 @@ function parseBZWMap(filename) {
     } else if (current && token === 'border') {
       const [, border] = line.split(/\s+/);
       current.border = Math.abs(parseFloat(border) || 0);
+    } else if (current && token === 'phydrv'
+      && (current.type === 'box' || current.type === 'pyramid' || current.type === 'group')) {
+      // A plain box/pyramid's own whole-obstacle driver (`CustomBox.cxx`),
+      // or a `group` instance's own only-if-unset override onto each member
+      // (`CustomGroup.cxx:70-82`) -- applied to the members themselves
+      // where a `group` instance is expanded, below.
+      const [, driverName] = line.split(/\s+/);
+      current.phydrv = driverName || null;
     } else if (current && current.kind === 'base' && token === 'color') {
       const [, color] = line.split(/\s+/);
       const team = parseInt(color, 10);
       current.team = Number.isInteger(team) ? Math.max(1, Math.min(4, team)) : 1;
+    } else if (current && current.type === 'group'
+      && (token === 'matref' || token === 'addtexture' || token === 'texture')) {
+      // A group instance's own material override -- unlike a box/pyramid's
+      // walls/caps split just below, this is one plain material applied
+      // wholesale to a mesh member's every face (`ObstacleModifier::execute`,
+      // `ObstacleModifier.cxx:189-208`: `face->bzMaterial = material`,
+      // unconditional), so it is kept as one resolved material object rather
+      // than the wallTexture/capTexture pair a box reads the same tokens
+      // into. `applyGroupMeshModifiers` (above `applyGroupInstanceTransform`)
+      // is what actually applies it, once the member is known.
+      current.materialOverride ??= {
+        texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+      };
+      applyBzwMaterialToken(current.materialOverride, token, line.split(/\s+/));
     } else if (current && (BZW_FACE_GROUPS.has(token) || token === 'color' || token === 'diffuse'
       || token === 'matref' || token === 'addtexture' || token === 'texture'
       || token === 'noradar' || token === 'nolighting')
@@ -4330,6 +4452,8 @@ function parseBZWMap(filename) {
           driveThrough: !!current.driveThrough,
           shootThrough: !!current.shootThrough,
           ricochet: !!current.ricochet,
+          phydrv: current.phydrv || null,
+          materialOverride: current.materialOverride || null,
         };
         if (currentDefine) {
           currentDefine.groupInstances.push(instanceRequest);
@@ -4405,6 +4529,42 @@ function parseBZWMap(filename) {
   // placed output, one level in. Applying it once per level as nesting
   // unwinds is what makes recursion work without composing an N-level
   // transform up front.
+  // A group instance's own `phydrv`/`matref`/`addtexture` never touch a
+  // plain box or pyramid member at all -- `ObstacleModifier::execute`
+  // (`ObstacleModifier.cxx:179-223`) gates both behind `obstacle->getType()
+  // == MeshObstacle::getClassName()`, full stop. On a mesh member the two
+  // are opposite rules, not the same "only if unset" shape a member's own
+  // passability gets: a matref/addtexture override *replaces* every face's
+  // material outright (`face->bzMaterial = material`, unconditional), while
+  // a phydrv override only ever touches a face that *already* names some
+  // driver (upstream's own comment: "only modify faces that already have a
+  // physics driver") -- a face with none stays driver-less under a moving
+  // group. Building new face objects rather than mutating the member's own:
+  // the same `define` this member came from may be instantiated again
+  // elsewhere with a different override, and that later instance must not
+  // see this one's.
+  function applyGroupMeshModifiers(member, request) {
+    if (member.type !== 'mesh') return member;
+    const hasPhydrvOverride = !!request.phydrv;
+    const hasMaterialOverride = !!request.materialOverride;
+    if (!hasPhydrvOverride && !hasMaterialOverride) return member;
+    return {
+      ...member,
+      faces: member.faces.map((face) => {
+        const next = { ...face };
+        if (hasPhydrvOverride && face.phydrv) next.phydrv = request.phydrv;
+        if (hasMaterialOverride) {
+          next.texture = request.materialOverride.texture;
+          next.textureUrl = request.materialOverride.textureUrl;
+          next.color = request.materialOverride.color;
+          next.noRadar = request.materialOverride.noRadar;
+          next.noLighting = request.materialOverride.noLighting;
+        }
+        return next;
+      }),
+    };
+  }
+
   function applyGroupInstanceTransform(members, request, instanceLabel) {
     const [scaleX, scaleY, scaleZ] = request.scale;
     const cos = Math.cos(request.spin);
@@ -4439,8 +4599,9 @@ function parseBZWMap(filename) {
         w: (member.w || 0) * Math.abs(scaleX),
         d: (member.d || 0) * Math.abs(scaleY),
         h: (member.h || 0) * Math.abs(scaleZ),
-        // The group's own passability only adds permission, the same as matref/
-        // phydrv/tint overriding a member only when it does not set its own.
+        // The group's own passability only adds permission -- true on every
+        // member type, unlike matref/phydrv below, which upstream restricts
+        // to a mesh member's own faces.
         driveThrough: !!member.driveThrough || request.driveThrough,
         shootThrough: !!member.shootThrough || request.shootThrough,
         ricochet: !!member.ricochet || request.ricochet,
@@ -4452,7 +4613,7 @@ function parseBZWMap(filename) {
         name: `${instanceLabel}:${member.name
           || (member.kind === 'teleporter' ? `t${memberIndex}` : `${(member.type || 'O')[0].toUpperCase()}${memberIndex}`)}`,
       };
-    });
+    }).map((member) => applyGroupMeshModifiers(member, request));
   }
 
   // A group instance's own scale/spin, applied to one point in the
@@ -4500,7 +4661,13 @@ function parseBZWMap(filename) {
       faces: mesh.faces.map((face) => ({ ...face })),
     };
     finalizeMeshGeometry(placedMesh);
-    return placedMesh;
+    // The instance's own `phydrv`/`matref` override, same rule and same
+    // helper `applyGroupInstanceTransform` uses for a nested plain-obstacle
+    // group whose member happens to be a mesh -- this is the direct path a
+    // top-level `group <meshDefine> \n matref <name> \n end` instance
+    // actually takes (`resolveDefineMeshes`, above), so it needs the same
+    // application, not just the indirect one.
+    return applyGroupMeshModifiers(placedMesh, request);
   }
 
   // A vertex pool's own axis-aligned bounding box -- `MeshObstacle::finalize`
@@ -4789,6 +4956,86 @@ function parseBZWMap(filename) {
   // obstacle list and only have to skip a shape they don't handle, not learn
   // a second array.
   obstacles.push(...meshes);
+
+  // A world-space AABB for every obstacle, in the same `{minX, maxX, minY,
+  // maxY, minZ, maxZ}` shape a mesh's own `.bounds` (`computeMeshBounds`,
+  // above) already has -- computed once, here, rather than re-derived from
+  // `x`/`z`/`w`/`d`/`rotation` inside a hot collision loop every time a
+  // query happens to reach this obstacle. `xspan`/`zspan` is upstream's own
+  // rotated-rectangle extent formula (`Obstacle::setExtents`,
+  // `Obstacle.cxx:87-98`): the half-extent a box or a pyramid's own bounding
+  // rectangle needs on each axis to contain every corner at any rotation,
+  // exact rather than a looser circle. A mesh already has a real one from
+  // its own vertices and is left alone. This is what lets the shared
+  // `findTankObstacle` loop (`server/collision.cjs`/`public/collision.mjs`)
+  // reject an obstacle that is entirely out of range on any one axis --
+  // above, below, or to any one side -- the same one-line way regardless of
+  // which of these shapes it actually is.
+  for (const obstacle of obstacles) {
+    if (obstacle.bounds) continue;
+    const x = obstacle.x || 0;
+    const z = obstacle.z || 0;
+    const rotation = obstacle.rotation || 0;
+    const halfW = (obstacle.w || 0) / 2;
+    const halfD = (obstacle.d || 0) / 2;
+    const cos = Math.abs(Math.cos(rotation));
+    const sin = Math.abs(Math.sin(rotation));
+    const xSpan = (cos * halfW) + (sin * halfD);
+    const zSpan = (cos * halfD) + (sin * halfW);
+    const baseY = obstacle.baseY || 0;
+    obstacle.bounds = {
+      minX: x - xSpan,
+      maxX: x + xSpan,
+      minY: baseY,
+      maxY: baseY + getObstacleHeight(obstacle),
+      minZ: z - zSpan,
+      maxZ: z + zSpan,
+    };
+  }
+
+  // Resolves every obstacle's (and every mesh face's) raw `phydrv` string
+  // against the driver registry above, the same digit-first-then-name check
+  // `matref` uses. Deferred to one pass over the whole obstacle list, rather
+  // than resolved inline the way `matref` is, since `phydrv` is set across
+  // many different shapes (box, pyramid, a group member, every mesh
+  // generator, and a mesh's own per-face default) and one shared pass here
+  // is simpler than teaching each of them the same lookup. This also makes
+  // bzo strictly more lenient than upstream, which requires a `physics`
+  // block to appear before anything referencing it -- no sampled map
+  // depends on that stricter order, since a real map always defines its
+  // drivers first regardless.
+  function resolvePhysicsDriverRef(rawRef) {
+    if (!rawRef) return null;
+    const driver = /^[0-9]/.test(rawRef)
+      ? physicsDriverRegistry[parseInt(rawRef, 10)] || null
+      : physicsDriversByName.get(rawRef.toLowerCase()) || null;
+    if (!driver) unresolvedPhysicsDriverRefs.add(rawRef.toLowerCase());
+    return driver;
+  }
+  for (const obstacle of obstacles) {
+    if (typeof obstacle.phydrv === 'string') {
+      obstacle.phydrv = resolvePhysicsDriverRef(obstacle.phydrv);
+    }
+    if (Array.isArray(obstacle.faces)) {
+      for (const face of obstacle.faces) {
+        if (typeof face.phydrv === 'string') {
+          face.phydrv = resolvePhysicsDriverRef(face.phydrv);
+        }
+      }
+    }
+  }
+  if (unresolvedPhysicsDriverRefs.size > 0) {
+    log(
+      `Ignoring "phydrv" naming a physics driver not defined in ${filename}:`
+      + ` ${Array.from(unresolvedPhysicsDriverRefs).sort().join(', ')}`
+    );
+  }
+  if (unreadPhysicsDriverKeywords.size > 0) {
+    log(
+      `Physics driver keywords bzo does not read in ${filename}:`
+      + ` ${Array.from(unreadPhysicsDriverKeywords).sort().join(', ')}`
+    );
+  }
 
   // What a player actually sees when they view or join this map -- not just
   // server.log. `-srvmsg` (serverOptions.serverMessages) reads as a message
@@ -5528,6 +5775,16 @@ rebuildTeleporterRuntimeState();
 
 function getMaxObstacleTopY(obstacles = []) {
   return obstacles.reduce((maxTop, obstacle) => {
+    // A mesh (a plain `mesh`, or any of the six generators, all of which
+    // finish as `type: 'mesh'`) has no `.h` at all -- its real extent is
+    // `.bounds`, the world-space vertex box `computeMeshBounds` already
+    // computed. Falling through to the box/pyramid-style `baseY + h` below
+    // for one of these silently answers 4 units tall regardless of its real
+    // height (a tree, a tall building), which is short enough that clouds
+    // end up level with a real map's own rooftops instead of above them.
+    if (obstacle?.bounds && Number.isFinite(obstacle.bounds.maxY)) {
+      return Math.max(maxTop, obstacle.bounds.maxY);
+    }
     const baseY = Number.isFinite(obstacle?.baseY) ? obstacle.baseY : 0;
     const height = Number.isFinite(obstacle?.h) ? obstacle.h : 4;
     return Math.max(maxTop, baseY + height);
@@ -6052,11 +6309,24 @@ class Player {
     // Use slide direction if present, otherwise use rotation
     const moveDirection = this.slideDirection !== undefined ? this.slideDirection : this.rotation;
 
+    // A physics driver's push, the same shared lookup the client's own
+    // motion step uses (`resolvePhysicsDriverAt`) -- so an honest client
+    // riding a conveyor still extrapolates to roughly where it actually
+    // ends up, and `validateMovement`'s drift check does not mistake the
+    // push for cheating. Vertical always applies, matching `linear`'s own
+    // z-component upstream adds unconditionally; horizontal only while on
+    // ground, which this branch already is.
+    const driver = getSupportPhysicsDriver(this.x, this.y, this.z);
+    const driverLinear = (driver && driver.linear) || null;
+    const driverDx = driverLinear ? driverLinear[0] * dt : 0;
+    const driverDy = driverLinear ? driverLinear[1] * dt : 0;
+    const driverDz = driverLinear ? driverLinear[2] * dt : 0;
+
     if (Math.abs(rs) < 0.001) {
       // Straight line motion (or sliding)
       const dx = -Math.sin(moveDirection) * fs * speed * dt;
       const dz = -Math.cos(moveDirection) * fs * speed * dt;
-      return { x: this.x + dx, y: this.y, z: this.z + dz, r: newR };
+      return { x: this.x + dx + driverDx, y: this.y + driverDy, z: this.z + dz + driverDz, r: newR };
     } else {
       // Circular arc motion
       // Radius of curvature: R = |linear_velocity / angular_velocity|
@@ -6082,9 +6352,9 @@ class Player {
       const newDz = dx * sinTheta + dz * cosTheta;
 
       return {
-        x: cx + newDx,
-        y: this.y,
-        z: cz + newDz,
+        x: cx + newDx + driverDx,
+        y: this.y + driverDy,
+        z: cz + newDz + driverDz,
         r: this.rotation + theta
       };
     }
@@ -7525,6 +7795,10 @@ function getCollisionColliders() {
 // Every obstacle's top, teleporters included: the importer resolves a
 // teleporter's frame into `w`/`d`/`h` so there is no special case left here.
 function getColliderTopY(obs) {
+  // A mesh has no `.h` at all -- see `getObstacleHeight`'s own same check --
+  // so `baseY + h` silently answers `baseY` (the mesh's own *bottom*) for
+  // one instead of its real top.
+  if (obs?.type === 'mesh' && obs.bounds) return obs.bounds.maxY;
   return (obs?.baseY || 0) + (Number.isFinite(obs?.h) ? obs.h : 0);
 }
 
@@ -7561,11 +7835,38 @@ function checkCollision(x, y, z, tankRadius = 2, options = {}) {
   if (!obs) return false;
   if (options.suppressLog !== true) {
     const base = obs.baseY || 0;
+    // A mesh has no single position/rotation to report -- checked directly
+    // against upstream: `MeshObstacle`'s own constructor never calls
+    // `Obstacle`'s position-taking one, so it inherits the base `Obstacle()`
+    // default (0, 0, rotation 0) and never relies on it for anything real
+    // either. bzo's own mesh objects go further and carry no such field at
+    // all, so `obs.x`/`obs.z`/`obs.rotation` are `undefined` here rather
+    // than a meaningless zero -- printing the bounds center in their place
+    // for a mesh is at least a real point on the thing that was hit, which
+    // upstream's own zero never was; `rotation` has no such stand-in, since
+    // an arbitrary mesh has no one facing to report.
+    const posX = Number.isFinite(obs.x) ? obs.x : ((obs.bounds?.minX + obs.bounds?.maxX) / 2 || 0);
+    const posZ = Number.isFinite(obs.z) ? obs.z : ((obs.bounds?.minZ + obs.bounds?.maxZ) / 2 || 0);
+    const rotation = Number.isFinite(obs.rotation) ? obs.rotation : 0;
     log(`[COLLISION] ${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)} ${obs.name}:${obs.type}`
-      + ` ${obs.x.toFixed(2)},${base.toFixed(2)},${obs.z.toFixed(2)} rot:${obs.rotation.toFixed(2)},`
+      + ` ${posX.toFixed(2)},${base.toFixed(2)},${posZ.toFixed(2)} rot:${rotation.toFixed(2)},`
       + ` h:${getObstacleHeight(obs).toFixed(2)}, top:${getColliderTopY(obs).toFixed(2)}`);
   }
   return obs;
+}
+
+// The one physics-driver lookup the server side needs -- `findPhysicsSurfaceObstacle`
+// stands in for the "what is this tank currently resting on" concept the
+// client tracks as `lastMotionObstacle` (`resolvePhysicsDriverAt` in the
+// shared `collision` pair is the rest of it, and is what guarantees the two
+// sides can never disagree about which driver, if any, applies). Not
+// `checkCollision`: that is an anti-cheat penetration test, deliberately
+// forgiving of a tank resting exactly on solid ground, which is the one
+// case this needs to catch. Used both to let an honest conveyor rider clear
+// `validateMovement`'s drift check, and to find a `death` driver.
+function getSupportPhysicsDriver(x, y, z) {
+  const obs = findPhysicsSurfaceObstacle(getCollisionColliders(), x, y, z, 2, 2);
+  return obs ? resolvePhysicsDriverAt(obs, x, y, z) : null;
 }
 
 function findMapEdgeImpactPoint(prevX, prevY, prevZ, nextX, nextY, nextZ, halfMap) {
@@ -7959,6 +8260,17 @@ function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSe
     }
   }
 
+  // A `death` physics driver -- checked regardless of anti-cheat mode, since
+  // this is a map's own gameplay rule, not a cheat detection. No killer to
+  // score (`killPlayer(player, null, ...)`, the same shape a world-weapon
+  // kill already has), and the driver's own mapper-authored message rides
+  // along as `deathMessage` rather than through `reason`, which every other
+  // caller already uses as a fixed lookup key, not display text.
+  const deathDriver = getSupportPhysicsDriver(newX, newY, newZ);
+  if (deathDriver && deathDriver.death) {
+    killPlayer(player, null, DEATH_REASON.PHYSICS_DRIVER, null, null, deathDriver.death);
+  }
+
   return true;
 }
 
@@ -8220,14 +8532,14 @@ log(`Game type: ${GAME_TYPE}`);
 // has sides -- the rabbit against the hunters -- while having no colour teams,
 // so the two come apart there and only there.
 const TEAMS_ALLOWED = allowTeams(GAME_TYPE);
-// World::allowJumping, upstream's -j. Upstream has jumping off until the switch
-// turns it on; bzo has had it on since before there was a switch, so the default
-// stays on and `jumping: false` in server.json is what turns it off. A map's
-// `-j` can still turn it back on, because a bzfs switch never turns anything
-// off. With jumping on the `JP` flag has nothing to offer and is forbidden, and
-// with it off `JP` is the only way a tank leaves the ground -- except `WG`,
-// which never asks.
-const ALLOW_JUMPING = serverConfig.jumping !== false || mapServerOptions.jumping === true;
+// World::allowJumping, upstream's -j: off until the switch turns it on.
+// `jumping: true` in server.json is the server-config equivalent of an
+// operator passing `-j` themselves, and a map's own `-j` can still turn it
+// on the same way it can on a real bzfs -- but, matching upstream, neither
+// switch is on by default. With jumping off, `JP` is the only way a tank
+// leaves the ground (except `WG`, which never asks) and is forbidden the
+// other way around, once jumping is already on for everyone.
+const ALLOW_JUMPING = serverConfig.jumping === true || mapServerOptions.jumping === true;
 GAME_CONFIG.ALLOW_JUMPING = ALLOW_JUMPING;
 // The upward velocity that counts as leaving the ground; see `isJumpStart`.
 const JUMP_START_VERTICAL_VELOCITY = Math.max(
@@ -10571,6 +10883,10 @@ const DEATH_REASON = Object.freeze({
   GENOCIDE: 'genocide',   // GenocideEffect
   SELF_DESTRUCT: 'selfDestruct', // SelfDestruct
   GAME_OVER: 'gameOver', // playing.cxx:2212 -- the match clock reached zero.
+  // A `death` physics driver -- no killer, and its own mapper-authored
+  // message rather than a `deathPrefix`-templated one (client.js), the same
+  // "whole phrase" treatment a world weapon's kill already gets.
+  PHYSICS_DRIVER: 'physicsDriver',
 });
 
 // playerKilled() (bzfs.cxx:3345). One tank dies, for one reason, and everything
@@ -10632,7 +10948,7 @@ function applyDeath(victim, killerId, hit) {
   }, GAME_CONFIG.RESPAWN_DELAY);
 }
 
-function killPlayer(victim, killer, reason, projectileId = null, shooterId = null) {
+function killPlayer(victim, killer, reason, projectileId = null, shooterId = null, deathMessage = null) {
   // "victim was already dead. keep score." Upstream's own guard, and bzo needs
   // it for the same reason plus one of its own: genocide kills a team in a loop,
   // and a team killer who dies for the first of them must not die again for the
@@ -10687,6 +11003,7 @@ function killPlayer(victim, killer, reason, projectileId = null, shooterId = nul
   applyDeath(victim, killerId, {
     projectileId,
     reason,
+    deathMessage,
     victimFlag: getPlayerFlag(victim.id)?.type ?? null,
     shooterFlag: killer ? (getPlayerFlag(killer.id)?.type ?? null) : null,
     // The client words its death notice from this, and derives the same thing
@@ -12678,7 +12995,7 @@ wss.on('connection', (ws, req) => {
         }
       }
     } catch (err) {
-      logError('Error handling message:', err.message);
+      logError('Error handling message:', err.stack || err.message);
     }
   });
 

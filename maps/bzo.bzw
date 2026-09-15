@@ -1165,8 +1165,8 @@ end
 # so the render and collision paths (`docs/bzw-plan.md`'s "Mesh geometry")
 # have real content to check themselves against in the client, not only in
 # `parseBZWMap`. A tank stops at the cube and the floor's own solid top face,
-# slides along either the way it would off a box corner, and drives straight
-# through the billboard and the floor's own drivethrough underside.
+# slides along either the way it would off a box corner, and the floor's own
+# underside and the billboard bush below are both passable.
 
 mesh
   name mesh_cube
@@ -1200,25 +1200,107 @@ mesh
   endface
 end
 
-mesh
-  name mesh_billboard
-  vertex -60 -70 0
-  vertex -54 -70 0
-  vertex -54 -70 6
-  vertex -60 -70 6
-  texcoord 0 0
-  texcoord 1 0
-  texcoord 1 1
-  texcoord 0 1
-  texture wall
-  face
-    vertices 0 1 2 3
-    texcoords 0 1 2 3
-  endface
-  face #backside
-    vertices 1 0 3 2
-    texcoords 1 0 3 2
-  endface
+# A real map's own alpha-blended texture (a shrub cutout, genuinely
+# transparent where there is no leaf, not just an unused alpha channel --
+# confirmed directly against the live image), rather than a stock asset bzo
+# already knows is opaque -- so this billboard also exercises the
+# alpha-detection path in `public/texture.js`/`public/render.js`, not only
+# mesh collision and rendering. `passable` on both faces, the same as a real
+# bush or a small tree upstream's own mapper community builds this way --
+# decorative, never a wall.
+define billboard_bush_quad
+  mesh
+    vertex -3 0 0
+    vertex 3 0 0
+    vertex 3 0 6
+    vertex -3 0 6
+    texcoord 0 0
+    texcoord 1 0
+    texcoord 1 1
+    texcoord 0 1
+    texture http://images.bzflag.org/bz_legacy/trepan/tiles/shrub.png
+    passable
+    face
+      vertices 0 1 2 3
+      texcoords 0 1 2 3
+    endface
+    face #backside
+      vertices 1 0 3 2
+      texcoords 1 0 3 2
+    endface
+  end
+enddef
+
+# The same quad with its texture mirrored left-right (`texcoord`'s own U
+# flipped at each corner, geometry and winding otherwise identical) -- eight
+# copies of one leaf pattern all facing the same way reads as an obvious
+# repeat from any angle that lands between two planes; alternating this one
+# in breaks that symmetry up the same way real foliage sprites do.
+define billboard_bush_quad_mirrored
+  mesh
+    vertex -3 0 0
+    vertex 3 0 0
+    vertex 3 0 6
+    vertex -3 0 6
+    texcoord 1 0
+    texcoord 0 0
+    texcoord 0 1
+    texcoord 1 1
+    texture http://images.bzflag.org/bz_legacy/trepan/tiles/shrub.png
+    passable
+    face
+      vertices 0 1 2 3
+      texcoords 0 1 2 3
+    endface
+    face #backside
+      vertices 1 0 3 2
+      texcoords 1 0 3 2
+    endface
+  end
+enddef
+
+# Eight instances of that one quad, sharing one vertical axis and each turned
+# 22.5 degrees further than the last -- placed here, all at this definition's
+# own local origin, so the whole cluster is one reusable shape a single
+# outer `group` (below) can then stand wherever the map wants a bush, the
+# same nested-definition recursion `import-Planet-MoFo.com_4202.bzw`'s own
+# `base_pillar` (a `define` wrapping `group base_oval` instances) already
+# proved out earlier this session -- rather than repeating the same shift on
+# every one of the eight. A two-sided quad looks identical to its own
+# 180-degree turn, so eight steps of 22.5 degrees covers every distinct
+# orientation there is -- going all the way to 360 would just redraw the
+# same four planes a second time. A handful of crossed flat planes reads as
+# a rounded, roughly volumetric bush from any angle despite each one being
+# perfectly flat -- the same fake-foliage technique real maps use, and
+# cheaper than a real 3D bush mesh would be.
+define billboard_bush
+  group billboard_bush_quad
+  end
+  group billboard_bush_quad_mirrored
+    rotation 22.5
+  end
+  group billboard_bush_quad
+    rotation 45
+  end
+  group billboard_bush_quad_mirrored
+    rotation 67.5
+  end
+  group billboard_bush_quad
+    rotation 90
+  end
+  group billboard_bush_quad_mirrored
+    rotation 112.5
+  end
+  group billboard_bush_quad
+    rotation 135
+  end
+  group billboard_bush_quad_mirrored
+    rotation 157.5
+  end
+enddef
+
+group billboard_bush
+  shift -57 -70 0
 end
 
 mesh
@@ -1256,6 +1338,58 @@ mesh
     vertices 4 5 6 7
     texture roof
   endface
+end
+
+# `phydrv` -- only the two keywords bzo actually reads, matched against
+# real map usage rather than upstream's own full set (see "Physics drivers"
+# in docs/bzw-plan.md): `linear`, a velocity added to a tank resting on the
+# surface naming it, and `death`, which kills a tank outright instead.
+# `angular`, `radial` and `slide` are not read -- no real map sampled uses
+# any of the three -- so there is nothing to demonstrate for them here.
+#
+# The two pads deliberately demonstrate two different rules, because
+# upstream's own driver checks are two different mechanisms, not one:
+#
+# `linear` only ever applies once a tank is recorded as *resting* on the
+# surface naming it -- upstream's own `LocalPlayer::doUpdateMotion` only
+# sets `lastObstacle` (bzo's `lastMotionObstacle`) for a surface a tank was
+# actually expelled by (`LocalPlayer.cxx:617-624`, `:771-780`), i.e.
+# `location == OnBuilding`, which a flush/drive-through pad can never be --
+# it's walked straight through as ordinary ground. So `PD_Conveyor` is real,
+# if barely (`size ... 0.1`, comfortably under `_maxBumpHeight`), because a
+# flush one would never push at all, on bzo or on upstream.
+#
+# `death` is checked a different way -- `LocalPlayer::getHitBuilding`/
+# `collectInsideBuildings` (LocalPlayer.cxx:927-937, 986-992) run it against
+# any face the tank's box currently overlaps, checked directly against
+# `MeshFace::inBox`'s own inclusive touching test (MeshFace.cxx:454-461),
+# before ever asking whether that face is drive-through. So `PD_Death` is
+# flush on purpose (`size ... 0`) -- forced `driveThrough` by bzo's own
+# flush-pad rule (see "A pad flush with the ground" in `docs/bzw.md`) -- to
+# demonstrate that a death driver reaches a surface a tank drives straight
+# across, exactly as it does upstream.
+physics
+  name test_conveyor
+  linear 8 0 0
+end
+
+physics
+  name test_death
+  death Tank Melted By The Test Pad
+end
+
+box
+  name PD_Conveyor
+  position -45 -70 0
+  size 3 3 0.1
+  phydrv test_conveyor
+end
+
+box
+  name PD_Death
+  position -35 -70 0
+  size 3 3 0
+  phydrv test_death
 end
 
 # All six primitives that expand to a mesh upstream are read now --
@@ -1307,7 +1441,7 @@ end
 # instead).
 sphere
   name test_sphere_hemi
-  position -15 90 0
+  position -45 90 0
   radius 6
   divisions 4
   hemisphere

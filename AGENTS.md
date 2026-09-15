@@ -261,13 +261,6 @@ These are deliberate. Do not "fix" them without being asked.
   named 13 of the 41 flags bzo now carries. See "The world carries the
   gameplay".
 
-- **Jumping is on by default.** bzfs needs `-j` before any tank can jump; bzo
-  has had jumping since before there was a switch, so `jumping` defaults to on
-  and `jumping: false` in `server.json` is what turns it off. The rest follows
-  upstream: a map's `-j` can still turn it back on, exactly one of `JP` and `NJ`
-  is ever in the flag pool -- `JP` forbidden while jumping is on, `NJ` while it
-  is off -- and `WG` never consults it. See `docs/flags.md`.
-
 - **A bad flag is shed by dying unless one of the three switches says
   otherwise.** Upstream's `-st`, `-sw` and `-sa` are all off by default and so
   are bzo's `flagShakeTimeout`, `flagShakeWins` and `antidoteFlags`; each is
@@ -411,6 +404,22 @@ may change once that stops being the dominant cost.
   cycling through choices nobody has committed to. A message the server pushed
   could only ever reach the live match; one carried in the map's own data
   reaches whichever map a player actually lands on.
+
+- **A mapper-named texture URL is attempted from any host.** Upstream trusts
+  one host by default (`DownloadAccess.txt`'s shipped
+  `allow *images.bzflag.org` / `deny *`, `Downloads.cxx:37-59`) and leaves
+  widening that allowlist to the *player's* own local config file -- a real
+  per-viewer decision upstream's own client supports. bzo has no equivalent:
+  a browser has no such file, and there is no server-side stand-in for one
+  either, so whoever picked the host -- an operator running the source
+  server a map was imported from, or a mapper hand-writing a `.bzw` -- has
+  no channel to tell bzo "trust this one too." A fixed allowlist here would
+  only ever be bzo guessing on their behalf, so `isExternalTextureUrlLoadable`
+  in `public/texture.js` checks the URL is well-formed `http`/`https` and
+  nothing else. Anyone who wants a picture blocked can already do that on
+  their own end -- an ad blocker, a browser's own site permissions -- the
+  same as any other third-party image on the web. See "Materials" in
+  `docs/bzw.md`.
 
 ## Memory Policy
 

@@ -165,9 +165,10 @@ This is what made resolving a named texture against bzo's *existing* asset
 set almost the whole of what a real map's `material` block asks for, with an
 absolute URL -- the one thing left outside that asset set -- read too, but
 never fetched by bzo's own server: see "Materials" in `docs/bzw.md` for the
-client-side trust decision (`isExternalTextureUrlTrusted` in
-`public/texture.js`) and its own CORS check, which `images.bzflag.org`
-passes. Geometry-wise, two of the four
+client-side loadability check (`isExternalTextureUrlLoadable` in
+`public/texture.js` -- every host is attempted now, a deliberate deviation
+from upstream's own allowlist) and its own CORS check, which
+`images.bzflag.org` passes. Geometry-wise, two of the four
 sampled maps were pure box/pyramid plus `group`, zero mesh; the other two
 leaned on `arc` (a mesh generator) for curved walls, so mesh remains
 necessary eventually rather than skippable forever -- see "Mesh geometry"
@@ -189,49 +190,95 @@ mesh geometry does too.
       reads them -- bzo's renderer lights obstacles one way today, so this is
       the one item here that is a rendering-architecture question first and a
       parser task second.
-- [ ] `matref`/`addtexture`/`tint` on a `group` instance, and on a `mesh`
-      face once mesh geometry itself is read -- the material registry does
-      not care which obstacle asks it for a texture, so a face's own `matref`
-      is a consumer of this section to add, not a second implementation of
-      it. See "Groups and transforms" and "Mesh geometry" above.
+- [x] `matref`/`addtexture` on a `group` instance -- not the only-if-unset
+      shape assumed here originally. Checked directly against upstream's own
+      `ObstacleModifier::execute` (`ObstacleModifier.cxx:179-223`): it never
+      touches a plain box or pyramid member at all, and on a mesh member it
+      *replaces* every face's material outright, unconditionally, rather
+      than filling in one a face left unset. `import-Planet-MoFo.com_4202.bzw`'s
+      `billboard-image` define is the real map that exercises this -- one
+      shared mesh, a different `matref` per `group` instance selecting a
+      different billboard picture each time. `tint` (a separate multiplicative
+      colour modifier, distinct from `matref`'s own `color`) has no real map
+      sample yet and is not read.
 
 ## Physics drivers
 
-`phydrv`, defined by a `physics` / `enddef` block and referenced from an
-obstacle or a mesh face. `src/bzfs/CustomPhysicsDriver.cxx`,
-`include/PhysicsDriver.h`.
+`phydrv`, defined by a `physics` / `end` block and referenced from a `box`,
+`pyramid`, `group` instance, or `mesh` face. `src/bzfs/CustomPhysicsDriver.cxx`,
+`include/PhysicsDriver.h`. See "Physics drivers" in `docs/bzw.md` for the
+full account of what a mapper can rely on now.
 
-A physics driver is a velocity added to a tank standing on (or passing
-through) a surface that names it -- a conveyor belt, in the common case, and
-also upstream's mechanism for a "death" surface (`-set` style, killing
-outright) or a slide (removing friction) rather than pushing. This is a
-gameplay change, not only an importer one: it lives beside the pyramid
-support-surface rules in `AGENTS.md`'s motion section, because "what surface
-is a tank standing on and what does that surface do to it" is exactly the
-question `resolveTankMotion` already answers for a slope.
+`linear` and `death` are read -- the two real maps actually use (16 `linear`
+and 5 `death` instances across the 21 real maps fetched to validate this
+section, none of them `angular`, `radial`, or `slide`). `phydrv` resolves
+against a named driver registry the same digit-first-then-name way `matref`
+resolves, and a `group` instance's own `phydrv` overrides a member's only
+when the member sets none, the same shape `matref`/tint already get.
+`resolvePhysicsDriverAt` (the shared `collision` pair) resolves a driver off
+an obstacle/face both sides already agree they found, and can't disagree
+about -- but the two sides find that obstacle two different ways, matching
+two different upstream mechanisms rather than one:
 
-The porteighty docs page has standalone examples of a `linear` conveyor, a
-`bounce`, an `ice`-style `slide`, and a `death` mine, but none show the
-`phydrv <name>` line that attaches one to an obstacle -- confirm that syntax
-against `CustomBox.cxx`/`CustomMeshFace.cxx` directly, and treat the driver
-definitions as the validated half.
+- The client's `linear` push reads `lastMotionObstacle`, set from its own
+  swept motion the same way upstream's `lastObstacle` is: only from a
+  surface the tank was actually expelled by/rests on (`LocalPlayer.cxx:
+  617-624`), never a `driveThrough` one.
+- The server's death check (and its anti-cheat `linear` drift allowance)
+  uses `findPhysicsSurfaceObstacle` (server.js/collision.cjs only -- the
+  server has no swept-motion tracking of its own to reuse), a static
+  overlap test matching upstream's *other* mechanism,
+  `LocalPlayer::getHitBuilding`/`collectInsideBuildings` (LocalPlayer.cxx:
+  927-937, 986-992): it deliberately ignores `driveThrough`, since a death
+  face is exactly the kind of surface a tank is meant to drive straight
+  across. Originally this reused `checkCollision` (the anti-cheat
+  penetration test, whose vertical slack is written to let a tank resting
+  exactly on solid ground read as *clear* -- backwards for "what am I on"),
+  which is why the death driver silently never fired until this existed.
 
-- [ ] Parse `physics` / `enddef` (linear velocity, angular velocity about a
-      point, `slide`, `death`) into a named driver table, and `phydrv` on an
-      obstacle, mesh face, or group into a reference onto it.
-- [ ] Extend `resolveTankMotion` (the shared `motion` pair) to add a driver's
-      velocity while a tank's support surface carries one -- both ends need
-      the same answer, the way every other motion rule here does, so this
-      needs the parity test the pair's existing rules have.
-- [ ] Decide how a conveyor interacts with bzo's `antiCheat.collisionSlack`:
-      a driven tank's position is no longer purely a function of the stick,
-      so the server's extrapolation (`getPredictedState`) needs to know about
-      the same driver the client integrated.
-- [ ] Visuals: upstream draws nothing for a conveyor's belt motion itself, but
-      a mapper marks one with an animated texture (`dynamicColor`/
-      `textureMatrix` above) -- worth sequencing physics drivers after
-      materials for that reason, or accepting a plain conveyor with no visual
-      cue until materials land.
+- [x] Parse `physics` / `end` into a named driver table, and `phydrv` on a
+      box, pyramid, group instance, or mesh face into a reference onto it.
+- [x] Add a `linear` driver's velocity to a tank's own motion, client-side,
+      keyed off `lastMotionObstacle` the same way upstream reads a driver id
+      assigned on the previous frame's support check.
+- [x] Anti-cheat: `validateMovement`'s drift check adds the same `linear`
+      contribution to its own extrapolation, so an honest conveyor rider
+      doesn't trip `linearDriftThreshold`. Server-side this goes through
+      `findPhysicsSurfaceObstacle` rather than `lastMotionObstacle` (the
+      server has no equivalent to track), so it is slightly more permissive
+      than the client -- a `driveThrough` linear driver could clear the
+      drift check server-side even though the client itself never applies
+      that push. Permissive is the safe direction for anti-cheat slack, and
+      no real map gives a `linear` driver a `driveThrough` face, so this is
+      parked rather than fixed.
+- [x] `death` kills a tank outright through the existing `killPlayer`/
+      `applyDeath` path (the same one self-destruct and run-over already
+      use), carrying the driver's own message as a new `deathMessage` field
+      rather than through `reason`, which every other caller already uses as
+      a fixed lookup key rather than display text.
+
+What's left:
+
+- [ ] `angular` (a rotation about a point) and `slide` (removes friction
+      rather than pushing) -- parsed as recognized-but-unread keywords inside
+      a `physics` block, so a map defining one still loads and round-trips
+      cleanly, but not wired to motion. No real map sampled uses either; add
+      the motion side once one does.
+- [ ] `radial` -- parsed the same way, but likely never needs a motion side
+      at all: upstream itself never applies it either (no
+      `PhysicsDriver::getRadialVel`/`getRadialPos` consumer anywhere in its
+      own renderer), the same shelved-feature shape as `combineMode: decal`
+      under "Materials" above.
+- [x] `phydrv` on a `group` instance reaching a mesh member's own faces --
+      not an only-if-unset override the way this line first assumed either
+      (see "Materials and appearance" above for the same correction on
+      `matref`): upstream only ever replaces the driver on a face that
+      *already* names one (`ObstacleModifier::execute`,
+      `ObstacleModifier.cxx:210-221`, upstream's own comment: "only modify
+      faces that already have a physics driver"), and never touches a plain
+      box or pyramid member at all. `import-Planet-MoFo.com_4202.bzw`'s
+      `base_pillar` define (`base_oval`'s `down5`/`down11`) is the real map
+      that exercises this.
 
 ## Water
 
@@ -294,6 +341,13 @@ single pass once the rest of this plan is empty:
       (`_maxFlagGrabs`, `_wingsJumpCount`, `_maxBumpHeight`) stays a
       map-by-map judgment call -- add a config knob for one only when a map
       that needs it shows up, per `docs/flags.md`'s existing rule for these.
+- [ ] A real second-texture decal blend, matching the `combineMode: decal`
+      default `BzMaterial::addTexture` already sets (`BzMaterial.cxx:825`)
+      but no upstream renderer ever draws -- see "Materials" in
+      `docs/bzw.md` for the full account. Behind everything else here on
+      purpose: this would put bzo ahead of what a live bzflag client shows
+      today rather than catching up to it, so it waits until the rest of
+      this plan -- the parts where bzo is still behind upstream -- is done.
 
 Not planned: `-helpmsg`. Its argument is a path on the server's filesystem, and
 upstream itself refuses to take one from a world file

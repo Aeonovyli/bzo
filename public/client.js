@@ -293,6 +293,7 @@ import {
   findTankObstacle,
   findMeshHitFace,
   findMeshHitFaceOriented,
+  resolvePhysicsDriverAt,
   isOverFlatTop,
   getPyramidHeight,
   isPyramidFlatTop,
@@ -6334,6 +6335,10 @@ function handlePlayerHit(message) {
   // notice from "Killed by the server", which is what every other world-weapon
   // kill still says.
   const isMatchEnd = deathReason === 'gameOver';
+  // A `death` physics driver -- no killer, and its own mapper-authored
+  // message (`message.deathMessage`) rather than a `deathPrefix`-templated
+  // one, the same "whole phrase" treatment `killedByWorld` gets below.
+  const isPhysicsDriverDeath = deathReason === 'physicsDriver';
   // "if (!killerPlayer) blowedUpNotice = \"Killed by the server\"" -- gotBlowedUp
   // (playing.cxx:3999) throws the whole prefix away when the killer has no
   // roster entry, which is every kill by a world weapon: `lookupPlayer` finds
@@ -6386,6 +6391,9 @@ function handlePlayerHit(message) {
       noticeAbout(0, ['Time Expired - GAME OVER'], DEATH_ALERT_SECONDS, true);
     } else if (isSelfDestruct) {
       noticeAbout(0, ['Tank Self Destructed'], DEATH_ALERT_SECONDS, true);
+    } else if (isPhysicsDriverDeath) {
+      noticeAbout(0, [typeof message.deathMessage === 'string' && message.deathMessage
+        ? message.deathMessage : 'Killed by the server'], DEATH_ALERT_SECONDS, true);
     } else if (killedByWorld) {
       // "Killed by the server" -- gotBlowedUp throws the whole prefix away when
       // the killer has no roster entry, which is every world weapon.
@@ -6436,6 +6444,13 @@ function handlePlayerHit(message) {
     // and nobody else's.
     noticeAbout(
       null, [describePlayer(message.victimId, { flag: victimFlag }), ' self-destructed'],
+      0, false);
+  } else if (isPhysicsDriverDeath) {
+    noticeAbout(
+      null,
+      [describePlayer(message.victimId, { flag: victimFlag }), ': ',
+        typeof message.deathMessage === 'string' && message.deathMessage
+          ? message.deathMessage : 'killed by the server'],
       0, false);
   } else if (killedByWorld) {
     noticeAbout(
@@ -7530,6 +7545,22 @@ function checkCollision(x, y, z, rotation = playerRotation, fromY = y, fromX, fr
 // is what decides whether a tank may be bumped up a low ledge.
 function resolveTankStep(velocityX, velocityY, velocityZ, angularVelocity, deltaTime) {
   const groundLimit = myGroundLimit();
+  const onSupport = onGround || onObstacle;
+  // A physics driver's push, read off whatever `lastMotionObstacle` says the
+  // tank landed on last frame -- upstream's own timing too
+  // (`LocalPlayer.cxx:397-429` reads a driver id assigned on the *previous*
+  // frame's support check). The vertical component always applies; the
+  // horizontal only while actually resting on the driving surface, the same
+  // split upstream makes between its `slide` branch (not implemented here --
+  // no real map sampled uses it, see `docs/bzw-plan.md`) and the plain push.
+  const driver = resolvePhysicsDriverAt(lastMotionObstacle, playerX, playerY, playerZ);
+  if (driver && driver.linear) {
+    velocityY += driver.linear[1];
+    if (onSupport) {
+      velocityX += driver.linear[0];
+      velocityZ += driver.linear[2];
+    }
+  }
   return resolveTankMotion({
     x: playerX,
     y: playerY,
@@ -7547,7 +7578,7 @@ function resolveTankStep(velocityX, velocityY, velocityZ, angularVelocity, delta
     // bump up onto the next. `onGround`/`onObstacle` are last frame's
     // classification (set below from `nextOnGround`/`nextOnObstacle`), which
     // is what upstream's own `OnGround`/`OnBuilding` distinction answers too.
-    onGround: onGround || onObstacle,
+    onGround: onSupport,
     // World::hitBuilding, which is the solid the tank is expelled from and
     // nothing else. The step's own start height goes in as `fromY`, so the
     // occupant's vertical extent covers the span it crossed -- upstream's

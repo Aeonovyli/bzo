@@ -526,6 +526,63 @@ export function findMeshHitFace(obs, x, y, z, radius, height, passField = 'drive
   return null;
 }
 
+// Which face a tank standing at this position is over, ignoring both
+// passability flags -- unlike `findMeshHitFace`, which is asking "what
+// stopped this tank" and so must skip a `driveThrough` face. A `linear`
+// driver still needs an actually-solid face underneath (see
+// `findPhysicsSurfaceObstacle`'s own comment) -- a real river's push comes
+// from a solid mesh floor, not a passable one (`import-
+// bmbz.ducatileague.org_5152.bzw`'s `river_35`/`river_45`/`river_55` faces
+// carry no `drivethrough` at all). What genuinely needs this to ignore
+// passability is `death`: upstream's own check
+// (`LocalPlayer::getHitBuilding`/`collectInsideBuildings`,
+// LocalPlayer.cxx:927-937, 986-992) runs on any face the tank's box
+// overlaps, before ever asking whether that face is drive-through. No
+// `direction` filter either, for the same reason `meshFaceBlocksDirection`
+// exists at all: that filter answers "did the tank just hit this face
+// moving the way it was," which only matters for a collision response, not
+// for "which face is under me right now."
+export function findMeshFaceAt(obs, x, y, z, radius, height) {
+  const { bounds } = obs;
+  if (bounds && (x + radius < bounds.minX || x - radius > bounds.maxX
+    || z + radius < bounds.minZ || z - radius > bounds.maxZ)) {
+    return null;
+  }
+  const boxMins = [-radius, 0, -radius];
+  const boxMaxs = [radius, height, radius];
+  for (const face of obs.faces) {
+    if (!face.plane) continue;
+    const localPoints = face.vertexIndices.map((vi) => {
+      const v = obs.vertices[vi];
+      return [v.x - x, v.y - y, v.z - z];
+    });
+    const [nx, ny, nz, d] = face.plane;
+    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return face;
+  }
+  return null;
+}
+
+// The one physics-driver lookup both the client (motion) and the server
+// (anti-cheat extrapolation and the death check) call, so they can never
+// disagree about which driver -- if any -- applies at a pose. `obstacle` is
+// whatever the caller already knows the tank is currently resting on/
+// touching (the client's `lastMotionObstacle`, or a fresh `findTankObstacle`
+// result server-side); this never re-derives that itself. A plain box,
+// pyramid, or group member carries its own `phydrv` directly; a mesh needs
+// its specific face resolved first, since `phydrv` is a per-face property
+// there (falling back to the mesh's own top-level default when the found
+// face has none, the same default every mesh face already inherits at
+// parse time).
+export function resolvePhysicsDriverAt(obstacle, x, y, z) {
+  if (!obstacle) return null;
+  if (obstacle.type === 'mesh') {
+    const face = findMeshFaceAt(obstacle, x, y, z, 2, 2);
+    return (face && face.phydrv) || obstacle.phydrv || null;
+  }
+  return obstacle.phydrv || null;
+}
+
 export function meshIntersectsCylinder(obs, x, y, z, radius, height, passField = 'driveThrough', direction = null) {
   return findMeshHitFace(obs, x, y, z, radius, height, passField, direction) !== null;
 }
@@ -671,6 +728,17 @@ export function findTankObstacle(obstacles, x, y, z, options = {}) {
   const reversingOnGround = options.reversingOnGround === true;
   const ignoreTeleporters = options.ignoreTeleporters === true;
   const epsilon = Number.isFinite(options.verticalEpsilon) ? options.verticalEpsilon : 0;
+  // A safe (never-too-small) horizontal margin for the broad-phase reject
+  // below: the oriented tank box's own circumscribing radius when this is a
+  // box query, since its real half-extents can exceed the plain `radius`
+  // the cylinder case uses -- the same `Math.hypot(halfWidth, halfLength)`
+  // `findMeshHitFaceOriented` already computes for the identical reason.
+  const boundsMargin = useTankBox
+    ? Math.hypot(
+      TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
+      TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1),
+    )
+    : radius;
 
   for (const obs of obstacles) {
     if (!obs) continue;
@@ -679,6 +747,16 @@ export function findTankObstacle(obstacles, x, y, z, options = {}) {
     // `drivethrough` in a `.bzw`, `Obstacle::isDriveThrough`: an obstacle an
     // occupant passes straight through. `shootThrough` is its other half.
     if (obs.driveThrough) continue;
+
+    // Every obstacle now carries a precomputed world-space AABB (`obs.bounds`,
+    // set once at map load -- see server.js), the same shape a mesh's own
+    // vertex-derived one always was. Entirely out of horizontal range on
+    // this one -- to any one side of the query point, by more than this
+    // query's own reach -- can never hit, whatever shape the obstacle
+    // actually is, so this runs before any type-specific narrow-phase test
+    // below rather than duplicated inside each one.
+    if (obs.bounds && (x + boundsMargin < obs.bounds.minX || x - boundsMargin > obs.bounds.maxX
+      || z + boundsMargin < obs.bounds.minZ || z - boundsMargin > obs.bounds.maxZ)) continue;
 
     const obstacleBase = obs.baseY || 0;
     const obstacleTop = obstacleBase + getObstacleHeight(obs);
@@ -754,6 +832,48 @@ export function findTankObstacle(obstacles, x, y, z, options = {}) {
     }
 
     if (hitsRect(obs.w / 2, obs.d / 2, slack)) return obs;
+  }
+  return null;
+}
+
+// The obstacle a physics driver applies from at this position -- a support
+// test, not a collision one, and deliberately not `findTankObstacle` with a
+// generous epsilon: that function's vertical slack (`movingTankOverlapsHeight`)
+// exists to let a tank resting exactly on solid ground read as *clear*, which
+// is exactly backwards for "what am I resting on". Upstream keeps these
+// separate too -- `LocalPlayer::collectInsideBuildings`/`getHitBuilding`
+// (LocalPlayer.cxx:927-937, 986-992) run the physics-driver/death check on
+// every face `MeshFace::inBox` reports touching, before ever asking whether
+// that face is drive-through, and `inBox`'s own Z test (MeshFace.cxx:460,
+// `mins[2] > p[2]+height` / `maxs[2] < p[2]`) is inclusive at the touching
+// boundary rather than exclusive like this file's anti-cheat one. So this
+// ignores `driveThrough` entirely (a conveyor or death floor a tank drives
+// straight across is exactly what a physics driver is often carried on --
+// `findMeshFaceAt` already does the same for a mesh face, for the same
+// reason) and tests the vertical span the same inclusive way.
+export function findPhysicsSurfaceObstacle(obstacles, x, y, z, radius = 2, height = 2) {
+  for (const obs of obstacles) {
+    if (!obs) continue;
+    if (obs.bounds && (x + radius < obs.bounds.minX || x - radius > obs.bounds.maxX
+      || z + radius < obs.bounds.minZ || z - radius > obs.bounds.maxZ)) continue;
+
+    if (obs.type === 'mesh') {
+      if (findMeshFaceAt(obs, x, y, z, radius, height)) return obs;
+      continue;
+    }
+
+    const obstacleBase = obs.baseY || 0;
+    const obstacleTop = obstacleBase + getObstacleHeight(obs);
+    if (obstacleBase > y + height || obstacleTop < y) continue;
+
+    if (obs.type === 'pyramid') {
+      if (pyramidIntersectsCylinder(obs, x, y, z, radius, height)) return obs;
+      continue;
+    }
+    if (obs.kind === 'teleporter' || obs.kind === 'base') continue;
+
+    const local = getColliderLocalPoint(x, z, obs);
+    if (testOrigRectCircle(obs.w / 2, obs.d / 2, local.x, local.z, radius)) return obs;
   }
   return null;
 }

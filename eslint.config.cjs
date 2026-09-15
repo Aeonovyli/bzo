@@ -63,6 +63,7 @@ module.exports = [
         FormData: "readonly",
         localStorage: "readonly",
         navigator: "readonly",
+        queueMicrotask: "readonly",
         requestAnimationFrame: "readonly",
         ResizeObserver: "readonly",
         cancelAnimationFrame: "readonly",

@@ -88,11 +88,14 @@ function decodePingHex(hex) {
   const maxTeamScore = u16();
   const maxTime = u16();
   const maxPlayers = u8();
-  const rogueCount = u8(); u8(); // rogueMax -- team maximums aren't shown anywhere yet
-  const redCount = u8(); u8();
-  const greenCount = u8(); u8();
-  const blueCount = u8(); u8();
-  const purpleCount = u8(); u8();
+  // Rogue, red, green, blue, purple, observer -- the same order `-mp
+  // a,b,c,d,e,f` already takes (`BZFLAG_MP_TEAM_ORDER`, server/teams.cjs),
+  // so `teamMaximums` can be written back out unchanged.
+  const rogueCount = u8(); const rogueMax = u8();
+  const redCount = u8(); const redMax = u8();
+  const greenCount = u8(); const greenMax = u8();
+  const blueCount = u8(); const blueMax = u8();
+  const purpleCount = u8(); const purpleMax = u8();
   const observerCount = u8(); const observerMax = u8();
   if (Number.isNaN(gameType) || Number.isNaN(observerMax)) return null;
   const players = rogueCount + redCount + greenCount + blueCount + purpleCount;
@@ -101,6 +104,7 @@ function decodePingHex(hex) {
     gameOptionsBits, maxShots, shakeWins, shakeTimeout,
     maxPlayerScore, maxTeamScore, maxTime, maxPlayers,
     players, observerCount,
+    teamMaximums: [rogueMax, redMax, greenMax, blueMax, purpleMax, observerMax],
   };
 }
 
@@ -309,16 +313,24 @@ function decodeQueryGame(buf) {
   const r = new Reader(buf);
   const style = r.u16();
   r.u16(); // options (duplicate of MsgGameSettings' bitmask)
-  r.u16(); // maxPlayers
+  r.u16(); // maxPlayers (duplicate of decodePingHex's own, and just the sum
+  // of teamMaximums below plus its own observer slot -- CmdLineOptions.cxx:458)
   r.u16(); // maxShots (duplicate)
-  for (let i = 0; i < 6; i++) r.u16(); // per-team current sizes
-  for (let i = 0; i < 6; i++) r.u16(); // per-team maximums
+  for (let i = 0; i < 6; i++) r.u16(); // per-team current sizes -- live player
+  // counts at the moment of the query, not a map property, so left unread
+  // the same way a snapshot of who is playing right now always is.
+  // Rogue, red, green, blue, purple, observer, in that order -- the same
+  // order `-mp a,b,c,d,e,f` already takes (`BZFLAG_MP_TEAM_ORDER`,
+  // server/teams.cjs), so this can be written back out unchanged.
+  const teamMaximums = Array.from({ length: 6 }, () => r.u16());
   r.u16(); // shakeWins (duplicate)
   r.u16(); // shakeTimeout (duplicate)
   const maxPlayerScore = r.u16();
   const maxTeamScore = r.u16();
   const maxTime = r.u16();
-  return { style, maxPlayerScore, maxTeamScore, maxTime };
+  return {
+    style, maxPlayerScore, maxTeamScore, maxTime, teamMaximums,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -687,9 +699,21 @@ function fmt3(v) { return `${fmt(v[0])} ${fmt(v[1])} ${fmt(v[2])}`; }
 // server.js actually reads, derived from the server's own MsgGameSettings/
 // MsgQueryGame answers -- so a map loaded into bzo plays by close to the same
 // rules it was surveyed under, not just the same geometry.
-function buildOptionsLines(gameSettings, queryGame) {
+function buildOptionsLines(gameSettings, queryGame, listInfo) {
   const lines = [];
   const has = (bit) => (gameSettings.gameOptionsBits & bit) !== 0;
+  // GameType (`include/global.h:94`) is its own axis from the GameOptions
+  // bitmask below, and bzo's own parser already reads all three switches
+  // that select it (docs/bzw.md, "The `options` block"; how bzo reaches
+  // each type from them is in docs/game-modes-plan.md, "What bzo has").
+  // TeamFFA (0) is upstream's own default and needs no switch -- and, like
+  // upstream itself, there is no switch to *force* it either, so a TeamFFA
+  // source loaded onto a server whose own config defaults elsewhere plays
+  // by that config's default instead, the same gap a real bzfs's own "Save
+  // World" has.
+  if (gameSettings.gameType === 1) lines.push('  -c');
+  else if (gameSettings.gameType === 2) lines.push('  -offa');
+  else if (gameSettings.gameType === 3) lines.push('  -rabbit');
   if (has(GAME_OPTION_BITS.jumping)) lines.push('  -j');
   if (has(GAME_OPTION_BITS.ricochet)) lines.push('  +r');
   if (has(GAME_OPTION_BITS.antidote)) lines.push('  -sa');
@@ -697,12 +721,36 @@ function buildOptionsLines(gameSettings, queryGame) {
     lines.push(`  -st ${fmt(gameSettings.shakeTimeout / 10)}`);
     lines.push(`  -sw ${gameSettings.shakeWins}`);
   }
+  // `-handicap` (`CmdLineOptions.cxx:830-833`) -- recorded faithfully even
+  // though bzo does not act on it yet (`docs/game-modes-plan.md`,
+  // "Handicap"): the source server's own setting belongs in the file
+  // regardless of whether bzo's own parser does anything with it today.
+  if (has(GAME_OPTION_BITS.handicap)) lines.push('  -handicap');
   if (has(GAME_OPTION_BITS.noTeamKills)) lines.push('  -noTeamKills');
   if (gameSettings.linearAcceleration !== 0 || gameSettings.angularAcceleration !== 0) {
     lines.push(`  -a ${fmt(gameSettings.linearAcceleration)} ${fmt(gameSettings.angularAcceleration)}`);
   }
   lines.push(`  -ms ${gameSettings.maxShots}`);
-  if (has(GAME_OPTION_BITS.flags) && gameSettings.numFlags > 0) lines.push(`  -s ${gameSettings.numFlags}`);
+  if (has(GAME_OPTION_BITS.flags) && gameSettings.numFlags > 0) {
+    lines.push(`  -s ${gameSettings.numFlags}`);
+  } else if (has(GAME_OPTION_BITS.antidote) || has(GAME_OPTION_BITS.shaking)) {
+    // Antidote and Shakable only mean anything with a bad flag actually in
+    // play, so the source server must have superflags on even when this
+    // snapshot's `numFlags` came back 0 or the `flags` bit itself did not --
+    // upstream's own default count for a bare `+s`/`-s 0`
+    // (`CmdLineOptions.cxx:1174-1178`). The exact count isn't known, but
+    // that flags exist at all is, from these two bits alone.
+    lines.push('  -s 16');
+  }
+  // `-mp a,b,c,d,e,f` (rogue, red, green, blue, purple, observer -- the same
+  // order `BZFLAG_MP_TEAM_ORDER` in `server/teams.cjs` already expects).
+  // `queryGame`'s own live answer is preferred; the list server's cached
+  // ping-hex (`listInfo`) is the fallback for a server that did not answer
+  // `MsgQueryGame` on this particular import.
+  const teamMaximums = queryGame?.teamMaximums || listInfo?.teamMaximums || null;
+  if (teamMaximums && teamMaximums.some((n) => n > 0)) {
+    lines.push(`  -mp ${teamMaximums.join(',')}`);
+  }
   if (queryGame) {
     if (queryGame.maxPlayerScore > 0) lines.push(`  -mps ${queryGame.maxPlayerScore}`);
     if (queryGame.maxTeamScore > 0) lines.push(`  -mts ${queryGame.maxTeamScore}`);
@@ -988,20 +1036,9 @@ function buildBZWText(serverMeta, tree, fetchedAt) {
 
   if (gameSettings) {
     lines.push('options');
-    for (const line of buildOptionsLines(gameSettings, queryGame)) lines.push(line);
+    for (const line of buildOptionsLines(gameSettings, queryGame, serverMeta.listInfo)) lines.push(line);
     lines.push('end');
     lines.push('');
-
-    // Things the live server reports that bzo has no `options` keyword for --
-    // game mode (team/CTF/rabbit) is chosen by server.json, not the map file,
-    // and bzo's parseBZWServerOptions has no -handicap switch.
-    const unsupported = [];
-    if (queryGame) unsupported.push(`game style ${GAME_STYLES[queryGame.style] || queryGame.style}`);
-    if ((gameSettings.gameOptionsBits & GAME_OPTION_BITS.handicap) !== 0) unsupported.push('handicap');
-    if (unsupported.length) {
-      lines.push(`# server also reports: ${unsupported.join(', ')} -- bzo has no \`options\` keyword for this`);
-      lines.push('');
-    }
   }
 
   for (const d of dynamicColors) printDynamicColorBlock(lines, d);

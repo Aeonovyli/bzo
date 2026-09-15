@@ -6,6 +6,82 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.19] - 2026-09-15
+
+### Added
+- **`physics` / `end` blocks are now read, and `phydrv` actually does
+  something.** `linear` adds a velocity to a tank resting on the surface
+  naming it (a jump pad, a conveyor, an elevator, all the same mechanism in
+  different directions), and `death` kills a tank outright with the
+  mapper's own message. `angular`, `radial` and `slide` are recognized but
+  not wired to motion -- no real map among the 21 sampled to validate this
+  uses any of the three. `phydrv` now resolves on a box, pyramid, group
+  instance, or mesh face, the same digit-first-then-name lookup `matref`
+  already gets.
+- **A remote map import now records more of what the source server actually
+  reported.** Game style (`-c`/`-offa`/`-rabbit`), `-handicap`, `-mp` (team
+  limits, from the list server's own reported maximums), and the source
+  server's title (kept as a comment only, so re-serving the file never
+  publishes it under that name unexpectedly). A world reporting Antidote or
+  Shakable without an explicit flag count now gets bzfs's own implicit
+  default (`-s 16`) written in, since a world can't have either without
+  having some bad flags to shake.
+- **A `mesh_billboard`-based bush** in `bzo.bzw` -- eight quads at the same
+  spot, rotated 22.5 degrees apart and alternating a mirrored texture, in a
+  nested `group` rather than eight repeats of the same `shift`.
+- **Foliage-style textures with real transparency now blend instead of
+  rendering solid**, on both a plain obstacle and a mesh face -- detected by
+  scanning the loaded image for any non-opaque alpha byte, the same check
+  upstream's own `OpenGLTexture::getBestFormat` makes. A low `alphaTest`
+  (0.05) discards only the fully-transparent gap in a cutout, so a
+  deliberately partial texture (a mapper's own 20%-alpha glass, an 80%-alpha
+  overlay -- both real examples this was checked against) keeps blending
+  and keeps occluding normally rather than vanishing or turning solid.
+
+### Fixed
+- **A `death` physics driver never actually killed anyone**, even standing
+  right on top of one. The server had no equivalent of the client's own
+  "what am I resting on" tracking, so it stood in with the anti-cheat
+  penetration test (`checkCollision`) -- which is deliberately built to
+  treat a tank resting exactly on solid ground as *clear*, the opposite of
+  what a support check needs, and which also skips a `driveThrough` face
+  outright, exactly the kind of surface a death floor or a river conveyor
+  is. A new `findPhysicsSurfaceObstacle` (`server/collision.cjs`,
+  `public/collision.mjs`) matches upstream's actual mechanism instead
+  (`LocalPlayer::getHitBuilding`/`collectInsideBuildings`): an inclusive
+  touching test, independent of `driveThrough`, run only for this purpose.
+- **Jumping no longer defaults to on.** bzo used to assume jumping was
+  allowed unless a server explicitly turned it off; a real bzfs requires
+  `-j` before any tank can leave the ground, and bzo's own default now
+  matches -- `server.json`'s `jumping: true` (or a map's own `-j`) is what
+  turns it on, not the other way around.
+- **A `group` instance's `matref`/`phydrv` now override a mesh member the
+  way upstream's own `ObstacleModifier::execute` actually does**, not the
+  "only if the member set none" rule this carried before: a material
+  override replaces every face's texture unconditionally, while a `phydrv`
+  override only ever replaces a face that already named some driver.
+  Neither ever touches a plain box or pyramid member. Confirmed against a
+  real map's own elevator group that depends on exactly this.
+- **A mapper-named external texture URL now loads from any host**, not just
+  a small built-in allowlist. bzo has no equivalent of upstream's local,
+  per-player `DownloadAccess.txt` -- there is no channel for an operator or
+  a mapper to ask bzo to trust a host -- so a fixed allowlist could only
+  ever be bzo guessing on their behalf. Documented as a deliberate
+  deviation from upstream in `AGENTS.md`.
+- **Every obstacle now carries a precomputed world-space bounding box**,
+  mesh included (a mesh already had one from its own vertices; box,
+  pyramid, teleporter and base now get one too, from upstream's own
+  rotated-rectangle formula), used as a broad-phase reject before any
+  narrow-phase collision test -- a bare distance check that was already
+  skipping boxes far from a query point now does the same for meshes,
+  which it previously always had to test in full.
+- **Cloud height and a debug collision log line both had the same "mesh
+  has no `.h`" blind spot.** Cloud placement used to default a mesh's
+  height to a flat 4 regardless of its real size, sitting clouds inside
+  tall trees on some real maps; the collision debug log crashed outright
+  calling `.toFixed` on a mesh's nonexistent `.x`/`.z`/`.rotation`. Both
+  now read a mesh's own `.bounds` instead.
+
 ## [1.2.18] - 2026-09-15
 
 ### Fixed

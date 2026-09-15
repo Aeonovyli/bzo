@@ -533,10 +533,53 @@ function getObstacleTint(obs) {
 // `loadExternalTexture` decides, and falls back to `fallbackPath` either way),
 // or this obstacle type's own plain default, in that order. Returns a
 // zero-arg factory, the shape `_getSharedObstacleMaterials` wants.
+// `onAlpha`, when the caller wants one, learns whether the texture this
+// factory loads actually needs blending (`applyTextureAlpha` below) --
+// `fallbackFactory` is always one of bzo's own stock assets, confirmed
+// alpha-free directly, so it ignores the extra argument same as any other
+// function call with more arguments than parameters.
 function resolveObstacleTextureFactory(stockName, url, fallbackPath, fallbackFactory) {
-  if (stockName) return () => createStockMaterialTexture(stockName);
-  if (url) return () => loadExternalTexture(url, fallbackPath);
+  if (stockName) return (onAlpha) => createStockMaterialTexture(stockName, onAlpha);
+  if (url) return (onAlpha) => loadExternalTexture(url, fallbackPath, onAlpha);
   return fallbackFactory;
+}
+
+// Upstream's own rule for whether a face needs blending at all
+// (`MeshSceneNode::updateMaterial`, `MeshSceneNode.cxx:401-406`:
+// `textureAlpha = imageInfo.alpha`, folded into `isAlpha` a few lines
+// below) -- a texture with no real transparency costs nothing extra, and
+// one that does gets Three's ordinary alpha blending and sort, the modern
+// equivalent of upstream's own `BZDBCache::blend`-enabled path (there is no
+// hardware left that needs its stipple fallback). Applied once alpha is
+// actually known, since a texture's image loads after the material sharing
+// it is already created and handed to every obstacle using that material.
+// A near-zero cutoff -- discards only a pixel the texture's own alpha left
+// essentially fully transparent, not a soft edge or a mapper's own
+// deliberately partial overlay (`images.bzflag.org/bgrondin/telelink-trans.png`,
+// a uniform 80% alpha; `msheppard/glass.png`, a uniform 20% one -- both real
+// maps sampled this session, and both need to keep blending and keep
+// occluding normally, not vanish or turn solid the way a 0.5 threshold
+// would send a uniform-alpha texture entirely one way or the other).
+const FOLIAGE_ALPHA_TEST = 0.05;
+
+function applyTextureAlpha(material, hasAlpha) {
+  if (!hasAlpha) return;
+  material.transparent = true;
+  // A pixel this discards never reaches the depth test at all, so it can
+  // never block anything behind it -- correct for a foliage cutout's actual
+  // gaps, the class of pixel that was wrongly blocking a teleporter's own
+  // effect before this existed. Everything else -- any pixel with real
+  // presence, leaf or partial overlay alike -- still writes depth
+  // normally, which is what lets the debug ground grid (and anything else
+  // that depth-tests against real geometry) clip it exactly like a box.
+  // Upstream's own equivalent (`alphaThreshold`/`GL_GEQUAL`,
+  // `MeshSceneNode.cxx:519-520`) only activates when a mapper explicitly
+  // sets `alphathresh`, which bzo does not read yet -- this applies the
+  // same mechanism unconditionally instead, at a low enough threshold that
+  // it only ever catches the pixels upstream's own default (no threshold
+  // at all) would have shown as fully invisible anyway.
+  material.alphaTest = FOLIAGE_ALPHA_TEST;
+  material.needsUpdate = true;
 }
 
 // A tinted obstacle's debug label wears its colour, so a map's painting can be
@@ -2217,10 +2260,22 @@ class RenderManager {
     if (existing) return existing;
     const SideClass = unlit.side ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
     const CapClass = unlit.cap ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
-    const materials = [
-      new SideClass({ map: sideTextureFactory(), ...options }),
-      new CapClass({ map: topTextureFactory(), ...options }),
-    ];
+    // `sideMaterial`/`capMaterial` are declared before either factory runs so
+    // the alpha callback below always closes over the real material -- safe
+    // even though a factory may invoke it before returning (an already-known
+    // answer), since `registerAlphaCallback` defers that case to a microtask,
+    // which never runs until this whole statement (and both `let`s) finishes.
+    let sideMaterial;
+    let capMaterial;
+    sideMaterial = new SideClass({
+      map: sideTextureFactory((hasAlpha) => applyTextureAlpha(sideMaterial, hasAlpha)),
+      ...options,
+    });
+    capMaterial = new CapClass({
+      map: topTextureFactory((hasAlpha) => applyTextureAlpha(capMaterial, hasAlpha)),
+      ...options,
+    });
+    const materials = [sideMaterial, capMaterial];
     materials.forEach((material) => { material.userData.shared = true; });
     this._sharedObstacleMaterials.set(key, materials);
     return materials;
@@ -3357,7 +3412,15 @@ class RenderManager {
         const textureFactory = resolveObstacleTextureFactory(
           face.texture, face.textureUrl, '/textures/boxwall.png', createBoxWallTexture,
         );
-        const material = new THREE.MeshLambertMaterial({ map: textureFactory() });
+        // `material` declared before the factory runs, same reason
+        // `_getSharedObstacleMaterials` does: `registerAlphaCallback`
+        // (`public/texture.js`) always defers to a microtask, so the
+        // callback never actually fires until this statement (and `let`)
+        // has finished, even when the answer was already known.
+        let material;
+        material = new THREE.MeshLambertMaterial({
+          map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha)),
+        });
         if (face.color) material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);
         materialIndex = materials.length;
         materials.push(material);

@@ -18,3 +18,10 @@ cache/
 # which bzo doesn't read yet). Good to have locally for a large-map test;
 # revisit checking it in once mesh support makes it render anything.
 /maps/ahs3_Paradise_Valley.bzw
+
+# Any user's /view page or the Operator panel's "Import Remote Map" can
+# regenerate one of these from whatever server is at host:port, so there is
+# nothing here worth version-controlling -- and no license to check in
+# either, since it is a reconstruction of another operator's live world, not
+# a mapper's own authored file.
+/maps/import-*.bzw

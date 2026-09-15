@@ -902,4 +902,52 @@ assert.ok(Math.abs(trapped.x) < 1, 'and leaves the shot inside the corridor');
   }
 }
 
+// resolvePhysicsDriverAt: the one lookup both the client's motion step and
+// the server's anti-cheat call use, so they must agree exactly. A plain
+// obstacle answers with its own `.phydrv`; a mesh needs its specific face
+// resolved first, since `phydrv` is a per-face property there.
+{
+  const driver = { name: 'conveyor', linear: [1, 0, 2], death: null };
+  const box = { type: 'box', phydrv: driver };
+  assert.equal(client.resolvePhysicsDriverAt(box, 0, 0, 0), driver);
+  assert.equal(server.resolvePhysicsDriverAt(box, 0, 0, 0), driver);
+  assert.equal(client.resolvePhysicsDriverAt(null, 0, 0, 0), null);
+  assert.equal(client.resolvePhysicsDriverAt({ type: 'box' }, 0, 0, 0), null);
+
+  // A single horizontal square face at y=5, spanning x/z in [-10, 10] --
+  // plane = [nx, ny, nz, d] with d = -(n . vertex), the same formula
+  // server.js's own `computeMeshFacePlane` uses.
+  const meshVertices = [
+    { x: -10, y: 5, z: -10 }, { x: 10, y: 5, z: -10 },
+    { x: 10, y: 5, z: 10 }, { x: -10, y: 5, z: 10 },
+  ];
+  const driverFace = { vertexIndices: [0, 1, 2, 3], plane: [0, 1, 0, -5], phydrv: driver };
+  const plainFace = { vertexIndices: [0, 1, 2, 3], plane: [0, 1, 0, -5], phydrv: null };
+  const mesh = {
+    type: 'mesh',
+    phydrv: null,
+    vertices: meshVertices,
+    faces: [driverFace],
+    bounds: { minX: -10, maxX: 10, minZ: -10, maxZ: 10 },
+  };
+  assert.equal(client.resolvePhysicsDriverAt(mesh, 0, 5, 0), driver, 'standing over the driver face');
+  assert.equal(server.resolvePhysicsDriverAt(mesh, 0, 5, 0), driver, 'server agrees');
+  assert.equal(client.resolvePhysicsDriverAt(mesh, 100, 5, 100), null, 'off the mesh entirely');
+
+  // A face's own `phydrv` falls back to the mesh's top-level default when
+  // it has none of its own -- the same default every mesh face already
+  // inherits at parse time (server.js's `currentMeshFace` construction).
+  const meshWithDefault = { ...mesh, faces: [plainFace], phydrv: driver };
+  assert.equal(client.resolvePhysicsDriverAt(meshWithDefault, 0, 5, 0), driver);
+
+  // `findMeshFaceAt` finds a face regardless of its passability flags --
+  // the opposite of `findMeshHitFace`, which is asked "what stopped this
+  // tank" and so must skip a `driveThrough` face. A river's push comes from
+  // exactly such a face.
+  const driveThroughFace = { ...driverFace, driveThrough: true };
+  const driveThroughMesh = { ...mesh, faces: [driveThroughFace] };
+  assert.equal(client.findMeshFaceAt(driveThroughMesh, 0, 5, 0, 2, 2), driveThroughFace);
+  assert.equal(client.findMeshHitFace(driveThroughMesh, 0, 5, 0, 2, 2), null, 'a hit-normal query still skips it');
+}
+
 console.log(`collision geometry tests passed (${checked} fuzz samples, ${solidSamples} solid, seed ${SEED})`);

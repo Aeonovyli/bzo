@@ -55,13 +55,78 @@ function resolveSharedTexture(entry) {
   entry.pending.length = 0;
 }
 
-function loadTexture(path) {
+// Whether any pixel in a decoded image is not fully opaque -- the same scan
+// upstream's own `OpenGLTexture::getBestFormat` runs (`OpenGLTexture.cxx:
+// 336-351`: `alpha = true` the instant one byte is not `0xff`), which is what
+// upstream's own material rendering (`MeshSceneNode::updateMaterial`) reads
+// as `imageInfo.alpha` to decide whether a face needs blending at all. A
+// texture with an alpha channel that never actually varies (checked directly
+// against real map textures -- some ship one anyway, an export artifact) is
+// not blend-worthy by this same upstream rule, and shouldn't cost every
+// other opaque texture the sorting/blending overhead transparency asks for.
+function detectImageAlpha(image) {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    ctx.drawImage(image, 0, 0);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] !== 255) return true;
+    }
+    return false;
+  } catch {
+    // A cross-origin image reaching here without a clean CORS response
+    // would taint the canvas and throw -- shouldn't happen, since WebGL's
+    // own upload already demands the same CORS response this read does, but
+    // if it ever does, treat the texture as opaque rather than crash a
+    // render loop over a picture that already displays fine on the GPU.
+    return false;
+  }
+}
+
+// Fires once a texture's `hasAlpha` is known (the moment its image decodes),
+// immediately if it already is. Any later caller sharing the same texture --
+// `resolveObstacleTextureFactory`'s callers, one per face group naming the
+// same picture -- gets the same answer without re-scanning pixels twice.
+function resolveTextureAlpha(entry) {
+  if (entry.hasAlpha !== null || !entry.texture?.image) return;
+  entry.hasAlpha = detectImageAlpha(entry.texture.image);
+  const callbacks = entry.alphaCallbacks;
+  entry.alphaCallbacks = [];
+  callbacks.forEach((onAlpha) => onAlpha(entry.hasAlpha));
+}
+
+function registerAlphaCallback(entry, onAlpha) {
+  if (!onAlpha) return;
+  if (entry.hasAlpha !== null) {
+    // Deferred even though the answer is already known: a caller building a
+    // material from this same call stack (`_getSharedObstacleMaterials`)
+    // hasn't necessarily finished assigning it to a variable this callback
+    // closes over yet -- a same-tick call would run into that variable's own
+    // temporal dead zone. A microtask runs after the current synchronous
+    // call chain returns, same as the genuinely-async case below always was.
+    queueMicrotask(() => onAlpha(entry.hasAlpha));
+  } else {
+    entry.alphaCallbacks.push(onAlpha);
+  }
+}
+
+function loadTexture(path, onAlpha) {
   let entry = sharedTextures.get(path);
   if (!entry) {
-    entry = { texture: null, pending: [] };
-    entry.texture = configureTexture(textureLoader.load(path, () => resolveSharedTexture(entry)));
+    entry = {
+      texture: null, pending: [], hasAlpha: null, alphaCallbacks: [],
+    };
+    entry.texture = configureTexture(textureLoader.load(path, () => {
+      resolveSharedTexture(entry);
+      resolveTextureAlpha(entry);
+    }));
     sharedTextures.set(path, entry);
   }
+  registerAlphaCallback(entry, onAlpha);
   return cloneSharedTexture(entry);
 }
 
@@ -106,68 +171,70 @@ const STOCK_MATERIAL_TEXTURE_FILES = new Map([
   ['caution', 'caution.png'],
 ]);
 
-export function createStockMaterialTexture(name) {
+export function createStockMaterialTexture(name, onAlpha) {
   const file = STOCK_MATERIAL_TEXTURE_FILES.get(name);
-  return file ? loadTexture(`/textures/${file}`) : null;
+  return file ? loadTexture(`/textures/${file}`, onAlpha) : null;
 }
 
 // A material's own texture may name an absolute URL instead of a stock name
 // (`server.js`'s `resolveBzwTextureName` sends either one through as
 // `wallTextureUrl`/`capTextureUrl`, never both). bzo never fetches one
 // server-side -- see the note there -- so this, in the browser, is the one
-// place that decides whether a map-named host is trusted enough to load.
+// place that decides whether a map-named URL is even worth attempting to
+// load.
 //
-// Same-origin needs no rule of its own: a texture hosted on bzo's own server
-// carries no cross-origin request at all. `*images.bzflag.org` is upstream's
-// own default (`DownloadAccess.txt`'s shipped `allow *images.bzflag.org` /
-// `deny *`, `Downloads.cxx:37-59`) -- a leading `*` rather than a fixed
-// subdomain, on purpose, since BZFlag's own image host has moved under a
-// different prefix before and may again (`newimages.bzflag.org`, etc.).
-// `*.bzflag.org` -- a whole extra label -- is deliberately not here: a
-// wildcard TLS certificate covers one label deep, so a mapper-named host
-// four labels deep (`x.images.bzflag.org`) is not a thing upstream's own
-// setup would ever produce either.
-const EXTERNAL_TEXTURE_HOST_PATTERNS = ['*images.bzflag.org'];
-
-function hostMatchesGlob(host, pattern) {
-  const escaped = pattern.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
-  return new RegExp(`^${escaped}$`, 'i').test(host);
-}
-
-export function isExternalTextureUrlTrusted(url) {
+// Deliberately not an allowlist. Upstream trusts one host by default
+// (`DownloadAccess.txt`'s shipped `allow *images.bzflag.org` / `deny *`,
+// `Downloads.cxx:37-59`) and leaves widening that to the *player's* own
+// local config file -- a real per-viewer decision upstream's own client
+// supports. bzo has nothing equivalent (a browser has no such file, and
+// there is no server-side equivalent to put one in either), and the party
+// who picked the host -- whoever ran the source server this map was
+// imported from, or hand-wrote the `.bzw` -- has no channel to tell bzo
+// "trust this one too": the only lever bzo had was to guess a fixed
+// allowlist on their behalf, which is exactly backwards. Any host is
+// attempted now; a mapper or an operator who wants a picture blocked can
+// already do that on their own end (ad blockers, `NoScript`-style
+// extensions, a browser's own site permissions), same as with any other
+// third-party image on the web. This is a deliberate deviation from
+// upstream -- see "Intentional deviations from BZFlag" in `AGENTS.md`.
+export function isExternalTextureUrlLoadable(url) {
   let parsed;
   try {
     parsed = new URL(url, window.location.href);
   } catch {
     return false;
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  if (parsed.origin === window.location.origin) return true;
-  return EXTERNAL_TEXTURE_HOST_PATTERNS.some((pattern) => hostMatchesGlob(parsed.hostname, pattern));
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:';
 }
 
 const sharedExternalTextures = new Map();
 
 // `fallbackPath` is what this obstacle's own type would have drawn with no
 // material override at all (`/textures/boxwall.png`, `/textures/pyrwall.png`,
-// ...) -- used both for an untrusted host, which is never even requested,
-// and for a trusted one whose request still fails: a `crossOrigin`-tagged
-// image load is not "tainted, but shown" the way an ordinary cross-origin
-// `<img>` is, it is refused outright (`onerror`, not `onload`) the instant the
-// response carries no matching `Access-Control-Allow-Origin`. `images.
-// bzflag.org` sends `Access-Control-Allow-Origin: *` on every response
-// (checked directly), so a trusted-host load from there succeeds rather than
-// falling back -- this fallback path is what runs for any other host this
-// file trusts that does not.
-export function loadExternalTexture(url, fallbackPath) {
-  if (!isExternalTextureUrlTrusted(url)) return loadTexture(fallbackPath);
+// ...) -- used both for a malformed URL/scheme, which is never even
+// requested, and for a well-formed one whose request still fails: a
+// `crossOrigin`-tagged image load is not "tainted, but shown" the way an
+// ordinary cross-origin `<img>` is, it is refused outright (`onerror`, not
+// `onload`) the instant the response carries no matching
+// `Access-Control-Allow-Origin` -- which, with every host now attempted,
+// is a real outcome for a picture hosted somewhere that never expected a
+// cross-origin `<canvas>` to read its pixels back, not only a hypothetical
+// one.
+export function loadExternalTexture(url, fallbackPath, onAlpha) {
+  if (!isExternalTextureUrlLoadable(url)) return loadTexture(fallbackPath, onAlpha);
 
   let entry = sharedExternalTextures.get(url);
   if (!entry) {
-    entry = { texture: null, pending: [] };
+    entry = {
+      texture: null, pending: [], hasAlpha: null, alphaCallbacks: [],
+    };
     entry.texture = configureTexture(textureLoader.load(
       url,
-      () => resolveSharedTexture(entry),
+      () => {
+        resolveSharedTexture(entry);
+        resolveTextureAlpha(entry);
+      },
       undefined,
       () => {
         console.warn(`External texture blocked or failed to load, using this obstacle's plain default instead: ${url}`);
@@ -183,10 +250,12 @@ export function loadExternalTexture(url, fallbackPath) {
         // live through the Source object they already share.
         entry.texture.image = loadTexture(fallbackPath).image;
         resolveSharedTexture(entry);
+        resolveTextureAlpha(entry);
       },
     ));
     sharedExternalTextures.set(url, entry);
   }
+  registerAlphaCallback(entry, onAlpha);
   return cloneSharedTexture(entry);
 }
 

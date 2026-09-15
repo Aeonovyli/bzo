@@ -218,22 +218,49 @@ directly on an obstacle with no material block at all, the same as `color`/
 `diffuse` already are.
 
 **`addtexture` and `texture` are not the same keyword upstream, even though
-bzo treats them identically.** Upstream's own `BzMaterial::addTexture`
-(`BzMaterial.cxx:812`) always grows the material's own texture list by one
-slot; `setTexture` (`:833`) replaces the *last* slot instead, or creates the
-first one if the list is still empty. Every stock obstacle already starts
-with one texture from its own constructor (a plain `mesh`'s own `"mesh"`,
-a `box`'s own `"boxwall"`/`"roof"`, and so on), so the two keywords produce
-a genuinely different material there: `addtexture` leaves two texture
-layers, `texture` one. bzo has no multi-texture model at all and reads
-either keyword identically -- "set the one texture this face has" -- which is
+bzo draws the same slot either one does.** Upstream's own `BzMaterial::
+addTexture` (`BzMaterial.cxx:812`) always grows the material's own texture
+list by one slot; `setTexture` (`:833`) replaces the *last* slot instead, or
+creates the first one if the list is still empty. Every stock obstacle
+already starts with one texture from its own constructor (a plain `mesh`'s
+own `"mesh"`, a `box`'s own `"boxwall"`/`"roof"`, and so on), so the two
+keywords produce a genuinely different material there: `addtexture` leaves
+two texture layers, `texture` one. That would be academic if anything drew
+the second layer, but nothing does -- every renderer that reads a material
+(`OpenGLUtils.cxx`, `MeshSceneNode.cxx`, `MeshSceneNodeGenerator.cxx`,
+`BackgroundRenderer.cxx`) asks for slot 0 alone, with no exception anywhere
+in the tree, so a stacked second or third `addtexture` is inert in real
+play: only the first texture a material ever names is the one a client
+draws. bzo has no multi-texture model, but keeps to that same slot -- an
+`addtexture` once a texture is already set is the no-op it is upstream too,
+`notextures` clears the slot so the next `addtexture` counts as the first
+again, and a `texture` line always takes effect, matching `setTexture`
+always replacing whatever the single slot bzo tracks already holds. This is
 why `maps/bzo.bzw`'s own mesh fixtures write `texture` rather than
-`addtexture`: on a plain `mesh` block, `addtexture` would leave the stock
-`"mesh"` texture as an extra layer underneath against a real bzfs/bzflag, so
-the shape would keep showing that wireframe default there instead of the
-fixture's own texture, even though bzo itself reads either keyword the same
-way. A *fresh* `material` block has no constructor default to begin with, so
-`addtexture` there is already the first (and only) texture either way.
+`addtexture`: on a plain `mesh` block, `addtexture` leaves the stock
+`"mesh"` texture as the visible first slot, so the shape would keep showing
+that wireframe default against a real bzfs/bzflag -- and now against bzo
+too -- instead of the fixture's own texture. A *fresh* `material` block has
+no constructor default to begin with, so `addtexture` there is already the
+first (and only) texture either way.
+
+**A second layer was clearly meant to be a decal, not a repeating tile.**
+`BzMaterial.h`'s own `CombineModes` enum (`replace`, `modulate`, `decal`,
+`blend`, `add`, `combine`) names the classic OpenGL `glTexEnv` modes for
+stacking texture units, and `addTexture` (`BzMaterial.cxx:825`) sets every
+layer it creates to `decal` by default -- paint the new texture over the
+base wherever it is opaque, let the base show through wherever it is
+transparent, which is exactly a non-repeating graffiti sticker on a plain
+wall rather than a second tiling pattern. No `.bzw` keyword ever lets a
+mapper choose a different mode, and no code past `addTexture` itself reads
+`combineMode` at all -- confirmed by grepping the whole upstream tree for a
+second bound texture unit (`glActiveTexture`, `GL_TEXTURE1`): nothing binds
+one anywhere. The field is stored, and even round-trips over the network
+and through "Save World," but the classic renderer never draws it. This
+reads as a shelved feature rather than a working one -- worth bzo
+implementing for real once the format's still-missing pieces above and in
+`docs/bzw-plan.md` are caught up, since doing the actual decal blend would
+put bzo ahead of what a live upstream client shows today, not behind it.
 
 **A texture name is one of bzo's own local assets, or an absolute URL.**
 Upstream names a texture either by its own stock name (`boxwall`, `wall`,
@@ -266,10 +293,10 @@ reads both:
   as-is to bzo's own clients would trip. So the server does not forward it
   as-is -- `parseBzwTextureUrl` strips the scheme down to a protocol-relative
   `//host/path` before it ever reaches a client, and each one resolves that
-  against its own `window.location.href` (`isExternalTextureUrlTrusted`,
-  below), the way a protocol-relative `<img src>` already would in any
-  browser. A mapper never has to choose between the two: write `http://`
-  for upstream, and bzo silently makes it work for its own browsers too.
+  against its own `window.location.href`, the way a protocol-relative
+  `<img src>` already would in any browser. A mapper never has to choose
+  between the two: write `http://` for upstream, and bzo silently makes it
+  work for its own browsers too.
 
   A protocol-relative URL (`//host/path`, no scheme at all) written
   *directly* in the file is also recognized, and skips the stripping step
@@ -281,32 +308,61 @@ reads both:
   spelling for a map that only bzo will ever load; a mapper-facing `.bzw`
   should write `http://` and let the server do the rest.
 
-  Whether it is actually loaded is each connected browser's own decision:
-  `isExternalTextureUrlTrusted` in `public/texture.js` allows a URL whose
-  host is the same origin the client is already connected to, or matches
-  `*images.bzflag.org` (upstream's own default trusted host,
-  `DownloadAccess.txt`'s shipped `allow *images.bzflag.org` / `deny *`,
-  `Downloads.cxx:37-59` -- the leading `*` is upstream's own choice, not
-  bzo's, and stays as `*images.bzflag.org` rather than widening to
-  `*.bzflag.org`: a wildcard TLS certificate covers one label deep, so a
-  four-label host that pattern would additionally match is not something
-  upstream's own setup would produce anyway). Anything else -- another
-  domain entirely -- is never requested at all.
+  **Every host is attempted, deliberately unlike upstream.** Upstream trusts
+  one host by default (`DownloadAccess.txt`'s shipped
+  `allow *images.bzflag.org` / `deny *`, `Downloads.cxx:37-59`) and leaves
+  widening that allowlist to the *player's* own local config file -- a real
+  per-viewer decision upstream's own client supports. bzo has no equivalent
+  of that file (a browser has none, and there is no server-side stand-in for
+  one either), and whoever picked the host -- an operator running the
+  source server a map was imported from, or a mapper hand-writing a `.bzw`
+  -- has no channel to tell bzo "trust this one too": a fixed allowlist here
+  would just be bzo guessing on their behalf, backwards from what an
+  allowlist is for. `isExternalTextureUrlLoadable` in `public/texture.js`
+  therefore only checks that the URL parses and names `http`/`https`; see
+  "Intentional deviations from BZFlag" in `AGENTS.md`. Anyone who wants a
+  picture blocked can already do that on their own end -- an ad blocker, a
+  browser's own site permissions -- the same as with any other third-party
+  image on the web.
 
-  A trusted host still has to actually serve the picture: a texture load is
-  tagged `crossOrigin` (required for any WebGL texture, not only a
-  cross-origin one), which means the request carries a real `Origin` header
-  and the *response* must carry a matching `Access-Control-Allow-Origin` or
-  the browser refuses the load outright, the same as any other CORS-gated
+  Attempted is not the same as loaded: a texture load is tagged
+  `crossOrigin` (required for any WebGL texture, not only a cross-origin
+  one), which means the request carries a real `Origin` header and the
+  *response* must carry a matching `Access-Control-Allow-Origin` or the
+  browser refuses the load outright, the same as any other CORS-gated
   resource -- there is no plain-image fallback the way an ordinary `<img>`
   tag gets. Checked directly (several paths, across several mappers'
   subdirectories): `images.bzflag.org` sends `Access-Control-Allow-Origin: *`
-  on every response, so a texture named from there loads for real rather than
-  falling back. Either way -- an untrusted host, or a trusted one whose own
-  response still refuses the load -- the obstacle falls back to its type's
-  plain default texture, logged once to the console
+  on every response, so a texture named from there loads for real rather
+  than falling back; a host that never expected a cross-origin `<canvas>`
+  to read its pixels back may well refuse. Either way -- a malformed
+  URL/scheme, or a well-formed one whose own response still refuses the
+  load -- the obstacle falls back to its type's plain default texture,
+  logged once to the console for the second case
   (`loadExternalTexture`/`STOCK_MATERIAL_TEXTURE_FILES` in
-  `public/texture.js`) rather than left blank.
+  `public/texture.js`) rather than left blank; the first is silent, since a
+  malformed line is a mapper's own typo rather than a remote host's
+  behavior worth a runtime warning.
+
+  **A texture that actually has transparency gets it, real maps do use
+  this.** A survey of every texture referenced by the public server list's
+  own live maps found 39 distinct pictures with genuine, non-uniform alpha
+  in active use -- trees, shrubs, chainlink and barbwire fences, cutout
+  signage -- none of bzo's own stock assets among them (all six are opaque
+  by construction), and 42 more with an alpha channel present but every
+  pixel opaque, an export artifact rather than real transparency. Once a
+  texture's image decodes, `detectImageAlpha` in `public/texture.js` scans
+  it for any pixel that is not fully opaque -- the same test upstream's own
+  `OpenGLTexture::getBestFormat` runs (`OpenGLTexture.cxx:336-351`) to set
+  `imageInfo.alpha`, which `MeshSceneNode::updateMaterial`
+  (`MeshSceneNode.cxx:401-406`) reads to decide whether a face needs
+  blending at all -- and only then does the material carrying it turn on
+  ordinary alpha blending (Three's `transparent`), the modern equivalent of
+  upstream's own always-available `BZDBCache::blend` path (there is no
+  hardware left that needs its stipple fallback). A texture proven opaque
+  costs nothing extra; `maps/bzo.bzw`'s own `mesh_billboard` names a real
+  map's shrub texture for exactly this reason, so the path has a fixture to
+  check itself against beyond a server survey.
 
 Not yet read:
 
@@ -320,16 +376,6 @@ Not yet read:
 - **`ambient`/`specular`/`emission`/`shininess`.** bzo's renderer lights an
   obstacle one way today; reading these needs a lighting model first, not
   only a parser change.
-- **`matref`/`addtexture`/`tint` on a `group` instance**, the only-if-unset
-  override upstream's `CustomGroup` gives one over a member's own (see
-  **Groups**, below).
-- **`matref` inside a `mesh` face.** Every `matref` sampled in a real map
-  (docs/bzw-plan.md's "Evidence from real maps") turned out to be inside a
-  `mesh` `face` block or a mesh-generator primitive (`arc`), neither of which
-  bzo reads yet -- see **What is ignored**. The material registry itself does
-  not care which obstacle asks it for a texture, so this section is what a
-  face's own `matref` will draw on once mesh geometry lands, not a second
-  implementation.
 - **`dyncol`, `texmat`, `shader`/`addshader`/`noshaders`, `alphathresh`,
   `noculling`, `nosorting`, `noshadow`, `occluder`, `groupAlpha`,
   `spheremap`, `notexalpha`, `notexcolor`, `resetmat`.** Read and dropped,
@@ -442,9 +488,7 @@ makes a pad useful for marking ground -- `maps/bzo.bzw` puts a named one under
 every flag zone, so `L_Laser` and friends label the whole ring.
 
 A map option only ever turns a switch **on**, which is how a bzfs switch behaves:
-nothing in a map turns off something the server config enabled. `-j` is the one
-that reads oddly as a result -- bzo has jumping on by default, so `-j` in a map
-matters only on a server whose own config turned it off.
+nothing in a map turns off something the server config enabled.
 
 The options that carry a *value* rather than flip a switch are the exception,
 and they differ from each other. `-st`, `-sw`, `-time`, `-mps` and `-mts` take
@@ -739,9 +783,16 @@ the same way: an unnamed box two levels deep in `bzo.bzw`'s example reads
 of its own.
 
 `drivethrough`/`shootthrough`/`ricochet` on the `group` line add permission to
-whatever a member already has rather than replacing it -- the only-if-unset
-rule upstream's `matref`/`phydrv`/`tint` give a group instance over a member's
-own too, which bzo does not read on either (see **What is ignored**).
+whatever a member already has rather than replacing it, and apply to a member
+of any type. `matref`/`addtexture` and `phydrv` are read too, but neither
+follows that same only-if-unset shape, and neither touches a plain box or
+pyramid member at all -- both are mesh-only upstream
+(`ObstacleModifier::execute`, `ObstacleModifier.cxx:179-223`), and opposite
+rules from each other on a mesh's own faces: a `matref`/`addtexture` line
+*replaces* every face's material outright, unconditionally, while `phydrv`
+only ever touches a face that *already* names some driver -- a face with none
+stays driver-less under a moving group. See **Physics drivers** and
+**Materials** above for what a mapper can rely on from each.
 
 A `teleporter` in a `define` is placed the same way any other member is --
 named `t<n>` for its place in the definition if it gave no name of its own,
@@ -807,13 +858,52 @@ per-face auto-planar UV. See `docs/bzw-plan.md`'s "Mesh geometry" for what is
 still left on the mesh side generally (mainly a perf pass merging
 same-material triangles).
 
+## Physics drivers
+
+`physics` / `end` (`CustomPhysicsDriver.cxx`, `PhysicsDriver.cxx`) defines a
+named driver, which `phydrv <name>` then references directly from a `box`,
+a `pyramid`, or a `mesh` face (its own per-face property, the way a face's
+own `matref` is). A `group` instance's own `phydrv` line reaches a mesh
+member's faces too, but not as an override a member can leave unset: it
+replaces the driver on whichever faces already name *some* driver, and
+leaves a face with none alone -- see **Groups**, and it never touches a
+plain box or pyramid member regardless of whether that member set its own.
+
+- `name <string>` -- what `phydrv` looks it up by, or its file-order index
+  the same digit-first way a numberless `material` resolves a numeric
+  `matref` (see **Materials**).
+- `linear <x> <y> <z>` -- a velocity added to a tank resting on a surface
+  naming this driver: the vertical component always, the horizontal only
+  while the tank is on the ground -- upstream's own split between a plain
+  push and its `slide` variant, below. A jump pad, a conveyor belt and an
+  elevator are all this, in different directions. "Resting on" means
+  actually solid -- upstream only ever assigns a driver from a surface a
+  tank was expelled by (`LocalPlayer.cxx:617-624`, `:771-780`), so a
+  `drivethrough` face never supplies one, mesh included.
+- `death <message>` -- kills a tank outright instead of pushing it, showing
+  the rest of the line verbatim as the reason, the same `playerHit` message
+  a self-destruct or a run-over already sends. Unlike `linear`, this one
+  reaches a `drivethrough` face too: upstream checks it a different way
+  (`LocalPlayer::getHitBuilding`/`collectInsideBuildings`,
+  LocalPlayer.cxx:927-937, 986-992), against any face the tank's box
+  currently overlaps, before ever asking whether that face blocks anything.
+
+Not yet read: `angular` (a rotation rate about a point, adding both a spin
+and an orbital velocity) and `slide` (removes friction instead of pushing,
+so a tank drifts toward its own desired heading rather than snapping to it).
+Neither is exercised by a real map sampled yet -- see `docs/bzw-plan.md`,
+"Physics drivers". `radial` is parsed by upstream itself and never applied
+by any of its own renderers either -- no client code anywhere reads
+`PhysicsDriver::getRadialVel`/`getRadialPos` -- so bzo treats it the same
+way, permanently rather than provisionally.
+
 ## What is ignored
 
 Anything not listed above is skipped without comment, which means a map using it
 loads and plays with that part of it missing. The notable absences:
 
 - **Most of what a `material` block or a `matref` can still say**:
-  `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, `phydrv`, and the
+  `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, and the
   lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see
   **Materials** above for what a material *does* read now (`addtexture`/
   `texture` against bzo's own stock assets, `color`/`diffuse`, `noradar`,
@@ -821,7 +911,7 @@ loads and plays with that part of it missing. The notable absences:
 - **`shear`, `xform`, and a `spin` about anything but the vertical axis.**
   `shift`, `scale` and a vertical `spin` are read now -- see **Groups**
   above, and its "Not yet read" list for what of this line is left.
-- **`water`, `physics`**.
+- **`water`**.
 - **A `zone` block's `flag` keyword.** `zoneflag`, `team` and `safety` are all
   read -- see **Team zones** and **Flag safety zones** above. `flag` names a
   type any flag of which spawns in the zone; a map using it is named in the
