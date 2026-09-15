@@ -7439,8 +7439,12 @@ function rebuildTeleporterRuntimeState() {
 
 // Every obstacle's top, teleporters included: the importer resolves a
 // teleporter's frame into `w`/`d`/`h` so there is no special case left here.
+// A mesh has no `h` of its own -- `getObstacleHeight` reads its bounds
+// instead -- so this used to read a mesh's own top as its base, a
+// zero-height ledge every mesh collision (there was none, before this
+// session) never had reason to notice.
 function getColliderTopY(obs) {
-  return (obs?.baseY || 0) + (Number.isFinite(obs?.h) ? obs.h : 0);
+  return (obs?.baseY || 0) + getObstacleHeight(obs);
 }
 
 // Phasing, for the local tank -- the only tank this client resolves
@@ -7597,6 +7601,10 @@ function findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale = getMy
     if (!movingTankOverlapsHeight(obstacleBase, obstacleTop, worldY, worldY, 2, 0.15)) continue;
     if (obs.type === 'pyramid') {
       if (!pyramidIntersectsTank(obs, worldX, worldY, worldZ, rotation, 2, 0, tankScale)) continue;
+    } else if (obs.type === 'mesh') {
+      if (!findMeshHitFaceOriented(obs, worldX, worldY, worldZ, rotation,
+        TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
+        TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1), 2)) continue;
     } else {
       const { x: localX, z: localZ } = getColliderLocalPoint(worldX, worldZ, obs);
       if (!testOrigRectTank(

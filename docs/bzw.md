@@ -202,6 +202,31 @@ here. `addtexture`/`texture` and `noradar`/`nolighting` are also read
 directly on an obstacle with no material block at all, the same as `color`/
 `diffuse` already are.
 
+**`addtexture` and `texture` are not the same keyword upstream, even though
+bzo treats them identically.** Upstream's own `BzMaterial::addTexture`
+(`BzMaterial.cxx:812`) always grows the material's own texture list by one
+slot; `setTexture` (`:833`) replaces the *last* slot instead, or creates the
+first one if the list is still empty. Every stock obstacle already starts
+with one texture from its own constructor (a plain `mesh`'s own `"mesh"`,
+a `box`'s own `"boxwall"`/`"roof"`, and so on), so the two keywords produce
+a genuinely different material there: `addtexture` leaves two texture
+layers, `texture` one. bzo has no multi-texture model at all and reads
+either keyword identically -- "set the one texture this face has" -- which
+is why `maps/bzo.bzw`'s own mesh fixtures once looked correct in bzo and
+still showed each shape's own default (`mesh`, for a plain `mesh` block)
+once loaded into a real bzfs/bzflag, until changed from `addtexture` to
+`texture`; confirmed fixed against a real client. A *fresh* `material`
+block has no constructor default to begin with, so `addtexture` there is
+already the first (and only) texture either way.
+
+(An earlier pass through this file blamed `thin_wall`'s own `https://`
+texture not loading in a real client on this same `addtexture`/`texture`
+split, and reverted it rather than ship an unconfirmed theory. That guess
+was wrong in an informative way: the actual cause was the URL's scheme,
+not the keyword -- see below -- confirmed by testing `http://` under both
+keywords once the real culprit turned up. Left here so the same wrong
+turn is not repeated.)
+
 **A texture name is one of bzo's own local assets, or an absolute URL.**
 Upstream names a texture either by its own stock name (`boxwall`, `wall`,
 `roof`, `pyrwall`, `telelink`, `caution`) or by a mapper-hosted file, and bzo
@@ -218,28 +243,35 @@ reads both:
 - An absolute `http`/`https` URL -- the only kind of external texture any
   real map sampled actually used (docs/bzw-plan.md's "Evidence from real
   maps") -- is recognized by the server (`parseBzwTextureUrl`) and forwarded
-  to every client as-is, **never fetched by the server itself.** `https://`
-  is the one to actually write: it loads unchanged whether a viewer reached
-  bzo over plain `http://` or behind TLS (a page only ever refuses to load
-  the *less* secure scheme than its own, never the more secure one), and it
-  is the only form real upstream `bzflag` has any chance of fetching too --
-  its own texture downloader (`Downloads.cxx`) hands the URL to libcurl
-  largely as stated, so an ordinary absolute URL of either scheme reaches it
-  intact; a bare protocol-relative `//host/path` does not; see below.
-  `maps/bzo.bzw`'s own `thin_wall` names its external texture this way, on
+  to every client, **never fetched by the server itself.** `http://` is the
+  one to actually write: confirmed directly against a real client that
+  upstream's own texture downloader (`Downloads.cxx`) reliably follows
+  `http://` but not `https://` -- the same URL, scheme swapped, failed to
+  load and silently kept the obstacle's own plain default texture instead
+  (no error either side; it just never arrives). `maps/bzo.bzw`'s own
+  `thin_wall` names its external texture this way now, on
   `images.bzflag.org`.
 
-  A protocol-relative URL (`//host/path`, no scheme at all) is recognized by
-  the server too, and forwarded exactly as written rather than resolved to a
-  scheme here -- the server has no page of its own to resolve one against,
-  only each connected browser does, so `isExternalTextureUrlTrusted` (below)
-  resolves it against that viewer's own `window.location.href`, the way a
-  protocol-relative `<img src>` already would in any browser. That is a
-  purely browser-side convenience, though, with no equivalent for real
-  upstream: `bzflag`'s own `BzfNetwork::parseURL` scans for a leading `:`
-  before it does anything else, so a string with no scheme at all fails to
-  parse before curl is ever involved. Reserve this spelling for a map that
-  only bzo will ever load; `https://` is the one that works everywhere.
+  A browser is the opposite: an `https://` page (bz.rikers.org, most
+  notably) refuses to load a plain `http://` resource at all (mixed-content
+  blocking), which is exactly what forwarding a mapper's `http://` line
+  as-is to bzo's own clients would trip. So the server does not forward it
+  as-is -- `parseBzwTextureUrl` strips the scheme down to a protocol-relative
+  `//host/path` before it ever reaches a client, and each one resolves that
+  against its own `window.location.href` (`isExternalTextureUrlTrusted`,
+  below), the way a protocol-relative `<img src>` already would in any
+  browser. A mapper never has to choose between the two: write `http://`
+  for upstream, and bzo silently makes it work for its own browsers too.
+
+  A protocol-relative URL (`//host/path`, no scheme at all) written
+  *directly* in the file is also recognized, and skips the stripping step
+  since there is nothing left to strip -- but it has no equivalent for real
+  upstream at all: `bzflag`'s own `BzfNetwork::parseURL` scans for a
+  leading `:` before it does anything else, so a string with no scheme
+  fails to parse before curl is ever involved, unlike a scheme it can at
+  least attempt and fail quietly the way `https://` does. Reserve this
+  spelling for a map that only bzo will ever load; a mapper-facing `.bzw`
+  should write `http://` and let the server do the rest.
 
   Whether it is actually loaded is each connected browser's own decision:
   `isExternalTextureUrlTrusted` in `public/texture.js` allows a URL whose
@@ -735,16 +767,26 @@ Not yet read:
 Anything not listed above is skipped without comment, which means a map using it
 loads and plays with that part of it missing. The notable absences:
 
-- **`meshbox`/`meshpyr`, and the `arc`/`cone`/`sphere`/`tetra` primitives that
-  expand to a `mesh`.** `mesh` itself is parsed, textured, placed through
-  `group` instances, debug-labelled, radar-drawn, and collided with (a tank
-  and a shot both stop at a mesh face, per face-level
+- **`meshbox`, and the `arc`/`sphere` primitives that expand to a `mesh`.**
+  `tetra`, `cone` and `meshpyr` are the three of the six already read.
+  `tetra` parses its four vertices and per-face materials, corrects the
+  vertex winding the same way upstream's own `checkVertexOrder` does, and
+  builds a real four-face mesh. `cone` and `meshpyr` are upstream's own same
+  generator (`CustomCone.cxx`, `meshpyr` just built with `pyramid=true`) --
+  position, size, a `divisions`-sided sweep (`angle`, defaulting to a full
+  360 degrees), per-face materials (`edge`/`bottom`/`startside`/`endside`,
+  or a bare line for all four), `texsize`, `smoothbounce`/`flatshading`, and
+  a `meshpyr`'s own `flipz`. Both build a real explicit-texcoord (and, unless
+  `flatshading`/a `meshpyr`'s own default says otherwise, smooth-normal)
+  mesh, matching upstream's own wrap-around texturing rather than falling
+  back to bzo's per-face auto-planar UV. `mesh` itself is parsed, textured,
+  placed through `group` instances, debug-labelled, radar-drawn, and collided
+  with (a tank and a shot both stop at a mesh face, per face-level
   `drivethrough`/`shootthrough`, a tank slides off one the same way it slides
   off a box corner, and the oriented tank box is its own precise case rather
   than a circle standing in for it) -- see **Groups** above. See
   `docs/bzw-plan.md`'s "Mesh geometry" for what is still left (mainly a
-  perf pass merging same-material triangles, and these four primitives
-  themselves).
+  perf pass merging same-material triangles, and `arc`/`sphere`/`meshbox`).
 - **Most of what a `material` block or a `matref` can still say**:
   `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, `phydrv`, and the
   lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see

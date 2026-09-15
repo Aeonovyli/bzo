@@ -3388,6 +3388,94 @@ class RenderManager {
     return mesh;
   }
 
+  // A mesh's own eighth-dimension node -- upstream's `EighthDimShellNode`
+  // (EighthDimShellNode.cxx), which is nothing like a box or a pyramid's own
+  // scattered-point cloud: a mesh has no one footprint to scatter points
+  // across, so upstream instead redraws the mesh's own real geometry a
+  // second time, twice over. `ShellRenderNode::render()` (EighthDimShellNode.
+  // cxx:137-165) first draws it solid -- filled, normal winding inverted
+  // (`setCulling(GL_FRONT)`, the constructor, line 114) so the normally
+  // hidden *inside* of each face draws, additively blended whenever `blend`
+  // is on and render quality is 2 or better -- and only then overlays a
+  // 3px wireframe on top of that, unconditionally. The solid pass is what
+  // reads as "floating triangles" -- real geometry glowing from the inside,
+  // not upstream's own random scattered ones (`EighthDBoxSceneNode`'s own
+  // effect, box/pyramid only, an actual point cloud with nothing this
+  // mesh's own faces have to do with).
+  //
+  // bzo has no inverted-cull material pass sitting around to reuse, but the
+  // same real geometry is already sitting in `obs.vertices`/`obs.faces`, so
+  // both of upstream's own passes are rebuilt directly from it: a solid fill
+  // using `THREE.BackSide` (Three's own equivalent of inverted culling --
+  // draw only the faces the camera is behind, which is the mesh's real
+  // inside surface) with additive blending, one random colour per face
+  // rather than upstream's own texture (matching the random-colour style
+  // bzo's own box/pyramid cloud already uses, and simpler than resolving
+  // each face's real material a second time here); and a wireframe outline
+  // on top, in the same white a box or a pyramid's own outline already uses
+  // rather than upstream's per-face colour, for the same reason.
+  _buildMeshInsideBuildingNode(obs) {
+    const positions = [];
+    const colors = [];
+    const edges = [];
+    for (const face of obs.faces) {
+      const { vertexIndices } = face;
+      const n = vertexIndices.length;
+      const verts = vertexIndices.map((vi) => obs.vertices[vi]);
+      if (verts.some((v) => !v)) continue;
+
+      const red = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
+      const green = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
+      const blue = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
+      const alpha = BZFLAG_EIGHTH_DIM_ALPHA_MIN + BZFLAG_EIGHTH_DIM_ALPHA_RANGE * Math.random();
+      for (let t = 1; t < n - 1; t += 1) {
+        for (const v of [verts[0], verts[t], verts[t + 1]]) {
+          positions.push(v.x, v.y, v.z);
+          colors.push(red, green, blue, alpha);
+        }
+      }
+
+      for (let i = 0; i < n; i += 1) {
+        const a = verts[i];
+        const b = verts[(i + 1) % n];
+        edges.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      }
+    }
+
+    const fillGeometry = new THREE.BufferGeometry();
+    fillGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    fillGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+    const fill = new THREE.Mesh(fillGeometry, new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      side: THREE.BackSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }));
+    fill.renderOrder = EIGHTH_DIM_RENDER_ORDER;
+    fill.frustumCulled = false;
+
+    const outlineGeometry = new THREE.BufferGeometry();
+    outlineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edges, 3));
+    const outline = new THREE.LineSegments(
+      outlineGeometry,
+      new THREE.LineBasicMaterial({ color: 0xffffff })
+    );
+    outline.renderOrder = EIGHTH_DIM_RENDER_ORDER;
+    outline.frustumCulled = false;
+
+    // A mesh's own vertices are already in world space (unlike a box or a
+    // pyramid, which are drawn relative to their own centre and rotation),
+    // so the node itself sits at the origin with nothing to transform.
+    const node = new THREE.Group();
+    node.matrixAutoUpdate = false;
+    node.updateMatrix();
+    node.add(fill);
+    node.add(outline);
+    this._tagDraws(node, 'effect');
+    return node;
+  }
+
   // One eighth-dimension node per obstacle, built the first time a tank is
   // inside that obstacle rather than with the world. Upstream builds all of them
   // in SceneBuilder because it builds every scene node there anyway; here they
@@ -3396,6 +3484,12 @@ class RenderManager {
   _getInsideBuildingNode(obs) {
     let node = this.insideBuildingNodes.get(obs);
     if (node) return node;
+
+    if (obs.type === 'mesh') {
+      node = this._buildMeshInsideBuildingNode(obs);
+      this.insideBuildingNodes.set(obs, node);
+      return node;
+    }
 
     const height = getObstacleHeight(obs);
     const halfW = obs.w / 2;

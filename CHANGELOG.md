@@ -6,6 +6,50 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.16] - 2026-09-15
+
+### Added
+- **`tetra` is now a supported BZW primitive.** Parses its four vertices and
+  per-face (or whole-tetra) materials, corrects the vertex winding the same
+  way upstream's own `TetraBuilding::checkVertexOrder` does, and builds a
+  real four-face mesh through the existing mesh render/collision/radar/debug
+  pipeline unchanged.
+- **`cone` and `meshpyr` are now supported too** -- `meshpyr` is upstream's
+  own same generator (`CustomCone.cxx`) built with `pyramid=true`, not a
+  second implementation. Position, size, rotation, a `divisions`-sided
+  sweep (`angle`, defaulting to a full circle), per-face materials
+  (`edge`/`bottom`/`startside`/`endside`), `texsize`, and `meshpyr`'s own
+  45-degree twist, sqrt(2) footprint scale, and `flipz` are all read.
+  Generates real explicit per-vertex texcoords (upstream's own wrap-around
+  math, so a texture wraps around the curve cleanly instead of fanning out)
+  and real smooth per-vertex normals where `useNormals` asks for them.
+- **A tank phased through with Oscillation Overthruster can now stand inside
+  a mesh and see it.** Previously a mesh was never even detected as
+  something a phased tank could be inside of, and the effect's own geometry
+  builder assumed a box or a pyramid's `w`/`d`/`h` fields, both `undefined`
+  for a mesh. Now built the way upstream's own `EighthDimShellNode` draws a
+  mesh specifically (not the box/pyramid random-point-cloud effect at all):
+  the mesh's own real faces, redrawn inside-out and additively blended, with
+  a wireframe outline over them.
+
+### Fixed
+- **A ricocheting shot could pick the wrong face of a mesh and reflect
+  wildly** -- a laser bouncing off a `cone`/`meshpyr`/`tetra` could shoot off
+  at a near-vertical angle and leave the map almost instantly. Root cause was
+  two stacked bugs in how a mesh's face is chosen for a shot's exact
+  crossing point: a 2D-projection point-in-polygon test that could accept a
+  point nowhere near a thin, steeply angled face's real area, and a
+  radius-offset point that could drift past a face's own true edge at a
+  shallow angle. Both are now ported directly from upstream's own
+  `MeshFace::intersect` mechanism (per-edge "fence" planes, tested against
+  the ray's exact un-offset crossing).
+- A mapper-hosted texture URL now round-trips through both a real bzflag
+  client and bzo's own: write `http://` in the `.bzw` file (confirmed
+  against a real client, which only reliably follows that scheme, not
+  `https://`), and bzo's server now strips the scheme down to
+  protocol-relative before forwarding to its own browser clients, avoiding
+  mixed-content blocking on an `https://` page like bz.rikers.org.
+
 ## [1.2.15] - 2026-09-15
 
 ### Added

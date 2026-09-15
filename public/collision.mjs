@@ -587,17 +587,19 @@ export function meshIntersectsTank(obs, x, y, z, rotation, height, slack = 0, ta
   ) !== null;
 }
 
-// The plane normal of whichever face `findMeshHitFace` would report a hit
-// against -- `getShotObstacleNormal`'s mesh case, needed only when a shot
-// ricochets off one (a face itself marked `ricochet`, or a world that
-// reflects every shot regardless), so this always reads a face's own
-// `shootThrough` rather than the `driveThrough` default -- a shot ricochets
-// off exactly the faces that stop a shot, not the ones that stop a tank.
-// Picks whichever face the shared search finds first, the same "first hit
-// wins" bzo's tank collision already accepts for a mesh -- see
-// docs/bzw-plan.md's "Mesh geometry".
-export function getMeshHitNormal(obs, x, y, z, radius) {
-  const face = findMeshHitFace(obs, x, y, z, radius, radius, 'shootThrough');
+// The plane normal to reflect a ricocheting shot about. `hitFace`, when
+// given, is the exact face `findMeshFaceCrossing` already found by walking
+// the ray itself -- the caller's job, since only the ray sweep knows which
+// face the shot actually crossed. Without one (a caller that never traced a
+// ray to get here) this falls back to `findMeshHitFace`'s static touching
+// test, which is a real "first hit wins" ambiguity right where a small
+// mesh's faces meet -- e.g. a tetrahedron's three walls all share their
+// base edge with its flat bottom face, so a shot resting close to the
+// ground there can be "touching" more than one face, and array order used
+// to pick a wrong one, reflecting the shot off the bottom's normal instead
+// of the wall's. Passing `hitFace` sidesteps that rather than resolving it.
+export function getMeshHitNormal(obs, x, y, z, radius, hitFace = null) {
+  const face = hitFace || findMeshHitFace(obs, x, y, z, radius, radius, 'shootThrough');
   if (!face) return { x: 0, y: 1, z: 0 };
   return { x: face.plane[0], y: face.plane[1], z: face.plane[2] };
 }
@@ -1069,38 +1071,27 @@ export function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, ra
   return best;
 }
 
-// Whether a point lies inside a planar face's own boundary, projected flat
-// -- upstream's own `Obstacle::intersect` answers this by dropping into 2D
-// along whichever axis the face is most nearly perpendicular to (the same
-// choice `MeshSceneNodeGenerator::makeTexcoords`-style code always makes),
-// then a standard point-in-convex-polygon test: consistently signed on every
-// edge means inside, any edge that disagrees means outside. Every face a
-// mapper writes is required to be planar and convex (CustomMeshFace.cxx),
-// so this never has to handle a concave one.
+// Whether a point lies inside a planar face's own boundary -- upstream's own
+// `MeshFace::intersect` (MeshFace.cxx:341-349), tested against the same
+// per-edge "fence" planes upstream precomputes once at `finalize()`
+// (`edgePlanes`, MeshFace.cxx:201-214, ported into `face.edgePlanes` by
+// `finalizeMeshGeometry`/server.js): each edge's own plane contains that edge
+// and is perpendicular to the face's own plane, oriented so the polygon's
+// interior is its negative side, so a point actually on the face sits on the
+// negative side of every one of them (a small positive tolerance the same
+// way upstream reads it). This used to drop into a 2D projection instead
+// (whichever axis the face was least aligned with, then a flat
+// point-in-polygon test) -- a real bug, not just a style difference: a thin,
+// steeply angled face (any of a cone's narrow wedges, all sharing one edge
+// with their neighbours at the apex) could project close enough to
+// degenerate that a point nowhere near its real 3D area still read as
+// inside, handing a shot's reflection the wrong face's normal. Every face a
+// mapper writes is required to be planar and convex (CustomMeshFace.cxx), so
+// this never has to handle a concave one.
 export function pointInMeshFacePolygon(obs, face, px, py, pz) {
-  const [nx, ny, nz] = face.plane;
-  const absX = Math.abs(nx);
-  const absY = Math.abs(ny);
-  const absZ = Math.abs(nz);
-  const project = (absY >= absX && absY >= absZ)
-    ? (vx, vy, vz) => [vx, vz]
-    : (absX >= absZ)
-      ? (vx, vy, vz) => [vy, vz]
-      : (vx, vy) => [vx, vy];
-  const [px2, pz2] = project(px, py, pz);
-  const vertexIndices = face.vertexIndices;
-  const n = vertexIndices.length;
-  let sign = 0;
-  for (let i = 0; i < n; i++) {
-    const a = obs.vertices[vertexIndices[i]];
-    const b = obs.vertices[vertexIndices[(i + 1) % n]];
-    const [ax, az] = project(a.x, a.y, a.z);
-    const [bx, bz] = project(b.x, b.y, b.z);
-    const cross = ((bx - ax) * (pz2 - az)) - ((bz - az) * (px2 - ax));
-    if (Math.abs(cross) < 1e-9) continue;
-    const s = cross > 0 ? 1 : -1;
-    if (sign === 0) sign = s;
-    else if (s !== sign) return false;
+  for (let i = 0; i < face.edgePlanes.length; i++) {
+    const [nx, ny, nz, d] = face.edgePlanes[i];
+    if (((nx * px) + (ny * py) + (nz * pz) + d) > 0.001) return false;
   }
   return true;
 }
@@ -1116,10 +1107,12 @@ export function pointInMeshFacePolygon(obs, face, px, py, pz) {
 // ever catches a face if that single step happens to land within its own
 // radius of the exact plane -- which a fast, perpendicular crossing of a
 // razor-thin polygon very often does not. This asks the exact question
-// instead: where the segment's own line crosses each face's plane, offset
-// by `radius` so the shot's own surface reaches the face before its centre
-// point does, then whether that crossing point actually lands inside the
-// face's own boundary rather than merely its infinite plane.
+// instead: where the segment's own line crosses each face's plane -- offset
+// by `radius`, so the shot's own surface reaches the face before its centre
+// point does, for where the segment actually stops -- and separately, at the
+// line's own exact (un-offset) crossing, whether that lands inside the
+// face's own boundary rather than merely its infinite plane. See the
+// comment further down on why those two are not the same point.
 export function findMeshFaceCrossing(obs, fromX, fromY, fromZ, toX, toY, toZ, radius) {
   const { bounds } = obs;
   if (bounds && (Math.max(fromX, toX) + radius < bounds.minX
@@ -1146,11 +1139,27 @@ export function findMeshFaceCrossing(obs, fromX, fromY, fromZ, toX, toY, toZ, ra
     const t = ((sign * radius) - fromDist) / denom;
     if (t < 0 || t > 1) continue;
     if (best !== null && t >= best.fraction) continue;
-    const px = fromX + (dx * t);
-    const py = fromY + (dy * t);
-    const pz = fromZ + (dz * t);
+    // `t` is where the shot's own radius reaches the plane, not where the
+    // ray through its centre does -- offset by `radius/denom` from the
+    // exact crossing, along the ray. At anything but a dead-square hit that
+    // offset is not purely toward the face; part of it slides sideways
+    // within the face's own plane, growing without bound as the ray
+    // glances the face at a shallower angle. Entering right at the shared
+    // edge between two of a cone's narrow wedges, that sideways slide can
+    // carry the radius-offset point past the true face's own edge even
+    // though the ray's exact (zero-radius) crossing sits safely inside it --
+    // which is what this checks instead: "which face" is answered at the
+    // exact crossing, where a mesh face actually intersects a mathematical
+    // line the way upstream's own `MeshFace::intersect` always does (it has
+    // no shot radius to offset by in the first place); `t` still carries the
+    // radius offset, since that is where the shot's own surface, not its
+    // centre, actually meets the face.
+    const t0 = -fromDist / denom;
+    const px = fromX + (dx * t0);
+    const py = fromY + (dy * t0);
+    const pz = fromZ + (dz * t0);
     if (!pointInMeshFacePolygon(obs, face, px, py, pz)) continue;
-    best = { fraction: t, obstacle: obs };
+    best = { fraction: t, obstacle: obs, face };
   }
   return best;
 }
@@ -1291,8 +1300,12 @@ export function findShotSegmentImpact(obstacles, from, to, radius) {
 // the two flat faces are named by the same vertical tests that let that point
 // stay outside, and everything else falls through to the cross-section's
 // horizontal normal -- which, as getNormalOrigRect does, always answers.
-export function getShotObstacleNormal(obs, x, y, z, radius) {
-  if (obs.type === 'mesh') return getMeshHitNormal(obs, x, y, z, radius);
+//
+// `hitFace`, for a mesh, is the face the caller's own ray sweep already
+// identified -- see `getMeshHitNormal`'s comment on why that beats
+// re-deriving it here.
+export function getShotObstacleNormal(obs, x, y, z, radius, hitFace = null) {
+  if (obs.type === 'mesh') return getMeshHitNormal(obs, x, y, z, radius, hitFace);
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
 
@@ -1702,7 +1715,7 @@ export function traceShotStep({
         remaining = 0;
         break;
       }
-      const normal = getShotObstacleNormal(impact.obstacle, hitX, hitY, hitZ, radius);
+      const normal = getShotObstacleNormal(impact.obstacle, hitX, hitY, hitZ, radius, impact.face || null);
       const reflected = reflectShotDirection(dX, dY, dZ, normal);
       dX = reflected.x;
       dY = reflected.y;

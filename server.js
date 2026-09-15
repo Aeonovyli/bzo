@@ -1751,9 +1751,292 @@ function normalizeScoreLimit(score) {
 // only has to recognize the *opening* keyword to say how many of each a map
 // asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'arc', 'cone', 'sphere', 'tetra', 'meshbox', 'meshpyr',
+  'arc', 'sphere', 'meshbox',
   'physics', 'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
 ]);
+
+// `TetraBuilding::makeMesh`'s own fixed face topology (`MeshUtils.h`'s
+// `addFace` calls, `TetraBuilding.cxx:110-121`): four triangles, each
+// omitting one vertex, always in this order regardless of how a mapper
+// wrote the four `vertex` lines. `TetraBuilding::checkVertexOrder` swaps
+// vertices 1 and 2 first (and their own face-material slots along with
+// them) whenever the raw order given would make every face point inward
+// instead of out -- bzo(x,y,z) is a proper rotation of upstream's own
+// (x,y,z) (see `getColliderLocalPoint`'s own comment in the collision
+// pair), so the same cross/dot sign test applies unchanged here. Module
+// scope rather than nested in `parseBZWMap`: neither this nor
+// `buildTetraMesh` below closes over anything of its own, and nesting a
+// `const` after the line-parsing loop that can call `buildTetraMesh` mid-
+// loop is a temporal-dead-zone crash waiting to happen -- module scope
+// initializes once, well before `parseBZWMap` is ever called at all.
+const TETRA_FACE_TOPOLOGY = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]];
+
+function buildTetraMesh(tetra) {
+  const v = tetra.vertexPositions.slice();
+  const mats = tetra.faceMaterials.slice();
+  const edgeA = { x: v[1].x - v[0].x, y: v[1].y - v[0].y, z: v[1].z - v[0].z };
+  const edgeB = { x: v[2].x - v[0].x, y: v[2].y - v[0].y, z: v[2].z - v[0].z };
+  const edgeC = { x: v[3].x - v[0].x, y: v[3].y - v[0].y, z: v[3].z - v[0].z };
+  const cross = {
+    x: (edgeA.y * edgeB.z) - (edgeA.z * edgeB.y),
+    y: (edgeA.z * edgeB.x) - (edgeA.x * edgeB.z),
+    z: (edgeA.x * edgeB.y) - (edgeA.y * edgeB.x),
+  };
+  const dot = (cross.x * edgeC.x) + (cross.y * edgeC.y) + (cross.z * edgeC.z);
+  if (dot < 0) {
+    [v[1], v[2]] = [v[2], v[1]];
+    [mats[1], mats[2]] = [mats[2], mats[1]];
+  }
+
+  // Every face is solid regardless of the tetra's own `drivethrough`/
+  // `shootthrough`/`ricochet` -- upstream's own `addFace` call hardcodes
+  // all three false per face (`TetraBuilding.cxx:115-121`), the same way
+  // `MeshUtils.h`'s shared helper always does for this shape. The whole
+  // object's own passability -- set below, from the BZW keywords a
+  // mapper actually wrote -- is what a tetra answers with instead,
+  // exactly as `findTankObstacle`'s `if (obs.driveThrough) continue;`
+  // already reads for every other obstacle type.
+  const faces = TETRA_FACE_TOPOLOGY.map((vertexIndices, i) => ({
+    vertexIndices, normalIndices: [], texcoordIndices: [],
+    phydrv: null, noclusters: false, smoothBounce: false,
+    driveThrough: false, shootThrough: false, ricochet: false,
+    texture: mats[i].texture, textureUrl: mats[i].textureUrl,
+    color: mats[i].color, noRadar: mats[i].noRadar, noLighting: mats[i].noLighting,
+  }));
+
+  const center = {
+    x: (v[0].x + v[1].x + v[2].x + v[3].x) / 4,
+    y: (v[0].y + v[1].y + v[2].y + v[3].y) / 4,
+    z: (v[0].z + v[1].z + v[2].z + v[3].z) / 4,
+  };
+
+  return {
+    type: 'mesh', name: tetra.name, definedIn: tetra.definedIn,
+    vertices: v, normals: [], texcoords: [], faces,
+    checkPoints: [{ ...center, inside: true }],
+    phydrv: null, noclusters: false, smoothBounce: false, decorative: false,
+    driveThrough: tetra.driveThrough, shootThrough: tetra.shootThrough, ricochet: tetra.ricochet,
+    texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+  };
+}
+
+// `ConeObstacle::makeMesh` (ConeObstacle.cxx:86-329), ported the same way as
+// `buildTetraMesh` above: every position/size/angle stays in upstream's own
+// BZW terms (Z up, degrees where upstream reads degrees) through the whole
+// generator, and only the finished vertices/normals are rotated into bzo's
+// axes at the very end -- `toBzo` below, the same single-purpose conversion
+// `buildTetraMesh` uses. `meshpyr` is the same generator upstream itself
+// reuses (`CustomCone(true)`, `BZWReader.cxx`): 4 divisions, defaults pulled
+// from BZDB's `_pyrBase`/`_pyrHeight` (4x/5x `_tankHeight`, 2.05 -- 8.2 and
+// 10.25 here, since bzo has no BZDB to read them from live), and upstream
+// rebuilds it at the origin with a 45-degree internal twist and a sqrt(2)
+// size scale (so the circle-inscribed square lands axis-aligned) before
+// spinning it out to the mapper's own `rotation` and shifting to `position`
+// -- see the call site below for why this port skips that transform stack
+// and gets the same shape a simpler way.
+const CONE_MIN_SIZE = 1e-6;
+// `_pyrBase`/`_pyrHeight` (BZDB, `4.0*_tankHeight`/`5.0*_tankHeight`,
+// `_tankHeight` = 2.05) -- `meshpyr`'s own default `size` when a mapper
+// gives none, same as a plain `pyramid`'s.
+const MESHPYR_DEFAULT_BASE = 4.0 * 2.05;
+const MESHPYR_DEFAULT_HEIGHT = 5.0 * 2.05;
+
+function buildConeMesh(cone) {
+  const rawSize = cone.sizeBzf;
+  // `meshpyr` rebuilds with a sqrt(2)-scaled footprint (upstream's own
+  // `CustomCone::writeToGroupDef` computes this `newSize` before ever
+  // constructing the `ConeObstacle` that `makeMesh` below is ported from, so
+  // by the time upstream's own generator math runs, this -- not the
+  // mapper's own `size` -- is already all it ever sees). `z` only ever gets
+  // `fabsf`'d, never scaled.
+  const sz = cone.isPyramid
+    ? { x: Math.abs(rawSize.x) * Math.SQRT2, y: Math.abs(rawSize.y) * Math.SQRT2, z: Math.abs(rawSize.z) }
+    : { x: Math.abs(rawSize.x), y: Math.abs(rawSize.y), z: Math.abs(rawSize.z) };
+  let texU = cone.texsize.u;
+  let texV = cone.texsize.v;
+  if (sz.x < CONE_MIN_SIZE || sz.y < CONE_MIN_SIZE || sz.z < CONE_MIN_SIZE
+    || Math.abs(texU) < CONE_MIN_SIZE || Math.abs(texV) < CONE_MIN_SIZE) {
+    return null;
+  }
+
+  // Ramanujan's ellipse-circumference approximation, rounded to an integral
+  // tile count so the wrap seam lines up -- upstream's own comment, and its
+  // own math, verbatim.
+  if (texU < 0) {
+    const circ = Math.PI * ((3 * (sz.x + sz.y))
+      - Math.sqrt((sz.x + (3 * sz.y)) * (sz.y + (3 * sz.x))));
+    texU = -Math.floor(circ / texU);
+  }
+  if (texV < 0) texV = -(sz.z / texV);
+
+  // `meshpyr` also rebuilds at the origin with a fixed 45-degree twist,
+  // then spins to `rotation` and shifts to `position` as a whole extra
+  // transform afterward. Baking straight into world space here skips that
+  // stack: generate with `rotation` already folded into the sweep's own
+  // start angle (exactly like a plain `cone` always does), then shift by
+  // `position` once at the end -- the same net shape, since the 45-degree
+  // twist never itself reads `position` or `rotation`.
+  const baseHeading = cone.isPyramid ? (Math.PI / 4) : cone.rotationRad;
+
+  let r = baseHeading;
+  let a = cone.sweepDeg;
+  if (a > 360) a = 360;
+  if (a < -360) a = -360;
+  a *= Math.PI / 180;
+  if (a < 0) {
+    r += a;
+    a = -a;
+  }
+
+  if (cone.divisions <= Math.floor((a + CONE_MIN_SIZE) / Math.PI)) return null;
+
+  const isCircle = Math.abs(Math.PI - (((a + Math.PI) % (2 * Math.PI)) + (2 * Math.PI)) % (2 * Math.PI))
+    < CONE_MIN_SIZE;
+
+  const { divisions } = cone;
+  const astep = a / divisions;
+
+  // A flipped `meshpyr` (`flipz`, or a negative `size` height) is the same
+  // shape upside down -- swapping which end sits at `position`'s own height
+  // and which sits `sz.z` above it reads the same as upstream's own
+  // scale-then-shift flip, without needing that transform's own ordering.
+  // `flipz`/a negative height are gated to `pyramidStyle` upstream, so a
+  // plain `cone` never reaches this.
+  const flipped = cone.isPyramid && (cone.flipz || rawSize.z < 0);
+  const ringZ = flipped ? sz.z : 0;
+  const apexZ = flipped ? 0 : sz.z;
+
+  const ringVertsLocal = [];
+  const ringNormsLocal = cone.useNormals ? [] : null;
+  const ringTexcoords = [];
+
+  for (let i = 0; i <= divisions; i++) {
+    const ang = r + (astep * i);
+    const cosv = Math.cos(ang);
+    const sinv = Math.sin(ang);
+    if (!isCircle || i !== divisions) {
+      ringVertsLocal.push({ x: cosv * sz.x, y: sinv * sz.y, z: ringZ });
+      if (cone.useNormals) {
+        let nx = cosv / sz.x;
+        let ny = sinv / sz.y;
+        let nz = 1 / sz.z;
+        const len = Math.sqrt((nx * nx) + (ny * ny) + (nz * nz)) || 1;
+        nx /= len; ny /= len; nz /= len;
+        ringNormsLocal.push({ x: nx, y: ny, z: flipped ? -nz : nz });
+      }
+    }
+    ringTexcoords.push({ u: texU * (0.5 + (0.5 * cosv)), v: texV * (0.5 + (0.5 * sinv)) });
+  }
+
+  const centralNormsLocal = [];
+  if (cone.useNormals) {
+    for (let i = 0; i < divisions; i++) {
+      const ang = r + (astep * (0.5 + i));
+      let nx = Math.cos(ang) / sz.x;
+      let ny = Math.sin(ang) / sz.y;
+      let nz = 1 / sz.z;
+      const len = Math.sqrt((nx * nx) + (ny * ny) + (nz * nz)) || 1;
+      nx /= len; ny /= len; nz /= len;
+      centralNormsLocal.push({ x: nx, y: ny, z: flipped ? -nz : nz });
+    }
+  }
+
+  // Local (pre-`position`) coordinates so far; shift to world space, then
+  // into bzo's own axes -- the same single conversion `buildTetraMesh` uses.
+  const pos = cone.posBzf;
+  const toBzo = (p) => ({ x: p.x + pos.x, y: p.z + pos.z, z: -(p.y + pos.y) });
+  const toBzoDir = (n) => ({ x: n.x, y: n.z, z: -n.y });
+
+  const vertices = ringVertsLocal.map(toBzo);
+  const vlen = vertices.length;
+  const vbotIndex = vlen;
+  const vtopIndex = vlen + 1;
+  vertices.push(toBzo({ x: 0, y: 0, z: ringZ }));
+  vertices.push(toBzo({ x: 0, y: 0, z: apexZ }));
+
+  const normals = cone.useNormals
+    ? ringNormsLocal.map(toBzoDir).concat(centralNormsLocal.map(toBzoDir))
+    : [];
+
+  const texcoords = ringTexcoords.slice();
+  const tmidIndex = divisions + 1;
+  texcoords.push({ u: texU * 0.5, v: texV * 0.5 });
+  let t00Index = -1; let t10Index = -1; let t11Index = -1; let t01Index = -1;
+  if (!isCircle) {
+    t00Index = texcoords.length; texcoords.push({ u: 0, v: 0 });
+    t10Index = texcoords.length; texcoords.push({ u: texU, v: 0 });
+    t11Index = texcoords.length; texcoords.push({ u: texU, v: texV });
+    t01Index = texcoords.length; texcoords.push({ u: 0, v: texV });
+  }
+
+  const faceBase = {
+    phydrv: cone.phydrv, noclusters: false, smoothBounce: false,
+    driveThrough: false, shootThrough: false, ricochet: false,
+  };
+  const matFields = (m) => ({
+    texture: m.texture, textureUrl: m.textureUrl, color: m.color, noRadar: m.noRadar, noLighting: m.noLighting,
+  });
+  const [edgeMat, bottomMat, startMat, endMat] = cone.materials;
+
+  // Every face below is wound the way upstream's own index math winds it,
+  // which faces outward for the ordinary apex-up shape. A flipped `meshpyr`
+  // swapped which physical end `ringZ`/`apexZ` sit at instead of mirroring
+  // through a transform, and that swap inverts every face's own winding
+  // (verified by hand: the edge face's cross product flips from
+  // (+x,+y,+z)-ish to (-x,-y,+z)-ish between the two) -- swapping each
+  // face's own last two corners undoes exactly that, corner-for-corner
+  // across its vertex/normal/texcoord indices together.
+  const pushFace = (vertexIndices, normalIndices, texcoordIndices, mat) => {
+    const order = flipped ? [0, 2, 1] : [0, 1, 2];
+    faces.push({
+      ...faceBase,
+      vertexIndices: order.map((k) => vertexIndices[k]),
+      normalIndices: normalIndices.length ? order.map((k) => normalIndices[k]) : [],
+      texcoordIndices: order.map((k) => texcoordIndices[k]),
+      ...matFields(mat),
+    });
+  };
+
+  const faces = [];
+  for (let i = 0; i < divisions; i++) {
+    const V = (x) => (x + i) % vlen;
+    const T = (x) => x + i;
+    const TI = (x) => divisions - T(x);
+    pushFace(
+      [vtopIndex, V(0), V(1)],
+      cone.useNormals ? [vlen + i, V(0), V(1)] : [],
+      [tmidIndex, T(0), T(1)],
+      edgeMat,
+    );
+    // The bottom cap is always flat -- upstream's own shared `addFace`
+    // helper never passes it a normal list regardless of `useNormals`,
+    // since a flat disc has nothing for a smooth normal to interpolate.
+    pushFace(
+      [vbotIndex, V(1), V(0)],
+      [],
+      [tmidIndex, TI(1), TI(0)],
+      bottomMat,
+    );
+  }
+  if (!isCircle) {
+    pushFace([vbotIndex, 0, vtopIndex], [], [t00Index, t10Index, t01Index], startMat);
+    pushFace([vlen - 1, vbotIndex, vtopIndex], [], [t00Index, t10Index, t11Index], endMat);
+  }
+
+  const checkLocal = isCircle
+    ? { x: 0, y: 0 }
+    : { x: Math.cos(r + (0.5 * a)) * sz.x * 0.25, y: Math.sin(r + (0.5 * a)) * sz.y * 0.25 };
+  const checkPoint = toBzo({ x: checkLocal.x, y: checkLocal.y, z: (ringZ + apexZ) * 0.5 });
+
+  return {
+    type: 'mesh', name: cone.name, definedIn: cone.definedIn,
+    vertices, normals, texcoords, faces,
+    checkPoints: [{ ...checkPoint, inside: true }],
+    phydrv: cone.phydrv, noclusters: false, smoothBounce: cone.smoothBounce, decorative: false,
+    driveThrough: cone.driveThrough, shootThrough: cone.shootThrough, ricochet: cone.ricochet,
+    texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+  };
+}
 
 function parseBZWServerOptions(lines) {
   let inOptions = false;
@@ -1963,6 +2246,15 @@ const BZW_PASSABILITY_KEYWORDS = new Map([
   ['ricochet', { ricochet: true }],
 ]);
 
+// `cone`/`meshpyr`'s own four material slots, in `CustomCone.h`'s own enum
+// order (`Edge, Bottom, StartFace, EndFace`) -- naming one of these first on
+// a line applies only to that slot (`parseMaterialsByName`); anything else
+// recognized applies to all four at once (`parseMaterials`), same as a bare
+// material line before a `tetra`'s first `vertex`.
+const CONE_SIDE_NAMES = new Map([
+  ['edge', 0], ['bottom', 1], ['startside', 2], ['endside', 3],
+]);
+
 // A material property may name the faces it applies to first, and upstream's own
 // names for a box's faces are these, with `top`, `bottom`, `sides` and
 // `outside` as extras over the six (CustomBox.cxx:34 and :104). bzo draws a box
@@ -2049,7 +2341,19 @@ function parseBzwTextureUrl(rawName) {
   }
   try {
     const parsed = new URL(rawName);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    // Real bzflag's own downloader needs a literal scheme to parse a texture
+    // URL at all (a mapper-written `//host/path` line, confirmed earlier,
+    // fails there outright) -- but confirmed directly against a real client
+    // that it only reliably follows `http://`, not `https://`, so a `.bzw`
+    // file should write `http://` for a mapper-hosted texture from here on.
+    // bzo's own browser clients would then hit mixed-content blocking
+    // loading `http://` from an `https://` page (bz.rikers.org, most
+    // notably), so this strips the scheme down to protocol-relative before
+    // forwarding -- exactly the form a mapper-written `//host/path` line
+    // already takes above, and each client already re-resolves against its
+    // own page's protocol (`isExternalTextureUrlTrusted`, public/texture.js).
+    return rawName.replace(/^https?:/i, '');
   } catch {
     return null;
   }
@@ -2806,6 +3110,158 @@ function parseBZWMap(filename) {
       // `rotation`/`rot` branch, where both get set from the same line.
       const [, groupDefName] = line.split(/\s+/);
       current = { type: 'group', groupDefName: groupDefName || '', rotation: 0, spin: 0, scale: [1, 1, 1] };
+    } else if (token === 'tetra') {
+      // CustomTetra's own defaults (CustomTetra.cxx:27-38): `drivethrough`/
+      // `shootthrough`/`ricochet` are WorldFileObstacle's usual false, and
+      // each of the four triangular faces defaults to upstream's own stock
+      // "mesh" texture independently -- a material line before the first
+      // `vertex` sets all four at once, one stated after the Nth sets only
+      // that vertex's own face slot (CustomTetra::read's `vc = vertexCount
+      // - 1`, clamped to 3 once all four are read) -- see the branch below.
+      current = {
+        type: 'tetra', name: null,
+        definedIn: currentDefine ? currentDefine.name : null,
+        vertexPositions: [],
+        faceMaterials: [0, 1, 2, 3].map(() => (
+          { texture: 'mesh', textureUrl: null, color: null, noRadar: false, noLighting: false }
+        )),
+        driveThrough: false, shootThrough: false, ricochet: false,
+      };
+    } else if (current && current.type === 'tetra') {
+      // A `tetra`'s own grammar: up to four `vertex` lines (no shared pool,
+      // unlike `mesh` -- CustomTetra keeps its own four-slot array), each
+      // one's own material read either before any vertex (every face) or
+      // right after it (that face alone). `normals`/`texcoords` are read
+      // and discarded rather than wired to a face: upstream's own
+      // `TetraBuilding::makeMesh` never attaches them either (`MeshUtils.h`'s
+      // shared `addFace` helper always receives empty normal/texcoord index
+      // lists for a tetra's four faces, `TetraBuilding.cxx:110-121`), so a
+      // tetra always falls back to bzo's generic per-face auto-planar UV --
+      // matching real bzflag exactly, not a gap on bzo's side.
+      const words = line.split(/\s+/);
+      if (token === 'end') {
+        if (current.vertexPositions.length < 4) {
+          log(`Not creating tetrahedron in ${filename}, not enough vertices (${current.vertexPositions.length})`);
+        } else {
+          const tetraMesh = buildTetraMesh(current);
+          if (currentDefine) {
+            currentDefine.meshes.push(tetraMesh);
+          } else {
+            meshes.push(finalizeMeshGeometry(tetraMesh));
+          }
+        }
+        current = null;
+      } else if (token === 'vertex') {
+        if (current.vertexPositions.length >= 4) {
+          log(`Extra tetrahedron vertex in ${filename}, ignoring`);
+        } else {
+          const [x, y, z] = words.slice(1).map(Number);
+          current.vertexPositions.push({ x: x || 0, y: z || 0, z: -(y || 0) });
+        }
+      } else if (token === 'normals' || token === 'texcoords') {
+        // See the comment above -- intentionally a no-op.
+      } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
+        Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
+      } else if (token === 'name') {
+        const [, ...nameParts] = words;
+        const name = nameParts.join(' ').replace(/"/g, '').trim();
+        if (name) current.name = name;
+      } else {
+        const vc = Math.min(Math.max(current.vertexPositions.length - 1, 0), 3);
+        if (current.vertexPositions.length === 0) {
+          current.faceMaterials.forEach((mat) => applyBzwMaterialToken(mat, token, words));
+        } else {
+          applyBzwMaterialToken(current.faceMaterials[vc], token, words);
+        }
+      }
+    } else if (token === 'cone' || token === 'meshpyr') {
+      // `CustomCone`'s own defaults (CustomCone.cxx:43-75): `meshpyr` is the
+      // exact same generator as `cone`, just constructed with `pyramid=true`
+      // (`BZWReader.cxx`'s own `new CustomCone(true)` for the keyword) --
+      // 4 divisions instead of 16, flat shading instead of smooth, its own
+      // default size pulled from a plain pyramid's (`_pyrBase`/`_pyrHeight`),
+      // and every one of its four faces defaulting to "pyrwall" rather than
+      // a cone's own boxwall/roof/wall/wall. `position`/`size`/`rotation`
+      // are kept in upstream's own raw BZW terms (see `buildConeMesh`) --
+      // this parses the same as every other obstacle's, it's only the
+      // *storage* that differs, until the generator converts once at `end`.
+      const isPyramid = token === 'meshpyr';
+      current = {
+        type: 'cone', name: null,
+        definedIn: currentDefine ? currentDefine.name : null,
+        isPyramid,
+        posBzf: { x: 0, y: 0, z: 0 },
+        sizeBzf: isPyramid
+          ? { x: MESHPYR_DEFAULT_BASE, y: MESHPYR_DEFAULT_BASE, z: MESHPYR_DEFAULT_HEIGHT }
+          : { x: 10, y: 10, z: 10 },
+        rotationRad: 0,
+        sweepDeg: 360,
+        divisions: isPyramid ? 4 : 16,
+        texsize: { u: -8, v: -8 },
+        useNormals: !isPyramid,
+        flipz: false,
+        smoothBounce: false,
+        phydrv: null,
+        driveThrough: false, shootThrough: false, ricochet: false,
+        materials: isPyramid
+          ? [0, 1, 2, 3].map(() => ({ texture: 'pyrwall', textureUrl: null, color: null, noRadar: false, noLighting: false }))
+          : ['boxwall', 'roof', 'wall', 'wall'].map((texture) => (
+            { texture, textureUrl: null, color: null, noRadar: false, noLighting: false }
+          )),
+      };
+    } else if (current && current.type === 'cone') {
+      const words = line.split(/\s+/);
+      if (token === 'end') {
+        const coneMesh = buildConeMesh(current);
+        if (!coneMesh) {
+          log(`Not creating ${current.isPyramid ? 'meshpyr' : 'cone'} in ${filename}, invalid size/divisions/texsize`);
+        } else if (currentDefine) {
+          currentDefine.meshes.push(coneMesh);
+        } else {
+          meshes.push(finalizeMeshGeometry(coneMesh));
+        }
+        current = null;
+      } else if (token === 'position' || token === 'pos') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.posBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'size') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.sizeBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'rotation' || token === 'rot') {
+        // Upstream's own raw convention -- degrees CCW about +Z, no sign or
+        // offset fixup -- since `buildConeMesh` bakes this straight into the
+        // sweep math in the same BZW terms everything else there uses.
+        current.rotationRad = (parseFloat(words[1]) || 0) * Math.PI / 180;
+      } else if (token === 'divisions') {
+        const n = parseInt(words[1], 10);
+        if (Number.isInteger(n)) current.divisions = n;
+      } else if (token === 'angle') {
+        // The sweep, not the heading -- `rotation` above is the heading.
+        const deg = parseFloat(words[1]);
+        if (!Number.isNaN(deg)) current.sweepDeg = deg;
+      } else if (token === 'texsize') {
+        const [, u, v] = words;
+        current.texsize = { u: parseFloat(u) || current.texsize.u, v: parseFloat(v) || current.texsize.v };
+      } else if (token === 'phydrv') {
+        current.phydrv = words[1] || null;
+      } else if (token === 'smoothbounce') {
+        current.smoothBounce = true;
+      } else if (token === 'flatshading') {
+        current.useNormals = false;
+      } else if (current.isPyramid && token === 'flipz') {
+        current.flipz = true;
+      } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
+        Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
+      } else if (token === 'name') {
+        const [, ...nameParts] = words;
+        const name = nameParts.join(' ').replace(/"/g, '').trim();
+        if (name) current.name = name;
+      } else if (CONE_SIDE_NAMES.has(token)) {
+        const subWords = words.slice(1);
+        applyBzwMaterialToken(current.materials[CONE_SIDE_NAMES.get(token)], (subWords[0] || '').toLowerCase(), subWords);
+      } else {
+        current.materials.forEach((mat) => applyBzwMaterialToken(mat, token, words));
+      }
     } else if (token === 'mesh') {
       // CustomMesh's own defaults -- a mesh's default texture is upstream's
       // stock "mesh" (a wireframe/grid picture, unrelated to mesh geometry --
@@ -3328,19 +3784,53 @@ function parseBZWMap(filename) {
     return [nx, ny, nz, d];
   }
 
-  // Bounds plus a per-face plane, computed once a mesh's vertices are in
-  // their final world positions -- a top-level mesh right when it closes, or
-  // a `group`-placed one right after its own transform, never on a
-  // `define`'s own still-local template (`resolveDefineMeshes` holds those
-  // unfinalized, since the same definition may be placed more than once,
-  // each landing somewhere different). `baseY` matches every other
-  // obstacle's own field, so `getObstacleHeight`/the collision pair's height
-  // gate read a mesh the same way they already read a box or a pyramid.
+  // A face's own per-edge "fence" planes -- `MeshFace::finalize`'s own
+  // precomputation (MeshFace.cxx:201-214): one plane per polygon edge, each
+  // containing that edge and perpendicular to the face's own plane, oriented
+  // so the polygon's interior is its negative side. A point actually inside a
+  // convex face's real 3D area sits on the negative side of every one of
+  // these, which needs no 2D projection at all -- unlike a flattened
+  // point-in-polygon test, it cannot be fooled by a thin, steeply angled
+  // polygon (a cone's narrow wedge face, near its own shared apex) into
+  // accepting a point that was never really on it. Returns `[]` alongside a
+  // `null` plane -- a degenerate face has no edges worth fencing either.
+  function computeMeshFaceEdgePlanes(vertices, vertexIndices, plane) {
+    if (!plane) return [];
+    const [pnx, pny, pnz] = plane;
+    const n = vertexIndices.length;
+    const edgePlanes = [];
+    for (let v = 0; v < n; v++) {
+      const vv = vertices[vertexIndices[v]];
+      const vn = vertices[vertexIndices[(v + 1) % n]];
+      const ex = vn.x - vv.x;
+      const ey = vn.y - vv.y;
+      const ez = vn.z - vv.z;
+      let nx = (ey * pnz) - (ez * pny);
+      let ny = (ez * pnx) - (ex * pnz);
+      let nz = (ex * pny) - (ey * pnx);
+      const len = Math.sqrt((nx * nx) + (ny * ny) + (nz * nz)) || 1;
+      nx /= len; ny /= len; nz /= len;
+      const d = -((nx * vv.x) + (ny * vv.y) + (nz * vv.z));
+      edgePlanes.push([nx, ny, nz, d]);
+    }
+    return edgePlanes;
+  }
+
+  // Bounds plus a per-face plane (and its edge planes), computed once a
+  // mesh's vertices are in their final world positions -- a top-level mesh
+  // right when it closes, or a `group`-placed one right after its own
+  // transform, never on a `define`'s own still-local template
+  // (`resolveDefineMeshes` holds those unfinalized, since the same
+  // definition may be placed more than once, each landing somewhere
+  // different). `baseY` matches every other obstacle's own field, so
+  // `getObstacleHeight`/the collision pair's height gate read a mesh the
+  // same way they already read a box or a pyramid.
   function finalizeMeshGeometry(mesh) {
     mesh.bounds = computeMeshBounds(mesh.vertices);
     mesh.baseY = mesh.bounds ? mesh.bounds.minY : 0;
     for (const face of mesh.faces) {
       face.plane = computeMeshFacePlane(mesh.vertices, face.vertexIndices);
+      face.edgePlanes = computeMeshFaceEdgePlanes(mesh.vertices, face.vertexIndices, face.plane);
     }
     return mesh;
   }
@@ -3672,7 +4162,7 @@ if (MAP_SOURCE === 'random') {
   log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
   const meshObstacleCount = OBSTACLES.filter((obs) => obs.type === 'mesh').length;
   if (meshObstacleCount > 0) {
-    log(`${meshObstacleCount} of those are meshes from ${mapPath} (rendered only, no collision yet)`);
+    log(`${meshObstacleCount} of those are meshes from ${mapPath}`);
   }
   log(`Loaded ${TELEPORTER_GRAPH.links.length} teleporter face links from ${mapPath}`);
   if (MAP_ZONES.length > 0) log(`Loaded ${MAP_ZONES.length} zones from ${mapPath}`);
@@ -9675,10 +10165,12 @@ function traceShotBeam(proj, now) {
 
     let reason = 'range';
     let obstacle = null;
+    let obstacleFace = null;
     let fraction = 1;
     if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
       reason = 'obstacle';
       obstacle = impact.obstacle;
+      obstacleFace = impact.face || null;
       fraction = obstacleFraction;
     } else if (groundFraction < 1) {
       reason = 'ground';
@@ -9697,12 +10189,14 @@ function traceShotBeam(proj, now) {
       end = { ...teleporterEvent.event.point };
       reason = teleporterEvent.type === 'frameHit' ? 'frame_hit' : 'teleport';
       obstacle = teleporterEvent.type === 'frameHit' ? teleporterEvent.obs : null;
+      obstacleFace = null;
     }
 
     if (Math.abs(end.x) > halfMap || Math.abs(end.z) > halfMap) {
       end = findMapEdgeImpactPoint(point.x, point.y, point.z, end.x, end.y, end.z, halfMap);
       reason = 'out_of_bounds';
       obstacle = null;
+      obstacleFace = null;
     }
 
     const tankHit = findShotPlayerHit(proj, point, end, now);
@@ -9753,7 +10247,7 @@ function traceShotBeam(proj, now) {
     if (proj.ricochet && (reason === 'obstacle' || reason === 'ground')) {
       const normal = reason === 'ground'
         ? { x: 0, y: 1, z: 0 }
-        : getShotObstacleNormal(obstacle, end.x, end.y, end.z, SHOT_COLLISION_RADIUS);
+        : getShotObstacleNormal(obstacle, end.x, end.y, end.z, SHOT_COLLISION_RADIUS, obstacleFace);
       direction = reflectShotDirection(direction.x, direction.y, direction.z, normal);
       // The next segment is traced from clear of the surface, along its normal
       // rather than along the new direction: a grazing bounce leaves almost no

@@ -207,8 +207,11 @@ intersection, immune to step size, not a discretized sample. `findMeshFaceCrossi
 now does the same: an exact ray-vs-plane crossing (offset by the shot's own
 radius, so its surface reaches the face before its centre point does), then
 `pointInMeshFacePolygon` checks the crossing point against the face's actual
-boundary rather than its infinite plane (upstream's own dominant-axis-drop
-trick). `findMeshRayImpact` folds this into both `findShotImpact` (the
+boundary rather than its infinite plane. (An earlier pass through this file
+credited that boundary check to "upstream's own dominant-axis-drop trick" --
+wrong, and found out the hard way; see the cone/meshpyr entry below for what
+upstream actually does and why the guess mattered.) `findMeshRayImpact` folds
+this into both `findShotImpact` (the
 ordinary per-tick path) and `findShotSegmentImpact` (the Laser's whole-
 lifetime-in-one-segment path, which drops a mesh from its own coarse-sample
 candidate loop entirely now and answers for it here instead). Reproduced the
@@ -352,30 +355,119 @@ reconstruction anyway: its faces already are its footprint, in world space
 already, so the fix finds whichever face the tank is actually touching (the
 same oriented-box/cylinder split `getTankHitNormal` uses) and outlines that
 face's own real vertices directly.
-- [ ] `arc`/`cone`/`sphere`/`tetra` as mesh generators once mesh itself works
-      -- each expands to a `mesh` upstream (`CustomArc.cxx`, `CustomCone.cxx`,
-      `CustomSphere.cxx`, `CustomTetra.cxx`), so they are a parser-side
-      convenience on top of the same collision and render path, not a second
-      implementation. Lowest priority of the four kinds of geometry here: no
-      example map and no finished doc page for any of them turned up, so there
-      is nothing to validate against but the upstream source itself. `bzo.bzw`'s
-      own `mesh_octagon` (added to test the oriented tank box, see above) is a
-      hand-built stand-in for what a `cone` with 8 sides would generate, so
+- [x] `tetra` as a mesh generator -- `CustomTetra.cxx`/`TetraBuilding.cxx`
+      ported directly: four vertices, per-face (or whole-tetra) materials,
+      the same `checkVertexOrder` winding fix, the same `[0,2,1]`/`[0,1,3]`/
+      `[1,2,3]`/`[2,0,3]` face topology. Reuses the existing mesh render/
+      collision/radar/debug pipeline unchanged -- no mesh-specific special
+      casing needed. `shift`/`scale`/`spin`/`xform` inside a `tetra` block
+      are not read (silently, same as everywhere else -- see `docs/bzw.md`'s
+      "What is ignored"); `normals`/`texcoords` per vertex are read and
+      dropped, matching bzo's own no-smooth-shading mesh faces generally.
+- [x] `cone`/`meshpyr` as a mesh generator -- `CustomCone.cxx`/
+      `ConeObstacle.cxx` ported directly, `meshpyr` being upstream's own same
+      class built with `pyramid=true` rather than a second implementation:
+      position/size/rotation/`divisions`/`angle` (a wedge sweep, degrees,
+      defaulting to a full circle)/`texsize`/materials all read, real
+      explicit per-vertex texcoords generated (upstream's own wrap-around
+      math, not bzo's per-face auto-planar fallback -- this is the shape a
+      mapper is most likely to actually wrap a texture around, so it gets
+      the real thing), and real smooth per-vertex normals when `useNormals`
+      asks for them (`flatshading` clears it; `meshpyr` defaults it clear,
+      matching upstream). `meshpyr`'s own 45-degree twist + sqrt(2) footprint
+      scale and its `flipz`/negative-height flip are both upstream transform
+      steps this port replicates by construction (bake the twist into the
+      sweep's own start angle, swap which end sits at `position`'s own
+      height for a flip) rather than by composing upstream's own transform
+      stack -- verified by hand (and by a fuzz sweep of default/wedge/
+      rotated/flipped cases) that every face still winds outward either way.
+      Considered, and skipped for now: the shared client/server generator
+      with compact wire params discussed above (position/size/divisions/etc
+      over the wire, both ends expand once) -- this instead fully expands
+      server-side and ships the finished mesh, the same as `tetra` and a
+      hand-authored `mesh` already do, since that infrastructure already
+      exists and a per-world-load payload is a one-time cost. Worth
+      revisiting if a real map leans on many high-`divisions` cones and the
+      extra wire bytes start to show.
+- [x] **A ricocheting shot could pick the wrong face of a mesh, and reflect
+      wildly (a laser bouncing near-vertically and leaving the map almost
+      instantly) -- cone/meshpyr's own narrow wedge faces, all sharing an
+      edge with their neighbours at the apex, made this common where
+      `tetra`'s four much-larger faces rarely surfaced it.** Two real,
+      separate bugs, found by fuzzing `findMeshFaceCrossing` against a real
+      cone against thousands of rays and checking the returned face's normal
+      never points back into the ray's own direction of travel:
+      1. `pointInMeshFacePolygon` dropped into a 2D projection (whichever
+         axis the face was least aligned with, then a flat point-in-polygon
+         test) -- not upstream's own approach at all (see the correction
+         above); a thin, steeply angled wedge could project close enough to
+         degenerate that a point nowhere near its real 3D area still read as
+         inside. Fixed by porting upstream's actual `MeshFace::intersect`
+         mechanism: per-edge "fence" planes, precomputed once alongside a
+         face's own `plane` (`computeMeshFaceEdgePlanes`/`face.edgePlanes`,
+         server.js), tested with no projection at all.
+      2. Even with that fixed, `findMeshFaceCrossing` still tested face
+         membership at the point offset by the shot's own `radius` off the
+         face's plane -- not the ray's exact crossing. Off dead square that
+         offset is fine, but at a shallow angle most of it slides sideways
+         *within* the face's own plane rather than toward it, growing
+         unboundedly as the angle gets shallower -- enough, entering right at
+         a shared edge between two wedges, to push the offset point past the
+         true face's own boundary while the ray's exact (zero-radius)
+         crossing sat safely inside it. Fixed by testing membership at the
+         exact crossing (`t0 = -fromDist/denom`) and keeping the
+         radius-offset `t` only for where the segment actually stops.
+      Reproduced first (thousands of wrong-direction reflections per 100k
+      fuzzed rays against a real cone), fixed, then reproduced again to
+      confirm zero for a full circle and a `meshpyr`; a wedge cone and
+      `tetra` still show a small residual (well under 1%) of *small*-angle
+      mismatches, all within about a shot's own radius of a genuine shared
+      vertex -- the same tie a thick ray touching a real corner would leave
+      for any face-based collision system, upstream included, not a
+      remaining bug in this one.
+- [ ] `arc`/`sphere` as mesh generators once mesh itself works -- each
+      expands to a `mesh` upstream (`CustomArc.cxx`, `CustomSphere.cxx`), so
+      they are a parser-side convenience on top of the same collision and
+      render path, not a second implementation. No example map and no
+      finished doc page for either turned up, so there is nothing to
+      validate against but the upstream source itself. `bzo.bzw`'s own
+      `mesh_octagon` (added to test the oriented tank box, see above) is a
+      hand-built stand-in for what an `arc` with 8 sides would generate, so
       there is now at least one non-rectangular collidable mesh to test
       against without this.
-- [ ] The eighth dimension (`OO`) has no mesh case. `_getInsideBuildingNode`
-      (render.js) reads `obs.w`/`obs.d` directly, both `undefined` for a mesh,
-      so every scattered point comes out `NaN` -- discovered by
+- [x] The eighth dimension (`OO`) now has a mesh case. `_getInsideBuildingNode`
+      (render.js) used to read `obs.w`/`obs.d` directly, both `undefined` for
+      a mesh, so every scattered point came out `NaN` -- discovered by
       `mesh_octagon` above (the whole reason it exists: one mesh a tank can
       stand inside, instead of the box-emulated octagon's four, which already
       had this problem before anyone noticed since `OO` was never carried
-      into the merge that added meshes to `obstacles`). Not a quick fix:
-      upstream's own `SceneDatabaseBuilder::addMesh` does not reuse
-      `EighthDBoxSceneNode`'s random-point-cloud approach at all for a mesh --
-      `EighthDimShellNode` wraps the mesh's own already-built render nodes and
-      draws each triangle as a translucent "shell" instead, which is a
-      genuinely different technique, not a bounds-based version of the
-      existing one.
+      into the merge that added meshes to `obstacles`). Confirmed genuinely
+      different, not a bounds-based version of the box/pyramid effect --
+      and confirmed twice, the first pass having missed half of it (see the
+      "not upstream's own" correction two entries up for the pattern):
+      upstream's own `SceneDatabaseBuilder::addMesh` never reuses
+      `EighthDBoxSceneNode`'s random-point-cloud approach for a mesh at all.
+      `EighthDimShellNode::ShellRenderNode::render()` (EighthDimShellNode.
+      cxx:137-165) redraws the mesh's own real geometry twice: solid first,
+      front-face culled instead of back (so the normally hidden *inside* of
+      each face draws) and additively blended whenever `blend` is on and
+      render quality is 2 or better -- which is most players, and is what
+      actually reads as "floating triangles", real geometry glowing from the
+      inside rather than upstream's own unrelated scattered-point effect --
+      then a 3px wireframe over that, unconditionally.
+      `_buildMeshInsideBuildingNode` ports both: a solid `THREE.BackSide`
+      fill (Three's own equivalent of inverted culling) with additive
+      blending, one random colour per face rather than resolving each face's
+      real texture a second time (matching the random-colour style bzo's own
+      box/pyramid cloud already uses); and a `LineSegments` wireframe on top,
+      one edge per face edge, in the same white a box or a pyramid's own
+      outline already uses rather than upstream's per-face colour -- both
+      straight off `obs.vertices`/`obs.faces`, already in world space unlike
+      a box or a pyramid's own centre-relative geometry. `findInsideBuildings`
+      (client.js) and `getColliderTopY` needed the same `obs.type === 'mesh'`
+      gap closed first -- both previously read `obs.w`/`.d`/`.h` unconditionally
+      too, so a phased tank was never actually detected as inside a mesh at
+      all, box-emulated `mesh_octagon` included.
 
 ## Groups and transforms
 
