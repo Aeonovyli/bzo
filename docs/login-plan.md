@@ -153,7 +153,7 @@ a BZID per session -- which is another argument for the 8 hour life.
 **`/login`** stops printing and starts finishing: on a verified token it creates
 the session, sets the cookie and redirects to `/`; on anything else it clears
 the cookie and redirects to `/#login=failed`. The `[LOGIN]` log lines stay, and
-are the diagnostic the plain-text page used to be.
+become the only diagnostic once `/login` stops printing its own page.
 
 **The handshake** reads the cookie in `wss.on('connection')`, looks up the
 session, and hangs the identity on the `Player`. `verified` and `admin` join the

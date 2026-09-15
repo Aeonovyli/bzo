@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.18] - 2026-09-15
+
+### Fixed
+- **A `matref` naming a `material` block with no `name` line of its own now
+  resolves.** Upstream lets a mapper reference a material purely by its
+  position in the file (`matref 0`, `matref 17`, ...) when it never gave the
+  block a name -- `BzMaterial::findMaterial` checks for a leading digit before
+  it ever tries a name match. bzo only ever registered a *named* material, so
+  every numeric reference was silently dropped. Real maps lean on this
+  heavily: `import-bz4.rikers.org_5154.bzw` alone has 18 materials, all but
+  one unnamed, referenced purely by number.
+
 ## [1.2.17] - 2026-09-15
 
 ### Added

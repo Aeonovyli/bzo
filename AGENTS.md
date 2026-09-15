@@ -345,9 +345,7 @@ These are deliberate. Do not "fix" them without being asked.
   sloped underside the component heading into the slope is still the only one
   cancelled, which is upstream's own slide.
 
-  This is the one place bzo's motion loop diverges from `doUpdateMotion`, and it
-  replaces a bigger deviation it used to carry: `hitObstacleBottom` reversed the
-  velocity at 50% energy, a bounce with no upstream counterpart at all.
+  This is the one place bzo's motion loop diverges from `doUpdateMotion`.
   `npm run test:motion` holds the rule.
 
 - **`WA` Wide Angle is not implemented and will not be.** It widens the field of
@@ -597,11 +595,11 @@ normal's `y` is the whole of what decides a landing -- upstream's
 `newPos[2] > 0 && normal[2] > 0.001` -- so there is no support surface, no snap
 window, no on-top tolerance and no fall sentinel anywhere in the path.
 
-**Do not add a second pass back.** bzo used to resolve horizontally through the
-loop with `velocityY: 0` and vertically through a support model of its own, and
-every bug in this path came out of the gap between the two: each was one question
-with two answers, one taken from upstream and one a fudge beside it. Prefer
-deleting the second number to tuning it.
+**Do not add a second pass back.** Resolving the vertical separately -- a
+support model of its own, alongside the horizontal-only loop -- turns every one
+of upstream's own hit-normal questions into two answers instead of one: the
+loop's, and a fudge beside it, free to disagree. Prefer deleting the second
+number to tuning it.
 
 Two shapes of upstream's loop are easy to get wrong and both were:
 
@@ -651,7 +649,7 @@ The consequences, each of which was once a bug:
   the hit walks the tank into the pyramid a step at a time.
 - **A blocked downward step stops at the surface it met.** Resolving x and z
   while gravity keeps lowering y sinks a tank through the face a frame at a
-  time, which is what falling onto one used to do (issue #49).
+  time.
 - **Leaving a slope is a fall, every frame.** A slope drops away faster than the
   support snap can follow, so driving downhill leaves the surface on the first
   frame. The speed a fall freezes must therefore be the speed the tank is being
@@ -659,15 +657,17 @@ The consequences, each of which was once a bug:
   measured is zero for a tank that has only just been asked to move, and zero
   sustains itself.
 - **One question, one threshold.** `validateMove` declares a fall as soon as the
-  tank is more than `ONTOP_TOLERANCE` above the surface under it, and
-  `findSupportSurface` used to take a surface back up to the wider
-  `SUPPORT_SNAP_DOWN` below. Both answer "is the tank still on this surface?",
-  so a gap between them is a band the tank falls out of and is grabbed back into
-  on the same frame -- a landing sound and a ground ring per frame. It shows up
-  on a slope and only at some frame rates, because what lands in the band is how
-  far the surface drops in one frame: `speed x dt x slope`. A falling tank is
-  therefore held only within `ONTOP_TOLERANCE`; the wider snap is for a tank
-  still driving along a surface and following it over a step.
+  tank is more than `ONTOP_TOLERANCE` above the surface under it.
+  `findSupportSurface`'s own snap-back distance is wider, `SUPPORT_SNAP_DOWN` --
+  right for a tank still driving along a surface and following it over a step,
+  but applied to a falling tank too it disagrees with `validateMove`'s tighter
+  threshold: the gap between them is a band the tank falls out of and is
+  grabbed back into on the same frame -- a landing sound and a ground ring per
+  frame. It shows up on a slope and only at some frame rates, because what
+  lands in the band is how far the surface drops in one frame: `speed x dt x
+  slope`. A falling tank is therefore held only within `ONTOP_TOLERANCE`; the
+  wider snap is for a tank still driving along a surface and following it over
+  a step.
 
 - **A turn is refused, not absorbed.** Upstream searches the timestep over the
   azimuth as well as the position and leaves `newAngVel = 0` when the step hit
@@ -920,8 +920,8 @@ map's `options` block as upstream's `-fb`, or from `flagsOnBuildings` in
 **A connection is not a player until it joins.** bzfs's `sendPlayerUpdate`
 returns early unless the player `isPlaying()` (`bzfs.cxx:518`), so a socket
 sitting in limbo before `MsgEnter` is in nobody's roster. bzo names its limbo
-player `Player n`, which is exactly the placeholder that used to appear on
-everyone else's scoreboard, so it follows the same rule: `getRosterFor` gives a
+player `Player n`, exactly the placeholder shown on everyone else's
+scoreboard, so it follows the same rule: `getRosterFor` gives a
 client the joined players plus itself, nothing is broadcast on connect, and a
 connection that never joined is not announced when it leaves either.
 
@@ -1311,12 +1311,12 @@ server runs.
 `player.team` is always `observer` on the wire -- same team limit, same team
 chat, same white scoreboard colour, every Observer gate unchanged --
 distinguished only by `player.viewMap`, carried alongside an ordinary
-observer join and validated against the server's map registry. A real, wire
-`mapviewer` team was tried first and reverted: upstream's `TeamColor`/`-mp`
-has no seventh slot for a bzo-only concept, so it was invisible to any map's
-`-mp` line and had to be hand-carried into the roam camera's target list, the
-radar's flag draw, and the join dialog's own team enum -- three places that
-would each need to remember it again the next time one of them changed.
+observer join and validated against the server's map registry, rather than a
+real, wire `mapviewer` team: upstream's `TeamColor`/`-mp` has no seventh slot
+for a bzo-only concept, so one would be invisible to any map's `-mp` line and
+would have to be hand-carried into the roam camera's target list, the radar's
+flag draw, and the join dialog's own team enum -- three places that would each
+need to remember it again the next time one of them changed.
 
 `PLAYER_TEAM.MAP_VIEWER` (`'mapviewer'`) exists only in `public/teams.mjs`, a
 client-only sentinel: it drives the entry dialog's own selection cycle and
@@ -1384,15 +1384,14 @@ need a conditional row.
 
 Since the dialog already renders the live world/roster behind itself before a
 player has joined, previewing an alternate map also suppresses every remote
-tank/shot/flag -- both the 3D meshes and the radar's own flag draw, which is
-a separate code path from the mesh code and was missed on the first pass --
-for as long as a preview is active, not only once actually joined as Map
-Viewer. One guard, `isPreviewingAltWorld()`, keyed on "which world is
+tank/shot/flag -- both the 3D meshes and the radar's own flag draw, a
+separate code path from the mesh code -- for as long as a preview is active,
+not only once actually joined as Map Viewer. One guard, `isPreviewingAltWorld()`, keyed on "which world is
 currently applied," covers both.
 
 **XR staged a preview off the confirmed team, not the staged one.** The flat
-dialog forces `cameraMode = 'overview'` for as long as it is open (originally
-for its own tank-preview-thumbnail spin), which incidentally also hides the
+dialog forces `cameraMode = 'overview'` for as long as it is open (for its own
+tank-preview-thumbnail spin), which incidentally also hides the
 fact that `isObserver()` reads the confirmed join rather than the in-progress
 selection. XR's "player" screen had no equivalent, so staging Map Viewer
 there showed whatever real camera mode the player last actually joined with
@@ -1684,13 +1683,11 @@ and takes `-a` in `server.json` (`linearAcceleration`, `angularAcceleration`) an
 in a map's `options` block, as upstream takes it on a command line and in the
 same block.
 
-bzo used to smooth the *stick* instead, through five rates of its own --
-`forwardAccel`, `reverseAccel`, `forwardDecel`, `turnAccel`, `turnDecel` -- with
-no upstream counterpart. That gave every tank inertia BZFlag does not have, at
-roughly `-a 2.25 2.36`, with no way for a server or a map to say otherwise. Those
-five keys are gone. **Do not reintroduce a second acceleration model**: the point
-of one model is that "feels like BZFlag" is a thing that can be checked rather
-than tuned by ear.
+**Do not add a second acceleration model.** Smoothing the *stick* locally --
+or any other client-only inertia layered beside `doMomentum` -- gives every
+tank acceleration BZFlag does not have, with no way for a server or a map to
+say otherwise. The point of one model is that "feels like BZFlag" is a thing
+that can be checked rather than tuned by ear.
 
 `M` Momentum composes with the world's limit rather than replacing it -- see the
 flags pair -- so it is a handicap on every map instead of upstream's
@@ -2119,16 +2116,14 @@ hide the finding.
   "no memory used" beside another browser's figure.
 
 **A slow series runs on every client**, five minutes apart, so a flat page left
-open produces a trend rather than the single sample at map entry it used to. The
-XR series stays at twenty seconds and suppresses the slow one, since a session is
-short and two interleaved series read as noise.
+open produces a trend. The XR series stays at twenty seconds and suppresses the
+slow one, since a session is short and two interleaved series read as noise.
 
 **`contextLost` appears only when it has happened.** A lost GL context is how a
 client ends up drawing black: the browser takes the context away -- a driver
 reset, a background tab reclaimed, too many live contexts across tabs -- and
-every texture in it goes with it. That failure used to be entirely silent; the
-listeners log it with the resource counts at that moment, and the count rides
-every later stats line.
+every texture in it goes with it. The listeners log it with the resource
+counts at that moment, and the count rides every later stats line.
 
 **A restore reloads the page**, because logging alone left a player looking at
 black tanks. Observed once and diagnosed from what survived: on a tank in third
@@ -3547,9 +3542,6 @@ reached only through `-set` and bzo does not read `-set`: `wingsJumpCount` and
 - Operator controls are part of the single-page app and stay in-game. Do not
   reintroduce a separate `/admin` page for operator tools, because navigating
   away from the SPA drops active game state and the WebSocket connection.
-- The old `/admin` server route was an abandoned experiment and has been removed.
-  Keep future operator/admin UX inside the existing overlay/HUD flow unless the
-  user asks for a different architecture.
 - **Operator controls are gated on being an admin, and an admin is a player who
   typed a name.** See "Admins and the admin channel" below. It is a courtesy
   gate and not a security one; what makes it safe enough is that every

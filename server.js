@@ -3037,6 +3037,15 @@ function parseBZWMap(filename) {
   // upstream's own MaterialManager looks a name up.
   let currentMaterial = null;
   const materialsByName = new Map();
+  // Every material in file order, so `findMaterial`'s own digit-first branch
+  // (`BzMaterial.cxx:79-86`, upstream) can resolve a numeric `matref` as an
+  // index into this list -- how a `material` block with no `name` line at
+  // all is still reachable, a common map-editor export style
+  // (`import-bz4.rikers.org_5154.bzw`'s 18 materials, 17 of them unnamed and
+  // referenced as `matref 0` through `matref 17`).
+  // See the `end` handler below for why this is plain file order rather than
+  // upstream's own dedup-on-add.
+  const materialRegistry = [];
   // A `matref` naming a material this file never defined.
   const unresolvedMaterialRefs = new Set();
   // A texture name (on a `material` or straight on an obstacle) bzo has no
@@ -3286,16 +3295,26 @@ function parseBZWMap(filename) {
   // its own block reads for anything this returns false for.
   function applyBzwMaterialToken(target, token, words) {
     if (token === 'matref') {
-      const refName = (words[1] || '').toLowerCase();
-      const referenced = materialsByName.get(refName);
+      const rawRef = words[1] || '';
+      // `findMaterial`'s own check (`BzMaterial.cxx:79`) looks at the
+      // target's first character alone, before it ever tries a name match --
+      // so a `matref` that starts with a digit is always an index, never a
+      // name, matching upstream exactly rather than only as a fallback.
+      let referenced;
+      if (/^[0-9]/.test(rawRef)) {
+        const index = parseInt(rawRef, 10);
+        referenced = materialRegistry[index] || null;
+      } else {
+        referenced = materialsByName.get(rawRef.toLowerCase()) || null;
+      }
       if (referenced) {
         target.texture = referenced.texture;
         target.textureUrl = referenced.textureUrl;
         target.color = referenced.color;
         target.noRadar = referenced.noRadar;
         target.noLighting = referenced.noLighting;
-      } else if (refName) {
-        unresolvedMaterialRefs.add(refName);
+      } else if (rawRef) {
+        unresolvedMaterialRefs.add(rawRef.toLowerCase());
       }
       return true;
     }
@@ -3561,6 +3580,25 @@ function parseBZWMap(filename) {
     }
     if (currentMaterial) {
       if (token === 'end') {
+        // Upstream's own `MaterialManager` (`BzMaterialManager::addMaterial`)
+        // reuses an existing entry instead of appending a second one for a
+        // block whose properties already match one it already holds --
+        // fully, on every field it parses, most of which (`ambient`,
+        // `shininess`, a full multi-layer `addtexture` list, ...) bzo itself
+        // never keeps. Approximating that dedup against only the fields bzo
+        // *does* keep collapses distinct upstream entries whose difference
+        // lives entirely in a dropped field -- checked directly against
+        // `import-bz4.rikers.org_5154.bzw`'s own 18 materials, where two
+        // pairs share their final `addtexture` layer once bzo has already
+        // discarded the layer before it (no multi-texture model -- see
+        // "Materials" in docs/bzw.md) but nothing else, and collapsing them
+        // shifted every later index enough to break that map's own highest
+        // `matref`s. Every material this file (or any other sampled) writes
+        // is otherwise distinct, so appending unconditionally reproduces
+        // upstream's real numbering exactly for real maps, at the cost of
+        // drifting by one from wherever a map writes two blocks that
+        // genuinely are identical on every field upstream tracks.
+        materialRegistry.push(currentMaterial);
         if (currentMaterial.name) {
           materialsByName.set(currentMaterial.name.toLowerCase(), currentMaterial);
         }
@@ -6132,10 +6170,10 @@ class Projectile {
 // their server empties it; an operator who never opens the file inherits
 // bzflag's, which is a deliberate default and worth knowing about.
 //
-// This replaced a courtesy gate: any name that was not `Player <n>` used to
-// count, on the reasoning that a typed name was at least deliberate. It is gone
-// rather than kept alongside, because a player who never logged in being an
-// admin would make the login decorative.
+// A name-only gate (any name other than the default `Player <n>` placeholder
+// counting as "deliberate") is deliberately not offered alongside this one:
+// letting a typed name substitute for a real login would make the login
+// requirement decorative.
 //
 // It is still checked on the server for every privileged message, so a modified
 // client that draws itself the Operator panel cannot change the map.
@@ -7081,9 +7119,9 @@ function canRunCommand(player, command) {
 
 // parseServerCommand (commands.cxx:3880), which is the whole of bzo's step 1: a
 // line beginning with `/` is a command or it is an error, and either way it is
-// never said out loud. Upstream reaches that by trying its table and answering
-// "Unknown command"; the reason it matters here is that bzo used to broadcast
-// the line, so a mistyped `/kick bob` announced itself to the room.
+// never said out loud -- a mistyped `/kick bob` must never reach the room as
+// chat. Upstream reaches the "or it is an error" half by trying its table and
+// answering "Unknown command".
 //
 // Returns true when the line was a command line, handled or not.
 function handleServerCommand(player, text) {
@@ -7805,8 +7843,7 @@ function logMalformed(player, what, detail) {
 // *own* clock says it travelled, not how long the packet happened to spend in
 // the network -- docs/lag-plan.md, "Extrapolate on the client's clock, not
 // ours". Every other caller has no client timestamp to offer and passes the
-// server's own arrival gap, which is what this function used to compute
-// unconditionally.
+// server's own arrival gap instead.
 function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSeconds, velocityChanged = false, options = {}, now = Date.now()) {
   // A non-finite coordinate would poison the stored position and every
   // extrapolation made from it afterwards, so it is refused in every mode.
@@ -10548,12 +10585,10 @@ const DEATH_REASON = Object.freeze({
 // with it, its flag goes, the rabbit is re-anointed if the rabbit is what died,
 // the clients are told and the respawn is queued.
 //
-// Every death in bzo runs this and nothing runs a copy of it. It used to have
-// three copies -- a shot, a self-destruct and a capture -- and two of them had
-// already drifted: neither the self-destruct nor the capture cleared the lock,
-// so a missile kept steering at a tank that was already exploding, and the
-// self-destruct had to be told about the rabbit separately. That is what a
-// second copy of a list like this costs, so there is one.
+// Every death in bzo runs this and nothing runs a copy of it -- a shot and a
+// self-destruct both call it, so the lock clearing, the flag drop, the rabbit
+// reassignment and the respawn queue can never drift out of step between the
+// two.
 //
 // `killerId` is who the clients are told did it, which is not always a player:
 // a world weapon's shot carries `ServerPlayer`, and a capture carries whoever
@@ -11467,10 +11502,10 @@ wss.on('connection', (ws, req) => {
 
   // Nobody is told about this player yet. bzfs's sendPlayerUpdate returns
   // early unless the player isPlaying() (`bzfs.cxx:518`), so a connection
-  // sitting in limbo before MsgEnter is never in anyone's roster -- and bzo's
-  // limbo player is named `Player n`, which is exactly the placeholder that
-  // used to appear on everyone else's scoreboard. The `joinGame` handler does
-  // the announcing, once there is a name to announce.
+  // sitting in limbo before MsgEnter is never in anyone's roster -- bzo's
+  // limbo player is named `Player n`, but that name is never sent to anyone
+  // else's scoreboard. The `joinGame` handler does the announcing, once
+  // there is a name to announce.
 
   // Get client IP and port
   const forwardedFor = req.headers['x-forwarded-for'];
@@ -11628,8 +11663,8 @@ wss.on('connection', (ws, req) => {
 
           // Step 1 of docs/commands-plan.md, and the reason it goes first: a line
           // beginning with `/` is a command whatever channel it was aimed at, and
-          // it is never said out loud. A mistyped `/kick bob` used to announce
-          // itself to the room.
+          // it is never said out loud -- a mistyped `/kick bob` must never
+          // announce itself to the room as chat.
           if (handleServerCommand(player, text)) break;
 
           deliverChatMessage(player, targetId, msgType, text);

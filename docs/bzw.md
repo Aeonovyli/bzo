@@ -57,11 +57,7 @@ colour of its own.
 **Every obstacle carries a `rotation`, whether or not the block gave one.** The
 importer states 0 for a block that says nothing, because everything downstream
 turns the field into a cosine: the collision pair, the renderer, the radar and
-the logs all read it, and one absent field meant each of them carrying a default
-of its own. A missing one used to read as 0 in the arithmetic and throw in the
-one place that formatted it -- an anti-cheat collision report against an
-unrotated box -- which is exactly the cost of a shape that is only mostly
-there.
+the logs all read it directly, with no default of their own to fall back on.
 
 **A zero height is a real height.** `size w d 0` is upstream's own default for a
 `base` -- `CustomBase` leaves the third extent at 0 -- and it means a pad painted
@@ -192,6 +188,25 @@ A material's own fields:
 | `nolighting` | the face is drawn unlit -- its texture and tint at full brightness, untouched by the renderer's own lighting |
 | `matref <name>` | copies another already-defined material wholesale, which a line stated after it then overrides |
 
+**A `matref` may also name a material by number instead of by name**, upstream's
+own alternative for a `material` block that gave no `name` line at all --
+`BzMaterial::findMaterial` (`src/game/BzMaterial.cxx:75-86`) checks whether the
+target's first character is a digit *before* it ever tries a name match, and if
+so reads it as a plain index into the file's materials, in the order they were
+defined -- `matref 0` is the first `material` block in the file, named or not.
+bzo reads it the same way, against every material in file order regardless of
+whether it gave a `name`: real maps lean on this, most heavily
+`import-bz4.rikers.org_5154.bzw`, whose 18 materials are all but one unnamed
+and referenced purely as `matref 0` through `matref 17`. This does not
+replicate upstream's own dedup on add (`BzMaterialManager::addMaterial` reuses
+an existing entry, rather than appending a new one, for a block that matches
+one already registered on every field upstream tracks) -- doing that against
+only the fields bzo itself keeps would collapse two materials upstream still
+tells apart by a field bzo drops (a multi-layer `addtexture`, most notably; see
+below), which shifts every later index enough to break that same map's own
+highest `matref`s -- checked directly against `import-bz4.rikers.org_5154.bzw`'s
+own materials, so bzo indexes in plain file order instead.
+
 A `matref` on an obstacle takes the same face selector a plain `color`/
 `diffuse` line does -- bare, or `top`/`bottom`/`sides`/`outside`/an axis
 name, resolved down to bzo's own walls/caps split (see **Colour**). Whatever
@@ -211,21 +226,14 @@ with one texture from its own constructor (a plain `mesh`'s own `"mesh"`,
 a `box`'s own `"boxwall"`/`"roof"`, and so on), so the two keywords produce
 a genuinely different material there: `addtexture` leaves two texture
 layers, `texture` one. bzo has no multi-texture model at all and reads
-either keyword identically -- "set the one texture this face has" -- which
-is why `maps/bzo.bzw`'s own mesh fixtures once looked correct in bzo and
-still showed each shape's own default (`mesh`, for a plain `mesh` block)
-once loaded into a real bzfs/bzflag, until changed from `addtexture` to
-`texture`; confirmed fixed against a real client. A *fresh* `material`
-block has no constructor default to begin with, so `addtexture` there is
-already the first (and only) texture either way.
-
-(An earlier pass through this file blamed `thin_wall`'s own `https://`
-texture not loading in a real client on this same `addtexture`/`texture`
-split, and reverted it rather than ship an unconfirmed theory. That guess
-was wrong in an informative way: the actual cause was the URL's scheme,
-not the keyword -- see below -- confirmed by testing `http://` under both
-keywords once the real culprit turned up. Left here so the same wrong
-turn is not repeated.)
+either keyword identically -- "set the one texture this face has" -- which is
+why `maps/bzo.bzw`'s own mesh fixtures write `texture` rather than
+`addtexture`: on a plain `mesh` block, `addtexture` would leave the stock
+`"mesh"` texture as an extra layer underneath against a real bzfs/bzflag, so
+the shape would keep showing that wireframe default there instead of the
+fixture's own texture, even though bzo itself reads either keyword the same
+way. A *fresh* `material` block has no constructor default to begin with, so
+`addtexture` there is already the first (and only) texture either way.
 
 **A texture name is one of bzo's own local assets, or an absolute URL.**
 Upstream names a texture either by its own stock name (`boxwall`, `wall`,
@@ -291,11 +299,11 @@ reads both:
   and the *response* must carry a matching `Access-Control-Allow-Origin` or
   the browser refuses the load outright, the same as any other CORS-gated
   resource -- there is no plain-image fallback the way an ordinary `<img>`
-  tag gets. Checked directly: `images.bzflag.org` sends no such header on
-  any response today, so a texture from there loads exactly as far as the
-  browser's own CORS check and then fails there, every time, until upstream's
-  own infrastructure adds one. Either way -- an untrusted host, or a trusted
-  one that still refuses the load -- the obstacle falls back to its type's
+  tag gets. Checked directly (several paths, across several mappers'
+  subdirectories): `images.bzflag.org` sends `Access-Control-Allow-Origin: *`
+  on every response, so a texture named from there loads for real rather than
+  falling back. Either way -- an untrusted host, or a trusted one whose own
+  response still refuses the load -- the obstacle falls back to its type's
   plain default texture, logged once to the console
   (`loadExternalTexture`/`STOCK_MATERIAL_TEXTURE_FILES` in
   `public/texture.js`) rather than left blank.

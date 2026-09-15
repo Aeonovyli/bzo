@@ -1480,8 +1480,7 @@ class RenderManager {
   // Upstream does not move any vertices to project a shadow: drawGroundShadows
   // (BackgroundRenderer.cxx:1227) builds a degenerate matrix, multiplies it in,
   // and redraws the same geometry. This is that matrix for a Y-up world, taking
-  // (x, y, z) to (x - y*dx/dy, casterY, z - y*dz/dy) -- the same projection the
-  // vertices used to be walked through one at a time, now free.
+  // (x, y, z) to (x - y*dx/dy, casterY, z - y*dz/dy).
   _setProjectedShadowFlattenMatrix(matrix, dir) {
     const slopeX = dir.x / dir.y;
     const slopeZ = dir.z / dir.y;
@@ -2199,10 +2198,10 @@ class RenderManager {
     this._disposeGroundGrid();
   }
 
-  // A box's four walls and its two caps, as one shared material each. The repeat
-  // that used to ride on the texture is baked into the geometry's UVs instead,
+  // A box's four walls and its two caps, as one shared material each. The
+  // texture's repeat is baked into the geometry's UVs rather than the material,
   // which is what lets every box in the world share them: nothing about the
-  // material depends on the box's size any more. `_prepareBoxGeometry` also puts
+  // material depends on the box's size. `_prepareBoxGeometry` also puts
   // the four walls next to each other in the index buffer, so a box is two draw
   // calls rather than the six a BoxGeometry's own face groups ask for.
   //
@@ -2398,11 +2397,11 @@ class RenderManager {
     ];
 
     // A teleporter is fourteen small quads sharing four materials between them.
-    // Each one used to be its own mesh and so its own draw call, which on a map
-    // with eight teleporters is over a hundred draws for a few hundred
-    // triangles. They accumulate per material here and become one mesh each
-    // below. No quad shares a vertex with another, so the normals a merged
-    // geometry computes are still per-quad.
+    // They accumulate per material here and become one mesh each below, rather
+    // than one draw call per quad -- a map with eight teleporters would
+    // otherwise cost over a hundred draws for a few hundred triangles. No quad
+    // shares a vertex with another, so the normals a merged geometry computes
+    // are still per-quad.
     const quadBuckets = new Map();
     const addQuad = (base, sEdge, tEdge, uvCoords, material, renderOrder = 5) => {
       let bucket = quadBuckets.get(material);

@@ -1204,10 +1204,6 @@ export function updateShotStatus({ myPlayerId, projectiles, gameConfig, now = Da
   // after every shot -- reaches `getReloadTime()`, and `getReloadTime` feeds the
   // "Reloaded in %.1f" *text* at HUDRenderer.cxx:1012. It never touches the bars.
   //
-  // bzo used to apply that gate as a ceiling over every bar, which is what made
-  // one shot turn every bar red at once and refill them together: the display
-  // said all slots had been fired when one had. See issue #36.
-  //
   // Then sorted, as upstream sorts, ascending. The bars are a tally of how ready
   // the slots are and not a row of named slots, so sorting stops a bar jumping
   // between rows as slots are used out of order -- which is the other half of

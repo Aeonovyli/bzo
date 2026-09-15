@@ -641,9 +641,9 @@ let myGlobalCallsign = null;
 // monotonic and is what motion and send timing already run on, so `deltaTime`
 // and `sdt` are untouched by this. This is the *epoch* clock, the one used for
 // anything measured against a timestamp the server also holds, and one reading
-// a frame is enough for all of it -- reading it per projectile, as the shot
-// ageing used to, differences two samples taken microseconds apart and calls the
-// difference physics.
+// a frame is enough for all of it -- reading it per projectile instead would
+// difference two samples taken microseconds apart and call the difference
+// physics.
 //
 // Anything that can run while frames are stopped calls `sampleEpochClock()`
 // instead of reading the stale value: a hidden tab delivers no frames but still
@@ -3221,9 +3221,7 @@ function cycleTankModel(step) {
 // The preview is built by the same `createTank` the world uses, so what the
 // carousel shows is what spawns: body and turret carry the tank texture in the
 // player's own colour, the treads carry `treads.png`, and a model that has
-// wheels instead of treads gets wheels. Loading the OBJ here separately is what
-// it used to do, and that drew an untextured OBJLoader default -- a preview of
-// the geometry rather than of the tank.
+// wheels instead of treads gets wheels.
 //
 // Its own renderer, and its own scene: two WebGLRenderers each keep their own
 // GPU state for a material, and `createTank` hands back a fresh object graph per
@@ -4171,8 +4169,7 @@ function updateDebugGeometryVisibility() {
 // cloak as well as the toggle and those change on different clocks -- the toggle
 // fires on a keypress, the cloak finishes 0.64s after a flag is taken. Deciding
 // it in one function and calling it from both is what keeps the two from
-// disagreeing; the toggle used to be the only caller, so a tank that cloaked
-// after the toggle kept its ghost.
+// disagreeing.
 //
 // A ghost left behind a vanished tank is not a cosmetic problem. It is a full
 // tank clone that writes depth, so it occludes the ground grid behind it -- the
@@ -7439,10 +7436,8 @@ function rebuildTeleporterRuntimeState() {
 
 // Every obstacle's top, teleporters included: the importer resolves a
 // teleporter's frame into `w`/`d`/`h` so there is no special case left here.
-// A mesh has no `h` of its own -- `getObstacleHeight` reads its bounds
-// instead -- so this used to read a mesh's own top as its base, a
-// zero-height ledge every mesh collision (there was none, before this
-// session) never had reason to notice.
+// A mesh has no `h` of its own, so `getObstacleHeight` reads its bounds
+// instead -- a real top rather than a zero-height ledge at its base.
 function getColliderTopY(obs) {
   return (obs?.baseY || 0) + getObstacleHeight(obs);
 }
@@ -7523,13 +7518,12 @@ function checkCollision(x, y, z, rotation = playerRotation, fromY = y, fromX, fr
 // single search resolves position, height and heading together. `resolveTankMotion`
 // in the shared `motion` pair is that loop; this is only the world it looks at.
 //
-// bzo used to run it twice over -- horizontally through here with `velocityY: 0`,
-// and vertically through a support surface of its own with its own tolerances --
-// and every disagreement between the two passes was a bug: a slope that held a
-// tank up at one threshold and dropped it at another, a landing declared by one
-// and undone by the other on the same frame. One pass cannot disagree with
-// itself, which is the point of converging on upstream rather than tuning the
-// gap between the two.
+// A single pass is required rather than a horizontal one (`velocityY: 0`) plus
+// a separate vertical one against its own support-surface tolerances: two
+// independent passes can disagree with each other -- a slope that holds a tank
+// up under one pass's threshold and drops it under the other's, a landing one
+// declares and the other undoes on the same frame -- where one pass canonically
+// cannot disagree with itself.
 //
 // `isFlatTop` is upstream's own (`BoxBuilding::isFlatTop` is true,
 // `PyramidBuilding::isFlatTop` is its ZFlip, `WallObstacle`'s is false), and it
@@ -8668,12 +8662,6 @@ function handleRoamMotion(deltaTime) {
     wasPhantomDriving = false;
   }
 
-  // Cycling used to answer Fire here too, but Fire is wanted free for a
-  // future driving mode's own shooting, and cycling already has three other
-  // ways in that do not conflict with anything: the `C` key, the Settings
-  // panel's Camera row, and the same row in the XR menu (`adjustSettingsMenuRow`
-  // via `cycleCameraMode`). Removed rather than kept as a fourth, redundant
-  // path that would need revisiting the moment Fire means something else.
   const inputActive = isGameplayInputActive();
 
   const identifyHeld = inputActive && virtualInput.identify;
@@ -9025,10 +9013,10 @@ function handleMotion(deltaTime) {
   // instant and the tank reaches full speed in one frame, exactly as a BZFlag
   // tank does.
   //
-  // bzo used to smooth the stick instead, through five rates of its own with no
-  // upstream counterpart. That gave every tank inertia BZFlag does not have and
-  // no way for a server or a map to say otherwise, which is the opposite of the
-  // point: bzo should feel like BZFlag and offer the same knobs to change it.
+  // Smoothing the stick directly, with no upstream counterpart, would give
+  // every tank inertia BZFlag does not have and no way for a server or a map
+  // to say otherwise -- the opposite of the point: bzo should feel like
+  // BZFlag and offer the same knobs to change it.
   const tankSpeedNow = gameConfig.TANK_SPEED * speedFactor;
   const tankAngVelNow = gameConfig.TANK_ROTATION_SPEED * angVelFactor;
   if (!isInAir || airControl) {
@@ -12845,10 +12833,10 @@ const RABBIT_LABELS = {
 };
 const getXROperatorLimitId = (team) => `operator${team}LimitXR`;
 
-// The same staged model the flat panel edits, one row per setting. This screen
-// used to carry an apply row *per* setting -- "Restart with Map", "Apply Shot
-// Limit" -- which is two rows each on the surface with the least room; one
-// confirm replaces all of them. See docs/operator-panel-plan.md.
+// The same staged model the flat panel edits, one row per setting: a
+// per-setting apply row ("Restart with Map", "Apply Shot Limit") would double
+// every row on the surface with the least room, so one confirm replaces them
+// all. See docs/operator-panel-plan.md.
 function getXROperatorMenuItems() {
   const mapList = document.getElementById('mapList');
   const staged = operatorStaged || getOperatorServerState();
@@ -12878,9 +12866,9 @@ function getXROperatorMenuItems() {
     },
     { id: 'operatorShotsXR', label: 'Shot Limit', value: String(staged.shotMaxActive), adjustable: true },
     { id: 'operatorRicochetXR', label: 'All Shots Ricochet', value: staged.ricochet ? 'On' : 'Off' },
-    // The game's shape. Every row below is one line with one value, which is
-    // what the staged model bought: a setting used to cost a row and an apply
-    // row, and fourteen of those is not a list anybody can read in a headset.
+    // The game's shape. Every row below is one line with one value -- a row
+    // plus its own apply row per setting would put fourteen settings near
+    // thirty lines, not a list anybody can read in a headset.
     {
       id: 'operatorTeamsXR',
       label: 'Teams',
@@ -13147,9 +13135,9 @@ function handleXRSettingsMenuInput(now = performance.now()) {
   }
 
   // B opens the menu, steps back out of a submenu, and closes it from the top.
-  // It used to be the thumbstick press, which sits under a thumb that is
-  // already steering and was being hit by accident; identify is behind that now,
-  // where a stray press costs nothing. B carries the whole menu rather than only
+  // Not the thumbstick press: that sits under a thumb already steering, where
+  // an accidental press is costly, so it drives identify instead, where a
+  // stray press costs nothing. B carries the whole menu rather than only
   // opening it, so a press cannot both open the menu and be read as the back it
   // is inside one.
   const xrInput = getXRControllerInput();

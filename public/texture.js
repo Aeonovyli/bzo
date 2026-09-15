@@ -154,10 +154,11 @@ const sharedExternalTextures = new Map();
 // and for a trusted one whose request still fails: a `crossOrigin`-tagged
 // image load is not "tainted, but shown" the way an ordinary cross-origin
 // `<img>` is, it is refused outright (`onerror`, not `onload`) the instant the
-// response carries no matching `Access-Control-Allow-Origin` -- which is
-// exactly what `images.bzflag.org` does today (no CORS header on any
-// response, checked directly), so every trusted-host load is expected to
-// fail this way until upstream's own infrastructure adds one.
+// response carries no matching `Access-Control-Allow-Origin`. `images.
+// bzflag.org` sends `Access-Control-Allow-Origin: *` on every response
+// (checked directly), so a trusted-host load from there succeeds rather than
+// falling back -- this fallback path is what runs for any other host this
+// file trusts that does not.
 export function loadExternalTexture(url, fallbackPath) {
   if (!isExternalTextureUrlTrusted(url)) return loadTexture(fallbackPath);
 
