@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.23] - 2026-09-16
+
+### Fixed
+- **A world file's URL is now validated before it is fetched.** GitHub code
+  scanning (CodeQL `js/request-forgery`) correctly traced a path from the
+  raw WebSocket message all the way to `loadWorldFile`'s `fetch(worldRef.url)`
+  with nothing in between enforcing its shape. Every world URL a client is
+  ever handed is one `server.js` itself built from a content hash
+  (`/maps/<hash>.json`), never an arbitrary string -- that is now checked
+  explicitly instead of trusted implicitly, so a future bug, a compromised
+  server, or a spoofed connection can no longer make the client fetch
+  anything else.
+
 ## [1.2.22] - 2026-09-16
 
 ### Added
