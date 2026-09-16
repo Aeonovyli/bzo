@@ -6,6 +6,61 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.22] - 2026-09-16
+
+### Added
+- **A `?viewmap=import-<host>_<port>.bzw` link now outlives its own cache.**
+  Previously the link only worked while that exact file was still
+  registered; once bzo let its cached copy of a remote server's world go
+  (or never fetched it in this process), the link silently fell through to
+  an ordinary join with no explanation. The filename already names the
+  server it came from, so the client now asks the server to (re-)import it
+  on demand, shows the loading overlay while that settles, and finishes the
+  join as Map Viewer on success or an ordinary join with a HUD alert on
+  failure. An import less than an hour old is reused rather than
+  re-fetched. (#73)
+- **Every stock texture name upstream ships an asset for is now usable in a
+  material**, not just the handful most real maps reach for (`boxwall`,
+  `roof`, `pyrwall`, ...). A map maker has no way to predict which texture
+  bzo has an asset for, so all of upstream's remaining stock textures --
+  every team-tinted bolt/laser/tank/base skin, the `mesh` grid texture,
+  `snowflake`, `water`, and more -- were copied in and made resolvable the
+  same way the originals are.
+
+### Changed
+- **The entry dialog's name field locks to a verified session's forum
+  callsign.** Signing in with a bzflag.org global callsign now fills and
+  disables the name field immediately, including right after the redirect
+  back from weblogin -- previously the verified state only reached the
+  dialog after a join had already happened, so a returning verified player
+  could see (and edit) the wrong name for a moment. Logging out restores
+  the field to editable. (#75)
+- **server.log no longer logs every cached map's quirks on every restart.**
+  Unresolved refs, external texture URLs, dropped spins, and broken
+  teleporter links used to print for every file the background trickle
+  re-hashes at startup, not just the live map -- so a server carrying a few
+  dozen cached remote imports filled its log with quirks about maps nobody
+  was playing. The live map still logs loudly; the trickle is quiet and
+  prints one summary line instead ("Converted N of M bzw file(s) to cached
+  json"). The live world's own obstacle dump now logs where its cached JSON
+  lives rather than inlining the whole array as one multi-hundred-KB log
+  line.
+- **WebXR's three startup debug lines are now one.** The launch-session
+  report and the XR support probe used to log separately on every page
+  load; they now combine into a single debug line.
+
+### Fixed
+- **Oscillation Overthruster no longer lets a phased tank jump out of a
+  building.** Matches upstream: jumping requires standing on the ground or
+  a building (Wings excepted), so a tank that has driven through a wall
+  with OO can't jump its way out even on a server that allows jumping.
+  (#76)
+- **Border walls no longer overlap at the corners or draw faces nobody
+  sees.** Each wall now runs exactly `worldSize` long and meets the
+  perpendicular wall at the corner instead of overlapping past it, and
+  drops its end faces, top, and bottom -- matching upstream's thicknessless
+  single-quad border, down to a single visible quad per wall. (#74)
+
 ## [1.2.21] - 2026-09-16
 
 ### Fixed
