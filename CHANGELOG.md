@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.26] - 2026-09-16
+
+### Added
+- **BZFlag's `waterLevel` map feature.** A map can now flood part of its
+  world with a translucent, scrolling water plane; a tank that drops to or
+  below the surface is destroyed ("fell in the water" / "Tank Rusted"),
+  matching upstream's own rule exactly. Spawn points, flag spawns, and a
+  dropped flag's landing spot all stay off the water's surface, the same
+  as a real bzfs. `maps/water.bzw` is a new four-base CTF map floating
+  above the water, jump-connected island to island.
+
 ## [1.2.25] - 2026-09-16
 
 ### Changed
