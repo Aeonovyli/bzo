@@ -2908,18 +2908,37 @@ function parseBzwColor(words) {
   return values.slice(0, 3).map((value) => Math.max(0, Math.min(1, value)));
 }
 
-// Upstream's own stock texture names -- what `material`/`matref`/`addtexture`
-// almost always name in the wild (docs/bzw-plan.md's "Evidence from real
-// maps") -- that bzo also ships an asset for under `public/textures/`. Kept
-// in sync with `STOCK_MATERIAL_TEXTURE_FILES` in `public/texture.js`, which is
-// the other half of this: this set decides what a map is *allowed* to name,
-// that one decides what picture the name actually draws.
+// Every stock texture name upstream's own `data/` ships an asset for --
+// not just the handful `material`/`matref`/`addtexture` names most often in
+// the wild (docs/bzw-plan.md's "Evidence from real maps"), because there is
+// no way to predict which one a map maker reaches for. bzo runtime-colours a
+// tank/shot's own grey base per team rather than shipping one file per
+// colour (`loadTintedTexture`/`getBaseTeamTint`, public/texture.js) -- but a
+// material block names a *file*, not a game concept, so a map that puts
+// "the blue shot" on a wall as decoration needs `blue_bolt` to be a real
+// picture regardless of how bzo's own shot rendering gets its colour.
+// Kept in sync with `STOCK_MATERIAL_TEXTURE_FILES` in `public/texture.js`,
+// which is the other half of this: this set decides what a map is *allowed*
+// to name, that one decides what picture the name actually draws.
 //
-// A name not in this set -- another of upstream's own stock names (`mesh`,
-// its wireframe/grid texture, notably) or an external URL a map links a
-// texture in from -- resolves to nothing: no network fetch, no CORS/CSP
-// surface, and the obstacle keeps its type's plain default texture.
-const BZW_STOCK_TEXTURES = new Set(['boxwall', 'wall', 'roof', 'pyrwall', 'telelink', 'caution']);
+// A name not in this set -- anything not shipped in upstream's own `data/`,
+// or an external URL a map links a texture in from -- resolves to nothing:
+// no network fetch, no CORS/CSP surface, and the obstacle keeps its type's
+// plain default texture.
+const BZW_STOCK_TEXTURES = new Set([
+  'automatic_icon', 'blue_basetop', 'blue_basewall', 'blue_bolt', 'blue_icon', 'blue_laser',
+  'blue_super_bolt', 'blue_tank', 'boxwall', 'bubble', 'bzflag-256x256', 'bzflag-48x48',
+  'caution', 'clouds', 'frog', 'green_basetop', 'green_basewall', 'green_bolt',
+  'green_icon', 'green_laser', 'green_super_bolt', 'green_tank', 'hunter_bolt', 'hunter_laser',
+  'hunter_super_bolt', 'hunter_tank', 'menu_arrow', 'mesh', 'moon', 'observer_icon',
+  'puddle', 'purple_basetop', 'purple_basewall', 'purple_bolt', 'purple_icon', 'purple_laser',
+  'purple_super_bolt', 'purple_tank', 'pyrwall', 'rabbit_bolt', 'rabbit_laser', 'rabbit_super_bolt',
+  'rabbit_tank', 'radar', 'raindrop', 'red_basetop', 'red_basewall', 'red_bolt',
+  'red_icon', 'red_laser', 'red_super_bolt', 'red_tank', 'rogue_bolt', 'rogue_icon',
+  'rogue_laser', 'rogue_super_bolt', 'rogue_tank', 'roof', 'snowflake', 'std_ground',
+  'telelink', 'tetrawall', 'thief', 'title', 'wall', 'water',
+  'zone_ground',
+]);
 
 // A texture name as a `material`/`addtexture`/`texture` line states it --
 // upstream's own bare stock name, or a mapper's own file name or URL -- down

@@ -157,18 +157,81 @@ export function createTeleporterPortalTexture() {
 // Upstream's own stock texture names, resolved against bzo's local asset for
 // each -- `material`/`matref`/`addtexture` naming one of these paints an
 // obstacle with the same picture bzo already ships for it (see "Materials
-// and appearance" in docs/bzw.md). This list has to agree with
-// `BZW_STOCK_TEXTURES` in server.js: that is what turns away, at parse time,
-// any name that is not one of these -- upstream's own "mesh" grid texture
-// among them, which bzo has no asset for, or an external URL a map links a
-// texture in from -- so a name reaching here always resolves.
+// and appearance" in docs/bzw.md). Every name upstream's own `data/` ships a
+// picture for is here, not just the common wall/roof/pyramid handful, since
+// there is no predicting which one a map maker's `material` block reaches
+// for -- see `BZW_STOCK_TEXTURES`'s own comment in server.js, which this list
+// has to agree with: that is what turns away, at parse time, any name not
+// one of these, or an external URL a map links a texture in from -- so a
+// name reaching here always resolves.
 const STOCK_MATERIAL_TEXTURE_FILES = new Map([
+  ['automatic_icon', 'automatic_icon.png'],
+  ['blue_basetop', 'blue_basetop.png'],
+  ['blue_basewall', 'blue_basewall.png'],
+  ['blue_bolt', 'blue_bolt.png'],
+  ['blue_icon', 'blue_icon.png'],
+  ['blue_laser', 'blue_laser.png'],
+  ['blue_super_bolt', 'blue_super_bolt.png'],
+  ['blue_tank', 'blue_tank.png'],
   ['boxwall', 'boxwall.png'],
-  ['wall', 'wall.png'],
-  ['roof', 'roof.png'],
-  ['pyrwall', 'pyrwall.png'],
-  ['telelink', 'telelink.png'],
+  ['bubble', 'bubble.png'],
+  ['bzflag-256x256', 'bzflag-256x256.png'],
+  ['bzflag-48x48', 'bzflag-48x48.png'],
   ['caution', 'caution.png'],
+  ['clouds', 'clouds.png'],
+  ['frog', 'frog.png'],
+  ['green_basetop', 'green_basetop.png'],
+  ['green_basewall', 'green_basewall.png'],
+  ['green_bolt', 'green_bolt.png'],
+  ['green_icon', 'green_icon.png'],
+  ['green_laser', 'green_laser.png'],
+  ['green_super_bolt', 'green_super_bolt.png'],
+  ['green_tank', 'green_tank.png'],
+  ['hunter_bolt', 'hunter_bolt.png'],
+  ['hunter_laser', 'hunter_laser.png'],
+  ['hunter_super_bolt', 'hunter_super_bolt.png'],
+  ['hunter_tank', 'hunter_tank.png'],
+  ['menu_arrow', 'menu_arrow.png'],
+  ['mesh', 'mesh.png'],
+  ['moon', 'moon.png'],
+  ['observer_icon', 'observer_icon.png'],
+  ['puddle', 'puddle.png'],
+  ['purple_basetop', 'purple_basetop.png'],
+  ['purple_basewall', 'purple_basewall.png'],
+  ['purple_bolt', 'purple_bolt.png'],
+  ['purple_icon', 'purple_icon.png'],
+  ['purple_laser', 'purple_laser.png'],
+  ['purple_super_bolt', 'purple_super_bolt.png'],
+  ['purple_tank', 'purple_tank.png'],
+  ['pyrwall', 'pyrwall.png'],
+  ['rabbit_bolt', 'rabbit_bolt.png'],
+  ['rabbit_laser', 'rabbit_laser.png'],
+  ['rabbit_super_bolt', 'rabbit_super_bolt.png'],
+  ['rabbit_tank', 'rabbit_tank.png'],
+  ['radar', 'radar.png'],
+  ['raindrop', 'raindrop.png'],
+  ['red_basetop', 'red_basetop.png'],
+  ['red_basewall', 'red_basewall.png'],
+  ['red_bolt', 'red_bolt.png'],
+  ['red_icon', 'red_icon.png'],
+  ['red_laser', 'red_laser.png'],
+  ['red_super_bolt', 'red_super_bolt.png'],
+  ['red_tank', 'red_tank.png'],
+  ['rogue_bolt', 'rogue_bolt.png'],
+  ['rogue_icon', 'rogue_icon.png'],
+  ['rogue_laser', 'rogue_laser.png'],
+  ['rogue_super_bolt', 'rogue_super_bolt.png'],
+  ['rogue_tank', 'rogue_tank.png'],
+  ['roof', 'roof.png'],
+  ['snowflake', 'snowflake.png'],
+  ['std_ground', 'std_ground.png'],
+  ['telelink', 'telelink.png'],
+  ['tetrawall', 'tetrawall.png'],
+  ['thief', 'thief.png'],
+  ['title', 'title.png'],
+  ['wall', 'wall.png'],
+  ['water', 'water.png'],
+  ['zone_ground', 'zone_ground.png'],
 ]);
 
 export function createStockMaterialTexture(name, onAlpha) {
