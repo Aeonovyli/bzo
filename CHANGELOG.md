@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.25] - 2026-09-16
+
+### Changed
+- **A remote server's imported map (`?viewmap=import-<host>_<port>.bzw`) no
+  longer accumulates on disk forever.** Its one-hour reuse window only ever
+  decided whether to re-fetch it, never whether to delete it, so a server
+  that had ever imported a few dozen remote worlds kept every one of them
+  indefinitely. The background map-hashing pass now also runs periodically
+  rather than only at boot, and deletes an import twice its reuse window
+  past its last real fetch (read off the file's own last-modified time,
+  not an in-memory timestamp a restart would otherwise reset to "now" for
+  every file already on disk) -- along with its cached JSON and brotli
+  sidecar, closing a gap the existing brotli cache's own sweep can't reach
+  on its own once a server has been running a while.
+
 ## [1.2.24] - 2026-09-16
 
 ### Added
