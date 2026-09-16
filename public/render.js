@@ -2962,8 +2962,18 @@ class RenderManager {
     // position a player can occupy the wall is as solid as it was.
     //
     // Upstream has no third person view and no equivalent of this.
+    //
+    // Each wall also drops its two end faces and runs exactly `mapSize` long,
+    // meeting the perpendicular wall at the corner rather than overlapping it.
+    // A camera can never reach the gap this opens behind the meeting point --
+    // it is outside every wall's kept face -- so there is nothing there to cap.
+    //
+    // And each drops its top: upstream's border is a single quad with no
+    // thickness, so it has no top surface either, only the one face this wall
+    // is built around. Above `wallHeight` there is nothing to stand on and
+    // nothing to see from outside -- shots already pass over the same edge.
     const northWall = new THREE.Mesh(
-      this._prepareBoxGeometry(mapSize + wallThickness * 2, wallHeight, wallThickness, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.NZ] }),
+      this._prepareBoxGeometry(mapSize, wallHeight, wallThickness, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.NZ, BOX_FACE.PX, BOX_FACE.NX, BOX_FACE.PY] }),
       this._getSharedObstacleMaterials('boundary', createBoundaryTexture, createBoundaryTexture),
     );
     northWall.position.set(0, wallHeight / 2, -mapSize / 2 - wallThickness / 2);
@@ -2978,7 +2988,7 @@ class RenderManager {
 
 
     const southWall = new THREE.Mesh(
-      this._prepareBoxGeometry(mapSize + wallThickness * 2, wallHeight, wallThickness, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.PZ] }),
+      this._prepareBoxGeometry(mapSize, wallHeight, wallThickness, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.PZ, BOX_FACE.PX, BOX_FACE.NX, BOX_FACE.PY] }),
       this._getSharedObstacleMaterials('boundary', createBoundaryTexture, createBoundaryTexture),
     );
     southWall.position.set(0, wallHeight / 2, mapSize / 2 + wallThickness / 2);
@@ -2992,7 +3002,7 @@ class RenderManager {
 
 
     const eastWall = new THREE.Mesh(
-      this._prepareBoxGeometry(wallThickness, wallHeight, mapSize, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.PX] }),
+      this._prepareBoxGeometry(wallThickness, wallHeight, mapSize, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.PX, BOX_FACE.PZ, BOX_FACE.NZ, BOX_FACE.PY] }),
       this._getSharedObstacleMaterials('boundary', createBoundaryTexture, createBoundaryTexture),
     );
     eastWall.position.set(mapSize / 2 + wallThickness / 2, wallHeight / 2, 0);
@@ -3006,7 +3016,7 @@ class RenderManager {
 
 
     const westWall = new THREE.Mesh(
-      this._prepareBoxGeometry(wallThickness, wallHeight, mapSize, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.NX] }),
+      this._prepareBoxGeometry(wallThickness, wallHeight, mapSize, { ...BOX_TEXTURE_SCALES, omitFaces: [BOX_FACE.NX, BOX_FACE.PZ, BOX_FACE.NZ, BOX_FACE.PY] }),
       this._getSharedObstacleMaterials('boundary', createBoundaryTexture, createBoundaryTexture),
     );
     westWall.position.set(-mapSize / 2 - wallThickness / 2, wallHeight / 2, 0);
