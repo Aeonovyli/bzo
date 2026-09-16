@@ -1247,6 +1247,31 @@ function remoteMapFileName(host, port) {
   return `import-${host}_${port}`.replace(/[^A-Za-z0-9._-]/g, '_') + '.bzw';
 }
 
+// The inverse: recovers the host:port a `?viewmap=` link's own
+// `import-<host>_<port>.bzw` name came from, so a shared link still says
+// which server to (re-)ask once bzo has let its cached copy go
+// (`IMPORT_REUSE_MS` below) or never fetched it in this process at all --
+// see `importMapForView`. Sanitizing the host is lossy (any character
+// outside [A-Za-z0-9._-] becomes '_'), so this only trusts a name that
+// reproduces itself exactly when run back through `remoteMapFileName`: a
+// real import's own name always does, and nothing else needs to.
+function parseImportMapFileName(fileName) {
+  const match = typeof fileName === 'string' ? fileName.match(/^import-(.+)_(\d{1,5})\.bzw$/) : null;
+  if (!match) return null;
+  const host = match[1];
+  const port = Number(match[2]);
+  if (!(port >= 1 && port <= 65535)) return null;
+  return remoteMapFileName(host, port) === fileName ? { host, port } : null;
+}
+
+// How long a remote import is worth reusing rather than fetched again: long
+// enough that following the same shared link twice in a sitting never
+// re-downloads, short enough that the file is not worth keeping past it --
+// `maps/import-*.bzw` is a regeneratable cache (see .gitignore), not
+// something worth pruning on its own schedule, since `parseImportMapFileName`
+// above is what lets a link outlive this window instead of just going stale.
+const IMPORT_REUSE_MS = 60 * 60 * 1000;
+
 async function performRemoteMapImport(host, port) {
   const safeMapName = remoteMapFileName(host, port);
   const { worldDatabase, gameSettings, queryGame } = await fetchWorldFromServer(host, port, 15000);
@@ -5553,7 +5578,12 @@ function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize
     return null;
   }
   precompress.consider(url, filePath, Buffer.from(json));
-  const registered = { fileName, hash, url, ...entry };
+  // Outside `entry`, not inside it: this runs every time the file is
+  // (re-)registered, including on an unchanged re-import, and folding it into
+  // the hashed JSON would make an identical map hash differently call to
+  // call. `importMapForView`'s freshness check (`IMPORT_REUSE_MS`) is the one
+  // reader; nothing else needs a map's age.
+  const registered = { fileName, hash, url, registeredAt: Date.now(), ...entry };
   MAP_REGISTRY.set(fileName, registered);
   return registered;
 }
@@ -13254,6 +13284,48 @@ wss.on('connection', (ws, req) => {
           }).catch((error) => {
             logError(`Remote map import from ${host}:${port} failed:`, error);
             ws.send(JSON.stringify({ error: `Import failed: ${error.message}` }));
+          });
+          break;
+        }
+
+        // A `?viewmap=` link's own answer to "the file it named isn't
+        // registered": the name is `import-<host>_<port>.bzw`
+        // (`remoteMapFileName`), so it still says which server to ask even
+        // once bzo has let its cached copy go, or never fetched it in this
+        // process at all. Reused rather than re-fetched inside
+        // `IMPORT_REUSE_MS` of its last import -- the same server's world is
+        // not worth downloading twice in the same sitting -- otherwise this
+        // is `performRemoteMapImport` again, same as an operator's own
+        // Import button, just triggered by a link instead of a click.
+        case 'importMapForView': {
+          const file = typeof message.file === 'string' ? message.file : '';
+          // `reason`, not `error`: a bare top-level `error` string is the
+          // generic admin-response shortcut (handleServerMessage's own
+          // "Some admin/operator responses are sent without a message type"
+          // check) and would short-circuit past `type` entirely, so this
+          // reply would never reach `handleImportMapForViewResult` and the
+          // client's pending join would wait forever.
+          const reply = (success, extra = {}) => {
+            ws.send(JSON.stringify({ type: 'importMapForViewResult', file, success, ...extra }));
+          };
+          const target = parseImportMapFileName(file);
+          if (!target) {
+            reply(false, { reason: 'not a remote server\'s import file' });
+            break;
+          }
+          const { host, port } = target;
+          const existing = MAP_REGISTRY.get(file);
+          if (existing && (Date.now() - existing.registeredAt) < IMPORT_REUSE_MS) {
+            reply(true, { viewableMaps: getViewableMapsList() });
+            break;
+          }
+          log(`A viewmap link is importing a remote map from ${host}:${port}`);
+          performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
+            log(`Viewmap link imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes)`);
+            reply(true, { viewableMaps: getViewableMapsList() });
+          }).catch((error) => {
+            logError(`Remote map import from ${host}:${port} for a viewmap link failed:`, error);
+            reply(false, { reason: error.message });
           });
           break;
         }

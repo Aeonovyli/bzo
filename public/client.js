@@ -2904,6 +2904,31 @@ let selectedViewMapFile = null;
 let previewedMapFile = null;
 let liveWorldData = null;
 
+// A `?viewmap=` link naming a remote import the server hasn't hashed (yet,
+// or again -- see `IMPORT_REUSE_MS` in server.js) waits here for
+// `importMapForViewResult` rather than falling through to an ordinary join.
+// `sequenceId` is the `init` this request was for, so a reconnect that
+// starts a new one before the reply lands does not resolve a stale one.
+let pendingViewMapImport = null;
+
+// Asks the server to (re-)import the remote server a viewmap link's own
+// filename names (`import-<host>_<port>.bzw`, parsed back server-side by
+// `parseImportMapFileName`) and finishes the join once that settles --
+// as Map Viewer on success, as an ordinary join on failure. The loading
+// overlay already showing for this connection borrows a line to say so
+// rather than a dialog of its own, since nothing else is asking for
+// attention at this point in a fresh page load.
+function requestMapImportForView(file, sequenceId, onSuccess, onFailure) {
+  pendingViewMapImport = { file, sequenceId, onSuccess, onFailure };
+  setLoadingOverlayState({
+    visible: true,
+    progress: 0.02,
+    status: 'Fetching remote server\'s map...',
+    detail: file,
+  });
+  sendToServer({ type: 'importMapForView', file });
+}
+
 // Camera mode
 let cameraMode = 'first-person'; // 'first-person', 'third-person', or 'overview'
 let lastCameraMode = 'first-person';
@@ -5329,50 +5354,71 @@ function handleServerMessage(message) {
       // `?viewmap=` (issue #68), the same shape of link: Map Viewer is
       // Observer on the wire, offered wherever Observer is, so it only means
       // something if the server offers Observer at all and has actually
-      // hashed the requested file by now -- an unknown name or a server that
-      // refuses Observer falls through to a normal join rather than staging a
-      // team the server would refuse.
-      const autoViewingMap = autoViewMapTarget !== null
+      // hashed the requested file by now.
+      const autoViewingMapAvailable = autoViewMapTarget !== null
         && availablePlayerTeams.includes(PLAYER_TEAM.OBSERVER)
         && availableViewMaps.some((entry) => entry.file === autoViewMapTarget);
-      if (autoViewingMap) {
-        selectedPlayerTeam = PLAYER_TEAM.MAP_VIEWER;
-        selectedViewMapFile = autoViewMapTarget;
-        syncPlayerTeamSelector();
-      }
 
-      // Only send join if there is a saved name of the player's own choosing
-      const savedName = getSavedJoinableName();
-      if (savedName) {
-        myPlayerName = savedName;
-      }
-      // A verified session's name is not saved from a choice, it is forced --
-      // overriding whatever a previous, unauthenticated visit left in
-      // localStorage, the same way `resolveJoinName` would at join time.
-      if (amVerified && myGlobalCallsign) {
-        myPlayerName = myGlobalCallsign;
-      }
-      if (!isDefaultPlayerName(myPlayerName)) {
-        setPendingJoinRequest(myPlayerName);
-      } else if (autoObserving || autoViewingMap) {
-        // The name the server gave this connection, which is the one the entry
-        // dialog would have offered. A spectator arriving on a handed-out link
-        // has no name to be asked for.
-        myPlayerName = message.player.name;
-        setPendingJoinRequest(myPlayerName);
+      // The rest of this handler decides how to join, which depends on
+      // whether Map Viewer staged -- so it wraps in a closure rather than
+      // running inline, and runs either now (the ordinary case) or once a
+      // pending remote re-import settles (`requestMapImportForView` below).
+      const finishInit = (autoViewingMap) => {
+        if (autoViewingMap) {
+          selectedPlayerTeam = PLAYER_TEAM.MAP_VIEWER;
+          selectedViewMapFile = autoViewMapTarget;
+          syncPlayerTeamSelector();
+        }
+
+        // Only send join if there is a saved name of the player's own choosing
+        const savedName = getSavedJoinableName();
+        if (savedName) {
+          myPlayerName = savedName;
+        }
+        // A verified session's name is not saved from a choice, it is forced --
+        // overriding whatever a previous, unauthenticated visit left in
+        // localStorage, the same way `resolveJoinName` would at join time.
+        if (amVerified && myGlobalCallsign) {
+          myPlayerName = myGlobalCallsign;
+        }
+        if (!isDefaultPlayerName(myPlayerName)) {
+          setPendingJoinRequest(myPlayerName);
+        } else if (autoObserving || autoViewingMap) {
+          // The name the server gave this connection, which is the one the entry
+          // dialog would have offered. A spectator arriving on a handed-out link
+          // has no name to be asked for.
+          myPlayerName = message.player.name;
+          setPendingJoinRequest(myPlayerName);
+        } else {
+          // Ask for a name: in XR on the menu panel, otherwise in the 2D dialog
+          myPlayerName = message.player.name;
+          if (isXREnabled()) openXRJoinMenu();
+          else toggleEntryDialog(myPlayerName);
+        }
+
+        // Initialize dead reckoning state (velocity-based)
+        lastSentForwardSpeed = 0;
+        lastSentRotationSpeed = 0;
+        lastSentVerticalVelocity = 0;
+        lastSentTime = performance.now();
+        void prepareInitialRender(message, sequenceId);
+      };
+
+      if (autoViewingMapAvailable) {
+        finishInit(true);
+      } else if (autoViewMapTarget !== null && availablePlayerTeams.includes(PLAYER_TEAM.OBSERVER)) {
+        // Not already hashed -- but a remote import's own name still says
+        // which server to ask (see `parseImportMapFileName` in server.js),
+        // and bzo only keeps that cache for an hour (`IMPORT_REUSE_MS`), so a
+        // shared link outliving it asks the server to fetch it again rather
+        // than silently falling through to an ordinary join.
+        requestMapImportForView(autoViewMapTarget, sequenceId, () => finishInit(true), () => finishInit(false));
       } else {
-        // Ask for a name: in XR on the menu panel, otherwise in the 2D dialog
-        myPlayerName = message.player.name;
-        if (isXREnabled()) openXRJoinMenu();
-        else toggleEntryDialog(myPlayerName);
+        // An unknown name that is not a remote import's own, or a server
+        // that refuses Observer entirely: nothing to fetch, so fall through
+        // to a normal join rather than staging a team the server would refuse.
+        finishInit(false);
       }
-
-      // Initialize dead reckoning state (velocity-based)
-      lastSentForwardSpeed = 0;
-      lastSentRotationSpeed = 0;
-      lastSentVerticalVelocity = 0;
-      lastSentTime = performance.now();
-      void prepareInitialRender(message, sequenceId);
       break;
     }
 
@@ -5943,6 +5989,10 @@ function handleServerMessage(message) {
 
     case 'importMapResult':
       importMapResultReceived(message);
+      break;
+
+    case 'importMapForViewResult':
+      handleImportMapForViewResult(message);
       break;
 
     case 'serverConfigUpdate':
@@ -6848,6 +6898,26 @@ function importMapResultReceived(message) {
     // table can offer a View button for. Cheap and always fresh, unlike the
     // entry dialog's `init.viewableMaps`, which only updates on a reload.
     sendToServer({ type: 'getMaps' });
+  }
+}
+
+// The reply to `requestMapImportForView`. Ignored if it is not an answer to
+// the request still pending -- a reconnect before this landed already moved
+// on to a new `init` and a new (or no) request of its own -- otherwise
+// finishes the join `case 'init'` deferred: as Map Viewer, with
+// `availableViewMaps` updated from this same reply so the picker and the
+// preview see the map that just got imported, or as an ordinary join if the
+// import failed.
+function handleImportMapForViewResult(message) {
+  const pending = pendingViewMapImport;
+  if (!pending || pending.file !== message.file || pending.sequenceId !== activeInitSequence) return;
+  pendingViewMapImport = null;
+  if (message.success) {
+    if (Array.isArray(message.viewableMaps)) availableViewMaps = message.viewableMaps;
+    pending.onSuccess();
+  } else {
+    setHudAlert(2, `Could not load that server's map: ${message.reason || 'import failed'}`, 6, true);
+    pending.onFailure();
   }
 }
 
