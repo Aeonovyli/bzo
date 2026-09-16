@@ -156,43 +156,41 @@ export function debugLog(message) {
   }
 }
 
-// Check if WebXR is available
+// Check if WebXR is available. Returns `{ mode, detail }` rather than
+// logging its own way through the branches -- `initXR` folds `detail` into
+// the one debug line it already sends for the launch attempt, so a page
+// load reports the whole XR probe as a single log entry instead of three.
 async function checkXRSupport() {
-  debugLog('Checking XR support... navigator.xr=' + (navigator.xr ? 'YES' : 'NO'));
-  if (!navigator.xr) {
-    debugLog('navigator.xr not available - WebXR not supported');
-    return 'none';
+  const hasNavigatorXR = Boolean(navigator.xr);
+  if (!hasNavigatorXR) {
+    return { mode: 'none', detail: 'navigator.xr not available' };
   }
 
   try {
     // Try immersive-vr
     const vrSupported = await navigator.xr.isSessionSupported('immersive-vr');
     if (vrSupported) {
-      debugLog('immersive-vr (VR) supported');
       xrMode = 'immersive-vr';
       xrSupported = true;
       xrState.isSupported = true;
-      return 'vr';
+      return { mode: 'vr', detail: 'immersive-vr supported' };
     }
 
     // Fall back to immersive-ar
     const arSupported = await navigator.xr.isSessionSupported('immersive-ar');
     if (arSupported) {
-      debugLog('immersive-ar (AR) supported');
       xrMode = 'immersive-ar';
       xrSupported = true;
       xrState.isSupported = true;
-      return 'ar';
+      return { mode: 'ar', detail: 'immersive-ar supported' };
     }
 
-    debugLog('Neither immersive-ar nor immersive-vr supported');
     xrSupported = false;
     xrState.isSupported = false;
-    return 'none';
+    return { mode: 'none', detail: 'neither immersive-ar nor immersive-vr supported' };
   } catch (err) {
-    debugLog('Failed to check support: ' + err.message);
     console.error('[WebXR] Full error:', err);
-    return 'none';
+    return { mode: 'none', detail: 'failed to check support: ' + err.message };
   }
 }
 
@@ -740,8 +738,8 @@ export async function initXR() {
   // Settle the first request before reporting: it is the one attempt whose
   // outcome predates the debug channel.
   if (pendingLaunchSession) await pendingLaunchSession;
-  debugLog('Launch session: ' + launchReport);
-  const mode = await checkXRSupport();
+  const { mode, detail } = await checkXRSupport();
+  debugLog(`Launch session: ${launchReport}; XR support: navigator.xr=${navigator.xr ? 'YES' : 'NO'}, ${detail}`);
   // A granted launch session is proof enough, whatever the support probe said.
   if (pendingLaunchSession) {
     xrMode = 'immersive-vr';
