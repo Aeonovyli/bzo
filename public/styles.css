@@ -1163,6 +1163,11 @@ body {
   border-color: #66bb6a;
 }
 
+#entryInput:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .entryTeamSelector {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(10rem, 1fr);

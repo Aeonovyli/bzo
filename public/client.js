@@ -2577,6 +2577,15 @@ function applyAdminUi() {
   applyLoginUi();
 }
 
+// A verified session's join name is not a choice: `resolveJoinName` forces
+// the join to the session's callsign regardless of what the entry dialog's
+// name field holds, so the field is locked to match rather than inviting an
+// edit the server will ignore (issue #75). `null` where there is nothing to
+// force, which is every unverified connection.
+function forcedEntryName() {
+  return (amVerified && myGlobalCallsign) ? myGlobalCallsign : null;
+}
+
 // The Global login row in the entry dialog. It says what the server said and
 // nothing more: signed in as whom, and whether that carried admin. `@` and `+`
 // are upstream's own indicators (`ScoreboardRenderer.cxx:718`), so the row uses
@@ -2584,6 +2593,12 @@ function applyAdminUi() {
 function applyLoginUi() {
   const value = document.getElementById('entryLoginValue');
   const row = document.getElementById('entryLoginRow');
+  const entryInput = document.getElementById('entryInput');
+  const forcedName = forcedEntryName();
+  if (entryInput) {
+    entryInput.disabled = forcedName !== null;
+    if (forcedName !== null) entryInput.value = forcedName;
+  }
   if (!value) return;
   if (amVerified) {
     value.textContent = `${amAdmin ? '@' : '+'}${myGlobalCallsign || myPlayerName}`;
@@ -2789,7 +2804,9 @@ function openEntryDialog(name = '') {
   // Team is settled at join time, so changing it means rejoining -- which OK
   // does, and which is why the selector is offered to a player already in the
   // game rather than greyed out for them.
-  entryInput.value = name === '' ? myPlayerName : name;
+  const forcedName = forcedEntryName();
+  entryInput.value = forcedName ?? (name === '' ? myPlayerName : name);
+  entryInput.disabled = forcedName !== null;
   entryInput.focus();
   entryDialogReturnCameraMode = cameraMode;
   cameraMode = 'overview';
@@ -2853,7 +2870,9 @@ function applyEntrySelections() {
 // until OK.
 function resetEntrySelectionsToDefault() {
   const entryInput = document.getElementById('entryInput');
-  if (entryInput) {
+  // A verified name is not the default button's to clear -- it is not the
+  // player's choice while signed in, and logging out is what restores it.
+  if (entryInput && forcedEntryName() === null) {
     entryInput.value = '';
     entryInput.focus();
   }
@@ -5286,6 +5305,16 @@ function handleServerMessage(message) {
       playerZ = message.player.z;
       playerRotation = message.player.rotation;
 
+      // Known from the handshake cookie, before any join -- set here rather
+      // than waiting for `playerJoined` so the entry dialog below locks the
+      // name field to a verified session's callsign from the moment it is
+      // first shown, including right after the redirect back from weblogin
+      // (issue #75).
+      amVerified = !!message.player.verified;
+      amAdmin = !!message.player.admin;
+      myGlobalCallsign = message.player.globalCallsign || null;
+      applyAdminUi();
+
       // A server that does not offer the observer team cannot honour the
       // spectator link, so the page joins as it otherwise would rather than
       // asking for a team and being refused.
@@ -5316,6 +5345,12 @@ function handleServerMessage(message) {
       const savedName = getSavedJoinableName();
       if (savedName) {
         myPlayerName = savedName;
+      }
+      // A verified session's name is not saved from a choice, it is forced --
+      // overriding whatever a previous, unauthenticated visit left in
+      // localStorage, the same way `resolveJoinName` would at join time.
+      if (amVerified && myGlobalCallsign) {
+        myPlayerName = myGlobalCallsign;
       }
       if (!isDefaultPlayerName(myPlayerName)) {
         setPendingJoinRequest(myPlayerName);

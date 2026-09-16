@@ -6519,6 +6519,11 @@ class Player {
       // `registered`: it learns nothing about a callsign unless a token
       // verifies, and a verified token means registered as well.
       verified: this.verified,
+      // The name a verified session forces the join to. `name` itself does
+      // not become this until `resolveJoinName` runs at join time, so the
+      // entry dialog needs its own field to lock its name input to before
+      // that -- see issue #75.
+      globalCallsign: this.globalCallsign ?? null,
       teleportCooldownUntil: this.teleportCooldownUntil,
       // The map a Map Viewer chose (issue #68), null for everyone else -- the
       // roster's business is only which file, since the hash/url to render it
