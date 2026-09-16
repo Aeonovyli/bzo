@@ -6,6 +6,30 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.27] - 2026-09-16
+
+### Fixed
+- **`bzship.obj`'s barrel had four stray loose-edge (`l`) lines at the tail
+  of its object block.** three.js's `OBJLoader` sets a whole object's type
+  to `LineSegments` the moment it sees even one, and never sets it back --
+  so despite carrying thousands of real faces, the barrel built as
+  something the renderer's part lookup could never find, and the tank
+  failed to build for every client. Removed the four lines; the model was
+  otherwise sound.
+
+### Changed
+- **The tank model picker now rejects a part tainted by a loose edge or
+  point, not just a missing one.** `readObjObjectNames` previously reported
+  every `o`-declared name regardless of what else was in its block, so the
+  server's own buildability check missed exactly the defect above and
+  offered the model anyway. A model with this defect is now excluded from
+  `/api/tank-models` the same way one missing the part outright would be.
+
+The ship model still has open rough edges tracked in #59 -- most visibly,
+its first-person eye height sits inside the hull rather than above it,
+and its tread meshes read as full-height side skirts rather than a
+track band, so it doesn't yet look or feel finished.
+
 ## [1.2.26] - 2026-09-16
 
 ### Added

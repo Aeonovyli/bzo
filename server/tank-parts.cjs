@@ -73,11 +73,30 @@ function missingTankParts(objectNames) {
 // The object names an OBJ file declares, which is all either end reads to
 // answer the question above. Kept here so the server parses the contract the
 // same way the loader names the meshes it builds.
+//
+// A block that carries even one loose `l` (or `p`) primitive builds as a
+// LineSegments or Points node instead of a Mesh: OBJLoader.js sets the whole
+// object's type the first time it sees either command and never sets it back,
+// so a hundred `f` faces in the same block still come out invisible to the
+// renderer's `child.isMesh` lookup. Such a block is left out of the returned
+// names the same way an empty one would be -- a name nothing can ever build.
 function readObjObjectNames(text) {
   const names = [];
+  let current = null;
+  let tainted = false;
+  const commit = () => {
+    if (current !== null && !tainted) names.push(current);
+  };
   for (const line of String(text).split('\n')) {
-    if (line.startsWith('o ')) names.push(line.slice(2).trim());
+    if (line.startsWith('o ')) {
+      commit();
+      current = line.slice(2).trim();
+      tainted = false;
+    } else if (line.startsWith('l ') || line.startsWith('p ')) {
+      tainted = true;
+    }
   }
+  commit();
   return names;
 }
 

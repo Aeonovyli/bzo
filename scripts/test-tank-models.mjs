@@ -78,4 +78,30 @@ const split = tankRunningGear([
 assert.equal(split.leftTread, true);
 assert.equal(split.rightTread, false);
 
+// A loose `l` edge mixed into an otherwise normal object taints the whole
+// block: OBJLoader.js builds it as a LineSegments node, not a Mesh, so the
+// renderer's `child.isMesh` lookup can never find it. `readObjObjectNames`
+// has to drop a part like that the same way it drops one with no faces --
+// bzship.obj shipped exactly this defect (four stray `l` lines at the tail
+// of its barrel block) and the server offered it anyway because it only
+// checked for the name.
+const taintedBarrel = [
+  'o body',
+  'f 1 2 3',
+  'o turret',
+  'f 1 2 3',
+  'o barrel',
+  'f 1 2 3',
+  'l 1 2',
+  'o ltread',
+  'f 1 2 3',
+  'o rtread',
+  'f 1 2 3',
+].join('\n');
+assert.deepEqual(
+  missingTankParts(readObjObjectNames(taintedBarrel)),
+  ['barrel'],
+  'a barrel block with a stray loose edge should not count as a usable barrel',
+);
+
 console.log(`tank model parts OK (${offered.join(', ')})`);
