@@ -1986,6 +1986,7 @@ function applyWorldData(world) {
   renderManager.setGroundGridEnabled(showDebugGeometry, currentWorldMapSize);
   renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls);
   renderManager.createMountains(currentWorldMapSize);
+  renderManager.buildWater(currentWorldMapSize, world?.waterLevel || null);
 }
 
 async function prepareInitialRender(message, sequenceId) {
@@ -6578,6 +6579,13 @@ function handlePlayerHit(message) {
   // message (`message.deathMessage`) rather than a `deathPrefix`-templated
   // one, the same "whole phrase" treatment `killedByWorld` gets below.
   const isPhysicsDriverDeath = deathReason === 'physicsDriver';
+  // `waterLevel` -- no killer, and a fixed message rather than a mapper's
+  // own: upstream's own local-player alert for this is "Tank Rusted"
+  // (`blowedUpMessage[WaterDeath]`, `playing.cxx:186-195`), not a phrase
+  // that names the water at all, while the notice about someone else says
+  // "fell in the water" instead (`playing.cxx:2601-2604`) -- two different
+  // fixed strings for the same reason, both upstream's own.
+  const isWaterDeath = deathReason === 'water';
   // "if (!killerPlayer) blowedUpNotice = \"Killed by the server\"" -- gotBlowedUp
   // (playing.cxx:3999) throws the whole prefix away when the killer has no
   // roster entry, which is every kill by a world weapon: `lookupPlayer` finds
@@ -6630,6 +6638,8 @@ function handlePlayerHit(message) {
       noticeAbout(0, ['Time Expired - GAME OVER'], DEATH_ALERT_SECONDS, true);
     } else if (isSelfDestruct) {
       noticeAbout(0, ['Tank Self Destructed'], DEATH_ALERT_SECONDS, true);
+    } else if (isWaterDeath) {
+      noticeAbout(0, ['Tank Rusted'], DEATH_ALERT_SECONDS, true);
     } else if (isPhysicsDriverDeath) {
       noticeAbout(0, [typeof message.deathMessage === 'string' && message.deathMessage
         ? message.deathMessage : 'Killed by the server'], DEATH_ALERT_SECONDS, true);
@@ -6683,6 +6693,10 @@ function handlePlayerHit(message) {
     // and nobody else's.
     noticeAbout(
       null, [describePlayer(message.victimId, { flag: victimFlag }), ' self-destructed'],
+      0, false);
+  } else if (isWaterDeath) {
+    noticeAbout(
+      null, [describePlayer(message.victimId, { flag: victimFlag }), ' fell in the water'],
       0, false);
   } else if (isPhysicsDriverDeath) {
     noticeAbout(

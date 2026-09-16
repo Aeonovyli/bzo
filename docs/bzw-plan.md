@@ -22,9 +22,8 @@ disagreements before calling the section done.
 No third-party map pack with mesh/group/physics-driver usage in the wild turned
 up on a search of the BZFlag-Dev GitHub org or the usual community sites --
 BZFlag ships no sample maps using them either. The porteighty `bzw_docs` pages
-for `mesh`, `group`, and `waterLevel` each carry a complete, runnable example
-block, though, which is the next best thing to a real map and is cited per
-section below. `arc`/`cone`/`sphere`/`tetra`'s docs pages are unfinished --
+for `mesh` and `group` each carry a complete, runnable example block, though,
+which is the next best thing to a real map and is cited per section below. `arc`/`cone`/`sphere`/`tetra`'s docs pages are unfinished --
 placeholder text where an example should be -- so those four are validated
 against `$HOME/bzflag/src/bzfs/Custom{Arc,Cone,Sphere,Tetra}.cxx` directly
 rather than against any map, real or documented, until one turns up.
@@ -283,21 +282,6 @@ What's left:
       `base_pillar` define (`base_oval`'s `down5`/`down11`) is the real map
       that exercises this.
 
-## Water
-
-`waterLevel`, a single plane at a height. `src/bzfs/CustomWaterLevel.cxx`.
-
-The smallest item here: one `height` plus a `matref` for its surface, no
-collision effect upstream (a tank drives through it same as air) and no
-gameplay change. Reads as a straightforward render-only addition once
-`matref`/material support exists to texture it, or with a plain flat-shaded
-plane before that lands. A world-block keyword like `noWalls` -- one map, one
-height -- so it needs its own small map to preview in Map Viewer rather than a
-corner of `bzo.bzw`.
-
-- [ ] Parse `waterLevel` / `endwaterlevel`'s `height`.
-- [ ] Draw a single translucent plane at that height in `render.js`.
-
 ## Weather
 
 Rain, and the five other particle presets `_rainType` names -- `snow`,
@@ -323,10 +307,10 @@ the best-looking preset's rendering path -- billboarded drops, textured,
 puddled, roof-culled -- and do not carry `doLineRain`'s plain streaks or
 `userRainScale` as a client setting.
 
-Purely a client render, same as water: no collision, nothing a shot or a tank
-interacts with, so a preview map is sufficient on its own -- no live match,
-no second client, and Map Viewer's driveable phantom tank is not even needed,
-just look at the sky.
+Purely a client render: no collision, nothing a shot or a tank interacts with,
+so a preview map is sufficient on its own -- no live match, no second client,
+and Map Viewer's driveable phantom tank is not even needed, just look at the
+sky.
 
 - [ ] Parse the `_rain*` family through the map's `options` block into
       `GAME_CONFIG`, `-set`'s existing path.

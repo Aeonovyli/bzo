@@ -421,6 +421,12 @@ may change once that stops being the dominant cost.
   same as any other third-party image on the web. See "Materials" in
   `docs/bzw.md`.
 
+- **The water plane can be seen through, from above or below.** `render.js`'s
+  `buildWater` draws it `DoubleSide` with `depthWrite: false`; upstream's own
+  fixed-function `MeshPolySceneNode` is a plain single-sided, depth-writing
+  quad. A deliberate choice, not an unnoticed side effect. See "Water" in
+  `docs/bzw.md`.
+
 ## Memory Policy
 
 - When the user asks to remember something, record it in this file so other

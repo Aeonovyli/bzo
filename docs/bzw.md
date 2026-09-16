@@ -694,6 +694,88 @@ instead, the same path rogue and a base-less colour team always take. Upstream
 never clears `restartOnBase` while the switch is on either, since the branch
 that would clear it is the one being skipped.
 
+## Water
+
+`waterLevel` / `end` (`src/bzfs/CustomWaterLevel.cxx`) -- one flat plane, the
+whole width of the world, at a fixed height. A `world`-block-adjacent, map-wide
+singleton like `noWalls` above rather than an obstacle: it takes no `name`,
+`position`, or `size` of its own, since a map has at most one.
+
+| keyword | effect |
+|---|---|
+| `height <n>` | the plane's altitude -- bzo's own vertical axis directly, no sign flip |
+| `matref <name>`, `color`/`diffuse`, `addtexture`/`texture`, `noradar`, `nolighting`, `dyncol`, `texmat` | the surface's own material, read exactly as a plain obstacle's (see **Materials**) |
+
+Upstream's own words for the gameplay half of it (the porteighty BZW docs
+page): "Any tanks that move below this height will be destroyed." bzo reads
+this the same way `WorldInfo::getWaterLevel()`'s two upstream callers do --
+`playing.cxx:4196`/`:4851`'s `(waterLevel > 0.0f) && (position[2] <= waterLevel)`
+kills the tank (`WaterDeath`, "fell in the water" to everyone else, "Tank
+Rusted" to the tank itself -- `blowedUpMessage[WaterDeath]`, upstream's own
+joke about why it blew up) -- and `validateMovement` checks it on every move,
+regardless of anti-cheat mode, the same "map's own gameplay rule, not a cheat
+detection" treatment a `death` physics driver already gets. `height > 0` is
+upstream's own guard too: a `waterLevel 0` plane sits exactly on the ground
+every tank already stands on, so without it the plane would kill on arrival.
+
+**A material with no lines of its own still isn't bare.**
+`WorldInfo::makeWaterMaterial` seeds a default -- the `water` stock texture,
+tinted, and left off the radar -- if the map's `waterLevel` block names no
+material at all, and bzo seeds the same default up front rather than lazily.
+bzo has no alpha channel on a plain `color`/`diffuse` line to carry upstream's
+own 0.9 default alpha (see **Colour**), so translucency is water's own fixed
+property in `render.js` instead of something a tint line can override.
+
+**The surface scrolls, by default.** `WorldInfo::makeWaterMaterial` also seeds
+a texture matrix (`texmat->setDynamicShift(0.05f, 0.0f)`) alongside the tint,
+a steady drift along U with no motion on V -- the same continuous
+`fmod(t * shiftU, 1.0)` cycle `applyTextureMatrix` in `render.js` already
+drives for a mapper's own `texmat`. bzo seeds this default the same way it
+seeds the texture and the tint, so a bare `waterLevel` block scrolls without a
+mapper asking; a `texmat <name>` line on the block replaces it with a
+different animation, the same override any other default material property
+here takes.
+
+**Nothing about collision changes.** A tank or a shot passes through the
+plane exactly as it passes through air -- the kill above is a position check
+on every move, not a surface anything bounces off or stops at.
+
+**The plane can be seen through, from above or below**, unlike upstream's own
+single-sided, depth-writing quad -- a deliberate keep rather than an unnoticed
+side effect of `DoubleSide`/`depthWrite: false` in `render.js`'s `buildWater`.
+See "Intentional deviations from BZFlag" in `AGENTS.md`.
+
+**A map with water needs real ground above the waterline for every team that
+plays it.** Upstream forces `-fb` on unasked the moment a map's `waterLevel`
+is above zero (`bzfs.cxx:1217-1223`, "WARNING: enabling flag and tank spawns on
+buildings due to waterLevel"), and clamps the floor of its own random spawn
+and flag searches to the waterline (`RandomSpawnPolicy.cxx:93-96`,
+`SpawnPolicy.cxx:116-119`) rather than climbing to a real surface -- bzo does
+both, in `FLAGS_ON_BUILDINGS` and in `dropSpawnPosition`/
+`findValidSpawnPosition`/`findFlagLandingY`. That clamp is a floor, not a
+guarantee: a team with no `zone` or `base` above the waterline still lands the
+plain random search exactly on the water's own surface, which is the death
+line itself (`<=`, both here and upstream), and dies on arrival. `maps/water.bzw`
+is the preview map for this, and its own `spawn_zone` names every team
+(`team 0 1 2 3 4`) for exactly this reason.
+
+**A flag dropped over open water never rests in it either.**
+`findFlagLandingY` returns `null` rather than the waterline itself when
+nothing above the waterline qualifies as a landing -- upstream's own
+`DropGeometry::dropIt` (`bzfs.cxx`) returns `false` from the same case, the
+signal both a team flag's and a superflag's drop act on. A superflag
+(`dropFlag` in `server.js`) vanishes instead of landing, the same as when its
+last grab is spent. A team flag never vanishes, so it works down upstream's
+own chain instead (`WorldInfo::getFlagDropPoint`, `bzfs.cxx:3792-3814`): the
+nearest zone naming this team's `safety` (see **Flag safety zones**, below),
+else the map centre -- re-dropped against the real geometry there rather than
+assumed to be bare ground, since a water map's centre may itself be a
+platform -- else the team's own base outright, which needs no test at all: a
+base is always a real, already-placed landing. A `safety` zone is a
+convenience this chain takes first, not a requirement the map has to supply;
+without one, a drop over open water still resolves through the centre or the
+base.
+
 ## Team zones
 
 A `zone` block's `team <n> [n ...]` marks it a spawn area for BZFlag team
@@ -973,7 +1055,6 @@ loads and plays with that part of it missing. The notable absences:
 - **`shear`, `xform`, and a `spin` about anything but the vertical axis.**
   `shift`, `scale` and a vertical `spin` are read now -- see **Groups**
   above, and its "Not yet read" list for what of this line is left.
-- **`water`**.
 - **A `zone` block's `flag` keyword.** `zoneflag`, `team` and `safety` are all
   read -- see **Team zones** and **Flag safety zones** above. `flag` names a
   type any flag of which spawns in the zone; a map using it is named in the

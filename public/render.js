@@ -2920,6 +2920,78 @@ class RenderManager {
     this.setGroundGridEnabled(this.showGroundGrid, mapSize);
   }
 
+  clearWater() {
+    this._animatedMaterials = this._animatedMaterials.filter((entry) => entry.source !== 'water');
+    if (this.water && this.scene) {
+      this.worldGroup.remove(this.water);
+      this.water.geometry.dispose();
+      this.water.material.map?.dispose();
+      this.water.material.dispose();
+      this.water = null;
+    }
+  }
+
+  // `SceneDatabaseBuilder::addWaterLevel` (`SceneBuilder.cxx:272-308`): one
+  // `BZDBCache::worldSize`-wide quad at the map's own height, its texture
+  // tiled twice across the whole span rather than once (`t[1][0] = 2.0f`).
+  // `WorldInfo::makeWaterMaterial`'s own defaults -- translucent, off the
+  // radar -- apply whatever the map's own material lines replaced the tint
+  // or the texture with, since bzo has no alpha channel on a plain `color`/
+  // `diffuse` line to carry them instead (docs/bzw.md, "Colour"). `noRadar`
+  // needs no code here at all: water is not in `OBSTACLES`, so the radar
+  // never draws it regardless.
+  buildWater(mapSize, waterLevel) {
+    if (!this.scene) return;
+    this.clearWater();
+    if (!waterLevel || !Number.isFinite(waterLevel.height)) return;
+
+    const geometry = new THREE.PlaneGeometry(mapSize, mapSize);
+    geometry.rotateX(-Math.PI / 2);
+    const uv = geometry.attributes.uv;
+    for (let i = 0; i < uv.count; i += 1) {
+      uv.setXY(i, uv.getX(i) * 2, uv.getY(i) * 2);
+    }
+
+    const hasTexture = !!(waterLevel.texture || waterLevel.textureUrl);
+    let texture = null;
+    if (hasTexture) {
+      const textureFactory = resolveObstacleTextureFactory(
+        waterLevel.texture, waterLevel.textureUrl, '/textures/water.png',
+        () => createStockMaterialTexture('water'),
+      );
+      texture = textureFactory(() => {});
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+    }
+
+    const [r, g, b] = waterLevel.color || [1, 1, 1];
+    const MaterialClass = waterLevel.noLighting ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
+    const material = new MaterialClass({
+      map: texture,
+      color: new THREE.Color(r, g, b),
+      // `setUseTextureAlpha(true)` upstream -- forced translucency rather
+      // than the render's usual per-texture alpha detection, and not
+      // something a `color`/`diffuse` line can override (bzo drops the
+      // fourth number there; see the comment above).
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+
+    this.water = new THREE.Mesh(geometry, material);
+    this.water.position.y = waterLevel.height;
+    this.water.frustumCulled = false;
+    this.worldGroup.add(this._tagDraws(this.water, 'scenery'));
+
+    if (waterLevel.dynamicColor) {
+      this._animatedMaterials.push({ material, dynamicColor: waterLevel.dynamicColor, source: 'water' });
+    }
+    if (waterLevel.textureMatrix && texture) {
+      texture.matrixAutoUpdate = false;
+      this._animatedMaterials.push({ texture, textureMatrix: waterLevel.textureMatrix, source: 'water' });
+    }
+  }
 
   createMapBoundaries(mapSize = 100, noWalls = false) {
     if (!this.scene) return;

@@ -1308,7 +1308,7 @@ async function performRemoteMapImport(host, port) {
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
   const mapData = parseBZWMap(filePath);
-  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls);
+  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel);
   return { safeMapName, byteLength: worldDatabase.length };
 }
 
@@ -1797,8 +1797,24 @@ function normalizeScoreLimit(score) {
 // `currentWeapon`, so their own inner lines already fall through the rest of
 // parseBZWMap's dispatch untouched -- this only has to recognize the
 // *opening* keyword to say how many of each a map asked for.
+// `WorldInfo::makeWaterMaterial`'s own texture matrix (`WorldInfo.cxx:150-153`):
+// `texmat->setDynamicShift(0.05f, 0.0f)`, a scroll along U alone, forever --
+// `TextureMatrix::update`'s `ushf = fmod(t * uShiftFreq, 1.0)` is the same
+// continuous cycle `applyTextureMatrix` in `render.js` already ports for every
+// other `texmat` reference. Shared rather than rebuilt per map: nothing ever
+// mutates the object itself, only replaces a `currentWaterLevel.textureMatrix`
+// reference that pointed at it (a `texmat` line on the block does that, the
+// same as any other material property overriding this default).
+const DEFAULT_WATER_TEXTURE_MATRIX = Object.freeze({
+  name: 'WaterMaterial',
+  fixedShiftU: 0, fixedShiftV: 0, fixedScaleU: 1, fixedScaleV: 1, fixedSpin: 0,
+  fixedCenterU: 0.5, fixedCenterV: 0.5,
+  shiftU: 0.05, shiftV: 0, spin: 0, scaleUFreq: 0, scaleVFreq: 0,
+  scaleU: 1, scaleV: 1, centerU: 0.5, centerV: 0.5,
+});
+
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'waterlevel', 'transform',
+  'transform',
 ]);
 
 // `TetraBuilding::makeMesh`'s own fixed face topology (`MeshUtils.h`'s
@@ -3062,6 +3078,14 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   let mapFlagHeight = null;
   let mapNoWalls = false;
   let mapFreeCtfSpawns = false;
+  // `waterLevel` / `end` (`CustomWaterLevel.cxx`) -- a map-wide singleton
+  // like `noWalls`, not an obstacle, so it fills in one variable on `end`
+  // rather than collecting into a registry a `matref` looks up later.
+  // Carried out through this function's own return value the same way
+  // `noWalls` is, for the same two reasons: the client needs it to draw the
+  // plane, and `validateMovement` needs it for the kill-on-touch rule.
+  let mapWaterLevel = null;
+  let currentWaterLevel = null;
   let current = null;
   let currentLink = null;
   let currentZone = null;
@@ -3744,6 +3768,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     // `MaterialManager` for later `matref` lookups to find.
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
       && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && !currentWaterLevel
       && token === 'material') {
       currentMaterial = {
         name: null, texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
@@ -3807,6 +3832,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     // `name`) for `phydrv` to look up later.
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
       && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && !currentWaterLevel
       && token === 'physics') {
       currentPhysicsDriver = { name: null, linear: null, death: null };
       continue;
@@ -3858,6 +3884,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     // `physics` block is for `phydrv`.
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
       && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && !currentWaterLevel
       && token === 'dynamiccolor') {
       currentDynamicColor = {
         name: null,
@@ -3937,6 +3964,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     // `material`'s own `texmat` to look up.
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
       && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && !currentWaterLevel
       && token === 'texturematrix') {
       currentTextureMatrix = {
         name: null,
@@ -4029,10 +4057,58 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       continue;
     }
 
+    // `waterLevel` / `end` (`CustomWaterLevel.cxx`). One plane, the whole
+    // width of the world, at a fixed height -- a map-wide singleton like
+    // `noWalls`, not an obstacle, so this fills in `mapWaterLevel` directly on
+    // `end` rather than collecting into a registry a `matref` looks up later.
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
+      && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && !currentWaterLevel
+      && token === 'waterlevel') {
+      currentWaterLevel = {
+        height: 0,
+        // `WorldInfo::makeWaterMaterial` (`WorldInfo.cxx:147-170`) -- the
+        // default a map's own material lines (read below, the same as a
+        // `material` block's own) overwrite as they're read. bzo has no
+        // alpha channel on a plain `color`/`diffuse` line (docs/bzw.md,
+        // "Colour"), so the 0.9 alpha upstream's own default carries is
+        // water's own fixed translucency in `render.js` instead of part of
+        // this tint.
+        texture: 'water', textureUrl: null, color: [0.65, 1.0, 0.5],
+        noRadar: true, noLighting: false, dynamicColor: null,
+        textureMatrix: DEFAULT_WATER_TEXTURE_MATRIX,
+      };
+      continue;
+    }
+    if (currentWaterLevel) {
+      if (token === 'end') {
+        mapWaterLevel = currentWaterLevel;
+        currentWaterLevel = null;
+        continue;
+      }
+      if (token === 'height') {
+        // BZW's height is bzo's own vertical axis already (`position x y z`'s
+        // `baseY = z`, docs/bzw.md's coordinate table) -- no sign flip, unlike
+        // the two horizontal axes.
+        const [, height] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(height)) currentWaterLevel.height = height;
+        continue;
+      }
+      if (applyBzwMaterialToken(currentWaterLevel, token, line.split(/\s+/))) {
+        continue;
+      }
+      // `name`, and everything else a plain `WorldFileObject` reads
+      // (`passable` and friends) -- meaningless on a plane that always
+      // covers the whole world, and upstream's own `writeToWorld` never
+      // reads any of them back either.
+      continue;
+    }
+
     // `define <name>` / `enddef` (CustomGroup's template registry). Upstream
     // refuses to nest one define inside another (BZWReader.cxx warns and skips
     // it), so a `define` seen while one is already open is dropped the same way.
-    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine && token === 'define') {
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine && !currentWaterLevel
+      && token === 'define') {
       const [, name] = line.split(/\s+/);
       if (name) {
         currentDefine = { name, obstacles: [], groupInstances: [], meshes: [] };
@@ -5415,6 +5491,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     flagHeight: mapFlagHeight,
     noWalls: mapNoWalls,
     freeCtfSpawns: mapFreeCtfSpawns,
+    waterLevel: mapWaterLevel,
     messages,
   };
 }
@@ -5503,6 +5580,13 @@ let mapNoWalls = false;
 // `getSpawnPosition` alone, so this stays a plain module variable rather than
 // threading through `GAME_CONFIG` or the client's copy of the map.
 let mapFreeCtfSpawns = false;
+// `waterLevel` -- `null` when the map states none. Read by `validateMovement`
+// for the kill-on-touch rule and by `findFlagSpawnPosition`/`dropSpawnPosition`
+// to keep a flag or a spawn off the surface, the server-side half of what
+// `noWalls` above is the client-side half of: this one also rides along in
+// the live map's own JSON (`registerMapFile`) for the client to draw the
+// plane itself.
+let mapWaterLevel = null;
 if (MAP_SOURCE === 'random') {
   OBSTACLES = generateObstacles();
   TELEPORTER_GRAPH = { teleporters: [], links: [] };
@@ -5530,6 +5614,8 @@ if (MAP_SOURCE === 'random') {
   if (mapNoWalls) log('Map option noWalls: the world border will not be built');
   mapFreeCtfSpawns = mapData.freeCtfSpawns;
   if (mapFreeCtfSpawns) log('Map option freeCtfSpawns: a colour team spawns in any of its zones every life');
+  mapWaterLevel = mapData.waterLevel || null;
+  if (mapWaterLevel) log(`Map option waterLevel: height=${mapWaterLevel.height}`);
   log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
   const meshObstacleCount = OBSTACLES.filter((obs) => obs.type === 'mesh').length;
   if (meshObstacleCount > 0) {
@@ -5573,7 +5659,7 @@ try {
 // second, brotli-only cache would only complicate the pipeline for no real
 // disk saving, so this reuses it exactly as public/'s assets do, raw copy and
 // negotiated fallback included.
-function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls) {
+function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel) {
   // Seeded from the map's own geometry (not from `fileName`, so a map that is
   // renamed but not edited still lands on the same clouds and the same hash)
   // -- deterministic across processes, unlike `MAP_SOURCE === 'random'`'s
@@ -5595,6 +5681,10 @@ function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize
     // `applyWorldData`/`createMapBoundaries` in client.js/render.js) and has
     // no other way to know a map asked for none.
     noWalls: !!noWalls,
+    // `waterLevel` -- a Map Viewer preview draws the plane from this same
+    // JSON too (see `applyWorldData`/`buildWater` in client.js/render.js),
+    // `null` when the map states none.
+    waterLevel: waterLevel || null,
     // What this map says to a player who arrives on it -- -srvmsg lines and
     // the dropped-unsupported-feature tally, both from parseBZWMap. Read by
     // the client only at the moment it actually starts viewing this map
@@ -5716,8 +5806,8 @@ function sweepStaleImports() {
 }
 
 const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
-  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls)
-  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls);
+  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel)
+  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel);
 
 // A Map Viewer's requested map file, checked against what this process has
 // actually hashed -- the client fetched its preview from `init.viewableMaps`
@@ -5766,7 +5856,7 @@ function hashRemainingMapsInBackground() {
         // actually views or joins it to see (`mapData.messages`, still
         // built either way), not a log line about a map nobody chose today.
         const mapData = parseBZWMap(filePath, { quiet: true });
-        if (registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls)) {
+        if (registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel)) {
           converted += 1;
         }
       }
@@ -8455,13 +8545,20 @@ function dropSpawnPosition(x, y, z, rotation) {
     tops.push((obs.baseY || 0) + getObstacleHeight(obs));
   }
 
+  // `waterLevel` -- a floating-point tank has no ground to fall to under a
+  // map with one; upstream's own `minZ = waterLevel` for exactly this search
+  // (`RandomSpawnPolicy.cxx:93-96`, `SpawnPolicy.cxx:116-119`), so bzo's own
+  // "else the ground" floor moves up to the water's own surface rather than
+  // leaving one that only ever resolves to an instant `WaterDeath`.
+  const groundLevel = (mapWaterLevel && mapWaterLevel.height > 0) ? mapWaterLevel.height : 0;
+
   if (clearance(y)) {
     // Falling: highest top below the start, else the ground.
     const below = tops.filter((top) => top <= y).sort((a, b) => b - a);
     for (const top of below) {
       if (clearance(top)) return top + SPAWN_DROP_FUDGE;
     }
-    if (y >= 0 && clearance(0)) return SPAWN_DROP_FUDGE;
+    if (y >= groundLevel && clearance(groundLevel)) return groundLevel + SPAWN_DROP_FUDGE;
     return y + SPAWN_DROP_FUDGE;
   }
 
@@ -8510,7 +8607,10 @@ function rebuildTestSpawns() {
 function findValidSpawnPosition(tankRadius = 2) {
   const halfMap = GAME_CONFIG.MAP_SIZE / 2;
   const maxAttempts = 100;
-  const y = 0;
+  // `waterLevel` -- this search never looks for an obstacle top the way
+  // `dropSpawnPosition` does, so its own flat plane is the ground itself,
+  // moved up to the water's surface for the same reason as there.
+  const y = (mapWaterLevel && mapWaterLevel.height > 0) ? mapWaterLevel.height : 0;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const x = Math.random() * (GAME_CONFIG.MAP_SIZE - tankRadius * 4) - (halfMap - tankRadius * 2);
@@ -8523,7 +8623,7 @@ function findValidSpawnPosition(tankRadius = 2) {
   }
 
   // If we couldn't find a valid position after many attempts, return a safe default
-  return { x: 0, y: 0, z: 0, rotation: 0 };
+  return { x: 0, y, z: 0, rotation: 0 };
 }
 
 // Anti-cheat mode decides what happens to a packet the server believes an
@@ -8713,6 +8813,22 @@ function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSe
   const deathDriver = getSupportPhysicsDriver(newX, newY, newZ);
   if (deathDriver && deathDriver.death) {
     killPlayer(player, null, DEATH_REASON.PHYSICS_DRIVER, null, null, deathDriver.death);
+  }
+
+  // `waterLevel` -- upstream's own words for it: "Any tanks that move below
+  // this height will be destroyed" (the porteighty BZW docs page), checked
+  // client-side against `myTank`'s and every robot's own position
+  // (`playing.cxx:4196`/`:4851`, `WaterDeath`) and self-reported the same way
+  // `SelfDestruct` is there. bzo has no client that reports its own death, so
+  // this is the server's own copy of that same test, in the same place and
+  // under the same "gameplay rule, not a cheat detection" reasoning the death
+  // driver above gets -- and `killPlayer`'s own already-dead guard is what
+  // keeps a tank that is both on a death driver and underwater from dying
+  // twice for it. `height > 0` is upstream's own guard too: a `waterLevel 0`
+  // plane sits exactly on the ground every tank already stands on, so this
+  // would otherwise kill on arrival.
+  if (mapWaterLevel && mapWaterLevel.height > 0 && newY <= mapWaterLevel.height) {
+    killPlayer(player, null, DEATH_REASON.WATER);
   }
 
   return true;
@@ -9129,8 +9245,17 @@ function getForbiddenFlags() {
 // -fb upstream. Whether a superflag may spawn on, and come to rest on, a
 // building. A map's `options` block may turn it on; nothing turns it back off,
 // which is how a bzfs switch behaves.
+//
+// `waterLevel` also turns it on, unasked -- upstream's own `bzfs.cxx:1218-1223`,
+// which warns and does the same: with the ground itself underwater, "off the
+// ground" is the only kind of surface `findFlagSpawnPosition` has left to put
+// a flag on.
 const FLAGS_ON_BUILDINGS = mapServerOptions.flagsOnBuildings === true
-  || serverConfig.flagsOnBuildings === true;
+  || serverConfig.flagsOnBuildings === true
+  || !!(mapWaterLevel && mapWaterLevel.height > 0);
+if (mapWaterLevel && mapWaterLevel.height > 0 && !(mapServerOptions.flagsOnBuildings === true || serverConfig.flagsOnBuildings === true)) {
+  log('Map option waterLevel: enabling flag spawns on buildings, the ground is underwater');
+}
 
 // -tft upstream. How long a team flag survives once its team has emptied and
 // nobody is carrying it.
@@ -9252,10 +9377,14 @@ function findFlagSpawnPosition(flag = null) {
         z: span * (Math.random() - 0.5),
       };
     const y = FLAGS_ON_BUILDINGS ? findFlagLandingY(spot.x, spot.z, spot.y) : 0;
+    // `null` -- open water under this point, nothing to land on above the
+    // waterline. Re-roll rather than spawn a flag there, the same as a point
+    // `hasFlagClearance` refuses.
+    if (y === null) continue;
     if (hasFlagClearance(spot.x, y, spot.z)) return { x: spot.x, y, z: spot.z };
   }
   log(`Unable to position flag ${flag ? flag.index : '?'} on this world.`);
-  return zone ? { x: zone.x, y: zone.y, z: zone.z } : { x: 0, y: 0, z: 0 };
+  return zone ? { x: zone.x, y: zone.y, z: zone.z } : { x: 0, y: getFlagFloorY(), z: 0 };
 }
 
 function getFlagOwner(flag) {
@@ -9392,8 +9521,27 @@ function applyRicochetGameStyle() {
 // the ground. `flagsOnBuildings` does not gate this -- it gates the maxZ that
 // resetFlag passes when choosing where a flag *spawns*, and for a drop it only
 // decides whether a superflag is allowed to stay where the ray put it.
+// `waterLevel` -- upstream's own `minZ`, everywhere a flag drop or spawn asks
+// for one (`RandomSpawnPolicy.cxx`, `bzfs.cxx`'s `resetFlag`/`dropFlag`, both
+// through `DropGeometry::dropIt`'s `if (pos[2] < minZ) pos[2] = minZ`). `0`
+// with no water on the map, since the ground itself is always a valid floor.
+function getFlagFloorY() {
+  return (mapWaterLevel && mapWaterLevel.height > 0) ? mapWaterLevel.height : 0;
+}
+
+// `DropGeometry::dropIt`'s own two-way split -- "check the ground" only when
+// `minZ <= 0.0f`, otherwise a point with nothing above the floor found by the
+// ray is `return false` outright, never the floor itself. `findFlagLandingY`
+// returns `null` for exactly that case: a real obstacle top always wins
+// (bzo has no clearance/opposing-base test of its own on a bare surface,
+// unlike upstream's `isValidClearance`, so any flat top at or below `fromY`
+// still counts), but nothing found is the ground when there is no water and
+// "no safe landing here" once there is -- an open stretch of water is not a
+// place a flag may rest, any more than it is a place a tank may stand.
 function findFlagLandingY(x, z, fromY) {
-  let landingY = 0;
+  const floorY = getFlagFloorY();
+  let landingY = floorY;
+  let found = floorY <= 0;
   for (const obs of getCollisionColliders()) {
     // isValidLanding() skips anything a tank can drive through, and the world
     // boundary is not somewhere a flag belongs.
@@ -9402,8 +9550,9 @@ function findFlagLandingY(x, z, fromY) {
     if (top > fromY || top <= landingY) continue;
     if (!isOverFlatTop(obs, x, z)) continue;
     landingY = top;
+    found = true;
   }
-  return landingY;
+  return found ? landingY : null;
 }
 
 // isOpposingTeam(). A team flag may not come to rest on another team's base:
@@ -9743,9 +9892,16 @@ function dropFlag(flag, now = Date.now()) {
   // Both kinds ride the same downward ray, cast from the tank's feet rather than
   // from the flag's launch altitude: dropIt gets `dropPos` while
   // FlagInfo::dropFlag adds the tank height to the launch point separately.
+  //
+  // `landingY` is `null` for open water: nothing above the waterline under
+  // this point at all (`findFlagLandingY`). `landing.y` itself always gets a
+  // real number regardless -- upstream's own `dropIt` leaves `pos[2]` at
+  // `minZ` in that same case (`if (pos[2] < minZ) pos[2] = minZ`), it just
+  // also returns `false`, which is the signal both branches below act on.
+  const landingY = findFlagLandingY(launch.x, launch.z, from.y);
   let landing = {
     x: launch.x,
-    y: findFlagLandingY(launch.x, launch.z, from.y),
+    y: landingY === null ? getFlagFloorY() : landingY,
     z: launch.z,
   };
   let vanish = false;
@@ -9753,14 +9909,24 @@ function dropFlag(flag, now = Date.now()) {
   if (teamFlag) {
     // A team flag never vanishes, so when it has nowhere safe to land upstream
     // works down a chain: the closest `safety` zone for this team, then the
-    // world centre, then its own base.
-    if (isOpposingBaseAt(landing, flag.team)) {
+    // world centre, then its own base. Upstream's own trigger for the whole
+    // chain is `!safelyDropped` (`DropGeometry::dropTeamFlag`), which is true
+    // for an opposing base exactly as much as for "nothing above the
+    // waterline here" -- both are "this landing is not one the flag may
+    // rest at", so `landingY === null` joins `isOpposingBaseAt` as the same
+    // question asked twice.
+    if (landingY === null || isOpposingBaseAt(landing, flag.team)) {
       const safety = getSafetyZonePosition(flag.team, landing);
       if (safety) {
         landing = safety;
       } else {
-        const centre = { x: 0, y: 0, z: 0 };
-        if (isOpposingBaseAt(centre, flag.team)) {
+        // The world centre, re-dropped rather than assumed flat ground:
+        // upstream re-runs `dropTeamFlag` at `{0,0,0}` rather than trusting
+        // it blindly, and on a water map the centre may itself be a platform
+        // (`maps/water.bzw`'s own hub) rather than the bare ground at `y=0`.
+        const centreY = findFlagLandingY(0, 0, getMaxObstacleTopY(OBSTACLES));
+        const centre = { x: 0, y: centreY === null ? getFlagFloorY() : centreY, z: 0 };
+        if (centreY === null || isOpposingBaseAt(centre, flag.team)) {
           const base = getRandomTeamBase(flag.team);
           landing = base ? { x: base.x, y: getBaseTopY(base), z: base.z } : centre;
         } else {
@@ -9773,9 +9939,11 @@ function dropFlag(flag, now = Date.now()) {
     // A good superflag has a limited number of grabs in it. With flags on
     // buildings off -- upstream's default -- one dropped anywhere but the ground
     // also has nowhere it is allowed to stay, so it rises out of the world from
-    // wherever the ray put it rather than falling to the floor.
+    // wherever the ray put it rather than falling to the floor. Open water is
+    // the same kind of nowhere -- `landingY === null` -- whether or not
+    // buildings are otherwise allowed.
     flag.grabs -= 1;
-    if (flag.grabs <= 0) {
+    if (flag.grabs <= 0 || landingY === null) {
       vanish = true;
       flag.grabs = 0;
     } else if (!FLAGS_ON_BUILDINGS && landing.y > 0) {
@@ -11331,6 +11499,12 @@ const DEATH_REASON = Object.freeze({
   // message rather than a `deathPrefix`-templated one (client.js), the same
   // "whole phrase" treatment a world weapon's kill already gets.
   PHYSICS_DRIVER: 'physicsDriver',
+  // `waterLevel` -- no killer, and a fixed message rather than a mapper's own:
+  // "Tank Rusted" is upstream's own local-player alert for this
+  // (`blowedUpMessage[WaterDeath]`, `playing.cxx:186-195`), kept verbatim
+  // rather than smoothed into something that reads more like a cause, because
+  // it already is upstream's joke about why the tank blew up.
+  WATER: 'water',
 });
 
 // playerKilled() (bzfs.cxx:3345). One tank dies, for one reason, and everything
