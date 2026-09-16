@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.21] - 2026-09-16
+
+### Fixed
+- **The v1.2.20 tag was cut without `npm run release:prepare`**, so
+  `public/version.mjs`'s own `CLIENT_VERSION` was never bumped and the
+  release workflow's own version check correctly rejected it. No functional
+  change from v1.2.20 -- this release exists only to carry the correct
+  `CLIENT_VERSION`, and v1.2.20 stays tagged rather than moved, per this
+  project's own rule for a release that fails before publishing anything.
+
 ## [1.2.20] - 2026-09-16
 
 ### Added
