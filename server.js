@@ -392,6 +392,9 @@ app.use('/vendor/three', express.static(threeBuildDir, {
 // brotli sidecar `precompress.middleware()` serves for the same path.
 const MAP_CACHE_DIR = path.join(__dirname, 'cache', 'maps');
 app.use('/maps', express.static(MAP_CACHE_DIR, { setHeaders: setStaticHeaders }));
+// Where precompress.cjs's own sidecar for a `/maps/<hash>.json` response
+// lands -- `cache/br/<urlPath minus its leading slash>...`, see `consider()`.
+const MAP_CACHE_BR_DIR = path.join(__dirname, 'cache', 'br', 'maps');
 
 // After threeBuildDir, which it hashes.
 const CLIENT_BUILD = computeClientBuild();
@@ -1271,6 +1274,12 @@ function parseImportMapFileName(fileName) {
 // something worth pruning on its own schedule, since `parseImportMapFileName`
 // above is what lets a link outlive this window instead of just going stale.
 const IMPORT_REUSE_MS = 60 * 60 * 1000;
+
+// Twice the reuse window: an import nobody has asked for again in the time
+// that would have reused it is one `sweepStaleImports` (below) deletes rather
+// than keeps "just in case" -- `performRemoteMapImport` recreates it from
+// scratch, and easily, the moment it is actually asked for again.
+const IMPORT_MAX_AGE_MS = IMPORT_REUSE_MS * 2;
 
 async function performRemoteMapImport(host, port) {
   const safeMapName = remoteMapFileName(host, port);
@@ -5638,6 +5647,72 @@ function sweepMapCache() {
     }
   }
   if (removed > 0) log(`Removed ${removed} stale map cache file(s) from ${MAP_CACHE_DIR}`);
+
+  // precompress's own sweep (server/precompress.cjs) can't catch this mid-
+  // process: its `expected` set only ever grows, reset solely by the
+  // `configure()` call this process makes once at boot -- so a sidecar
+  // `consider()`-ed for a map this pass just deleted above stays "expected"
+  // and immune to precompress's own sweep until the next restart. Asking the
+  // same freshness question again here, against `cache/br/maps/` directly,
+  // is what actually catches it in between.
+  let brEntries;
+  try {
+    brEntries = fs.readdirSync(MAP_CACHE_BR_DIR);
+  } catch {
+    return;
+  }
+  let removedBr = 0;
+  for (const name of brEntries) {
+    // A sidecar is named `<source name>.<digest>.br` (`consider()`); the
+    // source name is all that's expected, so the digest never has to agree
+    // with anything -- only whether that source is still around at all.
+    const match = name.match(/^(.+\.json)\.[0-9a-f]+\.br$/);
+    if (match && expected.has(match[1])) continue;
+    try {
+      fs.unlinkSync(path.join(MAP_CACHE_BR_DIR, name));
+      removedBr += 1;
+    } catch (error) {
+      logError(`Could not remove stale map cache sidecar ${name}:`, error);
+    }
+  }
+  if (removedBr > 0) log(`Removed ${removedBr} stale map cache sidecar(s) from ${MAP_CACHE_BR_DIR}`);
+}
+
+// A remote import older than `IMPORT_MAX_AGE_MS` deleted off disk, its
+// `MAP_REGISTRY` entry with it. Age is read off the file's own mtime, not
+// `MAP_REGISTRY`'s `registeredAt` -- the background trickle above
+// re-registers every file already on disk at every restart, which would
+// reset `registeredAt` to "now" regardless of when the file was actually
+// last fetched, and never let a restart-heavy server (this one) see one as
+// stale. Bundled maps never match `parseImportMapFileName`, so this only
+// ever touches a remote import.
+function sweepStaleImports() {
+  let removed = 0;
+  for (const fileName of listAvailableMapFiles()) {
+    if (!parseImportMapFileName(fileName)) continue;
+    const filePath = path.join(RUNTIME_MAPS_DIR, fileName);
+    let stats;
+    try {
+      stats = fs.statSync(filePath);
+    } catch {
+      continue;
+    }
+    if (Date.now() - stats.mtimeMs < IMPORT_MAX_AGE_MS) continue;
+    try {
+      fs.unlinkSync(filePath);
+      MAP_REGISTRY.delete(fileName);
+      removed += 1;
+    } catch (error) {
+      logError(`Could not remove stale import ${fileName}:`, error);
+    }
+  }
+  // The cache JSON an aged-out import leaves behind is exactly what
+  // sweepMapCache already knows how to find: nothing in MAP_REGISTRY names it
+  // once the entry above is gone.
+  if (removed > 0) {
+    log(`Removed ${removed} stale remote import(s) older than ${IMPORT_MAX_AGE_MS / 3600000}h`);
+    sweepMapCache();
+  }
 }
 
 const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
@@ -5679,6 +5754,7 @@ function hashRemainingMapsInBackground() {
       // already follows.
       if (total > 0) log(`Converted ${converted} of ${total} bzw file(s) to cached json`);
       sweepMapCache();
+      sweepStaleImports();
       precompress.start({ log }).catch((error) => logError('[BR] map hashing pass failed:', error));
       return;
     }
@@ -5702,6 +5778,14 @@ function hashRemainingMapsInBackground() {
   setTimeout(step, 0);
 }
 hashRemainingMapsInBackground();
+// The trickle above only runs once, at startup -- a long-lived process needs
+// the same cycle repeated: pick up and precompress any map that appeared
+// without going through registerMapFile's own synchronous path, delete a
+// remote import old enough that nobody has asked for it again
+// (sweepStaleImports, chained off hashRemainingMapsInBackground's own
+// completion), and sweep both the map cache and its brotli sidecars for
+// whatever either of those just removed. Same cadence as the session pruner.
+setInterval(() => hashRemainingMapsInBackground(), 15 * 60 * 1000).unref?.();
 // -ms upstream. The map is read after the shot config above, so its shot slot
 // count lands here, and the reload time is derived a second time from it -- each
 // slot comes back after _reloadTime / maxShots, so changing one without the
