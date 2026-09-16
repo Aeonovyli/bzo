@@ -6266,6 +6266,7 @@ class Player {
     this.lag = createLagTracker();
     this.kills = 0;
     this.deaths = 0;
+    this.teamKills = 0;
     this.paused = false;
     this.pauseCountdownStart = 0;
     this.pauseTimer = null;
@@ -6566,6 +6567,7 @@ class Player {
       health: this.health,
       kills: this.kills,
       deaths: this.deaths,
+      teamKills: this.teamKills,
       paused: this.paused,
       forwardSpeed: this.forwardSpeed,
       rotationSpeed: this.rotationSpeed,
@@ -11333,8 +11335,10 @@ function killPlayer(victim, killer, reason, projectileId = null, shooterId = nul
     if (teamKill) {
       // Upstream scores the killer a death rather than a kill for it
       // (`killerData->score.killedBy()`), so a team kill never counts towards
-      // shaking a bad flag either.
+      // shaking a bad flag either. `killerData->score.tK()` is the same call's
+      // other half, tallied on the killer for the scoreboard's `[NN]` column.
       killer.deaths++;
+      killer.teamKills++;
     } else {
       killer.kills++;
       recordShakeWin(killer);
@@ -12359,6 +12363,14 @@ wss.on('connection', (ws, req) => {
           // A channel change rewrites other players' rosters too, not just this
           // one's, so every roster is reconsidered rather than only the sender's.
           refreshVoiceRosters();
+          // sendVoiceStateUpdate only reaches this player's current voice
+          // peers, because that message is also what negotiates the WebRTC
+          // roster. The scoreboard's mic glyph is for every player in the
+          // match, on any channel or out of Nearby range alike, so it needs
+          // its own broadcast rather than reusing that one.
+          broadcastAll({
+            type: 'voiceMicToggled', playerId: player.id, enabled: player.voiceMicEnabled,
+          });
           break;
         }
         case 'voiceOffer':

@@ -1404,9 +1404,19 @@ class RenderManager {
   // One positional one-shot. Attenuation mirrors BZFlag: inverse rolloff at a
   // reference distance of 20 tank radii, and no per-sound gain, so the samples
   // keep the relative balance they were recorded with.
+  //
+  // The context autoplay policy creates is suspended until a user gesture
+  // resumes it (see resumeAudioContextOnFirstGesture in client.js), and
+  // AudioContext.currentTime is frozen while suspended -- so a sound started
+  // during that window would schedule at whatever instant it eventually
+  // resumes, and a whole game's worth of events would all play back at once
+  // the moment that happens. Dropping the sound here is what a player simply
+  // not hearing it looks like, which is correct: there is no right moment to
+  // play a shot that already happened.
   playSound(name, position) {
     const buffer = this.soundBuffers.get(name);
     if (!GAME_SOUNDS[name] || !buffer || !this.audioListener) return;
+    if (this.audioListener.context.state !== 'running') return;
 
     const sound = new THREE.PositionalAudio(this.audioListener);
     sound.setBuffer(buffer);
@@ -1425,6 +1435,7 @@ class RenderManager {
   playLocalSound(name) {
     const buffer = this.soundBuffers.get(name);
     if (!GAME_SOUNDS[name] || !buffer || !this.audioListener) return;
+    if (this.audioListener.context.state !== 'running') return;
 
     const sound = new THREE.Audio(this.audioListener);
     sound.setBuffer(buffer);

@@ -124,6 +124,33 @@ assert.equal(formatRabbitRank(0.539), '53%');
   assert.equal(plain.find((r) => r.id === '2').rabbit, null);
 }
 
+// teamKills, paused and micOn pass straight through from a player's own
+// state, same as kills and deaths do -- and default to 0/false for a player
+// state that predates any of them, the way a fresh connect always does.
+{
+  const tanks = new Map([
+    ['2', { userData: { playerState: { id: '2', name: 'quiet', team: PLAYER_TEAM.RED } } }],
+    ['3', {
+      userData: {
+        playerState: {
+          id: '3', name: 'ridden', team: PLAYER_TEAM.BLUE,
+          teamKills: 2, paused: true, voiceMicEnabled: true,
+        },
+      },
+    }],
+  ]);
+  const myTank = { userData: { playerState: { id: '1', name: 'me', team: PLAYER_TEAM.RED } } };
+  const rows = buildScoreboardRows({ myPlayerId: '1', myPlayerName: 'me', myTank, tanks });
+  const quiet = rows.find((r) => r.id === '2');
+  const ridden = rows.find((r) => r.id === '3');
+  assert.equal(quiet.teamKills, 0);
+  assert.equal(quiet.paused, false);
+  assert.equal(quiet.micOn, false);
+  assert.equal(ridden.teamKills, 2);
+  assert.equal(ridden.paused, true);
+  assert.equal(ridden.micOn, true);
+}
+
 // An observer draws neither score column, which is upstream's own
 // `if (player->getTeam() != ObserverTeam)` around both (ScoreboardRenderer.cxx
 // :829). It cannot kill or die, so `0 / 0` is the absence of a score rather than
@@ -152,6 +179,16 @@ assert.equal(formatRabbitRank(0.539), '53%');
   assert.equal(
     formatScoreboardStats({ kills: 9, deaths: 1, rank: 0.8, isObserver: true }),
     ''
+  );
+
+  // The `[NN]` team-kill bracket (ScoreboardRenderer.cxx:675-686), drawn only
+  // once there is one to report -- a zero is the expected state for almost
+  // every row, not information.
+  assert.equal(formatScoreboardStats({ kills: 4, deaths: 2, teamKills: 0 }), '4 / 2');
+  assert.equal(formatScoreboardStats({ kills: 4, deaths: 2, teamKills: 2 }), '4 / 2 [2]');
+  assert.equal(
+    formatScoreboardStats({ kills: 4, deaths: 2, rank: getPlayerRanking(4, 2), teamKills: 1 }),
+    '53% 4 / 2 [1]'
   );
 }
 

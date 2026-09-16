@@ -1318,15 +1318,15 @@ function describeVoicePeer(peerId) {
 }
 
 function trackVoicePeer(peerId, changes) {
-  const entry = voicePeerDebug.get(peerId) || { name: null, states: {}, audio: false };
+  const entry = voicePeerDebug.get(peerId) || { name: null, states: {}, audioReceived: false };
   Object.assign(entry, changes);
   voicePeerDebug.set(peerId, entry);
   return entry;
 }
 
-function handleVoicePeerChange({ peerId, state } = {}) {
+function handleVoicePeerChange({ peerId, state, connection } = {}) {
   if (!peerId || !state) return;
-  const entry = trackVoicePeer(peerId, {});
+  const entry = trackVoicePeer(peerId, connection ? { connection } : {});
   Object.entries(state).forEach(([key, value]) => {
     if (entry.states[key] === value) return;
     entry.states[key] = value;
@@ -1351,24 +1351,124 @@ function handleVoiceRosterChange(roster = []) {
   });
 }
 
-function handleVoiceRemoteAudio({ peerId } = {}, attached) {
+// voice.js has fired this on every ontrack since the day peer tracking was
+// added, but nothing ever listened -- so whether the browser ever tells the
+// app a remote track exists at all has been invisible until now. Logged
+// unconditionally, once per firing: unlike the polled fields above there is
+// no "current value" to compare against, and a track that fires twice (a
+// renegotiation replacing it) is exactly the kind of thing worth seeing each
+// time, not collapsing into one line.
+function handleVoiceRemoteTrack({ peerId, track } = {}) {
   if (!peerId) return;
-  trackVoicePeer(peerId, { audio: attached });
-  logVoiceEvent(`${describeVoicePeer(peerId)} audio ${attached ? 'attached' : 'detached'}`);
+  const kind = track?.kind || 'unknown';
+  const trackState = track ? `${track.readyState}${track.muted ? ', muted' : ''}` : 'no track';
+  logVoiceEvent(`${describeVoicePeer(peerId)} ontrack: ${kind} (${trackState})`);
 }
 
-// One line per peer for the debug HUD: who, whether audio is flowing, and the
-// two connection states that actually differ when a link is failing.
+// The one that actually answers "does real audio ever arrive": `muted` at
+// ontrack time is expected and meaningless, but a transition away from it
+// means the browser itself decided real media showed up on the wire.
+function handleVoiceRemoteTrackMuteChange({ peerId, muted } = {}) {
+  if (!peerId) return;
+  logVoiceEvent(`${describeVoicePeer(peerId)} track ${muted ? 'muted' : 'unmuted'}`);
+}
+
+// getStats() is async and not pushed the way the state-change events are, so
+// this runs as a side effect of each debug-HUD tick (getVoiceDebugState,
+// called only while the panel is open) rather than its own timer: the next
+// tick, 500ms later, is what actually shows a fresh answer. Only worth asking
+// once a link is up -- there is no selected candidate pair before then.
+//
+// `packetsReceived`/`packetsSent` off the inbound/outbound-rtp reports are
+// real RTP audio that has actually crossed the wire in each direction --
+// unlike the `<audio>` element's own creation (fires the moment the peer
+// connection exists, whether or not anything has ever been sent) or
+// `ontrack` (fires once negotiation completes, before either side has
+// necessarily sent a frame). Checking our own outbound alongside the
+// inbound half matters because a player has no other way to see whether
+// their own mic is actually reaching anyone -- webrtc-internals/about:webrtc
+// says so too, but reading it back off a remote or headless client is not
+// always something a player can copy out and hand to someone else. Read
+// both from the same stats snapshot as the candidate type rather than a
+// second getStats() call.
+async function refreshVoicePeerStats(peerId, pc) {
+  if (!pc || typeof pc.getStats !== 'function') return;
+  try {
+    const stats = await pc.getStats();
+    let selected = null;
+    let audioReceived = false;
+    let audioSent = false;
+    stats.forEach((report) => {
+      if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+        if (!selected || report.nominated) selected = report;
+      } else if (report.type === 'inbound-rtp' && (report.kind || report.mediaType) === 'audio') {
+        if (report.packetsReceived > 0) audioReceived = true;
+      } else if (report.type === 'outbound-rtp' && (report.kind || report.mediaType) === 'audio') {
+        if (report.packetsSent > 0) audioSent = true;
+      }
+    });
+    const local = selected && stats.get(selected.localCandidateId);
+    const entry = trackVoicePeer(peerId, {});
+    // Logged only on an actual change, the same restraint
+    // handleVoicePeerChange applies to connectionState/iceConnectionState --
+    // this polls every 500ms while the debug HUD is open, and logging that
+    // often would flood the server log with repeats of the same answer.
+    [
+      ['candidateType', local?.candidateType || null],
+      ['audioReceived', audioReceived],
+      ['audioSent', audioSent],
+    ].forEach(([key, value]) => {
+      if (entry[key] === value) return;
+      entry[key] = value;
+      logVoiceEvent(`${describeVoicePeer(peerId)} ${key}: ${value}`);
+    });
+  } catch {
+    // A peer mid-teardown can throw here; the cached values just go stale
+    // until the next successful poll.
+  }
+}
+
+// One line per peer for the debug HUD: who, whether real audio has actually
+// arrived from them, and a single state word. Upstream WebRTC exposes
+// `connectionState` and `iceConnectionState` as two separate readouts of the
+// same link, which almost always agree -- host/srflx/relay only exists once
+// that link actually is 'connected', so showing the candidate type in place
+// of the word "connected" says strictly more in less space rather than
+// repeating a state already implied by having a type at all.
 function getVoiceDebugState() {
   return {
     channel: getVoiceChannel(selectedVoiceChannel).label,
     transmitting: getVoiceState().transmitting === true,
-    peers: Array.from(voicePeerDebug.entries()).map(([peerId, entry]) => ({
-      label: entry.name || peerId,
-      audio: entry.audio === true,
-      connection: entry.states.connectionState || 'new',
-      ice: entry.states.iceConnectionState || 'new',
-    })),
+    peers: Array.from(voicePeerDebug.entries()).map(([peerId, entry]) => {
+      const connectionState = entry.states.connectionState || 'new';
+      const connected = connectionState === 'connected';
+      if (connected && entry.connection) void refreshVoicePeerStats(peerId, entry.connection);
+      // The one thing webrtc-internals/about:webrtc can show that getStats()
+      // never will: whether the actual <audio> element bzo created for this
+      // peer ever started playing at all. `audioReceived` only proves packets
+      // reached the RTCRtpReceiver -- it says nothing about whether ontrack
+      // ever fired or .play() ever ran, and copying this out of a remote or
+      // headless client's devtools to hand to someone else is exactly the
+      // friction this whole panel exists to avoid.
+      const audioElement = document.querySelector(`audio[data-voice-peer-id="${peerId}"]`);
+      const playback = !audioElement ? 'no element' : audioElement.paused ? 'paused' : 'playing';
+      if (entry.playback !== playback) {
+        entry.playback = playback;
+        logVoiceEvent(`${describeVoicePeer(peerId)} playback: ${playback}`);
+      }
+      return {
+        label: entry.name || peerId,
+        audio: entry.audioReceived === true,
+        sending: entry.audioSent === true,
+        playback,
+        connected,
+        state: connected ? (entry.candidateType || 'connected') : connectionState,
+        // Read off the same playerState the scoreboard's mic glyph reads,
+        // rather than the roster's own (unused) mic field, so debug and
+        // scoreboard cannot disagree about the same player.
+        mic: tanks.get(peerId)?.userData?.playerState?.voiceMicEnabled === true,
+      };
+    }),
   };
 }
 
@@ -1496,6 +1596,7 @@ function updateVoiceHud(nextState = null) {
   const channelSelect = document.getElementById('voiceChannelSelect');
   const microphoneSlider = document.getElementById('microphoneVolumeSlider');
 
+  const channelLabel = getVoiceChannel(selectedVoiceChannel).label;
   const team = normalizePlayerTeam(state.team || playerTeam);
   const transmitting = Boolean(state.transmitting);
   const permission = state.microphonePermission || 'prompt';
@@ -1515,9 +1616,9 @@ function updateVoiceHud(nextState = null) {
   if (hud) {
     hud.classList.toggle('voiceChannelHud--active', transmitting);
     hud.classList.toggle('voiceChannelHud--muted', !transmitting);
-    hud.setAttribute('aria-label', `Nearby voice channel, ${status.toLowerCase()}`);
+    hud.setAttribute('aria-label', `${channelLabel} voice channel, ${status.toLowerCase()}`);
   }
-  if (label) label.textContent = 'Nearby';
+  if (label) label.textContent = channelLabel;
   if (statusElement) statusElement.textContent = status;
   if (channelSelect) {
     channelSelect.value = selectedVoiceChannel;
@@ -1537,7 +1638,7 @@ function updateVoiceHud(nextState = null) {
   if (microphoneSlider) microphoneSlider.disabled = false;
   if (permissionStatus) {
     if (permission === 'granted') {
-      permissionStatus.textContent = transmitting ? 'Microphone is transmitting on the Nearby channel.' : 'Microphone permission granted; transmission is off.';
+      permissionStatus.textContent = transmitting ? `Microphone is transmitting on the ${channelLabel} channel.` : 'Microphone permission granted; transmission is off.';
     } else if (permission === 'denied') {
       permissionStatus.textContent = 'Microphone permission was denied by the browser.';
     } else if (permission === 'unavailable') {
@@ -1553,6 +1654,11 @@ function handleVoiceError(error) {
   const message = error.message || 'Voice operation failed.';
   updateVoiceHud(getVoiceState());
   showMessage(message);
+  // reportError (voice.js) never logs itself, only sets state and shows this
+  // one on-screen toast -- easy to miss mid-session and invisible to
+  // server.log. Every voice error is worth having in the same trail the
+  // connection-state and stats transitions already land in.
+  logVoiceEvent(`error${error.code ? ` (${error.code})` : ''}: ${message}`);
 }
 
 function initializeVoiceManager() {
@@ -1577,8 +1683,8 @@ function initializeVoiceManager() {
       onInputDevices: updateVoiceInputDevices,
       onPeerChange: handleVoicePeerChange,
       onRosterChange: handleVoiceRosterChange,
-      onRemoteAudio: (event) => handleVoiceRemoteAudio(event, true),
-      onRemoteAudioRemoved: (event) => handleVoiceRemoteAudio(event, false),
+      onRemoteTrack: handleVoiceRemoteTrack,
+      onRemoteTrackMuteChange: handleVoiceRemoteTrackMuteChange,
     },
   });
   updateVoiceHud();
@@ -4751,6 +4857,25 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 });
 
+// Autoplay policy hands the renderer's AudioContext over suspended, and
+// nothing else in bzo ever resumes it -- so a fresh join relies on the
+// mandatory entry-dialog click to happen to unlock it before any sound plays.
+// Auto-rejoin (see AGENTS.md) skips that dialog on a reload, which can leave
+// other tanks' sounds arriving, and dropped by playSound/playLocalSound's own
+// state check, for however long it takes the browser's own implicit
+// gesture-detection to notice something. Resuming explicitly on the very
+// first interaction of any kind, rather than waiting on that, is what keeps
+// the gap as short as it can be.
+function resumeAudioContextOnFirstGesture() {
+  const events = ['click', 'keydown', 'touchstart'];
+  const resume = () => {
+    events.forEach((type) => window.removeEventListener(type, resume));
+    const context = renderManager.getAudioContext();
+    if (context && context.state === 'suspended') context.resume().catch(() => {});
+  };
+  events.forEach((type) => window.addEventListener(type, resume));
+}
+
 // Initialize Three.js
 function init() {
   // Prevent iOS scrolling/bounce on fullscreen (web app mode)
@@ -5009,6 +5134,7 @@ function init() {
     initTankSelector();
     renderManager.setTankModel(getTankModelPathById(selectedTankModelId));
   }
+  resumeAudioContextOnFirstGesture();
 
   // Radar map
   radarCanvas = document.getElementById('radar');
@@ -5939,6 +6065,7 @@ function handleServerMessage(message) {
       }
       setTankPausedState(message.playerId, true, message);
       createPausedSphere(message.playerId, message.x, message.y, message.z);
+      refreshScoreboards();
       break;
 
     case 'playerUnpaused':
@@ -5951,7 +6078,17 @@ function handleServerMessage(message) {
       }
       setTankPausedState(message.playerId, false);
       removePausedSphere(message.playerId);
+      refreshScoreboards();
       break;
+
+    case 'voiceMicToggled': {
+      const state = tanks.get(message.playerId)?.userData?.playerState;
+      if (state) {
+        state.voiceMicEnabled = message.enabled === true;
+        refreshScoreboards();
+      }
+      break;
+    }
 
     case 'message': {
       const srcId = normalizeMessageEndpoint(message.src ?? message.from, CHAT_TARGET_SERVER);
@@ -11825,6 +11962,10 @@ function ensureXRScoreboardOverlay() {
     // in the same place. The leading space is this panel's answer to the flat
     // one's margin: everything here is laid out by measured width.
     const rabbitLabel = player.rabbit ? ` ${player.rabbit.label}` : '';
+    // The flat scoreboard's own paused hourglass and mic glyph, drawn after
+    // the flag the same way there.
+    const pausedLabel = player.paused ? '⏳' : '';
+    const micLabel = player.micOn ? '\u{1F3A4}' : '';
     // A carried flag shares the row with the name, so the name gives up room for
     // it rather than the panel growing a column nothing usually fills. The mark
     // comes out of the same allowance.
@@ -11832,6 +11973,8 @@ function ensureXRScoreboardOverlay() {
       - ctx.measureText(stats).width
       - statusWidth
       - (flagLabel ? ctx.measureText(flagLabel).width : 0)
+      - (pausedLabel ? ctx.measureText(pausedLabel).width : 0)
+      - (micLabel ? ctx.measureText(micLabel).width : 0)
       - (rabbitLabel ? ctx.measureText(rabbitLabel).width : 0);
     const shown = fitText(ctx, String(player.name || 'Player'), Math.max(0, nameWidth));
 
@@ -11846,6 +11989,16 @@ function ensureXRScoreboardOverlay() {
       ctx.fillStyle = colorToCSS(player.flag.color);
       ctx.fillText(flagLabel, labelRight, y);
       labelRight += ctx.measureText(flagLabel).width;
+    }
+    if (pausedLabel) {
+      ctx.fillStyle = rowColor;
+      ctx.fillText(pausedLabel, labelRight, y);
+      labelRight += ctx.measureText(pausedLabel).width;
+    }
+    if (micLabel) {
+      ctx.fillStyle = rowColor;
+      ctx.fillText(micLabel, labelRight, y);
+      labelRight += ctx.measureText(micLabel).width;
     }
     if (rabbitLabel) {
       ctx.fillStyle = colorToCSS(player.rabbit.color);

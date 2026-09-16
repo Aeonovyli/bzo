@@ -418,12 +418,14 @@ export function updateDebugDisplay({
   // The per-peer row is the only place that shows up.
   if (voice) {
     const peers = voice.peers || [];
-    const connected = peers.filter((peer) => peer.connection === 'connected').length;
+    const connected = peers.filter((peer) => peer.connected).length;
     html += `<div><span class="label">Voice:</span><span class="value">${voice.channel}, mic ${voice.transmitting ? 'on' : 'off'}</span></div>`;
     html += `<div><span class="label">Voice Peers:</span><span class="value">${connected}/${peers.length} connected</span></div>`;
     peers.forEach((peer) => {
+      const sending = peer.sending ? 'sending' : 'not sending';
       const audio = peer.audio ? 'audio' : 'no audio';
-      html += `<div><span class="label">&nbsp;&nbsp;${peer.label}:</span><span class="value">${peer.connection}/${peer.ice}, ${audio}</span></div>`;
+      const mic = peer.mic ? ', mic' : '';
+      html += `<div><span class="label">&nbsp;&nbsp;${peer.label}:</span><span class="value">${peer.state}, ${sending}, ${audio}, ${peer.playback}${mic}</span></div>`;
     });
   }
 
@@ -626,9 +628,14 @@ export function getScoreboardStatsHeader(rabbitChase = false, abbreviated = fals
 export function formatScoreboardStats(player) {
   if (player.isObserver) return '';
   const score = `${player.kills} / ${player.deaths}`;
-  return typeof player.rank === 'number'
+  const stats = typeof player.rank === 'number'
     ? `${formatRabbitRank(player.rank)} ${score}`
     : score;
+  // Upstream draws this bracket whenever the world has teams, at 0 or not
+  // (ScoreboardRenderer.cxx:675-686). bzo draws it only once there is
+  // something to say, the same restraint the rank column already gets --
+  // a zero is the expected state for almost every row, not information.
+  return player.teamKills > 0 ? `${stats} [${player.teamKills}]` : stats;
 }
 
 // Rabbit Chase marks the rabbit's row so the scoreboard says who everyone is
@@ -735,6 +742,9 @@ export function buildScoreboardRows({
       name,
       kills: state.kills || 0,
       deaths: state.deaths || 0,
+      teamKills: state.teamKills || 0,
+      paused: Boolean(state.paused),
+      micOn: Boolean(state.voiceMicEnabled),
       // No rank for an observer, on a Rabbit Chase world or any other. An
       // observer can never be anointed -- `canBeRabbit` refuses one outright --
       // so a rank would read as a place in a queue it cannot be picked from.
@@ -850,13 +860,27 @@ export function updateScoreboard({
     flagSpan.className = 'scoreboardFlag';
     // The row already carries the player's colour; only the flag differs.
     writePlayerLabel(nameSpan, flagSpan, { name: player.name, flag: player.flag });
+    // Upstream's own suffix for a paused tank is the plain text `[p]`
+    // (ScoreboardRenderer.cxx:800-801), a concession to its fixed bitmap font.
+    // bzo draws to a real DOM, so an hourglass reads as "paused" without
+    // needing the bracket -- and comes out a natural gold/amber on every
+    // platform's default emoji rendering, with no colour of bzo's own to keep
+    // in sync with anything.
+    const pausedSpan = document.createElement('span');
+    pausedSpan.className = 'scoreboardPaused';
+    pausedSpan.textContent = player.paused ? '⏳' : '';
+    // Same reasoning as the paused hourglass: a real glyph rather than a `[m]`
+    // bracket, for whether this player's microphone is currently on.
+    const micSpan = document.createElement('span');
+    micSpan.className = 'scoreboardMic';
+    micSpan.textContent = player.micOn ? '\u{1F3A4}' : '';
     // After the flag, so the pair upstream draws tight together stays tight and
     // the mark reads as something said about the row rather than part of a name.
     const rabbitSpan = document.createElement('span');
     rabbitSpan.className = 'scoreboardRabbit';
     rabbitSpan.textContent = player.rabbit ? player.rabbit.label : '';
     rabbitSpan.style.color = player.rabbit ? colorToCSS(player.rabbit.color) : '';
-    labelSpan.append(statusSpan, nameSpan, flagSpan, rabbitSpan);
+    labelSpan.append(statusSpan, nameSpan, flagSpan, pausedSpan, micSpan, rabbitSpan);
 
     const statsSpan = document.createElement('span');
     statsSpan.className = 'scoreboardStats';

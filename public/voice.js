@@ -490,6 +490,29 @@ export function createVoiceManager(options = {}) {
         });
       }
       invoke('onRemoteTrack', { peerId, stream, track: event.track, element: entry.remoteAudio });
+      // `track.muted` at ontrack time is a snapshot, not an answer -- it is
+      // normal for a track to start muted the instant it exists, before any
+      // packet has arrived, and this is what actually says whether it ever
+      // stops being true. A track that never fires `unmute` is one where the
+      // browser itself has decided no real media ever showed up on it, which
+      // is a stronger statement than anything getStats() can make.
+      if (event.track) {
+        event.track.onunmute = () => invoke('onRemoteTrackMuteChange', { peerId, muted: false });
+        event.track.onmute = () => invoke('onRemoteTrackMuteChange', { peerId, muted: true });
+      }
+    };
+
+    // A lost consent-freshness check or a lossy stretch of an otherwise fine
+    // path is not proof the two peers can no longer reach each other -- it is
+    // exactly what restartIce() exists to recover from, by re-gathering
+    // candidates and re-running connectivity checks on this same connection,
+    // same tracks and senders, rather than closePeer()'s full teardown and
+    // renegotiation from zero. onnegotiationneeded (already wired above)
+    // picks the resulting offer up the same way the very first one was made.
+    // A browser without restartIce() falls back to the old behaviour.
+    const recoverOrClose = () => {
+      if (typeof pc.restartIce === 'function') pc.restartIce();
+      else closePeer(peerId);
     };
 
     pc.onconnectionstatechange = () => {
@@ -499,12 +522,16 @@ export function createVoiceManager(options = {}) {
         clearTimeout(entry.disconnectedTimer);
         entry.disconnectedTimer = null;
       }
-      if (connectionState === 'failed' || connectionState === 'closed') {
+      if (connectionState === 'failed') {
+        // ICE has already concluded no current pair works -- restartIce() is
+        // the documented recovery for exactly this, not a last resort.
+        recoverOrClose();
+      } else if (connectionState === 'closed') {
         closePeer(peerId);
       } else if (connectionState === 'disconnected') {
         entry.disconnectedTimer = setTimeout(() => {
           if (!entry.closed && (pc.connectionState === 'disconnected' || pc.iceConnectionState === 'disconnected')) {
-            closePeer(peerId);
+            recoverOrClose();
           }
         }, 5000);
       }
@@ -527,6 +554,15 @@ export function createVoiceManager(options = {}) {
         entry.transceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
         preferOpusCodec(entry.transceiver);
         entry.sender = entry.transceiver.sender || null;
+        // addTransceiver's own sender always starts with a null track --
+        // nothing else attaches the current one at creation time, only a
+        // future mic toggle/device change does (replaceLocalTrack), and that
+        // never fires again for a peer that already existed before the last
+        // toggle. Without this, a peer who comes into Nearby range or joins
+        // the roster after the mic was already turned on stays silent to
+        // them forever, having missed the one event that would have wired
+        // it up.
+        if (getTransmitting()) void replacePeerTrack(entry, localStream.getAudioTracks()[0]);
       } catch (error) {
         reportError(createVoiceError('voice_transceiver_failed', `Could not prepare voice media for ${peerId}`, error));
       }

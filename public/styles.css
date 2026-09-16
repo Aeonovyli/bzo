@@ -785,6 +785,13 @@ body {
   font-weight: bold;
 }
 
+/* A tight suffix like the flag and status glyph, not a word off to the side
+   like the rabbit mark. */
+.scoreboardPaused,
+.scoreboardMic {
+  white-space: nowrap;
+}
+
 /* ScoreboardRenderer.cxx:562 drops a blank line in front of the first observer.
    Sorting them last says where they are; the gap says they are a separate group
    rather than the worst players on the board. */
