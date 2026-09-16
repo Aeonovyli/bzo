@@ -6,6 +6,53 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.24] - 2026-09-16
+
+### Added
+- **The scoreboard now shows a paused marker (⏳), a live microphone
+  indicator (🎤), and a team-kill count per player**, restoring columns
+  upstream BZFlag's own scoreboard carries that bzo's never did. bzo draws to
+  a real DOM rather than a fixed bitmap font, so these are real glyphs
+  instead of upstream's `[p]`/bracket text, and the team-kill count only
+  appears once there is one to report -- a zero is the expected state for
+  almost every row, not information.
+- **The debug HUD's voice section reports what actually happened to a
+  connection**, not just whether it exists: the real ICE candidate type in
+  use (host/relay/etc, in place of the redundant word "connected"), whether
+  real audio has been confirmed sent and received (`getStats()`'s packet
+  counters), and whether the peer's `<audio>` element is actually playing --
+  the combination that made a longstanding "nobody's mic works" bug
+  findable at all, instead of every connection quietly looking fine.
+
+### Fixed
+- **Voice chat audio essentially never reached anyone.** A new WebRTC peer's
+  sender always starts with `addTransceiver`'s own null track, and nothing
+  ever attached the real one for a peer that appeared *after* the local mic
+  was already turned on -- so a connection only carried real audio in the
+  narrow case where the mic happened to be toggled after every peer already
+  existed. The current track is now attached the moment a peer connection is
+  created.
+- **A dropped voice connection now attempts an ICE restart before giving
+  up.** A lost consent-freshness check or a lossy stretch of network isn't
+  proof the two peers can no longer reach each other, and `restartIce()` is
+  the documented recovery for it -- re-gathering candidates and re-running
+  connectivity checks on the same connection and tracks, rather than the
+  full teardown-and-renegotiate-from-zero a closed connection required
+  before.
+- **Gameplay sound could pile up and burst-play all at once** after bzo's own
+  automatic client reload. The browser's audio context starts suspended
+  until a user gesture resumes it, and reload's silent auto-rejoin can start
+  delivering sound events before the player has clicked anything on the
+  fresh page -- so a sound fired during that window scheduled at a frozen
+  clock and only actually played, along with every other one queued behind
+  it, the moment an unrelated later click resumed the context. The context
+  now resumes on the very first interaction of any kind, and any sound that
+  still fires before that is dropped rather than deferred.
+- **The persistent voice-channel HUD widget always said "Nearby"**, no
+  matter which channel was actually selected -- three separate places in its
+  update function had the label hardcoded rather than reading the player's
+  actual choice.
+
 ## [1.2.23] - 2026-09-16
 
 ### Fixed
