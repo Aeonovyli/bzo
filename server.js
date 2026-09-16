@@ -12576,7 +12576,8 @@ wss.on('connection', (ws, req) => {
           // about how many flaps it has left.
           const carriedFlagType = getPlayerFlag(player.id)?.type ?? null;
           const mayNotJump = isJumpStart
-            && !canJump(carriedFlagType, ALLOW_JUMPING, false, GAME_CONFIG.WINGS_JUMP_COUNT);
+            && !canJump(carriedFlagType, ALLOW_JUMPING, false, GAME_CONFIG.WINGS_JUMP_COUNT,
+              isPlayerInsideBuilding(player, x, y, z, r));
           const jumpRefused = mayNotJump && reportJumpRejection(player, carriedFlagType);
 
           // Extrapolate over the client's own clamped interval where the

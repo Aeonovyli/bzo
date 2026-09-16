@@ -720,9 +720,14 @@ function getFlagEndurance(abbreviation) {
 // true while the tank is already in the air. No Jumping is the other end of the
 // same switch: it refuses on a world that allows jumping, which is the whole of
 // what the flag does, and upstream forbids it on a world that does not.
-function canJump(abbreviation, allowJumping, airborne, flapsLeft) {
+// `location != OnGround && location != OnBuilding` is the other half of the same
+// check (LocalPlayer.cxx:1414): a tank has to be standing on something to leave
+// it, which is what strands an Oscillation Overthruster tank that has phased
+// into a building -- OO carries no jump rule of its own, it just never counts
+// as a surface.
+function canJump(abbreviation, allowJumping, airborne, flapsLeft, insideBuilding) {
   if (abbreviation === 'WG') return flapsLeft > 0;
-  if (airborne) return false;
+  if (airborne || insideBuilding) return false;
   if (abbreviation === 'NJ') return false;
   // "else if ((flag != Flags::Bouncy) && ..." (LocalPlayer.cxx:1425). Bouncy is
   // out of the gate entirely: it bounces on a world that forbids jumping, which

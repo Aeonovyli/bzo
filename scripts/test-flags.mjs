@@ -1126,15 +1126,17 @@ for (const [name, value] of Object.entries(serverFlags)) {
   }
 }
 
-for (const abbreviation of ['WG', 'JP', 'US', null]) {
+for (const abbreviation of ['WG', 'JP', 'US', 'OO', null]) {
   for (const allowJumping of [false, true]) {
     for (const airborne of [false, true]) {
-      for (const flapsLeft of [0, 1]) {
-        assert.equal(
-          serverFlags.canJump(abbreviation, allowJumping, airborne, flapsLeft),
-          canJump(abbreviation, allowJumping, airborne, flapsLeft),
-          `client/server canJump diverged for ${abbreviation}/${allowJumping}/${airborne}/${flapsLeft}`
-        );
+      for (const insideBuilding of [false, true]) {
+        for (const flapsLeft of [0, 1]) {
+          assert.equal(
+            serverFlags.canJump(abbreviation, allowJumping, airborne, flapsLeft, insideBuilding),
+            canJump(abbreviation, allowJumping, airborne, flapsLeft, insideBuilding),
+            `client/server canJump diverged for ${abbreviation}/${allowJumping}/${airborne}/${insideBuilding}/${flapsLeft}`
+          );
+        }
       }
     }
   }
@@ -1535,6 +1537,16 @@ for (const theirs of ['ST', 'CL', 'MQ', 'SE', null]) {
   assert.deepEqual(getShotEffects('OO'), getShotEffects(null), 'and fires an ordinary shell');
   assert.equal(canJump('OO', false, false, 0), false, 'it does not jump either');
   assert.equal(canJump('OO', true, false, 0), true, 'unless the world says so');
+  // LocalPlayer.cxx:1414: jumping needs a surface, and phasing into a building
+  // is not one -- OO carries no jump rule of its own, so this is the general
+  // "not on the ground or a building" gate catching the one flag that can put a
+  // tank somewhere else while still reporting grounded.
+  assert.equal(canJump('OO', true, false, 0, true), false,
+    'phased into a building is not a surface, even where the world allows jumping');
+  assert.equal(canJump(null, true, false, 0, true), false,
+    'the same gate holds for a plain tank caught inside a building');
+  assert.equal(canJump('WG', true, false, 1, true), true,
+    'Wings never asks what it is standing on');
 
   // setDesiredSpeed's first clamp: inside a building the reverse is gone and
   // everything else about the stick is untouched.

@@ -8930,7 +8930,8 @@ function handleInputEvents() {
     intendedForward = clamped.forward;
     intendedRotation = clamped.turn;
     if (drive.up && !jumpWasHeld
-      && canJump(carriedFlagType, gameConfig.ALLOW_JUMPING, jumpDirection !== null, wingsFlapsLeft)) {
+      && canJump(carriedFlagType, gameConfig.ALLOW_JUMPING, jumpDirection !== null, wingsFlapsLeft,
+        amInsideBuilding())) {
       intendedY = 1;
       jumpTriggered = true;
       // Every jump spends a flap. Only Wings ever holds more than the one a
@@ -8952,7 +8953,8 @@ function handleInputEvents() {
       performance.now() / 1000,
     );
     myTank.userData.bounceReadyAt = bounce.bounceReadyAt;
-    if (bounce.jump && canJump(carriedFlagType, gameConfig.ALLOW_JUMPING, false, wingsFlapsLeft)) {
+    if (bounce.jump && canJump(carriedFlagType, gameConfig.ALLOW_JUMPING, false, wingsFlapsLeft,
+      amInsideBuilding())) {
       intendedY = 1;
       jumpTriggered = true;
       wingsFlapsLeft--;
