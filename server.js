@@ -3008,7 +3008,14 @@ function resolveBzwTextureName(rawName) {
   return null;
 }
 
-function parseBZWMap(filename) {
+function parseBZWMap(filename, { quiet = false } = {}) {
+  // Diagnostic detail about this one file -- which refs, textures, or spins
+  // it dropped -- worth an operator's attention for the live map and for one
+  // just imported, but not for the hundred cached maps
+  // `hashRemainingMapsInBackground` revisits on every restart purely to keep
+  // the Map Viewer's hash list current. `quiet` is how a caller that is not
+  // loading a map anyone is about to play says so.
+  const warn = (message) => { if (!quiet) log(message); };
   const text = fs.readFileSync(filename, 'utf8');
   const lines = text.split(/\r?\n/);
   const teamMode = parseBZWTeamMode(lines);
@@ -3314,7 +3321,7 @@ function parseBZWMap(filename) {
       const dstFaces = resolveEndpointFaces(link.to);
 
       if (!srcFaces.length || !dstFaces.length) {
-        log(`Ignoring broken teleporter link from "${link.from?.value || ''}" to "${link.to?.value || ''}" in ${filename}`);
+        warn(`Ignoring broken teleporter link from "${link.from?.value || ''}" to "${link.to?.value || ''}" in ${filename}`);
         continue;
       }
 
@@ -3523,7 +3530,7 @@ function parseBZWMap(filename) {
       if (currentLink.from && currentLink.to) {
         parsedLinks.push(currentLink);
       } else {
-        log(`Ignoring incomplete link block in ${filename}`);
+        warn(`Ignoring incomplete link block in ${filename}`);
       }
       currentLink = null;
       continue;
@@ -4021,13 +4028,13 @@ function parseBZWMap(filename) {
       if (name) {
         currentDefine = { name, obstacles: [], groupInstances: [], meshes: [] };
       } else {
-        log(`Ignoring "define" with no name in ${filename}`);
+        warn(`Ignoring "define" with no name in ${filename}`);
       }
       continue;
     }
     if (currentDefine && !current && token === 'enddef') {
       if (defineTemplates.has(currentDefine.name)) {
-        log(`Duplicate group definition "${currentDefine.name}" in ${filename}, using the newest`);
+        warn(`Duplicate group definition "${currentDefine.name}" in ${filename}, using the newest`);
       }
       defineTemplates.set(currentDefine.name, {
         obstacles: currentDefine.obstacles,
@@ -4144,7 +4151,7 @@ function parseBZWMap(filename) {
       const words = line.split(/\s+/);
       if (token === 'end') {
         if (current.vertexPositions.length < 4) {
-          log(`Not creating tetrahedron in ${filename}, not enough vertices (${current.vertexPositions.length})`);
+          warn(`Not creating tetrahedron in ${filename}, not enough vertices (${current.vertexPositions.length})`);
         } else {
           const tetraMesh = buildTetraMesh(current);
           if (currentDefine) {
@@ -4156,7 +4163,7 @@ function parseBZWMap(filename) {
         current = null;
       } else if (token === 'vertex') {
         if (current.vertexPositions.length >= 4) {
-          log(`Extra tetrahedron vertex in ${filename}, ignoring`);
+          warn(`Extra tetrahedron vertex in ${filename}, ignoring`);
         } else {
           const [x, y, z] = words.slice(1).map(Number);
           current.vertexPositions.push({ x: x || 0, y: z || 0, z: -(y || 0) });
@@ -4217,7 +4224,7 @@ function parseBZWMap(filename) {
       if (token === 'end') {
         const coneMesh = buildConeMesh(current);
         if (!coneMesh) {
-          log(`Not creating ${current.isPyramid ? 'meshpyr' : 'cone'} in ${filename}, invalid size/divisions/texsize`);
+          warn(`Not creating ${current.isPyramid ? 'meshpyr' : 'cone'} in ${filename}, invalid size/divisions/texsize`);
         } else if (currentDefine) {
           currentDefine.meshes.push(coneMesh);
         } else {
@@ -4307,7 +4314,7 @@ function parseBZWMap(filename) {
       if (token === 'end') {
         const arcMesh = buildArcMesh(current);
         if (!arcMesh) {
-          log(`Not creating ${current.isBox ? 'meshbox' : 'arc'} in ${filename}, invalid size/divisions/ratio/texsize`);
+          warn(`Not creating ${current.isBox ? 'meshbox' : 'arc'} in ${filename}, invalid size/divisions/ratio/texsize`);
         } else if (currentDefine) {
           currentDefine.meshes.push(arcMesh);
         } else {
@@ -4386,7 +4393,7 @@ function parseBZWMap(filename) {
       if (token === 'end') {
         const sphereMesh = buildSphereMesh(current);
         if (!sphereMesh) {
-          log(`Not creating sphere in ${filename}, invalid size/divisions/texsize`);
+          warn(`Not creating sphere in ${filename}, invalid size/divisions/texsize`);
         } else if (currentDefine) {
           currentDefine.meshes.push(sphereMesh);
         } else {
@@ -4462,7 +4469,7 @@ function parseBZWMap(filename) {
         // constructor snapshot.
         if (token === 'endface') {
           if (currentMeshFace.vertexIndices.length < 3) {
-            log(`Ignoring a mesh face with fewer than 3 vertices in ${filename}`);
+            warn(`Ignoring a mesh face with fewer than 3 vertices in ${filename}`);
           } else {
             current.faces.push(currentMeshFace);
           }
@@ -5202,13 +5209,13 @@ function parseBZWMap(filename) {
     meshes.push(...definedMeshes.map((m) => applyGroupInstanceTransformToMesh(m, request, instanceLabel)));
   }
   if (unknownGroupDefs.size > 0) {
-    log(
+    warn(
       `Ignoring "group" instances naming a "define" not in ${filename}:`
       + ` ${Array.from(unknownGroupDefs).sort().join(', ')}`
     );
   }
   if (groupCycleWarnings.size > 0) {
-    log(
+    warn(
       `Avoided recursion in ${filename}: definition(s) `
       + `${Array.from(groupCycleWarnings).sort().join(', ')} reference themselves `
       + 'through a group instance, directly or through others'
@@ -5216,57 +5223,57 @@ function parseBZWMap(filename) {
   }
 
   if (nonVerticalSpinCount > 0) {
-    log(
+    warn(
       `Ignoring ${nonVerticalSpinCount} "spin" line(s) about an axis other than `
       + `vertical in ${filename} -- bzo's box/pyramid model can't tip that way`
     );
   }
   if (unreadZoneKeywords.size > 0) {
-    log(
+    warn(
       `Ignoring zone keywords bzo does not read in ${filename}:`
       + ` ${Array.from(unreadZoneKeywords).sort().join(', ')}`
     );
   }
   if (unreadWeaponKeywords.size > 0) {
-    log(
+    warn(
       `Ignoring weapon keywords bzo does not read in ${filename}:`
       + ` ${Array.from(unreadWeaponKeywords).sort().join(', ')}`
       + ' (those weapons fire on their timer instead)'
     );
   }
   if (unreadWeaponTypes.size > 0) {
-    log(
+    warn(
       `Weapon types bzo does not have in ${filename}:`
       + ` ${Array.from(unreadWeaponTypes).sort().join(', ')}`
       + ' (those weapons fire an ordinary shell)'
     );
   }
   if (unresolvedMaterialRefs.size > 0) {
-    log(
+    warn(
       `Ignoring "matref" naming a material not defined in ${filename}:`
       + ` ${Array.from(unresolvedMaterialRefs).sort().join(', ')}`
     );
   }
   if (unresolvedDynamicColorRefs.size > 0) {
-    log(
+    warn(
       `Ignoring "dyncol" naming a dynamicColor not defined in ${filename}:`
       + ` ${Array.from(unresolvedDynamicColorRefs).sort().join(', ')}`
     );
   }
   if (unresolvedTextureMatrixRefs.size > 0) {
-    log(
+    warn(
       `Ignoring "texmat" naming a textureMatrix not defined in ${filename}:`
       + ` ${Array.from(unresolvedTextureMatrixRefs).sort().join(', ')}`
     );
   }
   if (unresolvedTextureNames.size > 0) {
-    log(
+    warn(
       `Texture name(s) bzo has no local asset for in ${filename}, kept at the `
       + `obstacle's plain default: ${Array.from(unresolvedTextureNames).sort().join(', ')}`
     );
   }
   if (externalTextureUrls.size > 0) {
-    log(
+    warn(
       `External texture URL(s) in ${filename}, forwarded to each client which `
       + `only loads one from a trusted host (its own origin, or *images.bzflag.org):`
       + ` ${Array.from(externalTextureUrls).sort().join(', ')}`
@@ -5349,13 +5356,13 @@ function parseBZWMap(filename) {
     }
   }
   if (unresolvedPhysicsDriverRefs.size > 0) {
-    log(
+    warn(
       `Ignoring "phydrv" naming a physics driver not defined in ${filename}:`
       + ` ${Array.from(unresolvedPhysicsDriverRefs).sort().join(', ')}`
     );
   }
   if (unreadPhysicsDriverKeywords.size > 0) {
-    log(
+    warn(
       `Physics driver keywords bzo does not read in ${filename}:`
       + ` ${Array.from(unreadPhysicsDriverKeywords).sort().join(', ')}`
     );
@@ -5382,7 +5389,7 @@ function parseBZWMap(filename) {
       + `(box/pyramid/base/teleporter/mesh) and dropped ${dropped} it doesn't `
       + `yet: ${droppedList}.`
     );
-    log(
+    warn(
       `Ignoring unsupported blocks in ${filename}: ${droppedList}`
     );
   }
@@ -5661,9 +5668,16 @@ function resolveViewMapChoice(requested) {
 function hashRemainingMapsInBackground() {
   const pending = listAvailableMapFiles()
     .filter((fileName) => fileName !== 'random' && !MAP_REGISTRY.has(fileName));
+  const total = pending.length;
+  let converted = 0;
   const step = () => {
     const fileName = pending.shift();
     if (!fileName) {
+      // One line for the whole pass rather than one per file (see `quiet`
+      // above): still worth knowing the trickle ran and how much of it
+      // landed, the same reasoning `sweepMapCache`'s own summary line below
+      // already follows.
+      if (total > 0) log(`Converted ${converted} of ${total} bzw file(s) to cached json`);
       sweepMapCache();
       precompress.start({ log }).catch((error) => logError('[BR] map hashing pass failed:', error));
       return;
@@ -5671,8 +5685,14 @@ function hashRemainingMapsInBackground() {
     try {
       const filePath = resolveMapFilePath(fileName);
       if (filePath) {
-        const mapData = parseBZWMap(filePath);
-        registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls);
+        // Nobody is playing this file -- it is only here to keep the Map
+        // Viewer's hash list current -- so its own quirks are for whoever
+        // actually views or joins it to see (`mapData.messages`, still
+        // built either way), not a log line about a map nobody chose today.
+        const mapData = parseBZWMap(filePath, { quiet: true });
+        if (registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls)) {
+          converted += 1;
+        }
       }
     } catch (error) {
       logError(`Could not hash map ${fileName}:`, error);
@@ -6071,7 +6091,11 @@ function handleRabbitSpawn(player) {
   player.wasRabbit = false;
   if (rabbitPlayerId === null) anointNewRabbit();
 }
-log(OBSTACLES);
+// The live world's real object geometry, for whoever needs to read it back --
+// `LIVE_MAP_ENTRY` (above) already hashed and wrote it to
+// `MAP_CACHE_DIR`/`<hash>.json` before this line runs, so the file is there
+// to open directly instead of a multi-hundred-KB single log line.
+log(`World obstacles cached at ${path.join(MAP_CACHE_DIR, `${LIVE_MAP_ENTRY.hash}.json`)} (${LIVE_MAP_ENTRY.url})`);
 
 let TELEPORTER_OBSTACLES_BY_INDEX = new Map();
 let TELEPORTER_LINKS_BY_SOURCE_FACE = new Map();
