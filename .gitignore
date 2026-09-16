@@ -8,6 +8,10 @@ sessions.json
 data/
 cache/
 
+# bzfs stuff
+server.conf
+groupdb.txt
+
 # Pulled in to validate the BZW parser against real usage, but licensed "Ask
 # author to host" (maparchive/maps.json) -- not a grant, so it stays local
 # and out of git rather than checked in.
