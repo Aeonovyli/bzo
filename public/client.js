@@ -1763,10 +1763,27 @@ function maybeSendPendingJoinRequest() {
 // `immutable`, hash-named URL; see `MAP_REGISTRY`).
 const worldFileCache = new Map();
 
+// Every world URL a client is ever handed -- the live match's, a Map
+// Viewer's, a freshly imported remote server's -- is one `server.js` itself
+// built from a content hash (`registerMapFile`'s `/maps/<12 hex>.json`),
+// never an arbitrary string, however the caller found the entry that named
+// it (`availableViewMaps`/`viewableMapEntries`, both server-sent). Checked
+// here rather than trusted implicitly: `worldRef` arrives over the same
+// `JSON.parse(event.data)` every other server message does, so nothing
+// upstream of this function actually proves its shape, and CodeQL's
+// js/request-forgery query is right that an unchecked `fetch(worldRef.url)`
+// is one bug away from following whatever a compromised or spoofed
+// connection put there instead.
+const WORLD_FILE_URL_RE = /^\/maps\/[0-9a-f]{12}\.json$/;
+
 async function loadWorldFile(worldRef) {
   if (!worldRef || !worldRef.url) return null;
   if (worldRef.hash && worldFileCache.has(worldRef.hash)) {
     return worldFileCache.get(worldRef.hash);
+  }
+  if (!WORLD_FILE_URL_RE.test(worldRef.url)) {
+    console.error('Refusing to fetch a world file with an unexpected URL shape:', worldRef.url);
+    return null;
   }
   try {
     const response = await fetch(worldRef.url);
