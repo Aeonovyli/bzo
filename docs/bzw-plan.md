@@ -181,11 +181,14 @@ mesh geometry does too.
       `addtexture`'d picture's UVs upstream's own way, rather than every
       obstacle of a kind sharing that kind's own baked-in tiling regardless
       of what material it wears.
-- [ ] `dynamicColor` and `textureMatrix` -- animated tint and scrolling/
-      rotating UVs. Both are upstream's `useQuality`-gated best-looking
-      variants of a texture that is otherwise static, which is the case
-      "Fewer options than BZFlag" in `AGENTS.md` already covers: implement the
-      variant, ship no setting.
+- [x] `dynamicColor` and `textureMatrix` -- animated tint and scrolling/
+      rotating UVs, and the `dyncol`/`texmat` lines that pull them into a
+      `material`. Validated against three real maps that use both
+      (`ahs3_Ironside_Battlefield.bzw`, `dw_missilewar3.bzw`,
+      `import-Planet-MoFo.com_4202.bzw`), plus `maps/bzo.bzw`'s own
+      `PD_Conveyor`/`PD_Death` pads for the box/pyramid side -- see "Animated
+      materials" in `docs/bzw.md`, including the one remaining assumption
+      (a wall/cap slot with both a static tint and a `dyncol` at once).
 - [ ] `ambient`/`specular`/`emission`/`shininess` need a lighting model that
       reads them -- bzo's renderer lights obstacles one way today, so this is
       the one item here that is a rendering-architecture question first and a

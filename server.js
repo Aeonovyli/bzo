@@ -1757,15 +1757,14 @@ function normalizeScoreLimit(score) {
 
 // Top-level BZW keywords a real map may use that bzo does not read at all --
 // not a passability keyword inside a box, a zone keyword, or anything else
-// already partially supported, but whole obstacle/material/animation types
-// with no bzo equivalent yet (docs/bzw.md is the full account of what is and
-// is not read). None of these ever set `current`/`currentLink`/`currentZone`/
-// `currentWeapon`, so their own inner lines (`vertex`, `face`, `dyncol`, ...)
-// already fall through the rest of parseBZWMap's dispatch untouched -- this
-// only has to recognize the *opening* keyword to say how many of each a map
-// asked for.
+// already partially supported, but whole obstacle/animation types with no bzo
+// equivalent yet (docs/bzw.md is the full account of what is and is not
+// read). None of these ever set `current`/`currentLink`/`currentZone`/
+// `currentWeapon`, so their own inner lines already fall through the rest of
+// parseBZWMap's dispatch untouched -- this only has to recognize the
+// *opening* keyword to say how many of each a map asked for.
 const UNSUPPORTED_TOP_LEVEL_KEYWORDS = new Set([
-  'dynamiccolor', 'texturematrix', 'waterlevel', 'transform',
+  'waterlevel', 'transform',
 ]);
 
 // `TetraBuilding::makeMesh`'s own fixed face topology (`MeshUtils.h`'s
@@ -3081,6 +3080,23 @@ function parseBZWMap(filename) {
   // `radial` has no consumer anywhere in its renderer either. Counted the
   // same way `unsupportedCounts` tracks any other partially-read block.
   const unreadPhysicsDriverKeywords = new Set();
+  // `dynamicColor` / `end` (`CustomDynamicColor.cxx`, `DynamicColor.cxx`). A
+  // named, time-varying RGBA a `material`'s own `dyncol <name>` line pulls
+  // in -- collected the same way a material or a physics driver is, with the
+  // same digit-first-then-name resolution (`DynamicColor.cxx:80-101`).
+  let currentDynamicColor = null;
+  const dynamicColorsByName = new Map();
+  const dynamicColorRegistry = [];
+  // A `dyncol` naming a dynamic color this file never defined.
+  const unresolvedDynamicColorRefs = new Set();
+  // `textureMatrix` / `end` (`CustomTextureMatrix.cxx`, `TextureMatrix.cxx`).
+  // A named, time-varying UV transform a `material`'s own `texmat <name>`
+  // line pulls in -- collected and resolved the same way.
+  let currentTextureMatrix = null;
+  const textureMatricesByName = new Map();
+  const textureMatrixRegistry = [];
+  // A `texmat` naming a texture matrix this file never defined.
+  const unresolvedTextureMatrixRefs = new Set();
   // A texture name (on a `material` or straight on an obstacle) bzo has no
   // local asset for -- see `resolveBzwStockTexture` -- named on load rather
   // than silently kept at the obstacle's plain default.
@@ -3347,8 +3363,52 @@ function parseBZWMap(filename) {
         target.color = referenced.color;
         target.noRadar = referenced.noRadar;
         target.noLighting = referenced.noLighting;
+        target.dynamicColor = referenced.dynamicColor;
+        target.textureMatrix = referenced.textureMatrix;
       } else if (rawRef) {
         unresolvedMaterialRefs.add(rawRef.toLowerCase());
+      }
+      return true;
+    }
+    if (token === 'dyncol') {
+      // `BzMaterial::setDynamicColor` -- replaces the whole material's own
+      // diffuse with the named `dynamicColor`'s live RGBA (resolved fully
+      // below, not just a name) rather than tinting it, matching
+      // `MeshSceneNode.cxx:487-491`'s `mat->colorPtr = dyncol->getColor()`.
+      const rawRef = words[1] || '';
+      const referenced = /^[0-9]/.test(rawRef)
+        ? dynamicColorRegistry[parseInt(rawRef, 10)] || null
+        : dynamicColorsByName.get(rawRef.toLowerCase()) || null;
+      if (referenced) {
+        target.dynamicColor = referenced;
+      } else if (rawRef) {
+        unresolvedDynamicColorRefs.add(rawRef.toLowerCase());
+      }
+      return true;
+    }
+    if (token === 'texmat') {
+      // `BzMaterial::setTextureMatrix` -- a UV transform applied in the
+      // texture-coordinate stage (`OpenGLGState.cxx:536-544`), independent of
+      // whatever baked tiling the geometry itself already carries. Upstream
+      // attaches it to whichever texture slot was added most recently
+      // (`textures[textureCount - 1].matrix = matrix`, `BzMaterial.cxx:
+      // 850-855`) and silently does nothing if no texture has been added yet
+      // -- real for a fresh `material` block (`textureCount` starts at 0
+      // there, confirmed against `import-Planet-MoFo.com_4202.bzw`'s own
+      // `addtexture`-then-`texmat` convention, "Animated materials" in
+      // docs/bzw.md) but genuinely unclear for an inline box/mesh-face
+      // property with no `material` block at all, where the obstacle's own
+      // constructor may pre-seed a stock texture first. Not replicated here
+      // pending that answer -- bzo stays order-independent for `texmat`
+      // rather than risk dropping a reference upstream would actually keep.
+      const rawRef = words[1] || '';
+      const referenced = /^[0-9]/.test(rawRef)
+        ? textureMatrixRegistry[parseInt(rawRef, 10)] || null
+        : textureMatricesByName.get(rawRef.toLowerCase()) || null;
+      if (referenced) {
+        target.textureMatrix = referenced;
+      } else if (rawRef) {
+        unresolvedTextureMatrixRefs.add(rawRef.toLowerCase());
       }
       return true;
     }
@@ -3623,9 +3683,11 @@ function parseBZWMap(filename) {
     // upstream's `CustomMaterial::writeToManager` adds it to the
     // `MaterialManager` for later `matref` lookups to find.
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
-      && !currentMaterial && token === 'material') {
+      && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && token === 'material') {
       currentMaterial = {
         name: null, texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+        dynamicColor: null, textureMatrix: null,
       };
       continue;
     }
@@ -3663,20 +3725,20 @@ function parseBZWMap(filename) {
         continue;
       }
       // `matref`/`color`/`diffuse`/`addtexture`/`texture`/`notextures`/
-      // `noradar`/`nolighting` -- a material's own `matref <name>` copies
-      // another already-defined material wholesale (BzMaterial's plain
-      // struct assignment), which a property stated after it then
-      // overrides, the same sequential-read semantics as everything else
-      // in this block. `applyBzwMaterialToken` is the same read a mesh's
-      // own defaults and a mesh face's own overrides use.
+      // `noradar`/`nolighting`/`dyncol`/`texmat` -- a material's own
+      // `matref <name>` copies another already-defined material wholesale
+      // (BzMaterial's plain struct assignment), which a property stated
+      // after it then overrides, the same sequential-read semantics as
+      // everything else in this block. `applyBzwMaterialToken` is the same
+      // read a mesh's own defaults and a mesh face's own overrides use.
       if (applyBzwMaterialToken(currentMaterial, token, line.split(/\s+/))) {
         continue;
       }
       // Everything else a material block can say -- ambient/specular/
       // emission/shininess (need a lighting model bzo does not have yet),
-      // dyncol, texmat, shader/addshader/noshaders, alphathresh, noculling,
-      // nosorting, noshadow, occluder, groupAlpha, spheremap, notexalpha,
-      // notexcolor, resetmat -- is read and dropped.
+      // shader/addshader/noshaders, alphathresh, noculling, nosorting,
+      // noshadow, occluder, groupAlpha, spheremap, notexalpha, notexcolor,
+      // resetmat -- is read and dropped.
       continue;
     }
 
@@ -3684,7 +3746,8 @@ function parseBZWMap(filename) {
     // left to resolve by file-order index, the same as a `material` with no
     // `name`) for `phydrv` to look up later.
     if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
-      && !currentMaterial && !currentPhysicsDriver && token === 'physics') {
+      && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && token === 'physics') {
       currentPhysicsDriver = { name: null, linear: null, death: null };
       continue;
     }
@@ -3724,6 +3787,183 @@ function parseBZWMap(filename) {
       }
       if (token === 'angular' || token === 'radial' || token === 'slide') {
         unreadPhysicsDriverKeywords.add(token);
+        continue;
+      }
+      continue;
+    }
+
+    // `dynamicColor` / `end` (`CustomDynamicColor.cxx`, `DynamicColor.cxx`).
+    // A named, time-varying RGBA -- registered by name (or file-order index)
+    // for a `material`'s own `dyncol` to look up later, the same as a
+    // `physics` block is for `phydrv`.
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
+      && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && token === 'dynamiccolor') {
+      currentDynamicColor = {
+        name: null,
+        channels: {
+          red: { min: 0, max: 1, sinusoids: [], clampUps: [], clampDowns: [], sequence: null },
+          green: { min: 0, max: 1, sinusoids: [], clampUps: [], clampDowns: [], sequence: null },
+          blue: { min: 0, max: 1, sinusoids: [], clampUps: [], clampDowns: [], sequence: null },
+          alpha: { min: 0, max: 1, sinusoids: [], clampUps: [], clampDowns: [], sequence: null },
+        },
+      };
+      continue;
+    }
+    if (currentDynamicColor) {
+      if (token === 'end') {
+        dynamicColorRegistry.push(currentDynamicColor);
+        if (currentDynamicColor.name) {
+          dynamicColorsByName.set(currentDynamicColor.name.toLowerCase(), currentDynamicColor);
+        }
+        currentDynamicColor = null;
+        continue;
+      }
+      if (token === 'name') {
+        const [, ...nameParts] = line.split(/\s+/);
+        const dcName = nameParts.join(' ').replace(/"/g, '').trim();
+        if (dcName) currentDynamicColor.name = dcName;
+        continue;
+      }
+      if (token === 'red' || token === 'green' || token === 'blue' || token === 'alpha') {
+        // `DynamicColor::read` -- each channel line names its own sub-type
+        // (`limits`, `sinusoid`, `clampup`/`clampdown`, `sequence`), any
+        // number of times each; `update` (`public/render.js`) combines
+        // every one of them each frame rather than the last stated winning.
+        const [, sub, ...nums] = line.split(/\s+/);
+        const values = nums.map(Number);
+        const channel = currentDynamicColor.channels[token];
+        const subtype = (sub || '').toLowerCase();
+        if (subtype === 'limits') {
+          const [min, max] = values;
+          if (Number.isFinite(min)) channel.min = Math.max(0, Math.min(1, min));
+          if (Number.isFinite(max)) channel.max = Math.max(0, Math.min(1, max));
+        } else if (subtype === 'sinusoid') {
+          const [period, offset, weight] = values;
+          if (Number.isFinite(period) && period >= 0.01 && Number.isFinite(weight) && weight > 0) {
+            channel.sinusoids.push({ period, offset: Number.isFinite(offset) ? offset : 0, weight });
+          }
+        } else if (subtype === 'clampup' || subtype === 'clampdown') {
+          const [period, offset, width] = values;
+          if (Number.isFinite(period) && period >= 0.01) {
+            const list = subtype === 'clampup' ? channel.clampUps : channel.clampDowns;
+            list.push({
+              period,
+              offset: Number.isFinite(offset) ? offset : 0,
+              width: Number.isFinite(width) ? width : 0,
+            });
+          }
+        } else if (subtype === 'sequence') {
+          const [period, offset, ...states] = values;
+          if (Number.isFinite(period) && period >= 0.01 && states.length > 0) {
+            channel.sequence = {
+              period,
+              offset: Number.isFinite(offset) ? offset : 0,
+              // `DynamicColor::finalize` clamps every raw state into
+              // colorMin(0)/colorMid(1)/colorMax(2) -- a stray 3+ (or
+              // negative) in the file reads as whichever end it is closer to
+              // rather than an out-of-range index client-side.
+              states: states.map((v) => Math.max(0, Math.min(2, Math.round(v)))),
+            };
+          }
+        }
+        continue;
+      }
+      continue;
+    }
+
+    // `textureMatrix` / `end` (`CustomTextureMatrix.cxx`, `TextureMatrix.cxx`).
+    // A named, time-varying UV transform -- registered the same way, for a
+    // `material`'s own `texmat` to look up.
+    if (!current && !currentLink && !currentZone && !currentWeapon && !currentDefine
+      && !currentMaterial && !currentPhysicsDriver && !currentDynamicColor && !currentTextureMatrix
+      && token === 'texturematrix') {
+      currentTextureMatrix = {
+        name: null,
+        fixedShiftU: 0,
+        fixedShiftV: 0,
+        fixedScaleU: 1,
+        fixedScaleV: 1,
+        fixedSpin: 0,
+        fixedCenterU: 0.5,
+        fixedCenterV: 0.5,
+        shiftU: 0,
+        shiftV: 0,
+        spin: 0,
+        scaleUFreq: 0,
+        scaleVFreq: 0,
+        scaleU: 1,
+        scaleV: 1,
+        centerU: 0.5,
+        centerV: 0.5,
+      };
+      continue;
+    }
+    if (currentTextureMatrix) {
+      if (token === 'end') {
+        textureMatrixRegistry.push(currentTextureMatrix);
+        if (currentTextureMatrix.name) {
+          textureMatricesByName.set(currentTextureMatrix.name.toLowerCase(), currentTextureMatrix);
+        }
+        currentTextureMatrix = null;
+        continue;
+      }
+      if (token === 'name') {
+        const [, ...nameParts] = line.split(/\s+/);
+        const tmName = nameParts.join(' ').replace(/"/g, '').trim();
+        if (tmName) currentTextureMatrix.name = tmName;
+        continue;
+      }
+      if (token === 'fixedshift') {
+        const [, u, v] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(u)) currentTextureMatrix.fixedShiftU = u;
+        if (Number.isFinite(v)) currentTextureMatrix.fixedShiftV = v;
+        continue;
+      }
+      if (token === 'fixedscale') {
+        // `TextureMatrix::setFixedScale` -- 0 leaves the prior value (1)
+        // alone rather than zeroing the scale out.
+        const [, u, v] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(u) && u !== 0) currentTextureMatrix.fixedScaleU = u;
+        if (Number.isFinite(v) && v !== 0) currentTextureMatrix.fixedScaleV = v;
+        continue;
+      }
+      if (token === 'fixedspin') {
+        const [, deg] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(deg)) currentTextureMatrix.fixedSpin = deg;
+        continue;
+      }
+      if (token === 'fixedcenter') {
+        const [, u, v] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(u)) currentTextureMatrix.fixedCenterU = u;
+        if (Number.isFinite(v)) currentTextureMatrix.fixedCenterV = v;
+        continue;
+      }
+      if (token === 'shift') {
+        const [, uFreq, vFreq] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(uFreq)) currentTextureMatrix.shiftU = uFreq;
+        if (Number.isFinite(vFreq)) currentTextureMatrix.shiftV = vFreq;
+        continue;
+      }
+      if (token === 'spin') {
+        const [, freq] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(freq)) currentTextureMatrix.spin = freq;
+        continue;
+      }
+      if (token === 'scale') {
+        // `TextureMatrix::setScale` -- a uScale/vScale under 1.0 leaves the
+        // prior value (1, no scaling) alone rather than shrinking below it.
+        const [, uFreq, vFreq, uScale, vScale] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(uFreq)) currentTextureMatrix.scaleUFreq = uFreq;
+        if (Number.isFinite(vFreq)) currentTextureMatrix.scaleVFreq = vFreq;
+        if (Number.isFinite(uScale) && uScale >= 1.0) currentTextureMatrix.scaleU = uScale;
+        if (Number.isFinite(vScale) && vScale >= 1.0) currentTextureMatrix.scaleV = vScale;
+        continue;
+      }
+      if (token === 'center') {
+        const [, u, v] = line.split(/\s+/).map(Number);
+        if (Number.isFinite(u)) currentTextureMatrix.centerU = u;
+        if (Number.isFinite(v)) currentTextureMatrix.centerV = v;
         continue;
       }
       continue;
@@ -4353,7 +4593,8 @@ function parseBZWMap(filename) {
       const team = parseInt(color, 10);
       current.team = Number.isInteger(team) ? Math.max(1, Math.min(4, team)) : 1;
     } else if (current && current.type === 'group'
-      && (token === 'matref' || token === 'addtexture' || token === 'texture')) {
+      && (token === 'matref' || token === 'addtexture' || token === 'texture'
+        || token === 'dyncol' || token === 'texmat')) {
       // A group instance's own material override -- unlike a box/pyramid's
       // walls/caps split just below, this is one plain material applied
       // wholesale to a mesh member's every face (`ObstacleModifier::execute`,
@@ -4364,11 +4605,12 @@ function parseBZWMap(filename) {
       // is what actually applies it, once the member is known.
       current.materialOverride ??= {
         texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
+        dynamicColor: null, textureMatrix: null,
       };
       applyBzwMaterialToken(current.materialOverride, token, line.split(/\s+/));
     } else if (current && (BZW_FACE_GROUPS.has(token) || token === 'color' || token === 'diffuse'
       || token === 'matref' || token === 'addtexture' || token === 'texture'
-      || token === 'noradar' || token === 'nolighting')
+      || token === 'noradar' || token === 'nolighting' || token === 'dyncol' || token === 'texmat')
       && current.kind !== 'base' && current.kind !== 'teleporter') {
       // The colour, texture or material a map paints an obstacle with, which
       // the branch above reads as a team on a base -- upstream's CustomBase
@@ -4400,12 +4642,16 @@ function parseBZWMap(filename) {
             else if (material.textureUrl) { current.wallTextureUrl = material.textureUrl; current.wallTexture = null; }
             if (material.color) current.wallColor = material.color;
             if (material.noLighting) current.wallNoLighting = true;
+            if (material.dynamicColor) current.wallDynamicColor = material.dynamicColor;
+            if (material.textureMatrix) current.wallTextureMatrix = material.textureMatrix;
           }
           if (group !== 'walls') {
             if (material.texture) { current.capTexture = material.texture; current.capTextureUrl = null; }
             else if (material.textureUrl) { current.capTextureUrl = material.textureUrl; current.capTexture = null; }
             if (material.color) current.capColor = material.color;
             if (material.noLighting) current.capNoLighting = true;
+            if (material.dynamicColor) current.capDynamicColor = material.dynamicColor;
+            if (material.textureMatrix) current.capTextureMatrix = material.textureMatrix;
           }
           if (material.noRadar) current.noRadar = true;
         } else if (refName) {
@@ -4423,6 +4669,28 @@ function parseBZWMap(filename) {
           externalTextureUrls.add(resolved.url);
         } else if (rawName) {
           unresolvedTextureNames.add(rawName);
+        }
+      } else if (keyword === 'dyncol') {
+        const refName = (words[group ? 2 : 1] || '');
+        const referenced = /^[0-9]/.test(refName)
+          ? dynamicColorRegistry[parseInt(refName, 10)] || null
+          : dynamicColorsByName.get(refName.toLowerCase()) || null;
+        if (referenced) {
+          if (group !== 'caps') current.wallDynamicColor = referenced;
+          if (group !== 'walls') current.capDynamicColor = referenced;
+        } else if (refName) {
+          unresolvedDynamicColorRefs.add(refName.toLowerCase());
+        }
+      } else if (keyword === 'texmat') {
+        const refName = (words[group ? 2 : 1] || '');
+        const referenced = /^[0-9]/.test(refName)
+          ? textureMatrixRegistry[parseInt(refName, 10)] || null
+          : textureMatricesByName.get(refName.toLowerCase()) || null;
+        if (referenced) {
+          if (group !== 'caps') current.wallTextureMatrix = referenced;
+          if (group !== 'walls') current.capTextureMatrix = referenced;
+        } else if (refName) {
+          unresolvedTextureMatrixRefs.add(refName.toLowerCase());
         }
       } else if (keyword === 'noradar') {
         current.noRadar = true;
@@ -4933,6 +5201,18 @@ function parseBZWMap(filename) {
     log(
       `Ignoring "matref" naming a material not defined in ${filename}:`
       + ` ${Array.from(unresolvedMaterialRefs).sort().join(', ')}`
+    );
+  }
+  if (unresolvedDynamicColorRefs.size > 0) {
+    log(
+      `Ignoring "dyncol" naming a dynamicColor not defined in ${filename}:`
+      + ` ${Array.from(unresolvedDynamicColorRefs).sort().join(', ')}`
+    );
+  }
+  if (unresolvedTextureMatrixRefs.size > 0) {
+    log(
+      `Ignoring "texmat" naming a textureMatrix not defined in ${filename}:`
+      + ` ${Array.from(unresolvedTextureMatrixRefs).sort().join(', ')}`
     );
   }
   if (unresolvedTextureNames.size > 0) {

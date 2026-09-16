@@ -187,6 +187,8 @@ A material's own fields:
 | `noradar` | the obstacle is left off the radar entirely |
 | `nolighting` | the face is drawn unlit -- its texture and tint at full brightness, untouched by the renderer's own lighting |
 | `matref <name>` | copies another already-defined material wholesale, which a line stated after it then overrides |
+| `dyncol <name>` | replaces the material's own tint outright with a named `dynamicColor`'s live RGBA -- see **Animated materials**, below |
+| `texmat <name>` | a named `textureMatrix`'s live UV transform, layered on top of whatever UVs the texture already carries -- see **Animated materials**, below |
 
 **A `matref` may also name a material by number instead of by name**, upstream's
 own alternative for a `material` block that gave no `name` line at all --
@@ -364,6 +366,68 @@ reads both:
   map's shrub texture for exactly this reason, so the path has a fixture to
   check itself against beyond a server survey.
 
+### Animated materials: `dynamicColor` and `textureMatrix`
+
+Two named, time-varying blocks a `material`'s own `dyncol <name>`/
+`texmat <name>` line pulls in -- `src/bzfs/CustomDynamicColor.cxx`,
+`src/game/DynamicColor.cxx` and `src/bzfs/CustomTextureMatrix.cxx`,
+`src/game/TextureMatrix.cxx`. Both resolve by name the same digit-first-then-
+name way `matref` does (`DynamicColor.cxx:80-101`,
+`TextureMatrix.cxx:73-94`), collected into their own registry the same way a
+`material` or a `physics` block is. Real usage is well evidenced --
+`ahs3_Ironside_Battlefield.bzw`, `dw_missilewar3.bzw`, and
+`import-Planet-MoFo.com_4202.bzw` (all under `maps/`) use both, for a
+teleporter's glow, scrolling stripe and pillar textures, and a cycling
+multi-frame billboard sign.
+
+`dynamicColor` / `end` -- one block per named colour, up to four channel
+lines (`red`/`green`/`blue`/`alpha`), each of which can carry any number of:
+
+| line | effect |
+|---|---|
+| `limits <min> <max>` | this channel's own low/high value (defaults 0/1) |
+| `sinusoid <period> <offset> <weight>` | a cosine wave blending toward `limits`' high end |
+| `clampup <period> <offset> <width>` | forces the channel to its high end for `width` seconds out of every `period` |
+| `clampdown <period> <offset> <width>` | the same, forced to the low end instead |
+| `sequence <period> <offset> <ints...>` | a round-robin list, each slot `0` (low), `1` (leave to any sinusoid), or `2` (high) -- overrides every clamp/sinusoid above it for as long as it is active |
+
+Every frame, a channel's value is `low*(1-factor) + high*factor`: `factor` is
+`0`/`1`/`0.5` while a clamp (or a sequence slot) forces it, otherwise the sum
+of every `sinusoid`'s own `weight * cos(phase * 2π)`, centred and clamped
+into `[0, 1]` (`DynamicColor::update`, `DynamicColor.cxx:371-463`) -- ported
+in `public/render.js`'s `evaluateDynamicColor`. `dyncol` on a material
+**replaces its whole diffuse tint outright**, every frame
+(`MeshSceneNode.cxx:487-491`), not a multiply against a static `color`/
+`diffuse` line stated alongside it -- and every material naming the same
+`dynamicColor` animates in exact lockstep, upstream's own shared-pointer
+semantics, not a separate instance per material.
+
+`textureMatrix` / `end` -- one block per named UV transform, `fixedshift
+<u> <v>`/`fixedscale <u> <v>`/`fixedspin <degrees>`/`fixedcenter <u> <v>`
+baked once (a `0` on `fixedscale` leaves the axis at its prior value, never
+zeroing it), and `shift <uFreq> <vFreq>`/`spin <freq>`/
+`scale <uFreq> <vFreq> <uScale> <vScale>`/`center <u> <v>` re-evaluated every
+frame (a `scale` below `1.0` is ignored the same way). `texmat` on a material
+layers this on top of whatever UVs the geometry already carries -- a real
+texture-matrix transform (`OpenGLGState.cxx:536-544`,
+`TextureMatrix::update`, `TextureMatrix.cxx:405-444`), not a change to the
+texture's own tiling -- ported as `applyTextureMatrix` in `public/render.js`.
+
+**A box/pyramid's own wall or cap animates too, one assumption narrower than
+a mesh face.** `_getSharedObstacleMaterials` in `public/render.js` reads
+`wallDynamicColor`/`capDynamicColor`/`wallTextureMatrix`/`capTextureMatrix`
+the same way `_buildMeshObject` reads a mesh face's own -- `maps/bzo.bzw`'s
+own `PD_Conveyor`/`PD_Death` pads are the real fixture for this side of it,
+a scrolling stripe and a colour-cycling beacon on two plain boxes, the same
+mechanism the three maps above validate on a mesh face. The one thing this
+path does not yet handle is a slot carrying **both** a static `wallColor`/
+`capColor` *and* a `dyncol` at once -- `dyncol` is assumed to be the only
+tint that slot's shared material ever needs, since every obstacle sampled so
+far states one or the other, never both. A future map that does state both
+needs `_getSharedObstacleMaterials`/`_addObstacleFragment` taught to skip
+baking a vertex tint for a dyncol'd slot specifically, rather than the
+whole-box `vertexColors` flag it is today.
+
 Not yet read:
 
 - **`texsize`/`texoffset`**, so a `matref`'d or `addtexture`'d picture always
@@ -371,15 +435,13 @@ Not yet read:
   in (8 units per tile on a box's or a pyramid's walls, 2 on a box's caps --
   see **Colour** and `_prepareBoxGeometry`) rather than at a size or an offset
   the map may have asked for.
-- **`dynamicColor`, `textureMatrix`**, upstream's animated tint and
-  scrolling/rotating UVs.
 - **`ambient`/`specular`/`emission`/`shininess`.** bzo's renderer lights an
   obstacle one way today; reading these needs a lighting model first, not
   only a parser change.
-- **`dyncol`, `texmat`, `shader`/`addshader`/`noshaders`, `alphathresh`,
-  `noculling`, `nosorting`, `noshadow`, `occluder`, `groupAlpha`,
-  `spheremap`, `notexalpha`, `notexcolor`, `resetmat`.** Read and dropped,
-  the same as any other property this section does not act on.
+- **`shader`/`addshader`/`noshaders`, `alphathresh`, `noculling`,
+  `nosorting`, `noshadow`, `occluder`, `groupAlpha`, `spheremap`,
+  `notexalpha`, `notexcolor`, `resetmat`.** Read and dropped, the same as any
+  other property this section does not act on.
 
 ## Teleporters and links
 

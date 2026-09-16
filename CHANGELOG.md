@@ -6,6 +6,57 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.20] - 2026-09-16
+
+### Added
+- **`dynamicColor` and `textureMatrix` are now read** (`dyncol`/`texmat` on a
+  `material`) -- upstream's animated tint and scrolling/rotating UV
+  keywords, the last item under "Materials and appearance" in
+  `docs/bzw-plan.md`. Both blocks resolve into a named registry the same
+  digit-first-then-name way `matref`/`phydrv` already do, and read
+  everywhere `matref` does: material blocks, `matref`'s own wholesale copy,
+  mesh faces, group-instance overrides, and a box/pyramid's own wall/cap
+  lines. The per-channel colour blend and per-frame UV-matrix math are
+  ported directly from `DynamicColor::update`/`TextureMatrix::update`
+  (`src/game/DynamicColor.cxx`, `src/game/TextureMatrix.cxx`), validated
+  against three real maps that use both (`ahs3_Ironside_Battlefield.bzw`,
+  `dw_missilewar3.bzw`, `import-Planet-MoFo.com_4202.bzw`). Every connected
+  client evaluates the same phase at the same real moment (`Date.now()`,
+  not a per-tab clock), matching upstream's own network-corrected
+  `GameTime`.
+- **`maps/bzo.bzw` demonstrates both**: a scrolling caution-stripe sign and
+  a colour-cycling beacon sign (mesh faces), and the `PD_Conveyor`/
+  `PD_Death` physics-driver pads now carry a matching scrolling stripe and
+  pulsing beacon of their own -- the conveyor's scroll speed is derived
+  from its own `linear` driver speed and the box's own texture tiling, so
+  the two visibly agree (upstream has no engine-level link between a
+  physics driver and a texture matrix; this is the same manual tuning any
+  mapper would do).
+
+### Fixed
+- **A foliage-style alpha-tested material no longer occludes itself
+  through the depth buffer.** A billboard bush's own crossed quads were
+  each writing real depth, so whichever quad came first in the vertex
+  buffer clipped the others instead of showing the layered look upstream
+  does. `depthWrite` is now off for any alpha-tested material, matching
+  upstream's own blanket `glDepthMask(GL_FALSE)` for its whole transparent
+  render pass.
+- **The debug ground grid drew over foliage and other transparent scenery
+  instead of under it**, once the above changed depth-writing for
+  transparent objects -- its own `renderOrder` was higher than ordinary
+  scenery's default, backwards from what it needs. Now sorts first in the
+  transparent pass, below everything else.
+- **A teleporter's own portal glow scrolled backwards from a real
+  client.** It was approximated with a hand-tuned `texture.offset`
+  animation rather than upstream's real `textureMatrix` transform -- a
+  different formula, not just a different constant -- so bzo's own guess
+  at the scroll direction didn't actually match. Now runs the same
+  `applyTextureMatrix` a mapped `texmat` uses, with upstream's own real
+  default (`shift 0 -0.05`).
+- **The `PD_Conveyor`/`PD_Death` physics-driver test pads sat only a few
+  metres apart in the open field**, an easy way to get killed by accident.
+  Moved to the west wall, with real spacing between them.
+
 ## [1.2.19] - 2026-09-15
 
 ### Added

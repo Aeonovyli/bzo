@@ -568,19 +568,187 @@ function applyTextureAlpha(material, hasAlpha) {
   // A pixel this discards never reaches the depth test at all, so it can
   // never block anything behind it -- correct for a foliage cutout's actual
   // gaps, the class of pixel that was wrongly blocking a teleporter's own
-  // effect before this existed. Everything else -- any pixel with real
-  // presence, leaf or partial overlay alike -- still writes depth
-  // normally, which is what lets the debug ground grid (and anything else
-  // that depth-tests against real geometry) clip it exactly like a box.
-  // Upstream's own equivalent (`alphaThreshold`/`GL_GEQUAL`,
-  // `MeshSceneNode.cxx:519-520`) only activates when a mapper explicitly
-  // sets `alphathresh`, which bzo does not read yet -- this applies the
-  // same mechanism unconditionally instead, at a low enough threshold that
-  // it only ever catches the pixels upstream's own default (no threshold
-  // at all) would have shown as fully invisible anyway.
+  // effect before this existed. Upstream's own equivalent
+  // (`alphaThreshold`/`GL_GEQUAL`, `MeshSceneNode.cxx:519-520`) only
+  // activates when a mapper explicitly sets `alphathresh`, which bzo does
+  // not read yet -- this applies the same mechanism unconditionally
+  // instead, at a low enough threshold that it only ever catches the
+  // pixels upstream's own default (no threshold at all) would have shown
+  // as fully invisible anyway.
   material.alphaTest = FOLIAGE_ALPHA_TEST;
+  // Upstream renders every alpha-blended material in a separate ordered
+  // pass with `glDepthMask(GL_FALSE)` (`SceneRenderer.cxx:1069-1074`), so
+  // overlapping transparent geometry (crossed-quad foliage billboards,
+  // stacked leaf layers) blends instead of occluding itself through the
+  // depth buffer. Depth *testing* stays on, so this still hides correctly
+  // behind opaque scene geometry -- only writes are disabled.
+  material.depthWrite = false;
   material.needsUpdate = true;
 }
+
+// A stable per-object id, so two materials referencing the very same
+// (server-resolved) `dynamicColor`/`textureMatrix` share one cache key --
+// matching upstream's own shared-state animation (`DynamicColor::update`
+// writes into one array every referencing material reads the same pointer
+// to) -- while two distinct ones, even both unnamed, never collide the way
+// comparing by `.name` alone would.
+let animIdentityCounter = 0;
+const animIdentityIds = new WeakMap();
+function animIdentityKey(descriptor) {
+  if (!descriptor) return '';
+  if (!animIdentityIds.has(descriptor)) {
+    animIdentityIds.set(descriptor, ++animIdentityCounter);
+  }
+  return String(animIdentityIds.get(descriptor));
+}
+
+// `DynamicColor::update` (`src/game/DynamicColor.cxx:371-463`). A sequence
+// overrides a channel's clamps entirely; sinusoids only ever apply once
+// neither clamp is active -- ported in that same order.
+function foldTimeIntoPeriod(t, period) {
+  let x = t;
+  if (x < 0) x -= period * Math.floor(x / period);
+  return x % period;
+}
+
+function evaluateDynamicColorChannel(channel, t) {
+  let clampUp = false;
+  let clampDown = false;
+  if (channel.sequence) {
+    const { period, offset, states } = channel.sequence;
+    const fullPeriod = states.length * period;
+    const indexTime = foldTimeIntoPeriod(t - offset, fullPeriod);
+    const index = Math.min(states.length - 1, Math.floor(indexTime / period));
+    const state = states[index];
+    if (state === 0) clampDown = true;
+    else if (state === 2) clampUp = true;
+  } else {
+    for (const clamp of channel.clampUps) {
+      const upTime = foldTimeIntoPeriod(t - clamp.offset, clamp.period);
+      if (upTime < clamp.width) { clampUp = true; break; }
+    }
+    for (const clamp of channel.clampDowns) {
+      const downTime = foldTimeIntoPeriod(t - clamp.offset, clamp.period);
+      if (downTime < clamp.width) { clampDown = true; break; }
+    }
+  }
+
+  let factor = 1;
+  if (clampUp && clampDown) factor = 0.5;
+  else if (clampUp) factor = 1;
+  else if (clampDown) factor = 0;
+  else if (channel.sinusoids.length > 0) {
+    let value = 0;
+    for (const s of channel.sinusoids) {
+      const phase = (t - s.offset) / s.period;
+      value += s.weight * Math.cos((phase % 1) * Math.PI * 2);
+    }
+    factor = Math.max(0, Math.min(1, 0.5 + (0.5 * value)));
+  }
+
+  return (channel.min * (1 - factor)) + (channel.max * factor);
+}
+
+// Returns [r, g, b, a] in [0, 1] -- replaces a material's diffuse outright
+// (`MeshSceneNode.cxx:487-491`'s `mat->colorPtr = dyncol->getColor()`), never
+// multiplies against a static tint.
+function evaluateDynamicColor(dynamicColor, t) {
+  const { red, green, blue, alpha } = dynamicColor.channels;
+  return [
+    evaluateDynamicColorChannel(red, t),
+    evaluateDynamicColorChannel(green, t),
+    evaluateDynamicColorChannel(blue, t),
+    evaluateDynamicColorChannel(alpha, t),
+  ];
+}
+
+// `TextureMatrix::finalize`/`update` (`src/game/TextureMatrix.cxx:274-309,
+// 405-444`) -- ported as one unified formula rather than upstream's own two
+// (a static pass baked once at load, a dynamic pass re-run every frame):
+// running the dynamic step with every dynamic field at its own default (0
+// frequency, 1 scale) reduces algebraically to the identity transform, which
+// is exactly what upstream's `useDynamic` gate leaves `matrix` at in that
+// case -- the baked static matrix (or true identity, if that is at its own
+// defaults too). `tm_shift`/`tm_scale`/`tm_spin`/`tm_multiply` are the same
+// file's own composition primitives (`:192-238`) -- a right-multiply affine,
+// not commutative, ported in the same order.
+function tm_multiply(m, n) {
+  const t = [
+    [(m[0][0] * n[0][0]) + (m[0][1] * n[1][0]), (m[0][0] * n[0][1]) + (m[0][1] * n[1][1])],
+    [(m[1][0] * n[0][0]) + (m[1][1] * n[1][0]), (m[1][0] * n[0][1]) + (m[1][1] * n[1][1])],
+    [
+      (m[2][0] * n[0][0]) + (m[2][1] * n[1][0]) + n[2][0],
+      (m[2][0] * n[0][1]) + (m[2][1] * n[1][1]) + n[2][1],
+    ],
+  ];
+  m[0][0] = t[0][0]; m[0][1] = t[0][1];
+  m[1][0] = t[1][0]; m[1][1] = t[1][1];
+  m[2][0] = t[2][0]; m[2][1] = t[2][1];
+}
+function tm_shift(m, ushf, vshf) {
+  tm_multiply(m, [[1, 0], [0, 1], [ushf, vshf]]);
+}
+function tm_scale(m, uscl, vscl) {
+  tm_multiply(m, [[uscl, 0], [0, vscl], [0, 0]]);
+}
+function tm_spin(m, radians) {
+  const c = Math.cos(radians);
+  const s = Math.sin(radians);
+  tm_multiply(m, [[c, s], [-s, c], [0, 0]]);
+}
+
+// Writes the current frame's UV transform into `out` (a `THREE.Matrix3`,
+// normally a texture's own `.matrix` with `matrixAutoUpdate` left false --
+// reused in place rather than replaced, so an animated texture costs no
+// per-frame allocation) -- the same shader-stage transform upstream's own
+// `glLoadMatrixf` applies (`OpenGLGState.cxx:536-544`), composable on top of
+// whatever UVs the geometry already carries.
+function applyTextureMatrix(tm, t, out) {
+  const staticMatrix = [[1, 0], [0, 1], [0, 0]];
+  const radiansFixed = tm.fixedSpin * (Math.PI / 180);
+  tm_shift(staticMatrix, -(tm.fixedShiftU + tm.fixedCenterU), -(tm.fixedShiftV + tm.fixedCenterV));
+  tm_spin(staticMatrix, -radiansFixed);
+  tm_scale(staticMatrix, 1 / tm.fixedScaleU, 1 / tm.fixedScaleV);
+  tm_shift(staticMatrix, tm.fixedCenterU, tm.fixedCenterV);
+
+  const partial = [[1, 0], [0, 1], [0, 0]];
+  const radians = ((t * tm.spin) % 1) * Math.PI * 2;
+  const urad = ((t * tm.scaleUFreq) % 1) * Math.PI * 2;
+  const vrad = ((t * tm.scaleVFreq) % 1) * Math.PI * 2;
+  const uratio = 0.5 + (0.5 * Math.cos(urad));
+  const vratio = 0.5 + (0.5 * Math.sin(vrad));
+  const uscl = 1 + (uratio * (tm.scaleU - 1));
+  const vscl = 1 + (vratio * (tm.scaleV - 1));
+  const ushf = (t * tm.shiftU) % 1;
+  const vshf = (t * tm.shiftV) % 1;
+
+  tm_shift(partial, -(ushf + tm.centerU), -(vshf + tm.centerV));
+  tm_spin(partial, -radians);
+  tm_scale(partial, 1 / uscl, 1 / vscl);
+  tm_shift(partial, tm.centerU, tm.centerV);
+  tm_multiply(partial, staticMatrix);
+
+  out.set(
+    partial[0][0], partial[1][0], partial[2][0],
+    partial[0][1], partial[1][1], partial[2][1],
+    0, 0, 1,
+  );
+}
+
+// Upstream's own default teleporter glow is a `LinkMaterial` a map can
+// override but every sampled real one leaves at its stock values --
+// `textureMatrix name LinkMaterial \n shift 0 -0.05 \n end` (confirmed
+// verbatim in `maps/dw_missilewar3.bzw`, `maps/ahs3_Ironside_Battlefield.bzw`).
+// `_updateTeleporterVisuals` runs this through the same `applyTextureMatrix`
+// a map-authored `texmat` uses, rather than a hand-tuned `texture.offset`
+// approximation -- the two are not the same transform (Three's own
+// offset/repeat/rotation composition is a different formula from upstream's
+// shift/spin/scale one), which is what previously scrolled the portal
+// texture the opposite direction from a real client.
+const TELEPORTER_LINK_TEXTURE_MATRIX = {
+  fixedShiftU: 0, fixedShiftV: 0, fixedScaleU: 1, fixedScaleV: 1, fixedSpin: 0, fixedCenterU: 0.5, fixedCenterV: 0.5,
+  shiftU: 0, shiftV: -0.05, spin: 0, scaleUFreq: 0, scaleVFreq: 0, scaleU: 1, scaleV: 1, centerU: 0.5, centerV: 0.5,
+};
 
 // A tinted obstacle's debug label wears its colour, so a map's painting can be
 // read off the label as well as off the obstacle. The cap first: the label hangs
@@ -623,11 +791,12 @@ const GROUND_STRIPS = [
   [2, 3, 6, 7],
   [3, 0, 7, 4],
 ];
-// First in the transparent pass, before the flags, shots and explosions that
-// blend over the world without writing depth. Those cannot depth-reject a grid
-// line standing behind them, so the grid has to be underneath them in draw
-// order instead.
-const GROUND_GRID_RENDER_ORDER = 1;
+// First in the transparent pass, before flags, shots, explosions and
+// alpha-tested foliage -- none of those write depth, so none of them can
+// depth-reject a grid line drawn after them. A default (0) renderOrder is
+// what ordinary scenery gets, so the grid needs to sort below that floor to
+// stay underneath everything else in the pass.
+const GROUND_GRID_RENDER_ORDER = -1;
 // Ground light receivers, mirroring BackgroundRenderer::drawGroundReceivers
 // (BackgroundRenderer.cxx:1312): a small additive fan on the ground under every
 // dynamic light, its falloff computed per vertex on the CPU rather than by a
@@ -973,6 +1142,13 @@ class RenderManager {
     this._groundCenterZ = null;
     this.gridHelper = null;
     this.obstacleMeshes = [];
+    // A mesh face's or a box/pyramid's own `dyncol`/`texmat` (`docs/bzw.md`,
+    // "Animated materials") -- `{ material, dynamicColor }` and/or
+    // `{ texture, textureMatrix }` entries, driven each frame by
+    // `_updateAnimatedMaterials`. Each entry carries `source: 'obstacle'` or
+    // `'mesh'`, so `clearObstacles`/`clearMeshes` can each drop only its own
+    // half without racing whichever one reloads second.
+    this._animatedMaterials = [];
     // One `THREE.Mesh` per parsed `mesh` block -- render-only, see `setMeshes`.
     this.meshObjects = [];
     // Keyed by the obstacle the tank is inside, built on demand.
@@ -2176,6 +2352,13 @@ class RenderManager {
     this.renderer.info.reset();
     this.updateGroundCenter();
     this._updateTeleporterVisuals(performance.now() * 0.001);
+    // `Date.now()`, not `performance.now()` -- a wall clock every connected
+    // browser shares (modulo each machine's own clock skew), matching
+    // upstream's own `GameTime::getStepTime()` (`GameTime.cxx:194-224`) --
+    // every client evaluates a shared `dynamicColor`/`textureMatrix` at the
+    // same phase at the same real moment, the way a cycling billboard sign
+    // reads the same picture on every screen watching it.
+    this._updateAnimatedMaterials(Date.now() * 0.001);
 
     if (this.projectileLights) {
       for (const [projectile, light] of this.projectileLights.entries()) {
@@ -2254,7 +2437,20 @@ class RenderManager {
   // (docs/bzw.md, "Materials and appearance") -- upstream stops lighting the
   // face rather than tinting it, so this swaps the class rather than adding
   // an option Lambert would just ignore.
-  _getSharedObstacleMaterials(key, sideTextureFactory, topTextureFactory, options = {}, unlit = {}) {
+  // `animation` -- `{ wallDynamicColor, capDynamicColor, wallTextureMatrix,
+  // capTextureMatrix }`, a box/pyramid's own resolved `dyncol`/`texmat`
+  // (`docs/bzw.md`, "Animated materials"). Registered into
+  // `_animatedMaterials` here, at creation, rather than at the call site --
+  // `key` already folds each one's identity in (`animIdentityKey`, at every
+  // call site below), so a cache hit means this obstacle shares an already-
+  // registered material rather than needing a second registration. Assumes
+  // no obstacle also states a static `wallColor`/`capColor` on the same
+  // slot -- true of every obstacle in `maps/bzo.bzw` today -- since a
+  // vertex-baked tint and a live `material.color` write would otherwise
+  // fight every frame; `dyncol` replaces a slot's diffuse outright upstream
+  // too (`MeshSceneNode.cxx:487-491`), so this is the same rule, just not
+  // yet arbitrated against `_addObstacleFragment`'s own tint argument.
+  _getSharedObstacleMaterials(key, sideTextureFactory, topTextureFactory, options = {}, unlit = {}, animation = {}) {
     if (!this._sharedObstacleMaterials) this._sharedObstacleMaterials = new Map();
     const existing = this._sharedObstacleMaterials.get(key);
     if (existing) return existing;
@@ -2277,6 +2473,25 @@ class RenderManager {
     });
     const materials = [sideMaterial, capMaterial];
     materials.forEach((material) => { material.userData.shared = true; });
+    const { wallDynamicColor, capDynamicColor, wallTextureMatrix, capTextureMatrix } = animation;
+    if (wallDynamicColor) {
+      sideMaterial.transparent = true;
+      sideMaterial.depthWrite = false;
+      this._animatedMaterials.push({ material: sideMaterial, dynamicColor: wallDynamicColor, source: 'obstacle' });
+    }
+    if (capDynamicColor) {
+      capMaterial.transparent = true;
+      capMaterial.depthWrite = false;
+      this._animatedMaterials.push({ material: capMaterial, dynamicColor: capDynamicColor, source: 'obstacle' });
+    }
+    if (wallTextureMatrix && sideMaterial.map) {
+      sideMaterial.map.matrixAutoUpdate = false;
+      this._animatedMaterials.push({ texture: sideMaterial.map, textureMatrix: wallTextureMatrix, source: 'obstacle' });
+    }
+    if (capTextureMatrix && capMaterial.map) {
+      capMaterial.map.matrixAutoUpdate = false;
+      this._animatedMaterials.push({ texture: capMaterial.map, textureMatrix: capTextureMatrix, source: 'obstacle' });
+    }
     this._sharedObstacleMaterials.set(key, materials);
     return materials;
   }
@@ -2414,6 +2629,11 @@ class RenderManager {
 
     const portalTextureFront = createTeleporterPortalTexture();
     const portalTextureBack = createTeleporterPortalTexture();
+    // `_updateTeleporterVisuals` drives `.matrix` directly every frame
+    // (`applyTextureMatrix`), so Three must not recompute it from
+    // `.offset`/`.repeat`/`.rotation` behind that.
+    portalTextureFront.matrixAutoUpdate = false;
+    portalTextureBack.matrixAutoUpdate = false;
 
     const centerMaterialFront = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -2563,10 +2783,28 @@ class RenderManager {
       const frontTexture = portalTextures[0];
       const backTexture = portalTextures[1];
       if (frontTexture) {
-        frontTexture.offset.y = -((timeSeconds * 0.05) % 1);
+        applyTextureMatrix(TELEPORTER_LINK_TEXTURE_MATRIX, timeSeconds, frontTexture.matrix);
       }
       if (backTexture) {
-        backTexture.offset.y = -((timeSeconds * 0.05) % 1);
+        applyTextureMatrix(TELEPORTER_LINK_TEXTURE_MATRIX, timeSeconds, backTexture.matrix);
+      }
+    }
+  }
+
+  // A map-authored `dyncol`/`texmat` (`_buildMeshObject`'s own registration,
+  // above) -- `DynamicColorManager::update`/`TextureMatrixManager::update`'s
+  // own per-frame pass (`DynamicColor.cxx:60-69`, `TextureMatrix.cxx:54-63`),
+  // one shared evaluation per named descriptor rather than a separate one
+  // per material, matching upstream's own manager loop.
+  _updateAnimatedMaterials(timeSeconds = 0) {
+    for (const entry of this._animatedMaterials) {
+      if (entry.dynamicColor) {
+        const [r, g, b, a] = evaluateDynamicColor(entry.dynamicColor, timeSeconds);
+        entry.material.color.setRGB(r, g, b);
+        entry.material.opacity = a;
+      }
+      if (entry.textureMatrix) {
+        applyTextureMatrix(entry.textureMatrix, timeSeconds, entry.texture.matrix);
       }
     }
   }
@@ -2971,6 +3209,12 @@ class RenderManager {
       this._clearObjectForRemoval(mesh);
     });
     this.obstacleMeshes = [];
+    // A box/pyramid's own `dyncol`/`texmat` registration (see
+    // `_getSharedObstacleMaterials`) is tagged `source: 'obstacle'` so this
+    // can drop only its own entries -- `clearMeshes` may run before or after
+    // this during a world reload, and a blind reset here would race whichever
+    // one runs second.
+    this._animatedMaterials = this._animatedMaterials.filter((entry) => entry.source !== 'obstacle');
     // The eighth-dimension nodes are keyed by the obstacle objects the world
     // that is going away owns, so they go with it.
     this._clearInsideBuildings();
@@ -3141,6 +3385,12 @@ class RenderManager {
         const pyramidWallUrl = obs.wallTextureUrl || null;
         const pyramidCapUrl = obs.capTextureUrl || null;
         const pyramidUnlit = { side: !!obs.wallNoLighting, cap: !!obs.capNoLighting };
+        const pyramidAnimation = {
+          wallDynamicColor: obs.wallDynamicColor || null,
+          capDynamicColor: obs.capDynamicColor || null,
+          wallTextureMatrix: obs.wallTextureMatrix || null,
+          capTextureMatrix: obs.capTextureMatrix || null,
+        };
         const pyramidKey = [
           tint ? 'pyramidTinted' : 'pyramid',
           pyramidWallTexture ? `w-${pyramidWallTexture}` : '',
@@ -3149,6 +3399,10 @@ class RenderManager {
           pyramidCapUrl ? `cu-${pyramidCapUrl}` : '',
           pyramidUnlit.side ? 'wl' : '',
           pyramidUnlit.cap ? 'cl' : '',
+          `wd-${animIdentityKey(pyramidAnimation.wallDynamicColor)}`,
+          `cd-${animIdentityKey(pyramidAnimation.capDynamicColor)}`,
+          `wt-${animIdentityKey(pyramidAnimation.wallTextureMatrix)}`,
+          `ct-${animIdentityKey(pyramidAnimation.capTextureMatrix)}`,
         ].join('');
         this._addObstacleFragment(
           fragments,
@@ -3159,6 +3413,7 @@ class RenderManager {
             resolveObstacleTextureFactory(pyramidCapTexture, pyramidCapUrl, '/textures/roof.png', createRoofTexture),
             tint ? { flatShading: true, vertexColors: true } : { flatShading: true },
             pyramidUnlit,
+            pyramidAnimation,
           ),
           geometry,
           obstacleMatrix(),
@@ -3195,6 +3450,12 @@ class RenderManager {
         const boxWallUrl = obs.wallTextureUrl || null;
         const boxCapUrl = obs.capTextureUrl || null;
         const boxUnlit = { side: !!obs.wallNoLighting, cap: !!obs.capNoLighting };
+        const boxAnimation = {
+          wallDynamicColor: obs.wallDynamicColor || null,
+          capDynamicColor: obs.capDynamicColor || null,
+          wallTextureMatrix: obs.wallTextureMatrix || null,
+          capTextureMatrix: obs.capTextureMatrix || null,
+        };
         const boxKey = [
           flatOnGround ? 'boxFlat' : 'box',
           tint ? 'Tinted' : '',
@@ -3204,6 +3465,10 @@ class RenderManager {
           boxCapUrl ? `cu-${boxCapUrl}` : '',
           boxUnlit.side ? 'wl' : '',
           boxUnlit.cap ? 'cl' : '',
+          `wd-${animIdentityKey(boxAnimation.wallDynamicColor)}`,
+          `cd-${animIdentityKey(boxAnimation.capDynamicColor)}`,
+          `wt-${animIdentityKey(boxAnimation.wallTextureMatrix)}`,
+          `ct-${animIdentityKey(boxAnimation.capTextureMatrix)}`,
         ].join('');
         this._addObstacleFragment(
           fragments,
@@ -3219,6 +3484,7 @@ class RenderManager {
               ...(tint ? { vertexColors: true } : {}),
             },
             boxUnlit,
+            boxAnimation,
           ),
           // BoxSceneNodeGenerator.cxx:66, in its own words: "Don't generate the
           // bottom polygon if on the ground (or lower)".
@@ -3257,6 +3523,10 @@ class RenderManager {
       this._clearObjectForRemoval(object3D);
     });
     this.meshObjects = [];
+    // A mesh face's `dyncol`/`texmat` registration (see `_buildMeshObject`)
+    // is tagged `source: 'mesh'`, dropped here the same way `clearObstacles`
+    // drops only its own `'obstacle'`-tagged entries.
+    this._animatedMaterials = this._animatedMaterials.filter((entry) => entry.source !== 'mesh');
     // The labels themselves come down with their own mesh object already
     // (each is a child of it, per `_addDebugLabel`) -- this only clears the
     // bookkeeping entry `_updateDebugLabelsVisibility` would otherwise still
@@ -3406,7 +3676,8 @@ class RenderManager {
       const triangleCount = indices.length - triangleStart;
       if (triangleCount <= 0) return;
 
-      const key = `${face.texture || ''}|${face.textureUrl || ''}|${(face.color || []).join(',')}`;
+      const key = `${face.texture || ''}|${face.textureUrl || ''}|${(face.color || []).join(',')}`
+        + `|${animIdentityKey(face.dynamicColor)}|${animIdentityKey(face.textureMatrix)}`;
       let materialIndex = materialIndexByKey.get(key);
       if (materialIndex === undefined) {
         const textureFactory = resolveObstacleTextureFactory(
@@ -3422,6 +3693,29 @@ class RenderManager {
           map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha)),
         });
         if (face.color) material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);
+        // `dyncol` -- replaces this face's diffuse outright (see
+        // `evaluateDynamicColor`), so a static `color`/tint above is only
+        // ever this material's look before the first animation frame runs.
+        // Its alpha channel can vary too, so it gets the same
+        // depthWrite-off treatment as any other material that might not be
+        // fully opaque (`applyTextureAlpha` above) -- matching bzo's own
+        // "no self-occlusion through the depth buffer" rule rather than
+        // upstream's own `possibleAlpha` micro-optimization, which only ever
+        // skips a sort pass bzo does not have.
+        if (face.dynamicColor) {
+          material.transparent = true;
+          material.depthWrite = false;
+          this._animatedMaterials.push({ material, dynamicColor: face.dynamicColor, source: 'mesh' });
+        }
+        // `texmat` -- a live UV transform on this face's own texture. The
+        // texture object exists synchronously even though its image loads
+        // later (`resolveObstacleTextureFactory`'s own factories always
+        // return one right away), so it is safe to grab off `material.map`
+        // here rather than waiting on the alpha callback above.
+        if (face.textureMatrix && material.map) {
+          material.map.matrixAutoUpdate = false;
+          this._animatedMaterials.push({ texture: material.map, textureMatrix: face.textureMatrix, source: 'mesh' });
+        }
         materialIndex = materials.length;
         materials.push(material);
         materialIndexByKey.set(key, materialIndex);

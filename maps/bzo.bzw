@@ -9,11 +9,11 @@
 # IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
 # WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
 
-# The default world: every flag reachable within a short walk of the centre,
+# The default world: every flag reachable within a short walk of the center,
 # a base on each compass point, and a sample of bzo's obstacle geometry tests
 # in the four corners.
 #
-# `ID` sits alone at the centre. The ring immediately around it is every bad
+# `ID` sits alone at the center. The ring immediately around it is every bad
 # flag, clustered by what they do to a tank rather than laid out
 # alphabetically, so a `-sa`/`-sw` server exercises one theme at a time. The
 # outer ring is every good flag, alphabetically clockwise from north.
@@ -32,8 +32,9 @@ options
   -set _wingsJumpCount 4
   # keep flags only in their spawn zones
   -set _maxFlagGrabs 1
-  -srvmsg "Bad flags ring the centre; good flags ring those."
+  -srvmsg "Bad flags ring the center; good flags ring those."
   -srvmsg "Team bases sit on the compass points; test geometry is in the corners."
+  -srvmsg "Use Settings->Debug Labels to see flag zone names"
   # bad flag falls off in this many seconds
   -st 30
   # bad flag also falls off after this many kills.
@@ -1378,18 +1379,150 @@ physics
   death Tank Melted By The Test Pad
 end
 
+# The pads' own look, so each reads visually the way it behaves. Upstream has
+# no engine link at all between a `linear` driver and a `textureMatrix` --
+# checked directly against `$HOME/bzflag`: neither `PhysicsDriver` nor
+# `TextureMatrix` (`src/game/`) names the other anywhere in the tree, and no
+# real map sampled pairs a `linear` surface with a `texmat` on the same
+# obstacle either -- so a mapper tunes both by hand to agree, the same as
+# here: the stripe's own `shift` frequency is `test_conveyor`'s `linear`
+# speed (8) divided by a box cap's own tiling (`BOX_TEXTURE_SCALES.capScale`,
+# `public/render.js` -- 2 units/tile), so one tile's worth of stripe crosses
+# the pad every `capScale / speed` seconds, matching the physical push
+# exactly rather than an arbitrary scroll rate.
+textureMatrix
+  name conveyor_scroll
+  shift 4 0
+end
+
+material
+  name conveyor_look
+  addtexture caution
+  texmat conveyor_scroll
+end
+
+dynamicColor
+  name death_pulse
+  alpha limits 0.3 1
+  alpha sinusoid 1 0 1
+end
+
+material
+  name death_look
+  dyncol death_pulse
+  addtexture caution
+  nolighting
+end
+
 box
   name PD_Conveyor
-  position -45 -70 0
+  position -135 -100 0
   size 3 3 0.1
   phydrv test_conveyor
+  matref conveyor_look
 end
 
 box
   name PD_Death
-  position -35 -70 0
+  position -135 -125 0
   size 3 3 0
   phydrv test_death
+  matref death_look
+end
+
+# `dyncol`/`texmat` -- a material's own tint or UV animated from a named
+# `dynamicColor`/`textureMatrix` block, resolved once at parse time and
+# evaluated fresh every frame by `evaluateDynamicColor`/`applyTextureMatrix`
+# in `public/render.js`. See "Animated materials" in `docs/bzw.md` for the
+# real maps (`import-Planet-MoFo.com_4202.bzw`'s own `stripetrix`/
+# `billboard*`) this is validated against. Two signs, one per mechanism, at
+# the field spot the physics driver pads freed up when they moved to the
+# west wall above: a scrolling stripe (`texmat`) and a colour-cycling beacon
+# (`dyncol`), built the same double-sided, `passable` quad `billboard_bush`
+# already demonstrates.
+textureMatrix
+  name stripe_scroll
+  shift 0 0.3
+end
+
+material
+  name stripe_sign
+  addtexture caution
+  texmat stripe_scroll
+  nolighting
+end
+
+dynamicColor
+  name beacon_cycle
+  red limits 0.2 1
+  red sinusoid 2 0 1
+  green limits 0.2 1
+  green sinusoid 2 0.67 1
+  blue limits 0.2 1
+  blue sinusoid 2 1.33 1
+end
+
+material
+  name beacon_sign
+  dyncol beacon_cycle
+  addtexture caution
+  nolighting
+end
+
+define anim_stripe_quad
+  mesh
+    vertex -1.5 0 0
+    vertex 1.5 0 0
+    vertex 1.5 0 4
+    vertex -1.5 0 4
+    texcoord 0 0
+    texcoord 1 0
+    texcoord 1 1
+    texcoord 0 1
+    passable
+    face
+      vertices 0 1 2 3
+      texcoords 0 1 2 3
+      matref stripe_sign
+    endface
+    face #backside
+      vertices 1 0 3 2
+      texcoords 1 0 3 2
+      matref stripe_sign
+    endface
+  end
+enddef
+
+group anim_stripe_quad
+  shift -45 -70 0
+end
+
+define anim_beacon_quad
+  mesh
+    vertex -1.5 0 0
+    vertex 1.5 0 0
+    vertex 1.5 0 4
+    vertex -1.5 0 4
+    texcoord 0 0
+    texcoord 1 0
+    texcoord 1 1
+    texcoord 0 1
+    passable
+    face
+      vertices 0 1 2 3
+      texcoords 0 1 2 3
+      matref beacon_sign
+    endface
+    face #backside
+      vertices 1 0 3 2
+      texcoords 1 0 3 2
+      matref beacon_sign
+    endface
+  end
+enddef
+
+group anim_beacon_quad
+  shift -35 -70 0
 end
 
 # All six primitives that expand to a mesh upstream are read now --
