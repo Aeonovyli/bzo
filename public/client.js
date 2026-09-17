@@ -1987,6 +1987,7 @@ function applyWorldData(world) {
   renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls);
   renderManager.createMountains(currentWorldMapSize);
   renderManager.buildWater(currentWorldMapSize, world?.waterLevel || null);
+  renderManager.buildWeather(currentWorldMapSize, world?.weather || null, OBSTACLES);
 }
 
 async function prepareInitialRender(message, sequenceId) {
@@ -13878,6 +13879,7 @@ function animate(frameTime) {
     // map actually on screen rather than the live match's.
     renderManager.updateClouds(deltaTime, currentWorldMapSize ?? DEFAULT_MAP_SIZE);
   }
+  renderManager.updateWeather(deltaTime);
   if (deathFollowTarget && !deathFollowTarget.parent) {
     deathFollowTarget = null;
     renderManager.deathFollowTarget = null;

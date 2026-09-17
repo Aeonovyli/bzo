@@ -1,0 +1,30 @@
+#
+# `_rainType` -- one map-wide `-set` variable that turns on rain, textured
+# drops that fall from the sky and puddle where they land. See "Weather" in
+# docs/bzw.md.
+#
+# A roofed shelter sits at the centre so a look underneath it shows the other
+# half of the effect: drops stop at the roof (`_rainRoofs`'s default culling)
+# rather than falling through, and no puddle forms there either, since the
+# ground beneath a roof never actually gets rained on.
+#
+options
+	-set _rainType rain
+end
+
+world
+name weather
+size 200.0
+end
+
+box
+name shelter_roof
+position 0.0 0.0 20.0
+size 30.0 30.0 2.0
+end
+
+box
+name shelter_post
+position 0.0 0.0 0.0
+size 3.0 3.0 20.0
+end

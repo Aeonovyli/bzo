@@ -510,6 +510,7 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _maxFlagGrabs <n>` | how many pickups a superflag survives |
 | `-set _wingsJumpCount <n>` | how many times `WG` Wings may flap before it needs the ground again |
 | `-set _maxBumpHeight <n>` | how high a step a tank may climb without jumping |
+| `-set _rainType <rain\|snow\|fatrain\|frog\|particle\|bubble>` | turns on weather -- see **Weather** |
 | `-srvmsg <text>` | a line the world says to each player as they join |
 | `-admsg <text>` | a line said to everyone already playing, repeated every 15 minutes |
 
@@ -744,6 +745,63 @@ on every move, not a surface anything bounces off or stops at.
 single-sided, depth-writing quad -- a deliberate keep rather than an unnoticed
 side effect of `DoubleSide`/`depthWrite: false` in `render.js`'s `buildWater`.
 See "Intentional deviations from BZFlag" in `AGENTS.md`.
+
+## Weather
+
+`-set _rainType <preset>` (`src/bzflag/WeatherRenderer.cxx`) -- the generic
+`-set` mechanism above, not a block of its own, the same as `_maxFlagGrabs`.
+Nothing shows unless a map names one of upstream's six presets: `rain`,
+`snow`, `fatrain`, `frog`, `particle`, `bubble`. `maps/weather.bzw` names
+`rain` and puts a small roofed shelter over the origin to preview the roof
+culling below; view it through Map Viewer (`?viewmap=weather.bzw`) -- purely a
+client render, so no live match is needed.
+
+Every drop falls (or, for `bubble`, rises) from high above the map, resets
+when it reaches the ground or a roof, and -- for the presets that carry
+puddles -- leaves a splash there that grows and fades over
+`_rainMaxPuddleTime`. Upstream reads a dozen more `_rain*` variables to tune
+one of these presets; bzo reads the ones that still mean something once one
+rendering path replaces upstream's three (see below):
+
+| `-set` variable | tunes |
+|---|---|
+| `_rainDensity <n>` | how many drops are ever in the air at once |
+| `_rainSpread <n>` | how far from the map's centre a drop may fall |
+| `_rainSpeed <n>`, `_rainSpeedMod <n>` | fall speed, and how much it varies drop to drop |
+| `_rainStartZ <n>`, `_rainEndZ <n>` | the top and bottom of the fall |
+| `_rainTexture <name>`, `_rainPuddleTexture <name>` | either stock texture, overriding the preset's own |
+| `_useRainPuddles <0\|1>` | puddles on or off, overriding the preset's own |
+| `_rainMaxPuddleTime <n>`, `_rainPuddleSpeed <n>` | how long a puddle lasts, and how fast it grows |
+| `_rainSpins <0\|1>` | whether a drop tumbles as it falls |
+| `_rainRoofs <0\|1\|2>` | `0` lets rain fall through a roof to the ground beneath; `1` (upstream's default) stops it at the first roof; `2` also puddles the roof itself |
+
+`_rainBaseColor` and `_rainTopColor` are read by nothing here: both tint
+upstream's `GL_LINES` streak alone, and that rendering path does not exist on
+bzo -- see below. `_useLineRain`, `_useRainBillboards` and `userRainScale` are
+the same kind of absence for a different reason: "**Implement the
+highest-quality option upstream has for a given effect, and ship no setting
+for it**" (`AGENTS.md`) means bzo already draws the best-looking variant of
+each preset and has nothing for these to switch between. `_rainSize` is left
+to the preset alone -- a map wanting one particular drop size is better served
+naming its own `_rainTexture` on a preset already close to the size it wants.
+
+**One rendering path carries every preset**, rather than upstream's three:
+`doLineRain`'s `GL_LINES` streak (`rain` upstream, replaced here by the same
+textured cross the other falling presets use, sized on its own since a
+textured quad has no upstream-supplied width to inherit from a zero-width
+line), a camera-facing billboard (`frog`, `particle`, `bubble`), and a
+non-billboard "cross" of three quads 120 degrees apart that need not face the
+camera at all (`snow`, `fatrain`, and now `rain`). `render.js`'s
+`WEATHER_PRESETS` is the table of which preset gets which texture, speed,
+size, and puddle colour, each a comment's citation away from the
+`WeatherRenderer::set()` branch it came from.
+
+**Roof culling is a downward raycast against the same obstacles a shot
+collides with**, not upstream's own octree (`RoofTops::getTopHeight`) --
+`findShotSegmentImpact` from the `collision` pair, re-used rather than ported,
+skipping teleporters exactly as upstream's own comment says to ("the physics
+for teles is whacked"). Asked once per drop, when it starts a new fall, not
+every frame.
 
 **A map with water needs real ground above the waterline for every team that
 plays it.** Upstream forces `-fb` on unasked the moment a map's `waterLevel`
@@ -1060,10 +1118,11 @@ loads and plays with that part of it missing. The notable absences:
   type any flag of which spawns in the zone; a map using it is named in the
   load log rather than skipped silently, because a spawn zone that is ignored
   moves every tank in the world.
-- **Every `-set` variable but `_maxFlagGrabs`, `_wingsJumpCount` and
-  `_maxBumpHeight`.** bzo's world constants are constants, and these three are
-  the ones it already keeps a configurable copy of; see `docs/flags.md`. A map
-  that sets another is named on load.
+- **Every `-set` variable but `_maxFlagGrabs`, `_wingsJumpCount`,
+  `_maxBumpHeight`, and the `_rain*` family.** bzo's world constants are
+  constants, and these are the ones it already keeps a configurable copy of;
+  see `docs/flags.md` and **Weather** above. A map that sets another is named
+  on load.
 
 A map that needs any of these is not rejected -- it is worth knowing that it
 loaded rather than that it loaded *correctly*.

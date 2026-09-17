@@ -282,43 +282,6 @@ What's left:
       `base_pillar` define (`base_oval`'s `down5`/`down11`) is the real map
       that exercises this.
 
-## Weather
-
-Rain, and the five other particle presets `_rainType` names -- `snow`,
-`fatrain`, `frog`, `particle`, `bubble`, plain `rain` -- plus the `_rain*`
-BZDB family that tunes one (`_rainDensity`, `_rainSpeed`, `_rainSpeedMod`,
-`_rainSpread`, `_rainSize`, `_rainStartZ`/`_rainEndZ`, `_rainBaseColor`/
-`_rainTopColor`, `_rainTexture`, `_useRainPuddles`/`_rainPuddleColor`/
-`_rainPuddleTexture`/`_rainMaxPuddleTime`/`_rainPuddleSpeed`, `_useLineRain`,
-`_useRainBillboards`, `_rainSpins`, `_rainRoofs`). `src/bzflag/WeatherRenderer.cxx`
-picks a preset's defaults for every one of those a map or config does not
-override; `_rainRoofs` beyond 1 also decals puddles onto roof surfaces the
-rest of the rain is culled above (`src/bzflag/RoofTops.cxx`).
-
-There is no BZW keyword of its own -- like `_maxFlagGrabs`, this is the
-generic `-set` mechanism `docs/bzw.md` already threads into `GAME_CONFIG`, a
-map's `options` block setting a locked BZDB variable no player-facing setting
-ever touches. It gets a section here rather than living under "Leftovers"
-because it is a dozen variables that only make sense set together, not one
-value with one meaning, and because "**Implement the highest quality option
-upstream has for a given effect, and ship no setting for it**" (`AGENTS.md`,
-"bzo does not mirror BZFlag's client display options") applies directly: pick
-the best-looking preset's rendering path -- billboarded drops, textured,
-puddled, roof-culled -- and do not carry `doLineRain`'s plain streaks or
-`userRainScale` as a client setting.
-
-Purely a client render: no collision, nothing a shot or a tank interacts with,
-so a preview map is sufficient on its own -- no live match, no second client,
-and Map Viewer's driveable phantom tank is not even needed, just look at the
-sky.
-
-- [ ] Parse the `_rain*` family through the map's `options` block into
-      `GAME_CONFIG`, `-set`'s existing path.
-- [ ] Pick one rendering path (billboarded particles, textured, puddled,
-      roof-culled at `_rainRoofs` 2) and build every preset atop it rather
-      than porting `doLineRain`/`doBillBoards` as a second code path.
-- [ ] A small map naming one preset, to preview in Map Viewer.
-
 ## Leftovers
 
 Small enough to fold into whichever section lands near them, or to take as a

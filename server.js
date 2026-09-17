@@ -1308,7 +1308,7 @@ async function performRemoteMapImport(host, port) {
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
   const mapData = parseBZWMap(filePath);
-  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel);
+  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather);
   return { safeMapName, byteLength: worldDatabase.length };
 }
 
@@ -2682,6 +2682,32 @@ function buildSphereMesh(sphere) {
   };
 }
 
+// `_rainType` (`WeatherRenderer.cxx`): the preset names upstream recognizes.
+// bzo picks one rendering path per effects-menu.md's rule -- textured, spun or
+// billboarded, roof-culled and puddled -- and builds every preset on it rather
+// than porting `doLineRain`'s plain streaks, so "rain" gets the same textured
+// look as "fatrain" rather than upstream's `GL_LINES` streak. See "Weather" in
+// docs/bzw.md.
+const WEATHER_RAIN_TYPES = new Set(['rain', 'snow', 'fatrain', 'frog', 'particle', 'bubble']);
+
+// The single-value `_rain*` variables that still mean something once
+// `doLineRain`/`useRainBillboards`/`userRainScale` are gone -- `_rainBaseColor`
+// and `_rainTopColor` are dropped for the same reason: both tint upstream's
+// line-rain vertices alone (`drawDrop`'s non-line branch always draws white),
+// so they would be no-ops here. Mapped to the `weather` field bzo's own JSON
+// uses, not upstream's BZDB name, since the client never reads a BZDB var.
+const WEATHER_RAIN_NUMERIC_VARS = new Map([
+  ['_rainDensity', 'density'],
+  ['_rainSpread', 'spread'],
+  ['_rainSpeed', 'speed'],
+  ['_rainSpeedMod', 'speedMod'],
+  ['_rainStartZ', 'startZ'],
+  ['_rainEndZ', 'endZ'],
+  ['_rainMaxPuddleTime', 'maxPuddleTime'],
+  ['_rainPuddleSpeed', 'puddleSpeed'],
+  ['_rainRoofs', 'roofs'],
+]);
+
 function parseBZWServerOptions(lines) {
   let inOptions = false;
   // Every other field is left absent unless the map names it. `forbiddenFlags`
@@ -2854,6 +2880,36 @@ function parseBZWServerOptions(lines) {
         const bump = Number(setValue);
         if (Number.isFinite(bump) && bump >= 0) {
           options.maxBumpHeight = bump;
+        }
+      } else if (value === '_rainType') {
+        // The one weather variable whose value is a preset name rather than a
+        // number. Nothing here turns weather on without it -- a map that sets
+        // only `_rainDensity` or another tuning variable below is read but has
+        // nothing to apply it to, upstream's own `rainType`-less path being an
+        // edge case not worth reproducing.
+        const type = (setValue || '').trim().toLowerCase();
+        if (WEATHER_RAIN_TYPES.has(type)) {
+          options.weather = { ...(options.weather || {}), type };
+        } else if (type && type !== 'none') {
+          options.unreadBZDBVars.push(`_rainType=${setValue}`);
+        }
+      } else if (WEATHER_RAIN_NUMERIC_VARS.has(value)) {
+        const num = Number(setValue);
+        if (Number.isFinite(num)) {
+          options.weather = { ...(options.weather || {}), [WEATHER_RAIN_NUMERIC_VARS.get(value)]: num };
+        }
+      } else if (value === '_useRainPuddles' || value === '_rainSpins') {
+        // `BZDB.isTrue`'s own reading: `atoi(value) != 0`, so "true" is false
+        // and only a nonzero number is true.
+        const parsed = parseInt(setValue, 10);
+        const truthy = Number.isFinite(parsed) && parsed !== 0;
+        const field = value === '_useRainPuddles' ? 'puddles' : 'spin';
+        options.weather = { ...(options.weather || {}), [field]: truthy };
+      } else if (value === '_rainTexture' || value === '_rainPuddleTexture') {
+        const textureName = (setValue || '').trim().toLowerCase();
+        if (BZW_STOCK_TEXTURES.has(textureName)) {
+          const field = value === '_rainTexture' ? 'texture' : 'puddleTexture';
+          options.weather = { ...(options.weather || {}), [field]: textureName };
         }
       } else {
         options.unreadBZDBVars.push(value);
@@ -5492,6 +5548,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     noWalls: mapNoWalls,
     freeCtfSpawns: mapFreeCtfSpawns,
     waterLevel: mapWaterLevel,
+    weather: serverOptions.weather || null,
     messages,
   };
 }
@@ -5587,6 +5644,11 @@ let mapFreeCtfSpawns = false;
 // the live map's own JSON (`registerMapFile`) for the client to draw the
 // plane itself.
 let mapWaterLevel = null;
+// `weather` -- `null` when the map states no `_rainType`. Purely a client
+// render (see "Weather" in docs/bzw.md), so unlike `mapWaterLevel` this has no
+// server-side reader of its own; it only rides along in the live map's own
+// JSON (`registerMapFile`) the same way.
+let mapWeather = null;
 if (MAP_SOURCE === 'random') {
   OBSTACLES = generateObstacles();
   TELEPORTER_GRAPH = { teleporters: [], links: [] };
@@ -5616,6 +5678,8 @@ if (MAP_SOURCE === 'random') {
   if (mapFreeCtfSpawns) log('Map option freeCtfSpawns: a colour team spawns in any of its zones every life');
   mapWaterLevel = mapData.waterLevel || null;
   if (mapWaterLevel) log(`Map option waterLevel: height=${mapWaterLevel.height}`);
+  mapWeather = mapData.weather || null;
+  if (mapWeather) log(`Map option _rainType: ${mapWeather.type}`);
   log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
   const meshObstacleCount = OBSTACLES.filter((obs) => obs.type === 'mesh').length;
   if (meshObstacleCount > 0) {
@@ -5659,7 +5723,7 @@ try {
 // second, brotli-only cache would only complicate the pipeline for no real
 // disk saving, so this reuses it exactly as public/'s assets do, raw copy and
 // negotiated fallback included.
-function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel) {
+function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel, weather) {
   // Seeded from the map's own geometry (not from `fileName`, so a map that is
   // renamed but not edited still lands on the same clouds and the same hash)
   // -- deterministic across processes, unlike `MAP_SOURCE === 'random'`'s
@@ -5685,6 +5749,11 @@ function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize
     // JSON too (see `applyWorldData`/`buildWater` in client.js/render.js),
     // `null` when the map states none.
     waterLevel: waterLevel || null,
+    // `weather` -- a Map Viewer preview draws it from this same JSON too (see
+    // `applyWorldData`/`buildWeather` in client.js/render.js), `null` when the
+    // map states no `_rainType`. Purely a client render: no collision, so
+    // there is no server-side equivalent of `mapWaterLevel`'s kill check.
+    weather: weather || null,
     // What this map says to a player who arrives on it -- -srvmsg lines and
     // the dropped-unsupported-feature tally, both from parseBZWMap. Read by
     // the client only at the moment it actually starts viewing this map
@@ -5806,8 +5875,8 @@ function sweepStaleImports() {
 }
 
 const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
-  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel)
-  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel);
+  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel, null)
+  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel, mapWeather);
 
 // A Map Viewer's requested map file, checked against what this process has
 // actually hashed -- the client fetched its preview from `init.viewableMaps`
@@ -5856,7 +5925,7 @@ function hashRemainingMapsInBackground() {
         // actually views or joins it to see (`mapData.messages`, still
         // built either way), not a log line about a map nobody chose today.
         const mapData = parseBZWMap(filePath, { quiet: true });
-        if (registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel)) {
+        if (registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather)) {
           converted += 1;
         }
       }

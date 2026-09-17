@@ -27,7 +27,9 @@ import {
   loadAudioBuffer,
 } from './audio.js';
 import {
+  TANK_HEIGHT,
   WORLD_WALL_HEIGHT,
+  findShotSegmentImpact,
   getObstacleHeight,
   getPyramidSurfaceLocalHeight,
 } from './collision.mjs';
@@ -838,6 +840,174 @@ const TRACK_MARK_CAPACITY = 512;
 const TRACK_MARK_QUADS = 2;
 const TRACK_MARK_VERTICES = TRACK_MARK_QUADS * 4;
 const TRACK_MARK_INDICES = TRACK_MARK_QUADS * 6;
+
+// Weather (`_rainType`, `src/bzflag/WeatherRenderer.cxx`). A map's own `-set
+// _rainType <preset>` is what turns this on at all -- see "Weather" in
+// docs/bzw.md -- so every field below is only ever a preset's default,
+// overridable by the handful of `_rain*` siblings the server parses.
+//
+// bzo builds one rendering path rather than upstream's three (line rain,
+// billboarded quads, and a non-billboard "cross" of three quads 120 degrees
+// apart, upstream's own volumetric stand-in for a raindrop that need not face
+// the camera): the cross for `rain`/`snow`/`fatrain`, camera-facing billboards
+// for `frog`/`particle`/`bubble`. `doLineRain`'s GL_LINES streak has no
+// equivalent here, so `rain` gets the cross too, sized on its own rather than
+// upstream's zero-width line.
+const WEATHER_RENDER_ORDER = 21;
+const WEATHER_DEFAULT_DENSITY = 1000;
+const WEATHER_DEFAULT_SPREAD = 500;
+const WEATHER_DEFAULT_MAX_PUDDLE_TIME = 1.5;
+const WEATHER_DEFAULT_PUDDLE_SPEED = 1.0;
+// Same reasoning as `TRACK_MARK_CAPACITY`: a bound on live splashes rather
+// than upstream's unbounded `std::vector`, so a crowded sky shortens every
+// puddle's life instead of growing memory.
+const WEATHER_PUDDLE_CAPACITY = 512;
+// `RoofTops::getTopHeight`'s ray needs no real thickness; this is a point
+// test, not a shot's own collision radius.
+const WEATHER_ROOF_RAY_RADIUS = 0.1;
+// `120.0f * BZDBCache::tankHeight`, "same as the clouds" -- WeatherRenderer.cxx:351.
+const WEATHER_SKY_HEIGHT = 120 * TANK_HEIGHT;
+
+// `WeatherRenderer::set()`'s per-`_rainType` deltas over its own outer
+// defaults (density 1000, speed -100/50, size 1x1, spin on, puddles on, white
+// puddles, puddleSpeed 1). `_rainBaseColor`/`_rainTopColor` are absent because
+// they tint upstream's line-rain vertices alone -- `drawDrop`'s textured and
+// billboard branches always draw white -- so they would be no-ops on bzo's
+// single rendering path; `docs/bzw.md` documents the omission.
+const WEATHER_PRESETS = {
+  rain: {
+    texture: 'raindrop', size: [0.3, 0.75], speed: -100, speedMod: 50,
+    spin: true, billboard: false, puddles: true, puddleColor: [1, 1, 1],
+  },
+  snow: {
+    texture: 'snowflake', size: [1, 1], speed: -20, speedMod: 5,
+    spin: true, billboard: false, puddles: false, puddleColor: [1, 1, 1],
+  },
+  fatrain: {
+    texture: 'raindrop', size: [0.5, 0.75], speed: -50, speedMod: 25,
+    spin: false, billboard: false, puddles: true, puddleColor: [1, 1, 1],
+  },
+  frog: {
+    texture: 'frog', size: [2, 2], speed: -100, speedMod: 5,
+    spin: true, billboard: true, puddles: true, puddleColor: [0.75, 0, 0], puddleSpeed: 3,
+  },
+  particle: {
+    texture: 'red_super_bolt', size: [1, 1], speed: -20, speedMod: 5,
+    spin: true, billboard: true, puddles: true, puddleColor: [1, 0, 0], puddleSpeed: 10,
+    density: 500,
+  },
+  bubble: {
+    texture: 'bubble', size: [1, 1], speed: 20, speedMod: 1,
+    spin: true, billboard: true, puddles: false, puddleColor: [1, 1, 1],
+  },
+};
+
+// The "cross" of three quads 120 degrees apart around the vertical axis,
+// standing upright -- `WeatherRenderer::buildDropList`'s non-billboard path,
+// translated through bzo's `(x, z, -y)` axis swap: upstream's vertical quad
+// spans its X and Z (up) axes at Y=0, which is bzo's X and Y (up) at Z=0, and
+// its `glRotatef(_, 0, 0, 1)` (about upstream's up axis) is a rotation about
+// bzo's Y for the same reason.
+function buildWeatherCrossGeometry(halfW, halfH) {
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  const corner = new THREE.Vector3();
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  for (let plane = 0; plane < 3; plane += 1) {
+    const angle = (plane * Math.PI * 2) / 3;
+    const base = positions.length / 3;
+    const corners = [
+      [-halfW, -halfH], [halfW, -halfH], [-halfW, halfH], [halfW, halfH],
+    ];
+    for (const [x, y] of corners) {
+      corner.set(x, y, 0).applyAxisAngle(yAxis, angle);
+      positions.push(corner.x, corner.y, corner.z);
+    }
+    uvs.push(0, 0, 1, 0, 0, 1, 1, 1);
+    indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
+// A single camera-facing quad -- `doBillBoards`'s path, upstream's own
+// `sr.getViewFrustum().executeBillboard()`. The instance's own rotation is set
+// to the camera's each frame (see `_advanceWeatherDrops`) rather than baked
+// into the geometry.
+function buildWeatherBillboardGeometry(halfW, halfH) {
+  const geometry = new THREE.PlaneGeometry(halfW * 2, halfH * 2);
+  return geometry;
+}
+
+// A flat decal on the ground -- `WeatherRenderer::buildPuddleList`, upstream's
+// own unit quad in its X-Y (ground) plane, which is bzo's X-Z.
+function buildWeatherPuddleGeometry() {
+  const geometry = new THREE.PlaneGeometry(2, 2);
+  geometry.rotateX(-Math.PI / 2);
+  return geometry;
+}
+
+const WEATHER_VERTEX_SHADER = `
+attribute float instanceAlpha;
+varying vec2 vUv;
+varying float vAlpha;
+void main() {
+  vUv = uv;
+  vAlpha = instanceAlpha;
+  vec4 worldPosition = instanceMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * modelViewMatrix * worldPosition;
+}
+`;
+
+const WEATHER_FRAGMENT_SHADER = `
+uniform sampler2D map;
+uniform vec3 tint;
+varying vec2 vUv;
+varying float vAlpha;
+void main() {
+  vec4 texColor = texture2D(map, vUv);
+  float a = texColor.a * vAlpha;
+  if (a < 0.02) discard;
+  gl_FragColor = vec4(texColor.rgb * tint, a);
+}
+`;
+
+// One instanced draw call per mesh regardless of how many drops or puddles are
+// alive -- `glDepthMask(GL_FALSE)` and `GL_SRC_ALPHA`/`GL_ONE_MINUS_SRC_ALPHA`
+// upstream's own blend, `glDisable(GL_CULL_FACE)` its own `DoubleSide`. Alpha is
+// per-instance (`instanceAlpha`) rather than per-material, since a raindrop
+// fades as it nears the ground and a puddle fades as it ages -- something no
+// built-in Three.js material varies per `InstancedMesh` instance.
+function createWeatherMaterial(texture, tint = [1, 1, 1]) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: texture },
+      tint: { value: new THREE.Color(tint[0], tint[1], tint[2]) },
+    },
+    vertexShader: WEATHER_VERTEX_SHADER,
+    fragmentShader: WEATHER_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+}
+
+// `RoofTops::getTopHeight`: a straight ray down from above the world to the
+// ground, stopping at the first obstacle it meets -- upstream skips
+// teleporters for the same reason `findShotSegmentImpact` already does
+// (`obs.kind === 'teleporter'`), "the physics for teles is whacked, imho".
+// Never negative, upstream's own floor.
+function getWeatherTopHeight(obstacles, x, z, maxHeight) {
+  const impact = findShotSegmentImpact(
+    obstacles, { x, y: maxHeight, z }, { x, y: 0, z }, WEATHER_ROOF_RAY_RADIUS,
+  );
+  if (!impact) return 0;
+  return Math.max(0, maxHeight * (1 - impact.fraction));
+}
 
 // BZFlag gives every dynamic light the same falloff, 1/(c + l*d + q*d*d) --
 // bolts (BoltSceneNode.cxx:52-55), jump jets (TankSceneNode.cxx:75-83) and
@@ -2991,6 +3161,227 @@ class RenderManager {
       texture.matrixAutoUpdate = false;
       this._animatedMaterials.push({ texture, textureMatrix: waterLevel.textureMatrix, source: 'water' });
     }
+  }
+
+  clearWeather() {
+    const weather = this._weather;
+    if (!weather) return;
+    this.worldGroup.remove(weather.dropMesh);
+    weather.dropMesh.geometry.dispose();
+    weather.dropMesh.material.map?.dispose();
+    weather.dropMesh.material.dispose();
+    if (weather.puddleMesh) {
+      this.worldGroup.remove(weather.puddleMesh);
+      weather.puddleMesh.geometry.dispose();
+      weather.puddleMesh.material.map?.dispose();
+      weather.puddleMesh.material.dispose();
+    }
+    this._weather = null;
+  }
+
+  // `_rainType` -- see "Weather" in docs/bzw.md and the comment over
+  // `WEATHER_PRESETS`. `obstacles` is the same raw list `setObstacles` and
+  // `setMeshes` split apart, kept here only for `getWeatherTopHeight`'s roof
+  // raycast at each drop's reset -- not every frame, since a drop only needs a
+  // new answer when it starts a new fall.
+  buildWeather(mapSize, weather, obstacles) {
+    if (!this.scene) return;
+    this.clearWeather();
+    const preset = weather && WEATHER_PRESETS[weather.type];
+    if (!preset) return;
+
+    const density = Math.max(0, Math.round(weather.density ?? preset.density ?? WEATHER_DEFAULT_DENSITY));
+    if (density === 0) return;
+    const spread = weather.spread ?? WEATHER_DEFAULT_SPREAD;
+    const speed = weather.speed ?? preset.speed;
+    const speedMod = weather.speedMod ?? preset.speedMod;
+    const falling = speed < 0;
+    let startZ = weather.startZ;
+    let endZ = weather.endZ;
+    if (!Number.isFinite(startZ) && !Number.isFinite(endZ)) {
+      startZ = falling ? WEATHER_SKY_HEIGHT : 0;
+      endZ = falling ? 0 : WEATHER_SKY_HEIGHT;
+    } else {
+      startZ = Number.isFinite(startZ) ? startZ : 0;
+      endZ = Number.isFinite(endZ) ? endZ : 0;
+      // "make sure they make sense with the direction" -- WeatherRenderer.cxx:363-385.
+      if (falling && endZ > startZ) [startZ, endZ] = [endZ, startZ];
+      if (!falling && endZ < startZ) [startZ, endZ] = [endZ, startZ];
+    }
+    const roofs = weather.roofs ?? 1;
+    const cullRoofTops = roofs >= 1;
+    const roofPuddles = roofs >= 2;
+    const doPuddles = weather.puddles ?? preset.puddles;
+    const spin = weather.spin ?? preset.spin;
+    const { billboard } = preset;
+    const [halfW, halfH] = preset.size;
+    const puddleColor = preset.puddleColor || [1, 1, 1];
+    const puddleSpeed = weather.puddleSpeed ?? preset.puddleSpeed ?? WEATHER_DEFAULT_PUDDLE_SPEED;
+    const maxPuddleTime = weather.maxPuddleTime ?? WEATHER_DEFAULT_MAX_PUDDLE_TIME;
+
+    const textureName = weather.texture || preset.texture;
+    const puddleTextureName = weather.puddleTexture || 'puddle';
+    const dropTexture = createStockMaterialTexture(textureName);
+    const puddleTexture = createStockMaterialTexture(puddleTextureName);
+
+    const dropGeometry = billboard
+      ? buildWeatherBillboardGeometry(halfW, halfH)
+      : buildWeatherCrossGeometry(halfW, halfH);
+    const dropMaterial = createWeatherMaterial(dropTexture);
+    const dropMesh = new THREE.InstancedMesh(dropGeometry, dropMaterial, density);
+    dropMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // Upstream draws every drop with no frustum test at all --
+    // `_CULLING_RAIN` is compiled out (`#define _CULLING_RAIN false`), so the
+    // "smart" chunked culling in `WeatherRenderer.cxx` is dead code even
+    // there.
+    dropMesh.frustumCulled = false;
+    dropMesh.renderOrder = WEATHER_RENDER_ORDER;
+    dropGeometry.setAttribute(
+      'instanceAlpha', new THREE.InstancedBufferAttribute(new Float32Array(density).fill(1), 1),
+    );
+
+    let puddleMesh = null;
+    if (doPuddles) {
+      const puddleGeometry = buildWeatherPuddleGeometry();
+      const puddleMaterial = createWeatherMaterial(puddleTexture, puddleColor);
+      puddleMesh = new THREE.InstancedMesh(puddleGeometry, puddleMaterial, WEATHER_PUDDLE_CAPACITY);
+      puddleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      puddleMesh.frustumCulled = false;
+      puddleMesh.renderOrder = WEATHER_RENDER_ORDER;
+      puddleMesh.count = 0;
+      puddleGeometry.setAttribute(
+        'instanceAlpha', new THREE.InstancedBufferAttribute(new Float32Array(WEATHER_PUDDLE_CAPACITY), 1),
+      );
+    }
+
+    const posX = new Float32Array(density);
+    const posY = new Float32Array(density);
+    const posZ = new Float32Array(density);
+    const dropSpeed = new Float32Array(density);
+    const roofTop = new Float32Array(density);
+    const spinPhase = new Float32Array(density);
+
+    this._weather = {
+      preset, density, spread, speed, speedMod, halfW, halfH, startZ, endZ, falling,
+      cullRoofTops, roofPuddles, doPuddles, spin, billboard, puddleSpeed, maxPuddleTime,
+      obstacles, dropMesh, posX, posY, posZ, dropSpeed, roofTop, spinPhase,
+      puddleMesh, puddles: [], dummy: new THREE.Object3D(),
+    };
+
+    // Seed every drop scattered across the whole fall/rise, upstream's own
+    // `rainStartZ + bzfrand() * rainHeightDelta` -- otherwise the sky would
+    // visibly "fill in" from empty over the first few seconds.
+    for (let i = 0; i < density; i += 1) {
+      posX[i] = (Math.random() * 2 - 1) * spread;
+      posZ[i] = (Math.random() * 2 - 1) * spread;
+      posY[i] = startZ + (Math.random() * (endZ - startZ));
+      dropSpeed[i] = speed + ((Math.random() * 2 - 1) * speedMod);
+      roofTop[i] = (cullRoofTops && falling) ? getWeatherTopHeight(obstacles, posX[i], posZ[i], startZ) : 0;
+    }
+
+    this.worldGroup.add(this._tagDraws(dropMesh, 'effect'));
+    if (puddleMesh) this.worldGroup.add(this._tagDraws(puddleMesh, 'effect'));
+
+    this._advanceWeatherDrops(this._weather, 0);
+  }
+
+  // `WeatherRenderer::update` -- moves every drop, resets one that reached the
+  // ground or its roof (spawning a puddle first, unless the preset or
+  // `_useRainPuddles`/`_rainRoofs` says otherwise), and ages the puddles
+  // already down.
+  updateWeather(deltaTime) {
+    const weather = this._weather;
+    if (!weather || !(deltaTime > 0)) return;
+    // "not an important sim so just keep it smooth" -- WeatherRenderer.cxx:454.
+    const dt = Math.min(deltaTime, 0.06);
+    this._advanceWeatherDrops(weather, dt);
+    this._advanceWeatherPuddles(weather, dt);
+  }
+
+  _advanceWeatherDrops(weather, dt) {
+    const {
+      density, dropMesh, posX, posY, posZ, dropSpeed, roofTop, spinPhase,
+      spread, startZ, endZ, falling, cullRoofTops, roofPuddles, doPuddles,
+      spin, billboard, speed, speedMod, obstacles, dummy,
+    } = weather;
+    const cameraQuaternion = billboard && this.camera ? this.camera.quaternion : null;
+    const dropAlpha = dropMesh.geometry.attributes.instanceAlpha;
+
+    for (let i = 0; i < density; i += 1) {
+      posY[i] += dropSpeed[i] * dt;
+      spinPhase[i] += dt;
+
+      const groundLevel = cullRoofTops ? roofTop[i] : endZ;
+      const hitGround = falling ? posY[i] < groundLevel : posY[i] > endZ;
+      if (hitGround) {
+        if (doPuddles && (roofPuddles || !(cullRoofTops && falling && roofTop[i] !== 0))) {
+          const puddleY = falling ? groundLevel + 0.05 : endZ;
+          this._addWeatherPuddle(weather, posX[i], puddleY, posZ[i]);
+        }
+        posX[i] = (Math.random() * 2 - 1) * spread;
+        posZ[i] = (Math.random() * 2 - 1) * spread;
+        posY[i] = startZ;
+        dropSpeed[i] = speed + ((Math.random() * 2 - 1) * speedMod);
+        roofTop[i] = (cullRoofTops && falling)
+          ? getWeatherTopHeight(obstacles, posX[i], posZ[i], startZ)
+          : 0;
+      }
+
+      dummy.position.set(posX[i], posY[i], posZ[i]);
+      if (billboard) {
+        dummy.quaternion.copy(cameraQuaternion || dummy.quaternion);
+      } else if (spin) {
+        // Two of upstream's own three rotations survive the axis swap (see
+        // `buildWeatherCrossGeometry`); its billboard-path spin (an extra
+        // roll on top of facing the camera) is dropped as not worth the
+        // complication for a subtle, purely decorative tumble.
+        dummy.rotation.set(0, spinPhase[i] * dropSpeed[i] * 0.1, spinPhase[i] * dropSpeed[i] * 0.085);
+      } else {
+        dummy.rotation.set(0, 0, 0);
+      }
+      dummy.updateMatrix();
+      dropMesh.setMatrixAt(i, dummy.matrix);
+
+      // `drawDrop`'s own near-ground fade -- within the last 2 units of the
+      // surface a drop is about to hit.
+      const heightAboveGround = falling ? (posY[i] - groundLevel) : (endZ - posY[i]);
+      dropAlpha.array[i] = heightAboveGround < 2 ? Math.max(0, heightAboveGround * 0.5) : 1;
+    }
+
+    dropMesh.instanceMatrix.needsUpdate = true;
+    dropAlpha.needsUpdate = true;
+  }
+
+  _addWeatherPuddle(weather, x, y, z) {
+    if (!weather.puddleMesh) return;
+    weather.puddles.push({ x, y, z, age: 0 });
+    // A bound on live splashes, not upstream's unbounded vector -- see
+    // `WEATHER_PUDDLE_CAPACITY`. Puddles age in the order they were laid, so
+    // the oldest is always at the front.
+    if (weather.puddles.length > WEATHER_PUDDLE_CAPACITY) weather.puddles.shift();
+  }
+
+  _advanceWeatherPuddles(weather, dt) {
+    const { puddleMesh, puddles, maxPuddleTime, puddleSpeed, speed, dummy } = weather;
+    if (!puddleMesh) return;
+    while (puddles.length && puddles[0].age > maxPuddleTime) puddles.shift();
+    const puddleAlpha = puddleMesh.geometry.attributes.instanceAlpha;
+    for (let i = 0; i < puddles.length; i += 1) {
+      const puddle = puddles[i];
+      puddle.age += dt;
+      // `drawPuddle`'s own growth curve: a splash widens as it ages rather
+      // than starting full-size, `puddleSpeed` scaling how fast.
+      const scale = Math.max(0.001, Math.abs(puddle.age * speed * 0.035 * puddleSpeed));
+      dummy.position.set(puddle.x, puddle.y, puddle.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(scale, scale, scale);
+      dummy.updateMatrix();
+      puddleMesh.setMatrixAt(i, dummy.matrix);
+      puddleAlpha.array[i] = Math.max(0, 1 - (puddle.age / maxPuddleTime));
+    }
+    puddleMesh.count = puddles.length;
+    puddleMesh.instanceMatrix.needsUpdate = true;
+    puddleAlpha.needsUpdate = true;
   }
 
   createMapBoundaries(mapSize = 100, noWalls = false) {

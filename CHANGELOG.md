@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- **BZFlag's weather map feature (`_rainType`).** A map's `-set _rainType`
+  now draws upstream's rain, snow, fatrain, frog, particle or bubble --
+  drops that fall (or, for bubbles, rise) from the sky, stop at the first
+  roof beneath them rather than falling through, and puddle where they
+  land, growing and fading over a few seconds. One instanced-mesh
+  rendering path carries every preset rather than upstream's three
+  (a `GL_LINES` streak, a billboard, and a non-billboard "cross" of three
+  quads), and roof culling reuses the shot-collision raycast rather than
+  porting upstream's own octree. `maps/weather.bzw` previews it through Map
+  Viewer, no live match needed. See "Weather" in `docs/bzw.md`.
+
 ## [1.2.27] - 2026-09-16
 
 ### Fixed

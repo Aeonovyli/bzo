@@ -49,16 +49,19 @@ mesh, written once when a mark is laid and uploaded only over the marks that are
 still alive. A full pool drops its oldest mark, so a crowded map shortens every
 trail rather than growing the cost.
 
+**Weather (`WeatherRenderer.cxx`) is built.** `_rainType` and the `_rain*`
+family it reads are documented in `docs/bzw.md`'s "Weather" section, not here:
+map-driven, so nothing shows unless a map asks, and unlike the effects above
+it needed a map of its own (`maps/weather.bzw`) rather than a corner of
+`bzo.bzw`, the same reason `waterLevel` did.
+
 ## Still missing
 
 | missing | upstream | worth |
 |---|---|---|
 | tank alpha fade | `Player.cxx:642` | the minor half of teleporter proximity, below |
-| weather | `WeatherRenderer.cxx` | map-driven, so nothing shows unless a map asks |
 
-That is the whole list. Weather is last for a reason: `_rainType` and its dozen
-siblings are server or map settings with no default, so a client that never
-joins a rainy map is not missing anything a player would notice.
+That is the whole list.
 
 ## Teleporter proximity is two effects, not one
 
@@ -131,5 +134,5 @@ tank, for every tank, not just the local one.
 ## Order
 
 1. ~~The graded overlay, then the teleporter flash on top of it~~ -- both built.
-2. **The tank alpha fade**, with `getProximity` already there.
-3. **Weather**, if a map ever asks.
+2. ~~Weather~~ -- built.
+3. **The tank alpha fade**, with `getProximity` already there.
