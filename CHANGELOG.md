@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.28] - 2026-09-17
+
 ### Added
 - **BZFlag's weather map feature (`_rainType`).** A map's `-set _rainType`
   now draws upstream's rain, snow, fatrain, frog, particle or bubble --
