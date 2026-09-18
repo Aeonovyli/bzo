@@ -6,6 +6,26 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.31] - 2026-09-18
+
+### Added
+- **`localAdmin` can now cover more than this machine's own loopback
+  address.** `adminWhitelist` in `server.json` names extra addresses or
+  CIDR blocks (IPv4 or IPv6) to also grant admin, trusted only once a
+  startup probe confirms it is safe to: with `publicUrl` configured, the
+  server calls itself through real DNS and whatever reverse proxy sits in
+  front -- once plain, once with a poisoned `X-Forwarded-For` -- and only
+  reads the header at all if that poisoned value cannot survive as the
+  proxy's own last hop. A proxy that cannot be verified, or none
+  configured, leaves the whitelist limited to unproxied loopback, exactly
+  as before.
+
+### Fixed
+- **A tank's nametag no longer stretches with Tiny, Narrow, Obesity, or a
+  landing squish.** The nametag sprite is a child of the same group the
+  tank's own body scale is set on, so it inherited that scale too; it now
+  counters it back out each frame, on both the tank and its debug ghost.
+
 ## [1.2.30] - 2026-09-18
 
 ### Added
