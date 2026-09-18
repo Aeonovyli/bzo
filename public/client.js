@@ -12841,7 +12841,13 @@ function updateRadar() {
     // would otherwise hide it here same as anyone else's -- but a Map Viewer
     // or spectator has no other reference point on an empty radar without it,
     // so the local player's own marker is exempt from both gates.
-    if (!isSelf && ((state && state.health <= 0) || tank.visible === false)) return;
+    //
+    // These are asked directly rather than through `tank.visible`: `CL`
+    // (issue #85) drives that same flag to false once cloak alpha hits zero
+    // (see applyTankAlpha), which would silently buy every cloaked tank the
+    // radar-blip immunity that only `ST` is supposed to grant.
+    if (!isSelf && state && state.health <= 0) return;
+    if (!isSelf && isPreviewingAltWorld()) return;
     // RadarRenderer.cxx:628. A stealthed tank has no blip at all rather than a
     // dim one, and Seer is the only thing that brings it back. A cloaked tank is
     // the mirror image and stays on the radar: `CL` hides you from the window,

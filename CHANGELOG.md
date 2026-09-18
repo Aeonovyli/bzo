@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.32] - 2026-09-18
+
+### Fixed
+- **`CL` (Cloaking) no longer hides you from radar too.** The radar drew
+  no blip for any tank whose 3D mesh was hidden, and cloak's own fade-out
+  hides that mesh once alpha reaches zero -- so a cloaked tank silently
+  got `ST` (Stealth)'s radar immunity for free, on top of the "invisible
+  out the window" `CL` actually grants. Radar now checks health and
+  Map Viewer alt-world preview directly instead of the mesh's shared
+  visibility flag.
+
 ## [1.2.31] - 2026-09-18
 
 ### Added
