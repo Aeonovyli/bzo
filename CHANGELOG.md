@@ -6,6 +6,41 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.34] - 2026-09-18
+
+### Added
+- **Importing a remote map now tells you what it couldn't bring in.** A
+  feature bzo doesn't process yet -- a mesh built with an optimization bzo
+  doesn't reconstruct, an unresolved material reference, and so on -- used
+  to only ever reach server.log. It's now written into the imported map's
+  own file as `-srvmsg` lines, so anyone who joins or views that map sees
+  it on arrival.
+- `/view`'s local maps table now shows each map's registry hash, last-
+  modified time, and `.bzw`/`.json` size.
+
+### Fixed
+- **Importing a world from the server list works again against a host
+  advertising both an IPv4 and an IPv6 address.** Upstream bzfs has no IPv6
+  support; bzo could still end up dialing the IPv6 address and hanging.
+  Outbound connections to a remote bzfs are now forced to IPv4.
+- **A curved obstacle's (`arc`/`cone`/`sphere`/`tetra`) `shift` line is no
+  longer ignored.** A map that places several of these at the same
+  `position` and relies on `shift` to spread them apart -- a common way to
+  build a border out of repeated pieces -- used to render them all
+  collapsed on top of each other.
+- **A material with a transparent `diffuse`/`color` (alpha 0) is now
+  actually invisible instead of solid black.** A common mapping trick --
+  geometry that's solid for collision and shows on radar but draws
+  nothing -- was rendering as an opaque black wall.
+- A generic mesh face with no texture at all no longer falls back to the
+  boxwall texture; it now renders flat-colored, matching what the map
+  actually specified.
+- Fixed a race where two overlapping requests to import the same remote
+  map could each write their own copy of the new import-warning messages
+  into the map file.
+- Log messages (console and server.log) no longer include this server's
+  own install path.
+
 ## [1.2.33] - 2026-09-18
 
 ### Changed
