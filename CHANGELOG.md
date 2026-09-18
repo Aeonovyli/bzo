@@ -6,6 +6,32 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.35] - 2026-09-18
+
+### Added
+- **Loading any map -- not just a remote import -- now tells you, once, about
+  everything bzo doesn't process: unresolved references, dropped shapes, a
+  mesh's own spin animation, non-default material lighting, which hosts its
+  textures came from, and so on.** One terse `<map> <label>: <content>` line
+  per thing, the same line whether it reaches server.log or a joining
+  player's own chat -- previously several of these were console-only, and
+  the ones that did reach a player were each worded separately from their
+  own console line.
+
+### Fixed
+- **A mesh built with BZFlag's MeshDrawInfo render optimization now actually
+  renders, and shows on radar.** It used to import with real vertices but
+  zero faces -- invisible and non-collidable -- because the hidden drawInfo
+  blob packed into its texture-coordinate region was never decoded. Closes
+  #87.
+- **A map's `GroundMaterial` texture matrix and dynamic color now reach the
+  ground plane.** Read correctly since the ground got a material at all, but
+  never wired to the renderer -- a floor tiled with a `texmat` fixedscale (a
+  common way to repeat a texture more densely than its raw UVs) looked
+  stretched compared to upstream.
+- A remote import no longer logs every one of a map's own warnings to
+  server.log twice.
+
 ## [1.2.34] - 2026-09-18
 
 ### Added
