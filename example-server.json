@@ -9,7 +9,10 @@
     "DEVELOPERS",
     "BZADMIN"
   ],
-  "adminWhitelist": [],
+  "adminWhitelist": [
+    "127.0.0.0/8",
+    "::1"
+  ],
   "publicUrl": "",
   "listen": "[::]:3000",
   "teamMode": {

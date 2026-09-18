@@ -199,10 +199,38 @@ function isLoopbackAddress(address) {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare);
 }
 
+// A full IPv6 address (no embedded IPv4 tail, no zone id -- neither belongs in
+// a config file entry) as one 128-bit BigInt, or null if it is not one.
+// `net.isIPv6` confirms the shape; this does the arithmetic `net` has no
+// getter for, expanding a `::` run to the groups it stands for.
+function ipv6ToBigInt(address) {
+  if (!net.isIPv6(address)) return null;
+  const halves = address.split('::');
+  if (halves.length > 2) return null;
+  const groupsOf = (s) => (s === '' ? [] : s.split(':'));
+  let groups;
+  if (halves.length === 1) {
+    groups = groupsOf(halves[0]);
+  } else {
+    const head = groupsOf(halves[0]);
+    const tail = groupsOf(halves[1]);
+    const missing = 8 - head.length - tail.length;
+    if (missing < 0) return null;
+    groups = [...head, ...Array(missing).fill('0'), ...tail];
+  }
+  if (groups.length !== 8) return null;
+  let value = 0n;
+  for (const group of groups) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(group)) return null;
+    value = (value << 16n) | BigInt(parseInt(group, 16));
+  }
+  return value;
+}
+
 // A whitelist entry from `server.json`'s `adminWhitelist`: a bare IPv4/IPv6
-// address (an implicit /32 or /128) or an IPv4 CIDR block. Returns null for
-// anything unparseable rather than throwing, so one bad entry can be refused
-// and logged instead of crashing startup.
+// address (an implicit /32 or /128) or a CIDR block of either. Returns null
+// for anything unparseable rather than throwing, so one bad entry can be
+// refused and logged instead of crashing startup.
 function parseWhitelistEntry(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
@@ -218,13 +246,13 @@ function parseWhitelistEntry(raw) {
     const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
     return { family: 4, network: value & mask, mask };
   }
-  // IPv6 is matched as a single address, not a range: bzo's own whitelist
-  // entries are `::1` and operator IPv4s, and a full IPv6 CIDR matcher is more
-  // machinery than that use has earned so far.
-  if (prefixRaw !== undefined) return null;
   const bare = addr.replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '');
-  if (!net.isIPv6(bare)) return null;
-  return { family: 6, address: bare };
+  const value = ipv6ToBigInt(bare);
+  if (value === null) return null;
+  const prefix = prefixRaw === undefined ? 128 : Number(prefixRaw);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 128) return null;
+  const mask = prefix === 0 ? 0n : (((1n << BigInt(prefix)) - 1n) << BigInt(128 - prefix));
+  return { family: 6, network: value & mask, mask };
 }
 
 // `adminWhitelist` in server.json, validated and logged the way `adminGroups`
@@ -249,9 +277,13 @@ function addressMatchesWhitelist(address, entries) {
   const asIpv4 = ipv4Match
     ? (ipv4Match.slice(1).map(Number).reduce((acc, octet) => (acc << 8) | octet, 0) >>> 0)
     : null;
+  // Only computed once, and only when something might need it: every address
+  // this sees is IPv4 except the rare loopback/whitelisted IPv6 peer.
+  let asIpv6;
   return entries.some((entry) => {
     if (entry.family === 4) return asIpv4 !== null && (asIpv4 & entry.mask) === entry.network;
-    return entry.family === 6 && entry.address === bare;
+    if (asIpv6 === undefined) asIpv6 = ipv6ToBigInt(bare);
+    return entry.family === 6 && asIpv6 !== null && (asIpv6 & entry.mask) === entry.network;
   });
 }
 

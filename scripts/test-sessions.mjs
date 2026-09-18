@@ -256,6 +256,14 @@ assert.equal(isAdminSession(createSessionRecord({ bzid: '1', callsign: 'x' }, 10
   assert.equal(addressMatchesWhitelist('::2', entries), false);
 
   assert.deepEqual(parseAdminWhitelist(undefined).entries, []);
+
+  // IPv6 CIDR blocks, not just exact addresses: a `::`-compressed run expands
+  // to as many groups as it stands for, on both sides of the slash.
+  const { entries: v6 } = parseAdminWhitelist(['2607:fa18:9fff::/48', 'fc00::/7']);
+  assert.equal(addressMatchesWhitelist('2607:fa18:9fff::196', v6), true, 'inside the /48');
+  assert.equal(addressMatchesWhitelist('2607:fa18:a000::1', v6), false, 'outside the /48');
+  assert.equal(addressMatchesWhitelist('fd00::1', v6), true, 'inside fc00::/7');
+  assert.equal(addressMatchesWhitelist('fe00::1', v6), false, 'outside fc00::/7');
 }
 
 console.log('session tests passed');
