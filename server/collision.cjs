@@ -1227,6 +1227,27 @@ function getBoxCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
   return { x: nx, y: normalY, z: nz, d: -(nx * pointX + nz * pointZ) };
 }
 
+// `getBoxCrossingPlane`'s own guess, generalized to a mesh (#77): a box or a
+// pyramid has one wall per side to be nearest to, so "which face is the tank
+// straddling" is arithmetic on `w`/`d`; a mesh has whatever faces its author
+// gave it, so the same question is answered the way collision already answers
+// "which face is this tank touching" -- `findMeshHitFaceOriented`, the same
+// call `findInsideBuildings` itself uses to decide a tank is inside this mesh
+// at all. A mesh face's own `plane` is already `nx*x + ny*y + nz*z + d`,
+// unit-length, outward-positive -- `getBoxCrossingPlane`'s own convention --
+// because it is the same convention `meshFaceBlocksDirection` already needs
+// to tell a solid face's front from its back, so nothing here has to rebuild
+// it.
+function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
+  if (!obs) return null;
+  const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
+  const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+  const face = findMeshHitFaceOriented(obs, x, y, z, rotation, halfWidth, halfLength, TANK_HEIGHT);
+  if (!face || !face.plane) return null;
+  const [nx, ny, nz, d] = face.plane;
+  return { x: nx, y: ny, z: nz, d };
+}
+
 // --- Shots ------------------------------------------------------------------
 //
 // A shot occupies the world the way a tank does, but always as a cylinder:
@@ -2080,6 +2101,7 @@ module.exports = {
   phasedObstacleExpels,
   tankRectInsideOrigRect,
   getBoxCrossingPlane,
+  getMeshCrossingPlane,
   SHOT_COLLISION_RADIUS,
   MAX_SHOT_BOUNCES_PER_STEP,
   shotInsideObstacle,

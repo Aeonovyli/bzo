@@ -288,6 +288,7 @@ import {
   getOrigRectNormal,
   getTankLocalAngle,
   getBoxCrossingPlane,
+  getMeshCrossingPlane,
   getTankHitNormal,
   getShotTeleporterDims,
   findTankObstacle,
@@ -7938,7 +7939,9 @@ function findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale = getMy
 // as good an answer as the guess `isCrossing` makes anyway.
 function findTankCrossingPlane(worldX, worldY, worldZ, rotation, tankScale) {
   for (const obs of findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale)) {
-    const plane = getBoxCrossingPlane(obs, worldX, worldY, worldZ, rotation, tankScale);
+    const plane = obs.type === 'mesh'
+      ? getMeshCrossingPlane(obs, worldX, worldY, worldZ, rotation, tankScale)
+      : getBoxCrossingPlane(obs, worldX, worldY, worldZ, rotation, tankScale);
     if (plane) return plane;
   }
   return null;
@@ -7959,12 +7962,31 @@ const OBSERVER_POINT_SCALE = Object.freeze({ width: 0, length: 0 });
 // "otherwise there is nothing to see" problem applies -- so it gets the same
 // treatment unconditionally, tested as a point rather than a tank's own
 // footprint, since there is no tank body here to test.
+//
+// Neither of those is actually "where the camera is", though (#77) --
+// third-person and an observer's own follow-leader view both put the
+// rendered eye at a fixed offset from the tracked position, with no
+// wall-avoidance, so it can sit inside a solid before the tracked tank's own
+// body (or the observer's own roam position) ever would. Wherever the
+// current view actually renders from is unioned in on top of the sweep
+// above for exactly that reason -- both can name obstacles the other
+// misses, and the effect belongs on all of them.
 function updateInsideBuildings() {
-  const found = amPhased()
+  const phased = amPhased();
+  const observer = isObserver();
+  const found = phased
     ? findInsideBuildings(playerX, playerY, playerZ, playerRotation)
-    : isObserver()
+    : observer
       ? findInsideBuildings(playerX, playerY, playerZ, playerRotation, OBSERVER_POINT_SCALE)
       : [];
+  const cameraPosition = (phased || observer) ? renderManager.getCameraPosition() : null;
+  if (cameraPosition) {
+    for (const obs of findInsideBuildings(
+      cameraPosition.x, cameraPosition.y, cameraPosition.z, 0, OBSERVER_POINT_SCALE,
+    )) {
+      if (!found.includes(obs)) found.push(obs);
+    }
+  }
   if (found.length === insideBuildings.length
     && found.every((obs, i) => obs === insideBuildings[i])) return;
   insideBuildings = found;

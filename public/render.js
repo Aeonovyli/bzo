@@ -294,6 +294,18 @@ const BZFLAG_EIGHTH_DIM_ALPHA_MIN = 0.2;
 const BZFLAG_EIGHTH_DIM_ALPHA_RANGE = 0.6;
 // Inside a building and therefore over everything the building is made of.
 const EIGHTH_DIM_RENDER_ORDER = 6;
+// A mesh has no XZ footprint the way a box or a pyramid does, so its own dot
+// cloud (#77 -- every obstacle gets one, not just box/pyramid) is placed by
+// ray-casting candidate points against the mesh's own triangles rather than a
+// closed-form span. This is how many triangles it aims for and how hard it
+// tries before giving up on a shape that never encloses a volume at all (an
+// open decorative shell, say).
+const BZFLAG_EIGHTH_DIM_MESH_POLYGONS = 60;
+const MESH_CLOUD_MAX_ATTEMPTS_FACTOR = 40;
+// Off every axis, so a ray cast from a candidate point is unlikely to graze
+// along an axis-aligned face's own plane -- most map meshes are built from
+// axis-aligned panels.
+const MESH_CLOUD_RAY_DIRECTION = new THREE.Vector3(1, 1.3, 1.7).normalize();
 
 // The other half of the same flag: the eighth dimension is what a phasing tank
 // sees of the building, and this is what everyone else sees of the tank. A tank
@@ -3753,8 +3765,16 @@ class RenderManager {
 
     // The faces the world buries in itself. Worked out once for the whole
     // obstacle list, because every obstacle is a candidate to hide any other,
-    // and then asked per triangle as the fragments are built below.
+    // and then asked per triangle as the fragments are built below. Kept on
+    // `this` too: a box or a pyramid's own eighth-dimension shell (#77) is
+    // built lazily, long after this call returns, and needs the same answer
+    // for the same reason the fragments do -- a face dropped from the outside
+    // view because another obstacle buries it (four overlapping boxes making
+    // an octagon, say) has an inside that is just as buried, and glowing it
+    // additively would be a seam nobody outside ever sees but a phased tank
+    // very much would.
     const isTriangleBuried = createBuriedTriangleTest(obstacles);
+    this._insideBuildingBuriedTest = isTriangleBuried;
 
     // Boxes and pyramids collect here and become two meshes at the end.
     const fragments = new Map();
@@ -4247,53 +4267,137 @@ class RenderManager {
     return mesh;
   }
 
+  // A random point-and-triangle cloud inside an arbitrary closed mesh (#77 --
+  // giving every obstacle the same two-part look means a mesh needs one too,
+  // not just box/pyramid). A mesh has no simple footprint to sample like a
+  // box's XZ rectangle, so a candidate point in the mesh's own bounding box is
+  // kept only when a ray cast from it crosses the mesh's own triangles an odd
+  // number of times (even-odd rule -- `THREE.Ray.intersectTriangle` per
+  // triangle, `geometry`'s own index/position buffers, no separate collision
+  // machinery). An open, non-enclosing mesh (a decorative shell with no
+  // inside) fails every cast and simply gets no cloud, which is correct: there
+  // is no "inside" to scatter one across.
+  _buildMeshEighthDimCloud(geometry) {
+    const box = geometry.boundingBox;
+    const size = new THREE.Vector3();
+    if (!box) return null;
+    box.getSize(size);
+    if (size.x <= 0 || size.y <= 0 || size.z <= 0) return null;
+
+    const positionAttr = geometry.getAttribute('position');
+    const indexAttr = geometry.getIndex();
+    if (!positionAttr || !indexAttr) return null;
+    const positions = positionAttr.array;
+    const indices = indexAttr.array;
+
+    const ray = new THREE.Ray(new THREE.Vector3(), MESH_CLOUD_RAY_DIRECTION);
+    const triA = new THREE.Vector3();
+    const triB = new THREE.Vector3();
+    const triC = new THREE.Vector3();
+    const hit = new THREE.Vector3();
+    const isInside = (point) => {
+      ray.origin.copy(point);
+      let crossings = 0;
+      for (let i = 0; i < indices.length; i += 3) {
+        triA.fromArray(positions, indices[i] * 3);
+        triB.fromArray(positions, indices[i + 1] * 3);
+        triC.fromArray(positions, indices[i + 2] * 3);
+        if (ray.intersectTriangle(triA, triB, triC, false, hit)) crossings += 1;
+      }
+      return (crossings % 2) === 1;
+    };
+
+    const volume = size.x * size.y * size.z;
+    const polySize = Math.cbrt(volume / BZFLAG_EIGHTH_DIM_MESH_POLYGONS);
+    const positionsOut = [];
+    const colors = [];
+    const point = new THREE.Vector3();
+    const jittered = new THREE.Vector3();
+    let placed = 0;
+    let attempts = 0;
+    const maxAttempts = BZFLAG_EIGHTH_DIM_MESH_POLYGONS * MESH_CLOUD_MAX_ATTEMPTS_FACTOR;
+    while (placed < BZFLAG_EIGHTH_DIM_MESH_POLYGONS && attempts < maxAttempts) {
+      attempts += 1;
+      point.set(
+        box.min.x + Math.random() * size.x,
+        box.min.y + Math.random() * size.y,
+        box.min.z + Math.random() * size.z,
+      );
+      if (!isInside(point)) continue;
+      placed += 1;
+      const red = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
+      const green = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
+      const blue = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
+      const alpha = BZFLAG_EIGHTH_DIM_ALPHA_MIN + BZFLAG_EIGHTH_DIM_ALPHA_RANGE * Math.random();
+      // Clamping a jittered vertex to the bounding *box* the way the box/
+      // pyramid cloud clamps to its own half-extents (`_getInsideBuildingNode`
+      // above) is only exact there because a box's or a pyramid's "inside"
+      // test is that same box -- an arbitrary mesh's is not (the octagon's own
+      // bevels cut through its bounding box's corners), so a jittered vertex
+      // needs its own `isInside` check rather than a clamp, or exactly this
+      // triangle would poke out through a bevel it was never meant to cross.
+      // Falling back to `point` itself rather than discarding the vertex or
+      // the whole triangle keeps every triangle non-degenerate and every
+      // vertex provably inside, since `point` already passed the same test.
+      for (let vertex = 0; vertex < 3; vertex += 1) {
+        jittered.set(
+          point.x + polySize * (Math.random() - 0.5),
+          point.y + polySize * (Math.random() - 0.5),
+          point.z + polySize * (Math.random() - 0.5),
+        );
+        if (!isInside(jittered)) jittered.copy(point);
+        positionsOut.push(jittered.x, jittered.y, jittered.z);
+        colors.push(red, green, blue, alpha);
+      }
+    }
+    if (!positionsOut.length) return null;
+
+    const cloudGeometry = new THREE.BufferGeometry();
+    cloudGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positionsOut, 3));
+    cloudGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+    const cloud = new THREE.Mesh(cloudGeometry, new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }));
+    cloud.renderOrder = EIGHTH_DIM_RENDER_ORDER;
+    cloud.frustumCulled = false;
+    return cloud;
+  }
+
   // A mesh's own eighth-dimension node -- upstream's `EighthDimShellNode`
-  // (EighthDimShellNode.cxx), which is nothing like a box or a pyramid's own
-  // scattered-point cloud: a mesh has no one footprint to scatter points
-  // across, so upstream instead redraws the mesh's own real geometry a
+  // (EighthDimShellNode.cxx): it redraws the mesh's own real render node a
   // second time, twice over. `ShellRenderNode::render()` (EighthDimShellNode.
   // cxx:137-165) first draws it solid -- filled, normal winding inverted
   // (`setCulling(GL_FRONT)`, the constructor, line 114) so the normally
-  // hidden *inside* of each face draws, additively blended whenever `blend`
-  // is on and render quality is 2 or better -- and only then overlays a
-  // 3px wireframe on top of that, unconditionally. The solid pass is what
-  // reads as "floating triangles" -- real geometry glowing from the inside,
-  // not upstream's own random scattered ones (`EighthDBoxSceneNode`'s own
-  // effect, box/pyramid only, an actual point cloud with nothing this
-  // mesh's own faces have to do with).
+  // hidden *inside* of each face draws, textured and lit exactly as the real
+  // outside face is, additively blended whenever `blend` is on and render
+  // quality is 2 or better -- and only then overlays a 3px wireframe on top of
+  // that, unconditionally. The solid pass is what reads as "floating
+  // triangles": the building's own real walls glowing from the inside, not a
+  // color-blind cloud.
   //
-  // bzo has no inverted-cull material pass sitting around to reuse, but the
-  // same real geometry is already sitting in `obs.vertices`/`obs.faces`, so
-  // both of upstream's own passes are rebuilt directly from it: a solid fill
-  // using `THREE.BackSide` (Three's own equivalent of inverted culling --
-  // draw only the faces the camera is behind, which is the mesh's real
-  // inside surface) with additive blending, one random colour per face
-  // rather than upstream's own texture (matching the random-colour style
-  // bzo's own box/pyramid cloud already uses, and simpler than resolving
-  // each face's real material a second time here); and a wireframe outline
-  // on top, in the same white a box or a pyramid's own outline already uses
-  // rather than upstream's per-face colour, for the same reason.
+  // bzo has no inverted-cull material pass sitting around to reuse, but
+  // `_buildMeshObject` already resolves this obstacle's real per-face
+  // geometry, UVs and textures, so that is asked for again here and its
+  // materials cloned into unlit, `BackSide`, additively-blended ones sharing
+  // the same maps -- upstream's own real-texture look, not the random colour
+  // bzo shipped before #77. (The second `_buildMeshObject` call re-registers
+  // any `dyncol`/`texmat` animation on its own throwaway materials -- wasted
+  // cycles on a mesh that uses either, never a visible difference, and rare
+  // enough next to actually phasing through that particular mesh not to be
+  // worth a second geometry-building code path just to skip it.) The dot
+  // cloud is new for #77 too -- see `_buildMeshEighthDimCloud` -- and the
+  // wireframe outline stays the plain white a box or a pyramid's own outline
+  // already uses rather than upstream's per-face colour, same as before.
   _buildMeshInsideBuildingNode(obs) {
-    const positions = [];
-    const colors = [];
     const edges = [];
     for (const face of obs.faces) {
       const { vertexIndices } = face;
       const n = vertexIndices.length;
       const verts = vertexIndices.map((vi) => obs.vertices[vi]);
       if (verts.some((v) => !v)) continue;
-
-      const red = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
-      const green = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
-      const blue = BZFLAG_EIGHTH_DIM_COLOR_MIN + BZFLAG_EIGHTH_DIM_COLOR_RANGE * Math.random();
-      const alpha = BZFLAG_EIGHTH_DIM_ALPHA_MIN + BZFLAG_EIGHTH_DIM_ALPHA_RANGE * Math.random();
-      for (let t = 1; t < n - 1; t += 1) {
-        for (const v of [verts[0], verts[t], verts[t + 1]]) {
-          positions.push(v.x, v.y, v.z);
-          colors.push(red, green, blue, alpha);
-        }
-      }
-
       for (let i = 0; i < n; i += 1) {
         const a = verts[i];
         const b = verts[(i + 1) % n];
@@ -4301,18 +4405,36 @@ class RenderManager {
       }
     }
 
-    const fillGeometry = new THREE.BufferGeometry();
-    fillGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    fillGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
-    const fill = new THREE.Mesh(fillGeometry, new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      transparent: true,
-      side: THREE.BackSide,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }));
-    fill.renderOrder = EIGHTH_DIM_RENDER_ORDER;
-    fill.frustumCulled = false;
+    // A mesh's own vertices are already in world space (unlike a box or a
+    // pyramid, which are drawn relative to their own centre and rotation),
+    // so the node itself sits at the origin with nothing to transform.
+    const node = new THREE.Group();
+    node.matrixAutoUpdate = false;
+    node.updateMatrix();
+
+    const base = this._buildMeshObject(obs, 0);
+    if (base) {
+      const realMaterials = Array.isArray(base.material) ? base.material : [base.material];
+      const shellMaterials = realMaterials.map((material) => new THREE.MeshBasicMaterial({
+        map: material.map || null,
+        color: material.color ? material.color.clone() : undefined,
+        transparent: true,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }));
+      // The cloud below still ray-casts against `base.geometry` unfiltered --
+      // it needs the mesh's real, watertight shape to tell inside from
+      // outside, where the fill only ever wants to skip drawing a face's own
+      // glow (see `_filterGroundLevelMeshGeometry`).
+      const fill = new THREE.Mesh(this._filterGroundLevelMeshGeometry(base.geometry), shellMaterials);
+      fill.renderOrder = EIGHTH_DIM_RENDER_ORDER;
+      fill.frustumCulled = false;
+      node.add(fill);
+
+      const cloud = this._buildMeshEighthDimCloud(base.geometry);
+      if (cloud) node.add(cloud);
+    }
 
     const outlineGeometry = new THREE.BufferGeometry();
     outlineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edges, 3));
@@ -4322,17 +4444,204 @@ class RenderManager {
     );
     outline.renderOrder = EIGHTH_DIM_RENDER_ORDER;
     outline.frustumCulled = false;
-
-    // A mesh's own vertices are already in world space (unlike a box or a
-    // pyramid, which are drawn relative to their own centre and rotation),
-    // so the node itself sits at the origin with nothing to transform.
-    const node = new THREE.Group();
-    node.matrixAutoUpdate = false;
-    node.updateMatrix();
-    node.add(fill);
     node.add(outline);
+
     this._tagDraws(node, 'effect');
     return node;
+  }
+
+  // Rebuilds `geometry` keeping only the triangles `shouldDrop(a, b, c)`
+  // (each corner a `THREE.Vector3`, reused across calls -- read them, don't
+  // keep them) says to keep, group by group so each surviving triangle stays
+  // under its own material index. Shared by the two shell face filters below,
+  // which differ only in what a dropped triangle actually is -- one buried
+  // against a neighbouring obstacle, one a floor facing into the world's own
+  // ground. Always returns a plain, non-indexed geometry: cheap to build for
+  // the handful of triangles either caller ever runs on, and one less thing
+  // for a caller to get wrong re-deriving an index buffer for.
+  _filterShellTriangles(geometry, shouldDrop) {
+    const position = geometry.attributes.position;
+    const normal = geometry.attributes.normal;
+    const uv = geometry.attributes.uv;
+    const index = geometry.getIndex();
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const outPositions = [];
+    const outNormals = [];
+    const outUvs = [];
+    const outGroups = [];
+    for (const group of geometry.groups) {
+      const groupStart = outPositions.length / 3;
+      for (let i = group.start; i < group.start + group.count; i += 3) {
+        const ia = index.getX(i);
+        const ib = index.getX(i + 1);
+        const ic = index.getX(i + 2);
+        a.fromBufferAttribute(position, ia);
+        b.fromBufferAttribute(position, ib);
+        c.fromBufferAttribute(position, ic);
+        if (shouldDrop(a, b, c)) continue;
+        for (const vi of [ia, ib, ic]) {
+          outPositions.push(position.getX(vi), position.getY(vi), position.getZ(vi));
+          outNormals.push(normal.getX(vi), normal.getY(vi), normal.getZ(vi));
+          outUvs.push(uv.getX(vi), uv.getY(vi));
+        }
+      }
+      outGroups.push({ start: groupStart, count: (outPositions.length / 3) - groupStart, materialIndex: group.materialIndex });
+    }
+    const filtered = new THREE.BufferGeometry();
+    filtered.setAttribute('position', new THREE.Float32BufferAttribute(outPositions, 3));
+    filtered.setAttribute('normal', new THREE.Float32BufferAttribute(outNormals, 3));
+    filtered.setAttribute('uv', new THREE.Float32BufferAttribute(outUvs, 2));
+    outGroups.forEach((g) => filtered.addGroup(g.start, g.count, g.materialIndex));
+    return filtered;
+  }
+
+  // Drops whatever triangles of `geometry` (local to `obs`, vertical centre
+  // at `baseY + height / 2` -- see the two callers) `_buildObstacleFragments`
+  // would also have dropped as buried against another obstacle, so a shell's
+  // additive glow never shows a seam the outside view was never allowed to.
+  // `createBuriedTriangleTest`'s answer is per triangle in world space, so
+  // each one is transformed by this obstacle's own matrix -- the same
+  // position/rotation `obstacleMatrix()` bakes into the real fragment -- to
+  // ask it, even though the geometry returned here stays local (it is still
+  // headed for a child of `_getInsideBuildingNode`'s own positioned/rotated
+  // group). No burial test yet (`this._insideBuildingBuriedTest` unset) keeps
+  // the geometry as it was handed in, same as an obstacle list with nothing
+  // to bury anything in.
+  _filterBuriedShellGeometry(geometry, obs, height) {
+    const isBuried = this._insideBuildingBuriedTest;
+    if (!isBuried) return geometry;
+    const matrix = new THREE.Matrix4().compose(
+      new THREE.Vector3(obs.x, (obs.baseY || 0) + (height / 2), obs.z),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(0, obs.rotation || 0, 0)),
+      new THREE.Vector3(1, 1, 1),
+    );
+    const wa = new THREE.Vector3();
+    const wb = new THREE.Vector3();
+    const wc = new THREE.Vector3();
+    return this._filterShellTriangles(geometry, (a, b, c) => {
+      wa.copy(a).applyMatrix4(matrix);
+      wb.copy(b).applyMatrix4(matrix);
+      wc.copy(c).applyMatrix4(matrix);
+      return isBuried(obs, wa.x, wa.y, wa.z, wb.x, wb.y, wb.z, wc.x, wc.y, wc.z);
+    });
+  }
+
+  // A mesh face lying flat on the world's own ground -- upstream's
+  // `MeshSceneNodeGenerator` builds a mesh exactly as authored, unlike
+  // `BoxSceneNodeGenerator`, which explicitly skips "the bottom polygon if on
+  // the ground (or lower)" (`_prepareBoxGeometry`'s own `omitFaces`, above).
+  // A mesh author has no equivalent switch, and no reason to reach for one:
+  // nothing before the shell ever rendered a ground-level face's buried side
+  // anyway, so the map's own "Octagon" (`bzo.bzw`) left its floor cap in its
+  // default wall texture same as its walls. A phasing tank is always on the
+  // ground -- `OO` grants no flight -- so this is exactly the face its own
+  // feet are standing on, coplanar with the real ground mesh, and additively
+  // blending a second texture onto it is a z-fight (whichever the driver
+  // happens to put down last), not a glow. Coplanar is the whole test, not
+  // which way the face happens to wind: cull it outright rather than draw it
+  // additively, the same as the box's own bottom never draws at all.
+  _filterGroundLevelMeshGeometry(geometry) {
+    const groundEpsilon = 0.05;
+    return this._filterShellTriangles(
+      geometry,
+      (a, b, c) => a.y <= groundEpsilon && b.y <= groundEpsilon && c.y <= groundEpsilon,
+    );
+  }
+
+  // A box's own textured shell (#77 -- the real-texture inside-out look
+  // upstream reserves for meshes, given to every obstacle). Its own small
+  // `BoxGeometry`+material pair rather than a slice of the merged fragment
+  // `_buildObstacleFragments` puts every box into: nothing in that merge
+  // remembers which vertices were which obstacle's, and unlike the mesh shell
+  // above there is no already-built per-obstacle mesh sitting around to
+  // borrow materials from. Skips the merged path's tint/`dyncol`/`texmat`
+  // handling -- a glow nobody sees except while phasing through this one box
+  // does not need its own animated colour.
+  //
+  // Its own vertical centre, not the obstacle's base: `BoxGeometry`/
+  // `ConeGeometry` are centred on the local origin the way
+  // `_buildObstacleFragments`'s own `obstacleMatrix()` (`baseY + h / 2`)
+  // expects, unlike the dot cloud and outline elsewhere in
+  // `_getInsideBuildingNode`, which put local `y = 0` at the obstacle's own
+  // base. `_getInsideBuildingNode` shifts this shell up by `height / 2` of
+  // its own to land it on the same world span rather than half a height too
+  // low.
+  //
+  // `_filterBuriedShellGeometry` drops whatever `_buildObstacleFragments`
+  // would have dropped from the outside view too -- a wall buried against a
+  // neighbouring obstacle (four overlapping boxes making an octagon, say) has
+  // an inside just as buried, and this shell has no other way to learn that:
+  // it is built from scratch rather than sliced out of that merge.
+  _buildBoxInsideBuildingShell(obs, height) {
+    const geometry = this._filterBuriedShellGeometry(this._prepareBoxGeometry(obs.w, height, obs.d, {
+      ...BOX_TEXTURE_SCALES,
+      omitFaces: (obs.baseY || 0) > 0 ? [] : [BOX_FACE.NY],
+    }), obs, height);
+    const wallTexture = resolveObstacleTextureFactory(
+      obs.wallTexture || null, obs.wallTextureUrl || null, '/textures/boxwall.png', createBoxWallTexture,
+    )();
+    const capTexture = resolveObstacleTextureFactory(
+      obs.capTexture || null, obs.capTextureUrl || null, '/textures/roof.png', createRoofTexture,
+    )();
+    const shellOptions = {
+      transparent: true, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false,
+    };
+    return new THREE.Mesh(geometry, [
+      new THREE.MeshBasicMaterial({ map: wallTexture, ...shellOptions }),
+      new THREE.MeshBasicMaterial({ map: capTexture, ...shellOptions }),
+    ]);
+  }
+
+  // A pyramid's own textured shell -- same reasoning as the box above, and the
+  // same cone geometry/UV recipe `_buildObstacleFragments` uses for its real
+  // one.
+  _buildPyramidInsideBuildingShell(obs, height) {
+    const geometry = new THREE.ConeGeometry(0.5 / Math.SQRT2, height, 4, 1);
+    geometry.clearGroups();
+    const pyramidSideIndexCount = geometry.index.count - 12;
+    const showPyramidBase = (obs.baseY || 0) > 0 || Boolean(obs.inverted);
+    if (!showPyramidBase) geometry.setIndex(Array.from(geometry.index.array.slice(0, pyramidSideIndexCount)));
+    geometry.addGroup(0, pyramidSideIndexCount, 0);
+    if (showPyramidBase) geometry.addGroup(pyramidSideIndexCount, 12, 1);
+    geometry.rotateY(-Math.PI / 4);
+    if (obs.w > obs.d) geometry.rotateY(Math.PI / 2);
+    geometry.scale(2 * obs.w, 1, 2 * obs.d);
+    if (obs.inverted) geometry.rotateX(Math.PI);
+
+    const pyramidBaseSpan = Math.max(obs.w, obs.d);
+    const pyramidSlantHeight = Math.hypot(height, pyramidBaseSpan / 2);
+    this._bakeGroupUvTransform(geometry, 0, {
+      repeatX: pyramidBaseSpan / PYRAMID_TEXTURE_SCALE,
+      repeatY: pyramidSlantHeight / PYRAMID_TEXTURE_SCALE,
+    });
+    if (showPyramidBase) {
+      this._bakeGroupUvTransform(geometry, 1, {
+        repeatX: obs.w / PYRAMID_ROOF_TEXTURE_SCALE,
+        repeatY: obs.d / PYRAMID_ROOF_TEXTURE_SCALE,
+        rotation: obs.inverted ? Math.PI : 0,
+        centerX: 0.5,
+        centerY: 0.5,
+      });
+    }
+    // After the UV bake above, which needs this geometry's own index/groups
+    // intact -- see `_filterBuriedShellGeometry`.
+    const filtered = this._filterBuriedShellGeometry(geometry, obs, height);
+
+    const wallTexture = resolveObstacleTextureFactory(
+      obs.wallTexture || null, obs.wallTextureUrl || null, '/textures/pyrwall.png', createPyramidTexture,
+    )();
+    const capTexture = resolveObstacleTextureFactory(
+      obs.capTexture || null, obs.capTextureUrl || null, '/textures/roof.png', createRoofTexture,
+    )();
+    const shellOptions = {
+      transparent: true, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false,
+    };
+    return new THREE.Mesh(filtered, [
+      new THREE.MeshBasicMaterial({ map: wallTexture, ...shellOptions }),
+      new THREE.MeshBasicMaterial({ map: capTexture, ...shellOptions }),
+    ]);
   }
 
   // One eighth-dimension node per obstacle, built the first time a tank is
@@ -4442,6 +4751,17 @@ class RenderManager {
     );
     outline.renderOrder = EIGHTH_DIM_RENDER_ORDER;
 
+    const shell = pyramid
+      ? this._buildPyramidInsideBuildingShell(obs, height)
+      : this._buildBoxInsideBuildingShell(obs, height);
+    shell.renderOrder = EIGHTH_DIM_RENDER_ORDER;
+    shell.frustumCulled = false;
+    // The shell's own geometry is centred the way `_buildObstacleFragments`
+    // centres the real one (`baseY + height / 2`), not based at `y = 0` the
+    // way `node` itself is (matching the dot cloud and outline below) -- see
+    // `_buildBoxInsideBuildingShell`.
+    shell.position.y = height / 2;
+
     node = new THREE.Group();
     node.position.set(obs.x, obs.baseY || 0, obs.z);
     node.rotation.y = obs.rotation;
@@ -4452,6 +4772,7 @@ class RenderManager {
     // viewer is inside the volume this is the bounds of.
     cloud.frustumCulled = false;
     outline.frustumCulled = false;
+    node.add(shell);
     node.add(cloud);
     node.add(outline);
     this._tagDraws(node, 'effect');
@@ -8559,6 +8880,25 @@ class RenderManager {
         myTank.position.z - Math.cos(playerRotation) * 10,
       ));
     }
+  }
+
+  // Where the local view actually is right now, for `updateInsideBuildings`'s
+  // own OO/PZ check (#77 -- "the OO effect is whenever a camera is inside an
+  // object", not only whenever the tank's own hitbox is): third person and an
+  // observer's follow-leader view both put the rendered eye somewhere other
+  // than the tank/observer's own logical position, with no wall-avoidance of
+  // its own, so a chase camera can sit inside a wall's solid well before
+  // anything tracking the tank's own body would say so.
+  //
+  // Null in XR: `updateCamera`'s own XR branches move `worldGroup` around a
+  // stationary rig instead of moving `this.camera` through a static world
+  // (see the `xrState.enabled` branches above), so `this.camera.position`
+  // there is a rig-local constant, not a world one -- answering from it would
+  // just be wrong. Nothing upstream of this depends on the answer never being
+  // null; XR keeps exactly the tank-body-only behaviour it already had.
+  getCameraPosition() {
+    if (!this.camera || xrState.enabled) return null;
+    return this.camera.position.clone();
   }
 
 }
