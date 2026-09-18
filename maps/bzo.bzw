@@ -36,7 +36,7 @@ options
   -srvmsg "Team bases sit on the compass points; test geometry is in the corners."
   -srvmsg "Use Settings->Debug Labels to see flag zone names"
   # bad flag falls off in this many seconds
-  -st 30
+  -st 10
   # bad flag also falls off after this many kills.
   -sw 1
   # antidote flag for whoever is carrying a bad one
