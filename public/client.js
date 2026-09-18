@@ -8114,6 +8114,20 @@ function applyLandingSquish(tank, impactSpeed = 0) {
   tank.userData.landingSquishRecoverRate = 1 / LANDING_SQUISH_TIME;
 }
 
+// A nametag sprite is a child of the tank (or ghost) group it labels, so it
+// inherits that group's scale by default. Dividing out the group's current
+// scale keeps the label's own size -- set in updateSpriteLabel -- as the only
+// thing that determines how it looks, regardless of Tiny/Narrow/Obesity or
+// landing squish/spawn growth.
+function counterScaleNameLabel(label, groupScale) {
+  if (!label || label.userData.baseScaleX === undefined) return;
+  label.scale.set(
+    label.userData.baseScaleX / groupScale.x,
+    label.userData.baseScaleY / groupScale.y,
+    1
+  );
+}
+
 function updateTankDimensions(deltaTime) {
   tanks.forEach((tank, playerId) => {
     if (!tank?.userData) return;
@@ -8237,6 +8251,7 @@ function updateTankDimensions(deltaTime) {
       baseScaleY * squishScaleY * spawnScale,
       baseScaleZ * tank.userData.dimensionScaleLength * spawnScale
     );
+    counterScaleNameLabel(tank.userData.nameLabel, tank.scale);
 
     // The server-position ghost is a sibling of the tank rather than a child, so
     // it carries its own transform and has to be told. A ghost that stayed
@@ -8249,6 +8264,7 @@ function updateTankDimensions(deltaTime) {
         GHOST_SCALE,
         GHOST_SCALE * tank.userData.dimensionScaleLength
       );
+      counterScaleNameLabel(ghost.userData.nameLabel, ghost.scale);
     }
   });
 }

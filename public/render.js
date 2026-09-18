@@ -5652,6 +5652,12 @@ class RenderManager {
       // rather than squeezing into it. `Watchtower#0:Base` needs to read at
       // the same size as `B3`, not smaller.
       sprite.userData.unitsPerPixel = sprite.scale.x / canvas.width;
+      // A tank's label counters the tank's own scale each frame (see
+      // updateTankDimensions in client.js) so Tiny/Narrow/Obesity/spawn-grow
+      // stretch the tank without stretching its nametag. That needs the
+      // label's intended size independent of whatever the counter-scaling
+      // last wrote into sprite.scale.
+      sprite.userData.baseScaleY = sprite.scale.y;
     }
 
     const texture = sprite.material.map;
@@ -5671,6 +5677,7 @@ class RenderManager {
     context.fillText(name, canvas.width / 2, canvas.height / 2, width - HORIZONTAL_PADDING * 2);
     texture.needsUpdate = true;
     sprite.scale.x = canvas.width * sprite.userData.unitsPerPixel;
+    sprite.userData.baseScaleX = sprite.scale.x;
   }
 
   _getSharedImage(path) {
