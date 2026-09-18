@@ -237,11 +237,21 @@ const {
 } = require('./server/voice-channels.cjs');
 
 
+// Neither console nor server.log should ever show this install's own
+// absolute path -- a real disclosure (which user, which OS, which directory
+// layout), not just clutter. Every path anything in this codebase logs lives
+// under `__dirname`, including a stack trace's own frames, so stripping that
+// one prefix here catches all of them -- current call sites and any future
+// one that forgets to -- without hunting each down by hand.
+function redactInstallPath(text) {
+  return text.split(__dirname).join('.');
+}
+
 // Common log function: logs to console and to server.log
 function log(...args) {
   const now = new Date();
   const timestamp = now.toISOString();
-  const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  const msg = redactInstallPath(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
   const logMsg = `[${timestamp}] ${msg}`;
   // Write to console
   console.log(logMsg);
@@ -252,7 +262,7 @@ function log(...args) {
 function logError(...args) {
   const now = new Date();
   const timestamp = now.toISOString();
-  const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  const msg = redactInstallPath(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
   const logMsg = `[${timestamp}] [ERROR] ${msg}`;
   console.error(logMsg);
   fs.appendFileSync(path.join(__dirname, 'server.log'), logMsg + '\n');
@@ -843,6 +853,35 @@ app.get('/api/ready', (req, res) => {
 // and filtering are a few lines of vanilla JS over the rows already in the
 // page -- there is no client-side framework anywhere else in bzo and two
 // short tables do not need one either.
+// KB is plenty of precision for a table cell -- nobody sorting/scanning this
+// page needs the exact byte count `performRemoteMapImport`'s own log line
+// already carries.
+function formatByteSize(bytes) {
+  if (!Number.isFinite(bytes)) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function statSizeOrBlank(filePath) {
+  try {
+    return formatByteSize(fs.statSync(filePath).size);
+  } catch {
+    return '';
+  }
+}
+
+// ISO-ish (sorts correctly as plain text, no data-sort="num" needed) --
+// `sweepStaleImports` ages a remote import out by this same mtime, so
+// showing it here is what tells an operator when an import will next expire
+// (`IMPORT_MAX_AGE_MS` after this timestamp), not just when it was written.
+function statMtimeOrBlank(filePath) {
+  try {
+    return fs.statSync(filePath).mtime.toISOString().replace('T', ' ').slice(0, 19);
+  } catch {
+    return '';
+  }
+}
+
 function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
   const localMaps = listAvailableMapFiles().map((fileName) => ({
     fileName,
@@ -855,15 +894,16 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
     const maxShots = s.info && typeof s.info.maxShots === 'number' ? String(s.info.maxShots) : '';
     const hasOption = (bit) => (s.info && (s.info.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
     const importFileName = remoteMapFileName(s.host, s.port);
-    const viewLink = MAP_REGISTRY.has(importFileName)
-      ? `<a href="/?viewmap=${encodeURIComponent(importFileName)}">View</a> `
-      : '';
-    const importCell = viewLink
-      + `<form method="post" action="/view/import" class="inlineForm">`
+    // Always the row's own link, imported or not -- `?viewmap=` already
+    // imports on demand (`importMapForView`) the moment nothing this fresh is
+    // registered yet, so there is no state where clicking the row is wrong.
+    const viewmapHref = `/?viewmap=${encodeURIComponent(importFileName)}`;
+    const alreadyImported = MAP_REGISTRY.has(importFileName);
+    const importCell = `<form method="post" action="/view/import" class="inlineForm">`
       + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
       + `<input type="hidden" name="port" value="${s.port}">`
-      + `<button type="submit">${viewLink ? 'Re-import' : 'Import'}</button></form>`;
-    return `<tr><td>${players}</td><td>${maxPlayers}</td><td>${maxShots}</td>`
+      + `<button type="submit">${alreadyImported ? 'Re-import' : 'Import'}</button></form>`;
+    return `<tr class="clickable" data-href="${viewmapHref}"><td>${players}</td><td>${maxPlayers}</td><td>${maxShots}</td>`
       + `<td>${escapeHtml(s.info ? s.info.style : '')}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
@@ -872,9 +912,19 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
       + `<td>${importCell}</td></tr>`;
   }).join('\n');
 
-  const mapRows = localMaps.map((m) => `<tr><td>${escapeHtml(m.fileName)}</td>`
-    + `<td>${m.hashed ? 'yes' : 'hashing…'}</td>`
-    + `<td>${m.hashed ? `<a href="/?viewmap=${encodeURIComponent(m.fileName)}">View</a>` : ''}</td></tr>`).join('\n');
+  const mapRows = localMaps.map((m) => {
+    const entry = MAP_REGISTRY.get(m.fileName);
+    const hash = entry ? entry.hash : '';
+    const bzwPath = resolveMapFilePath(m.fileName);
+    const modified = bzwPath ? statMtimeOrBlank(bzwPath) : '';
+    const bzwSize = bzwPath ? statSizeOrBlank(bzwPath) : '';
+    const jsonSize = entry ? statSizeOrBlank(path.join(MAP_CACHE_DIR, `${entry.hash}.json`)) : '';
+    const rowAttrs = m.hashed ? ` class="clickable" data-href="/?viewmap=${encodeURIComponent(m.fileName)}"` : '';
+    return `<tr${rowAttrs}><td>${escapeHtml(m.fileName)}</td>`
+      + `<td>${m.hashed ? 'yes' : 'hashing…'}</td>`
+      + `<td>${escapeHtml(hash)}</td><td>${escapeHtml(modified)}</td>`
+      + `<td>${bzwSize}</td><td>${jsonSize}</td></tr>`;
+  }).join('\n');
 
   const flash = imported
     ? `<p class="flash success">Imported <code>${escapeHtml(imported)}</code> -- it is in the local maps table below.</p>`
@@ -923,6 +973,7 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
   th:hover { color: #66bb6a; }
   tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.05); }
   tbody tr:hover { background: rgba(76, 175, 80, 0.15); }
+  tbody tr.clickable { cursor: pointer; }
   .inlineForm { display: inline; }
   button {
     padding: 0.2rem 0.7rem;
@@ -955,10 +1006,10 @@ ${serverRows}
 </table>
 
 <h1>Local maps</h1>
-<p class="muted">Already in this server's <code>maps/</code>, including anything imported above.</p>
+<p class="muted">Already in this server's <code>maps/</code>, including anything imported above. Click a row to view it.</p>
 <input id="mapFilter" type="text" placeholder="Filter…">
 <table id="mapTable">
-<thead><tr><th>File</th><th>Hashed</th><th></th></tr></thead>
+<thead><tr><th>File</th><th>Hashed</th><th>Hash</th><th title="A remote import expires and re-fetches once this is older than IMPORT_MAX_AGE_MS">Modified</th><th data-sort="num">.bzw size</th><th data-sort="num">.json size</th></tr></thead>
 <tbody>
 ${mapRows}
 </tbody>
@@ -969,6 +1020,15 @@ function attachTable(tableId, filterId) {
   var table = document.getElementById(tableId);
   if (!table) return;
   var tbody = table.tBodies[0];
+  // A row's own data-href -- clicking anywhere on it goes to that map's
+  // viewmap link, except a click on the Import/Re-import form, which
+  // needs its own click (stopPropagation there would work too, but this
+  // reads clearer from the row's side: "unless it's the form").
+  tbody.addEventListener('click', function (e) {
+    if (e.target.closest('.inlineForm')) return;
+    var row = e.target.closest('tr[data-href]');
+    if (row) window.location.href = row.dataset.href;
+  });
   Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, colIndex) {
     var dir = 1;
     th.addEventListener('click', function () {
@@ -1295,8 +1355,55 @@ const IMPORT_REUSE_MS = 60 * 60 * 1000;
 // scratch, and easily, the moment it is actually asked for again.
 const IMPORT_MAX_AGE_MS = IMPORT_REUSE_MS * 2;
 
-async function performRemoteMapImport(host, port) {
+// Turns whatever `parseBZWMap` couldn't process while reading a freshly
+// imported map back into literal `-srvmsg` lines, appended to the `.bzw` file
+// itself (a second `options` block -- `parseBZWServerOptions` already
+// accumulates across as many of those as a file has, see the loop above) so
+// the gap is on record in the file a mapper or operator can read, not just
+// bzo's own console, and reaches a joining player through the exact same
+// `-srvmsg` -> `messages` -> `announceWorldMessages` path a mapper's own
+// `-srvmsg` line does. Deduplicated and capped: many of `parseBZWMap`'s
+// warnings repeat once per instance (one broken teleporter link, one
+// degenerate face, ...), and a wall of identical chat lines on join would
+// bury the ones actually worth reading.
+const IMPORT_WARNING_SRVMSG_LIMIT = 20;
+function buildImportWarningOptionsBlock(warnedMessages) {
+  const unique = Array.from(new Set(warnedMessages));
+  if (unique.length === 0) return '';
+  const shown = unique.slice(0, IMPORT_WARNING_SRVMSG_LIMIT);
+  const toSrvmsg = (text) => `  -srvmsg "${text.replace(/"/g, '\'').replace(/[\r\n]+/g, ' ')}"`;
+  const lines = [
+    'options',
+    toSrvmsg('This import has things bzo does not process yet:'),
+    ...shown.map(toSrvmsg),
+  ];
+  if (unique.length > shown.length) {
+    lines.push(toSrvmsg(`...and ${unique.length - shown.length} more (see server.log)`));
+  }
+  lines.push('end', '');
+  return lines.join('\n');
+}
+
+// Two nearly-simultaneous requests for the same host:port (a double click, a
+// page load racing an operator's own import) each used to run this whole
+// function independently -- harmless back when it only ever overwrote the
+// file wholesale, but now that a warning pass appends to it afterward
+// (`buildImportWarningOptionsBlock`), two interleaved runs duplicate that
+// append instead of one clean overwrite winning. Keyed by the file both
+// would produce, so a second caller joins the first's own promise instead of
+// starting a second one.
+const inFlightRemoteImports = new Map();
+function performRemoteMapImport(host, port) {
   const safeMapName = remoteMapFileName(host, port);
+  const existing = inFlightRemoteImports.get(safeMapName);
+  if (existing) return existing;
+  const promise = performRemoteMapImportNow(host, port, safeMapName)
+    .finally(() => inFlightRemoteImports.delete(safeMapName));
+  inFlightRemoteImports.set(safeMapName, promise);
+  return promise;
+}
+
+async function performRemoteMapImportNow(host, port, safeMapName) {
   const { worldDatabase, gameSettings, queryGame } = await fetchWorldFromServer(host, port, 15000);
   const tree = parseWorldDatabase(worldDatabase);
   if (gameSettings && gameSettings.length >= 30) tree.gameSettings = decodeGameSettings(gameSettings);
@@ -1321,7 +1428,11 @@ async function performRemoteMapImport(host, port) {
   // (`hashRemainingMapsInBackground`): this is the one file that just
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
-  const mapData = parseBZWMap(filePath);
+  let mapData = parseBZWMap(filePath);
+  if (mapData.warnedMessages.length > 0) {
+    await fs.promises.appendFile(filePath, `\n${buildImportWarningOptionsBlock(mapData.warnedMessages)}`);
+    mapData = parseBZWMap(filePath);
+  }
   registerMapFile(
     safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
     mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather, mapData.groundMaterial
@@ -1851,7 +1962,7 @@ if (MAP_SOURCE !== 'random') {
     try {
       fs.watch(mapPath, (eventType, filename) => {
         if (eventType === 'change' || eventType === 'rename') {
-          console.log(`\n📝 Map file changed: ${filename || mapPath}`);
+          console.log(`\n📝 Map file changed: ${filename || path.basename(mapPath)}`);
           console.log('🔄 Restarting server due to map file change...\n');
           requestServerRestart('map file change');
         }
@@ -2107,7 +2218,12 @@ function buildConeMesh(cone) {
   // here instead: spin around the vertical axis, then shift, then convert --
   // a plain `cone`'s own `rotation` is already spent as `baseHeading`, so it
   // spins by nothing extra here.
-  const pos = cone.posBzf;
+  // `shift` (WorldFileLocation's own extra transform, CustomCone.cxx) lands
+  // on top of `position`/`rotation` in world space -- it is not spun by the
+  // primitive's own rotation, so it's added alongside `pos` rather than
+  // passed through `spin`.
+  const shift = cone.shiftBzf;
+  const pos = { x: cone.posBzf.x + shift.x, y: cone.posBzf.y + shift.y, z: cone.posBzf.z + shift.z };
   const spinAngle = cone.isPyramid ? cone.rotationRad : 0;
   const cosSpin = Math.cos(spinAngle);
   const sinSpin = Math.sin(spinAngle);
@@ -2506,7 +2622,9 @@ function buildArcMesh(arc) {
   // See `buildConeMesh`'s own comment on `spinAngle` -- the same reasoning
   // applies here: a `meshbox`'s own `rotation` is upstream's own second
   // transform on top of the fixed 45-degree twist, not part of `baseHeading`.
-  const pos = arc.posBzf;
+  // `shift` joins `pos` unrotated for the same reason `buildConeMesh` does.
+  const shift = arc.shiftBzf;
+  const pos = { x: arc.posBzf.x + shift.x, y: arc.posBzf.y + shift.y, z: arc.posBzf.z + shift.z };
   const spinAngle = arc.isBox ? arc.rotationRad : 0;
   const cosSpin = Math.cos(spinAngle);
   const sinSpin = Math.sin(spinAngle);
@@ -2744,7 +2862,8 @@ function buildSphereMesh(sphere) {
     });
   }
 
-  const pos = sphere.posBzf;
+  const shift = sphere.shiftBzf;
+  const pos = { x: sphere.posBzf.x + shift.x, y: sphere.posBzf.y + shift.y, z: sphere.posBzf.z + shift.z };
   const toBzo = (p) => ({ x: p.x + pos.x, y: p.z + pos.z, z: -(p.y + pos.y) });
   const toBzoDir = (n) => ({ x: n.x, y: n.z, z: -n.y });
 
@@ -3090,7 +3209,14 @@ function parseBzwColor(words) {
   const values = words.slice(0, 4).map(Number);
   if (values.length < 3) return null;
   if (values.some((value) => !Number.isFinite(value))) return null;
-  return values.slice(0, 3).map((value) => Math.max(0, Math.min(1, value)));
+  const [r, g, b, a] = values;
+  // Alpha kept alongside RGB (rather than dropped) so a material that is
+  // meant to be invisible -- `diffuse 0 0 0 0`, a common "solid for
+  // collision/radar, drawn as nothing" trick -- actually renders as nothing
+  // in bzo too, instead of the fully opaque black RGB-only would otherwise
+  // produce (see `_buildMeshObject` in public/render.js, the one reader of
+  // this fourth value).
+  return [r, g, b, a === undefined ? 1 : a].map((value) => Math.max(0, Math.min(1, value)));
 }
 
 // Every stock texture name upstream's own `data/` ships an asset for --
@@ -3199,8 +3325,17 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   // just imported, but not for the hundred cached maps
   // `hashRemainingMapsInBackground` revisits on every restart purely to keep
   // the Map Viewer's hash list current. `quiet` is how a caller that is not
-  // loading a map anyone is about to play says so.
-  const warn = (message) => { if (!quiet) log(message); };
+  // loading a map anyone is about to play says so -- it only silences the
+  // console line; every warning is still collected into `warnedMessages`
+  // below so a caller that DOES want them (a remote import writing them back
+  // as `-srvmsg` lines, see `performRemoteMapImport`) always can, regardless
+  // of `quiet`.
+  const warnedMessages = [];
+  const warn = (message) => { warnedMessages.push(message); if (!quiet) log(message); };
+  // The map's own name is all a warning needs to say -- `filename` itself is
+  // always this same process's own absolute `maps/` path, which only repeats
+  // noise a reader already knows on every line.
+  const mapLabel = path.basename(filename);
   const text = fs.readFileSync(filename, 'utf8');
   const lines = text.split(/\r?\n/);
   const teamMode = parseBZWTeamMode(lines);
@@ -3514,7 +3649,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       const dstFaces = resolveEndpointFaces(link.to);
 
       if (!srcFaces.length || !dstFaces.length) {
-        warn(`Ignoring broken teleporter link from "${link.from?.value || ''}" to "${link.to?.value || ''}" in ${filename}`);
+        warn(`Ignoring broken teleporter link from "${link.from?.value || ''}" to "${link.to?.value || ''}" in ${mapLabel}`);
         continue;
       }
 
@@ -3723,7 +3858,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       if (currentLink.from && currentLink.to) {
         parsedLinks.push(currentLink);
       } else {
-        warn(`Ignoring incomplete link block in ${filename}`);
+        warn(`Ignoring incomplete link block in ${mapLabel}`);
       }
       currentLink = null;
       continue;
@@ -4273,13 +4408,13 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       if (name) {
         currentDefine = { name, obstacles: [], groupInstances: [], meshes: [] };
       } else {
-        warn(`Ignoring "define" with no name in ${filename}`);
+        warn(`Ignoring "define" with no name in ${mapLabel}`);
       }
       continue;
     }
     if (currentDefine && !current && token === 'enddef') {
       if (defineTemplates.has(currentDefine.name)) {
-        warn(`Duplicate group definition "${currentDefine.name}" in ${filename}, using the newest`);
+        warn(`Duplicate group definition "${currentDefine.name}" in ${mapLabel}, using the newest`);
       }
       defineTemplates.set(currentDefine.name, {
         obstacles: currentDefine.obstacles,
@@ -4377,6 +4512,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         type: 'tetra', name: null,
         definedIn: currentDefine ? currentDefine.name : null,
         vertexPositions: [],
+        shiftBzf: { x: 0, y: 0, z: 0 },
         faceMaterials: [0, 1, 2, 3].map(() => (
           { texture: 'mesh', textureUrl: null, color: null, noRadar: false, noLighting: false }
         )),
@@ -4396,8 +4532,14 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       const words = line.split(/\s+/);
       if (token === 'end') {
         if (current.vertexPositions.length < 4) {
-          warn(`Not creating tetrahedron in ${filename}, not enough vertices (${current.vertexPositions.length})`);
+          warn(`Not creating tetrahedron in ${mapLabel}, not enough vertices (${current.vertexPositions.length})`);
         } else {
+          const { shiftBzf } = current;
+          if (shiftBzf.x || shiftBzf.y || shiftBzf.z) {
+            current.vertexPositions = current.vertexPositions.map((v) => ({
+              x: v.x + shiftBzf.x, y: v.y + shiftBzf.y, z: v.z + shiftBzf.z,
+            }));
+          }
           const tetraMesh = buildTetraMesh(current);
           if (currentDefine) {
             currentDefine.meshes.push(tetraMesh);
@@ -4408,11 +4550,14 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         current = null;
       } else if (token === 'vertex') {
         if (current.vertexPositions.length >= 4) {
-          warn(`Extra tetrahedron vertex in ${filename}, ignoring`);
+          warn(`Extra tetrahedron vertex in ${mapLabel}, ignoring`);
         } else {
           const [x, y, z] = words.slice(1).map(Number);
           current.vertexPositions.push({ x: x || 0, y: z || 0, z: -(y || 0) });
         }
+      } else if (token === 'shift') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.shiftBzf = { x: x || 0, y: z || 0, z: -(y || 0) };
       } else if (token === 'normals' || token === 'texcoords') {
         // See the comment above -- intentionally a no-op.
       } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
@@ -4446,6 +4591,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         definedIn: currentDefine ? currentDefine.name : null,
         isPyramid,
         posBzf: { x: 0, y: 0, z: 0 },
+        shiftBzf: { x: 0, y: 0, z: 0 },
         sizeBzf: isPyramid
           ? { x: MESHPYR_DEFAULT_BASE, y: MESHPYR_DEFAULT_BASE, z: MESHPYR_DEFAULT_HEIGHT }
           : { x: 10, y: 10, z: 10 },
@@ -4469,7 +4615,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       if (token === 'end') {
         const coneMesh = buildConeMesh(current);
         if (!coneMesh) {
-          warn(`Not creating ${current.isPyramid ? 'meshpyr' : 'cone'} in ${filename}, invalid size/divisions/texsize`);
+          warn(`Not creating ${current.isPyramid ? 'meshpyr' : 'cone'} in ${mapLabel}, invalid size/divisions/texsize`);
         } else if (currentDefine) {
           currentDefine.meshes.push(coneMesh);
         } else {
@@ -4479,6 +4625,9 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       } else if (token === 'position' || token === 'pos') {
         const [x, y, z] = words.slice(1).map(Number);
         current.posBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'shift') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.shiftBzf = { x: x || 0, y: y || 0, z: z || 0 };
       } else if (token === 'size') {
         const [x, y, z] = words.slice(1).map(Number);
         current.sizeBzf = { x: x || 0, y: y || 0, z: z || 0 };
@@ -4536,6 +4685,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         definedIn: currentDefine ? currentDefine.name : null,
         isBox,
         posBzf: { x: 0, y: 0, z: 0 },
+        shiftBzf: { x: 0, y: 0, z: 0 },
         sizeBzf: isBox
           ? { x: MESHBOX_DEFAULT_BASE, y: MESHBOX_DEFAULT_BASE, z: MESHBOX_DEFAULT_HEIGHT }
           : { x: 10, y: 10, z: 10 },
@@ -4559,7 +4709,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       if (token === 'end') {
         const arcMesh = buildArcMesh(current);
         if (!arcMesh) {
-          warn(`Not creating ${current.isBox ? 'meshbox' : 'arc'} in ${filename}, invalid size/divisions/ratio/texsize`);
+          warn(`Not creating ${current.isBox ? 'meshbox' : 'arc'} in ${mapLabel}, invalid size/divisions/ratio/texsize`);
         } else if (currentDefine) {
           currentDefine.meshes.push(arcMesh);
         } else {
@@ -4569,6 +4719,9 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       } else if (token === 'position' || token === 'pos') {
         const [x, y, z] = words.slice(1).map(Number);
         current.posBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'shift') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.shiftBzf = { x: x || 0, y: y || 0, z: z || 0 };
       } else if (token === 'size') {
         const [x, y, z] = words.slice(1).map(Number);
         current.sizeBzf = { x: x || 0, y: y || 0, z: z || 0 };
@@ -4620,6 +4773,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         type: 'sphere', name: null,
         definedIn: currentDefine ? currentDefine.name : null,
         posBzf: { x: 0, y: 0, z: 10 },
+        shiftBzf: { x: 0, y: 0, z: 0 },
         sizeBzf: { x: 10, y: 10, z: 10 },
         rotationRad: 0,
         divisions: 4,
@@ -4638,7 +4792,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       if (token === 'end') {
         const sphereMesh = buildSphereMesh(current);
         if (!sphereMesh) {
-          warn(`Not creating sphere in ${filename}, invalid size/divisions/texsize`);
+          warn(`Not creating sphere in ${mapLabel}, invalid size/divisions/texsize`);
         } else if (currentDefine) {
           currentDefine.meshes.push(sphereMesh);
         } else {
@@ -4648,6 +4802,9 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       } else if (token === 'position' || token === 'pos') {
         const [x, y, z] = words.slice(1).map(Number);
         current.posBzf = { x: x || 0, y: y || 0, z: z || 0 };
+      } else if (token === 'shift') {
+        const [x, y, z] = words.slice(1).map(Number);
+        current.shiftBzf = { x: x || 0, y: y || 0, z: z || 0 };
       } else if (token === 'size') {
         const [x, y, z] = words.slice(1).map(Number);
         current.sizeBzf = { x: x || 0, y: y || 0, z: z || 0 };
@@ -4714,7 +4871,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         // constructor snapshot.
         if (token === 'endface') {
           if (currentMeshFace.vertexIndices.length < 3) {
-            warn(`Ignoring a mesh face with fewer than 3 vertices in ${filename}`);
+            warn(`Ignoring a mesh face with fewer than 3 vertices in ${mapLabel}`);
           } else {
             current.faces.push(currentMeshFace);
           }
@@ -4741,6 +4898,19 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         // does not touch `unsupportedCounts` -- but still does not fold into
         // the generic `current && token === 'end'` obstacle-closing branch
         // below, which assumes a finished box/pyramid/group.
+        // A mesh with vertices but zero faces draws and collides as nothing
+        // -- not a mapper error bzo can see in the text (a real `mesh`
+        // block, correctly closed), but the signature a source mesh built
+        // with BZFlag's MeshDrawInfo optimization leaves once reconstructed
+        // from a remote server's wire protocol, which does not carry that
+        // format's actual geometry at all (see `parseMesh` in
+        // `server/remote-world-import.cjs`). Worth a warning either way: an
+        // operator who hand-wrote a genuinely empty mesh gets the same nudge
+        // to remove it.
+        if (current.vertices.length > 0 && current.faces.length === 0) {
+          warn(`Ignoring mesh "${current.name || current.definedIn || '(unnamed)'}" in ${mapLabel}, `
+            + `${current.vertices.length} vertices with no faces`);
+        }
         if (currentDefine) {
           // Still a template in its own local frame -- `finalizeMeshGeometry`
           // runs later, once a `group` instance places it (or not at all, if
@@ -5649,13 +5819,13 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   }
   if (unknownGroupDefs.size > 0) {
     warn(
-      `Ignoring "group" instances naming a "define" not in ${filename}:`
+      `Ignoring "group" instances naming a "define" not in ${mapLabel}:`
       + ` ${Array.from(unknownGroupDefs).sort().join(', ')}`
     );
   }
   if (groupCycleWarnings.size > 0) {
     warn(
-      `Avoided recursion in ${filename}: definition(s) `
+      `Avoided recursion in ${mapLabel}: definition(s) `
       + `${Array.from(groupCycleWarnings).sort().join(', ')} reference themselves `
       + 'through a group instance, directly or through others'
     );
@@ -5664,59 +5834,75 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   if (nonVerticalSpinCount > 0) {
     warn(
       `Ignoring ${nonVerticalSpinCount} "spin" line(s) about an axis other than `
-      + `vertical in ${filename} -- bzo's box/pyramid model can't tip that way`
+      + `vertical in ${mapLabel} -- bzo's box/pyramid model can't tip that way`
     );
   }
   if (unreadZoneKeywords.size > 0) {
     warn(
-      `Ignoring zone keywords bzo does not read in ${filename}:`
+      `Ignoring zone keywords bzo does not read in ${mapLabel}:`
       + ` ${Array.from(unreadZoneKeywords).sort().join(', ')}`
     );
   }
   if (unreadWeaponKeywords.size > 0) {
     warn(
-      `Ignoring weapon keywords bzo does not read in ${filename}:`
+      `Ignoring weapon keywords bzo does not read in ${mapLabel}:`
       + ` ${Array.from(unreadWeaponKeywords).sort().join(', ')}`
       + ' (those weapons fire on their timer instead)'
     );
   }
   if (unreadWeaponTypes.size > 0) {
     warn(
-      `Weapon types bzo does not have in ${filename}:`
+      `Weapon types bzo does not have in ${mapLabel}:`
       + ` ${Array.from(unreadWeaponTypes).sort().join(', ')}`
       + ' (those weapons fire an ordinary shell)'
     );
   }
   if (unresolvedMaterialRefs.size > 0) {
     warn(
-      `Ignoring "matref" naming a material not defined in ${filename}:`
+      `Ignoring "matref" naming a material not defined in ${mapLabel}:`
       + ` ${Array.from(unresolvedMaterialRefs).sort().join(', ')}`
     );
   }
   if (unresolvedDynamicColorRefs.size > 0) {
     warn(
-      `Ignoring "dyncol" naming a dynamicColor not defined in ${filename}:`
+      `Ignoring "dyncol" naming a dynamicColor not defined in ${mapLabel}:`
       + ` ${Array.from(unresolvedDynamicColorRefs).sort().join(', ')}`
     );
   }
   if (unresolvedTextureMatrixRefs.size > 0) {
     warn(
-      `Ignoring "texmat" naming a textureMatrix not defined in ${filename}:`
+      `Ignoring "texmat" naming a textureMatrix not defined in ${mapLabel}:`
       + ` ${Array.from(unresolvedTextureMatrixRefs).sort().join(', ')}`
     );
   }
   if (unresolvedTextureNames.size > 0) {
     warn(
-      `Texture name(s) bzo has no local asset for in ${filename}, kept at the `
+      `Texture name(s) bzo has no local asset for in ${mapLabel}, kept at the `
       + `obstacle's plain default: ${Array.from(unresolvedTextureNames).sort().join(', ')}`
     );
   }
   if (externalTextureUrls.size > 0) {
-    warn(
-      `External texture URL(s) in ${filename}, forwarded to each client which `
-      + `only loads one from a trusted host (its own origin, or *images.bzflag.org):`
-      + ` ${Array.from(externalTextureUrls).sort().join(', ')}`
-    );
+    // Counted by host, not listed one URL at a time -- a real map can name a
+    // few dozen of these (every one of `import-xs.bzexcess.com_5155.bzw`'s
+    // own materials does), and every client already attempts every host
+    // regardless (`isExternalTextureUrlLoadable`, public/texture.js) -- what
+    // is worth a player's attention on join is which hosts this map trusted,
+    // not each individual picture.
+    const hostCounts = new Map();
+    for (const url of externalTextureUrls) {
+      let host = 'local';
+      try {
+        host = new URL(`https:${url}`).host || 'local';
+      } catch {
+        host = 'local';
+      }
+      hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
+    }
+    const summary = Array.from(hostCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([host, count]) => `${count} - ${host}`)
+      .join(', ');
+    warn(`textures from ${mapLabel}: ${summary}`);
   }
 
   // Joined into `obstacles` before the tally below, so "included" counts a
@@ -5796,13 +5982,13 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   }
   if (unresolvedPhysicsDriverRefs.size > 0) {
     warn(
-      `Ignoring "phydrv" naming a physics driver not defined in ${filename}:`
+      `Ignoring "phydrv" naming a physics driver not defined in ${mapLabel}:`
       + ` ${Array.from(unresolvedPhysicsDriverRefs).sort().join(', ')}`
     );
   }
   if (unreadPhysicsDriverKeywords.size > 0) {
     warn(
-      `Physics driver keywords bzo does not read in ${filename}:`
+      `Physics driver keywords bzo does not read in ${mapLabel}:`
       + ` ${Array.from(unreadPhysicsDriverKeywords).sort().join(', ')}`
     );
   }
@@ -5829,7 +6015,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       + `yet: ${droppedList}.`
     );
     warn(
-      `Ignoring unsupported blocks in ${filename}: ${droppedList}`
+      `Ignoring unsupported blocks in ${mapLabel}: ${droppedList}`
     );
   }
 
@@ -5872,6 +6058,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     weather: serverOptions.weather || null,
     groundMaterial: mapGroundMaterial,
     messages,
+    warnedMessages,
   };
 }
 
@@ -14191,7 +14378,7 @@ fs.readdirSync(publicDir).forEach(file => {
   if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
     fs.watch(filePath, (eventType, filename) => {
       if (eventType === 'change') {
-        console.log(`\n📝 File changed: ${filename || filePath}`);
+        console.log(`\n📝 File changed: ${filename || path.basename(filePath)}`);
         console.log('🔄 Reloading all clients...\n');
         forceClientReload();
       }
@@ -14204,7 +14391,7 @@ const serverJsPath = path.join(__dirname, 'server.js');
 if (fs.existsSync(serverJsPath)) {
   fs.watch(serverJsPath, (eventType, filename) => {
     if (eventType === 'change') {
-      console.log(`\n📝 server.js changed: ${filename || serverJsPath}`);
+      console.log(`\n📝 server.js changed: ${filename || path.basename(serverJsPath)}`);
       console.log('🔄 Restarting server...\n');
       requestServerRestart('server.js change');
     }

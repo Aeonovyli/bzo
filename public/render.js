@@ -4203,19 +4203,41 @@ class RenderManager {
         + `|${animIdentityKey(face.dynamicColor)}|${animIdentityKey(face.textureMatrix)}`;
       let materialIndex = materialIndexByKey.get(key);
       if (materialIndex === undefined) {
-        const textureFactory = resolveObstacleTextureFactory(
-          face.texture, face.textureUrl, '/textures/boxwall.png', createBoxWallTexture,
-        );
-        // `material` declared before the factory runs, same reason
-        // `_getSharedObstacleMaterials` does: `registerAlphaCallback`
-        // (`public/texture.js`) always defers to a microtask, so the
-        // callback never actually fires until this statement (and `let`)
-        // has finished, even when the answer was already known.
+        // A generic `mesh` face with no `texture`/`addtexture` at all (unlike
+        // box/pyramid, which upstream always textures with a stock default)
+        // is meant to be flat-colored -- falling back to the boxwall texture
+        // here would draw a wall pattern the map never asked for.
         let material;
-        material = new THREE.MeshLambertMaterial({
-          map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha)),
-        });
-        if (face.color) material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);
+        if (face.texture || face.textureUrl) {
+          const textureFactory = resolveObstacleTextureFactory(
+            face.texture, face.textureUrl, '/textures/boxwall.png', createBoxWallTexture,
+          );
+          // `material` declared before the factory runs, same reason
+          // `_getSharedObstacleMaterials` does: `registerAlphaCallback`
+          // (`public/texture.js`) always defers to a microtask, so the
+          // callback never actually fires until this statement (and `let`)
+          // has finished, even when the answer was already known.
+          material = new THREE.MeshLambertMaterial({
+            map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha)),
+          });
+        } else {
+          material = new THREE.MeshLambertMaterial();
+        }
+        if (face.color) {
+          material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);
+          // A material's own flat `diffuse`/`color` alpha (`parseBzwColor`,
+          // server.js) -- distinct from a texture's own per-pixel alpha
+          // (`applyTextureAlpha` above). A map that writes `diffuse 0 0 0 0`
+          // wants this face invisible (a common "solid for collision/radar,
+          // drawn as nothing" trick), not opaque black, which is what
+          // dropping this value used to produce.
+          const alpha = face.color[3] ?? 1;
+          if (alpha < 1) {
+            material.transparent = true;
+            material.opacity = alpha;
+            material.depthWrite = false;
+          }
+        }
         // `dyncol` -- replaces this face's diffuse outright (see
         // `evaluateDynamicColor`), so a static `color`/tint above is only
         // ever this material's look before the first animation frame runs.

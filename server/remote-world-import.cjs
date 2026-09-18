@@ -150,7 +150,9 @@ function sendFrame(socket, codeStr, payload = Buffer.alloc(0)) {
 
 function fetchWorldFromServer(host, port, timeout) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host, port });
+    // Upstream bzfs does not support IPv6; force IPv4 so dual-stack hosts
+    // (e.g. AAAA + A records) don't route the connection over IPv6.
+    const socket = net.createConnection({ host, port, family: 4 });
     let buffer = Buffer.alloc(0);
     const waiters = [];
     let settled = false;
