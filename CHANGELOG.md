@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.29] - 2026-09-18
+
+### Fixed
+- **Pyramid orientation now matches upstream for a textured pyramid.** Any
+  pyramid with a per-face command (`sides matref`, `texsize`, a face's own
+  texture or color, `phydrv`) now follows BZFlag's real `isOldPyramid=false`
+  construction: a negative height anchors `position` at whichever end it
+  points to rather than literally flipping the shape, matching what a real
+  bzfs client renders for the same map instead of always applying the
+  legacy flip interpretation.
+- **A tank on one mesh's flat roof is no longer blocked by a neighboring
+  mesh's wall at a shared seam.** Collision now collects every mesh face a
+  move actually touches before picking a winner -- any flat top beats any
+  wall, matching upstream's own tie-break -- instead of stopping at
+  whichever obstacle happened to answer first. Also ported upstream's own
+  stuck-frame escape for the remaining case of two obstacles pinched too
+  tight to slide out of.
+- **A flag dropped on a mesh's flat roof now behaves the same for every
+  player.** The footprint test a flag drop uses had mesh support on the
+  server only; a real client now agrees with it instead of always reading a
+  mesh roof as not-a-valid-drop-spot.
+
 ## [1.2.28] - 2026-09-17
 
 ### Added
