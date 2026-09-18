@@ -1372,11 +1372,12 @@ function buildImportWarningOptionsBlock(warnedMessages) {
   if (unique.length === 0) return '';
   const shown = unique.slice(0, IMPORT_WARNING_SRVMSG_LIMIT);
   const toSrvmsg = (text) => `  -srvmsg "${text.replace(/"/g, '\'').replace(/[\r\n]+/g, ' ')}"`;
-  const lines = [
-    'options',
-    toSrvmsg('This import has things bzo does not process yet:'),
-    ...shown.map(toSrvmsg),
-  ];
+  // No header line: `announceWorldMessages` says each of these as its own
+  // separate chat line, so a label saying only "there are lines below" would
+  // be the one line here carrying no actual content -- every real line
+  // already names the map and the specific thing dropped, and stands on its
+  // own without one.
+  const lines = ['options', ...shown.map(toSrvmsg)];
   if (unique.length > shown.length) {
     lines.push(toSrvmsg(`...and ${unique.length - shown.length} more (see server.log)`));
   }
@@ -1429,9 +1430,27 @@ async function performRemoteMapImportNow(host, port, safeMapName) {
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
   let mapData = parseBZWMap(filePath);
-  if (mapData.warnedMessages.length > 0) {
-    await fs.promises.appendFile(filePath, `\n${buildImportWarningOptionsBlock(mapData.warnedMessages)}`);
-    mapData = parseBZWMap(filePath);
+  // `tree.discardedAnimationNames` (remote-world-import.cjs) is known only
+  // here, before the wire-protocol detail behind it is flattened to `.bzw`
+  // text -- `mapData.warnedMessages` alone, from re-reading that text, could
+  // never see it. Folded into the one "this import has things bzo does not
+  // process yet" report rather than a second, separate one.
+  const spinCount = tree.discardedAnimationNames.length;
+  const spinNames = Array.from(new Set(tree.discardedAnimationNames.filter(Boolean))).sort();
+  const importWarnings = spinCount > 0
+    ? [
+      ...mapData.warnedMessages,
+      `${safeMapName} ignored: ${spinCount} mesh animation${spinCount === 1 ? '' : 's'}`
+      + (spinNames.length > 0 ? ` (${spinNames.join(', ')})` : ''),
+    ]
+    : mapData.warnedMessages;
+  if (importWarnings.length > 0) {
+    await fs.promises.appendFile(filePath, `\n${buildImportWarningOptionsBlock(importWarnings)}`);
+    // Quiet: this is the same file the first parse above just fully logged,
+    // plus the options block this very function appended -- re-parsing it
+    // is only to pick up that block's own `-srvmsg` lines in `mapData`, not
+    // a second, real pass worth repeating every warning to server.log for.
+    mapData = parseBZWMap(filePath, { quiet: true });
   }
   registerMapFile(
     safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
@@ -3488,6 +3507,26 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   // load-failure outcome, not a host it refused to try). Named on load so
   // it is visible that a map asked for one at all.
   const externalTextureUrls = new Set();
+  // Set below, once, if this map has any -- carried out to the player-facing
+  // `messages` build near the end of this function rather than pushed there
+  // directly, since that is also where `mapLabel`'s own line gets its exact
+  // wording decided.
+  let externalTextureSummary = null;
+  // Set below, once, the same way `externalTextureSummary` is -- see it for
+  // why this is not simply pushed onto `messages` at the point it is known.
+  let lightingPropsSummary = null;
+  // `ambient`/`specular`/`emission`/`shininess` -- BzMaterial's own
+  // Blinn-Phong coefficients (`BzMaterial::reset` defaults: ambient
+  // 0.2 0.2 0.2 1, specular/emission 0 0 0 1, shininess 0) -- bzo has no
+  // lighting model that reads them (one ambient + one directional light over
+  // plain Lambert materials, see `render.js`), so every material stays
+  // diffuse-only regardless of what a map states here. Read in
+  // `applyBzwMaterialToken` below purely to notice a *non-default* value --
+  // a mapper who never touched these should not be told about it -- and
+  // tallied per distinct property name and per material actually affected,
+  // rather than silently dropped the way they used to be.
+  const unappliedLightingProps = new Set();
+  const materialsWithUnappliedLighting = new Set();
   // How many of each UNSUPPORTED_TOP_LEVEL_KEYWORDS block this map asked for,
   // by keyword -- what turns into the player-facing chat message below and
   // (with `serverOptions.serverMessages`, i.e. -srvmsg) this function's
@@ -3839,6 +3878,21 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     }
     if (token === 'nolighting') {
       target.noLighting = true;
+      return true;
+    }
+    if (token === 'ambient' || token === 'specular' || token === 'emission' || token === 'shininess') {
+      // Defaults straight from `BzMaterial::reset` -- see the declaration
+      // above. A value that matches it is a mapper who never touched this
+      // property (or an exporter, like `remote-world-import.cjs`'s own
+      // `printMaterialBlock`, that always writes every property whether or
+      // not it changed anything), not one worth a warning.
+      const defaults = token === 'ambient' ? [0.2, 0.2, 0.2, 1] : token === 'shininess' ? [0] : [0, 0, 0, 1];
+      const values = words.slice(1).map(Number);
+      const isDefault = defaults.every((def, i) => !Number.isFinite(values[i]) || Math.abs(values[i] - def) < 1e-6);
+      if (!isDefault) {
+        unappliedLightingProps.add(token);
+        materialsWithUnappliedLighting.add(target);
+      }
       return true;
     }
     return false;
@@ -5881,6 +5935,11 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       + `obstacle's plain default: ${Array.from(unresolvedTextureNames).sort().join(', ')}`
     );
   }
+  if (materialsWithUnappliedLighting.size > 0) {
+    lightingPropsSummary = `${materialsWithUnappliedLighting.size} material${materialsWithUnappliedLighting.size === 1 ? '' : 's'}`
+      + ` (${Array.from(unappliedLightingProps).sort().join('/')})`;
+    warn(`${mapLabel} ignored: ${lightingPropsSummary}`);
+  }
   if (externalTextureUrls.size > 0) {
     // Counted by host, not listed one URL at a time -- a real map can name a
     // few dozen of these (every one of `import-xs.bzexcess.com_5155.bzw`'s
@@ -5902,7 +5961,16 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       .sort((a, b) => b[1] - a[1])
       .map(([host, count]) => `${count} - ${host}`)
       .join(', ');
-    warn(`textures from ${mapLabel}: ${summary}`);
+    // Worth both server.log and a joining/viewing player's own chat -- which
+    // hosts this map trusted for textures. Not routed through `warn`, though:
+    // that would also land it in `warnedMessages`, which a remote import bakes
+    // back into the file as its own "This import has things bzo does not
+    // process yet:" -srvmsg block (`buildImportWarningOptionsBlock`) -- a
+    // header this FYI note does not belong under, since nothing about it went
+    // unprocessed. `externalTextureSummary` carries it to `messages` below
+    // instead, its own line with its own framing.
+    if (!quiet) log(`textures from ${mapLabel}: ${summary}`);
+    externalTextureSummary = summary;
   }
 
   // Joined into `obstacles` before the tally below, so "included" counts a
@@ -6002,6 +6070,12 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   // entry and says it locally the moment a player actually starts viewing
   // that map, never during the entry dialog's preview-while-choosing.
   const messages = [...serverOptions.serverMessages];
+  if (externalTextureSummary) {
+    messages.push(`${mapLabel} textures: ${externalTextureSummary}`);
+  }
+  if (lightingPropsSummary) {
+    messages.push(`${mapLabel} ignored: ${lightingPropsSummary}`);
+  }
   if (unsupportedCounts.size > 0) {
     const included = obstacles.length;
     const dropped = Array.from(unsupportedCounts.values()).reduce((sum, n) => sum + n, 0);
@@ -6034,6 +6108,11 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       texture: groundMaterialBlock.texture,
       textureUrl: groundMaterialBlock.textureUrl,
       color: groundMaterialBlock.color,
+      // A `GroundMaterial`'s own `dyncol`/`texmat` (resolved above like any
+      // other material's) -- `render.js`'s `buildGround` registers these
+      // with `_animatedMaterials` the same way `buildWater` already does.
+      dynamicColor: groundMaterialBlock.dynamicColor,
+      textureMatrix: groundMaterialBlock.textureMatrix,
     };
   } else if (serverOptions.groundTexture) {
     const resolved = resolveBzwTextureName(serverOptions.groundTexture);

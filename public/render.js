@@ -2593,6 +2593,7 @@ class RenderManager {
   }
 
   clearGround() {
+    this._animatedMaterials = this._animatedMaterials.filter((entry) => entry.source !== 'ground');
     // The material's `dispose` does not reach its map, and the zone ground is a
     // second texture the material is not holding when the standard one is up.
     if (this._groundTexture) this._groundTexture.dispose();
@@ -3100,6 +3101,20 @@ class RenderManager {
         : 0xffffff,
       side: THREE.FrontSide,
     });
+
+    // A `GroundMaterial`'s own `dyncol`/`texmat` (`BackgroundRenderer`'s own
+    // ground material is a `BzMaterial` like any other, so it can carry
+    // either) -- the same `_animatedMaterials` registration `buildWater`
+    // already does for its own material/texture, just never wired up for
+    // the ground until now (issue #81 gave the ground a material at all, but
+    // stopped at texture/color).
+    if (groundMaterial?.dynamicColor) {
+      this._animatedMaterials.push({ material: groundMeshMaterial, dynamicColor: groundMaterial.dynamicColor, source: 'ground' });
+    }
+    if (groundMaterial?.textureMatrix) {
+      groundTexture.matrixAutoUpdate = false;
+      this._animatedMaterials.push({ texture: groundTexture, textureMatrix: groundMaterial.textureMatrix, source: 'ground' });
+    }
 
     this._groundTexture = groundTexture;
     this._zoneGroundTexture = null;

@@ -512,6 +512,200 @@ function parseMeshFace(r) {
   };
 }
 
+// A mesh built with BZFlag's MeshDrawInfo optimization (`-meshbox`, or a
+// mapper's own `drawInfo` block) hides its real render geometry in this same
+// texcoord region -- MeshObstacle::pack (~MeshObstacle.cxx:672-694) inflates
+// texcoordCount to also cover the packed MeshDrawInfo blob plus alignment
+// padding, then appends a trailing `afvec2` slot holding `rewindLen`: the
+// byte count to step back from the end of this region to find where that
+// blob actually starts. `unpackCorner`, next, mirrors `Corner::unpack`
+// (MeshDrawInfo.cxx:1518).
+function unpackCorner(r) {
+  const tag = r.u8();
+  if (tag === 0) return { vertex: r.i32(), normal: r.i32(), texcoord: r.i32() };
+  return { vertex: r.u16(), normal: r.u16(), texcoord: r.u16() };
+}
+
+// OpenGL index type constants a `DrawCmd` tags its indices with
+// (DrawCmd::DrawIndexUShort / DrawIndexUInt, MeshDrawInfo.h).
+const DRAW_INDEX_USHORT = 0x1403;
+
+function unpackDrawCmd(r) {
+  const drawMode = r.u32();
+  const count = r.i32();
+  const indexType = r.u32();
+  const indices = indexType === DRAW_INDEX_USHORT
+    ? Array.from({ length: count }, () => r.u16())
+    : Array.from({ length: count }, () => r.u32());
+  return { drawMode, indices };
+}
+
+// `DrawCmd::DrawModes` (MeshDrawInfo.h) -- expands one OpenGL-style draw
+// command's index list into individual triangles (each a triple of *corner*
+// indices, still one step removed from real vertex/normal/texcoord indices).
+// Points/lines carry no surface to draw and are skipped.
+function drawCmdToTriangles(cmd) {
+  const idx = cmd.indices;
+  const tris = [];
+  switch (cmd.drawMode) {
+    case 4: // DrawTriangles
+      for (let i = 0; i + 2 < idx.length; i += 3) tris.push([idx[i], idx[i + 1], idx[i + 2]]);
+      break;
+    case 5: // DrawTriangleStrip
+      for (let i = 0; i + 2 < idx.length; i++) {
+        tris.push(i % 2 === 0 ? [idx[i], idx[i + 1], idx[i + 2]] : [idx[i + 1], idx[i], idx[i + 2]]);
+      }
+      break;
+    case 6: // DrawTriangleFan
+    case 9: // DrawPolygon (assumed convex, same fan triangulation)
+      for (let i = 1; i + 1 < idx.length; i++) tris.push([idx[0], idx[i], idx[i + 1]]);
+      break;
+    case 7: // DrawQuads
+      for (let i = 0; i + 3 < idx.length; i += 4) {
+        tris.push([idx[i], idx[i + 1], idx[i + 2]]);
+        tris.push([idx[i], idx[i + 2], idx[i + 3]]);
+      }
+      break;
+    case 8: // DrawQuadStrip
+      for (let i = 0; i + 3 < idx.length; i += 2) {
+        tris.push([idx[i], idx[i + 1], idx[i + 3]]);
+        tris.push([idx[i], idx[i + 3], idx[i + 2]]);
+      }
+      break;
+    default:
+      break;
+  }
+  return tris;
+}
+
+function unpackDrawSet(r) {
+  const cmdCount = r.i32();
+  const cmds = Array.from({ length: cmdCount }, () => unpackDrawCmd(r));
+  const material = r.i32();
+  r.skip((4 * 4) + 1); // sphere (afvec3 + radius) and state bits, unused here
+  return { cmds, material };
+}
+
+function unpackDrawLod(r) {
+  const setCount = r.i32();
+  const sets = Array.from({ length: setCount }, () => unpackDrawSet(r));
+  const lengthPerPixel = r.f32();
+  return { sets, lengthPerPixel };
+}
+
+// Reset at the start of every `parseWorldDatabase` call and read back off
+// its return value (`tree.discardedAnimationNames`) once parsing finishes --
+// see the comments there and in `parseGroupDefinition`. Safe as a
+// module-level array only because `parseWorldDatabase` is fully synchronous
+// top to bottom (no `await` anywhere inside its call graph), so two calls
+// can never interleave.
+let discardedAnimationNames = [];
+
+// `MeshDrawInfo::unpack` (MeshDrawInfo.cxx:1386). `radarLods` and the
+// trailing sphere/extents are read (to stay aligned) but not kept -- bzo has
+// no distance-based LOD system, so only the highest-resolution `lods` entry
+// (post-sort, the smallest `lengthPerPixel`) ever gets used.
+function unpackMeshDrawInfo(r) {
+  const name = r.str();
+  const optionCount = r.i32();
+  for (let i = 0; i < optionCount; i++) r.str();
+  const stateBits = r.u32();
+  // `AnimationInfo::unpack` (angvel, dummy) -- a continuous spin bzo has no
+  // per-obstacle animation system to apply (#88). Read so the cursor stays
+  // aligned, same as ever, but the value now survives the call (`angvel`,
+  // below) instead of being thrown away right here -- `applyMeshDrawInfo`
+  // needs it to decide whether this mesh's own name is worth reporting.
+  const angvel = (stateBits & 1) ? r.f32() : 0;
+  if (stateBits & 1) r.str();
+  const cornerCount = r.i32();
+  const corners = Array.from({ length: cornerCount }, () => unpackCorner(r));
+  const rawVertCount = r.i32();
+  const rawVerts = Array.from({ length: rawVertCount }, () => r.vec3());
+  const rawNormCount = r.i32();
+  const rawNorms = Array.from({ length: rawNormCount }, () => r.vec3());
+  const rawTxcdCount = r.i32();
+  const rawTxcds = Array.from({ length: rawTxcdCount }, () => [r.f32(), r.f32()]);
+  const lodCount = r.i32();
+  const lods = Array.from({ length: lodCount }, () => unpackDrawLod(r));
+  const radarCount = r.i32();
+  for (let i = 0; i < radarCount; i++) unpackDrawLod(r);
+  r.skip(10 * 4); // sphere (vec4) + extents mins/maxs (vec3 each), unused here
+  return { name, angvel, corners, rawVerts, rawNorms, rawTxcds, lods };
+}
+
+// Reconstructs the triangles a drawInfo-optimized mesh's own `face` list
+// never carries (#87): only when that list came back empty, since a mesh
+// with real faces already renders and collides normally, and a mapper who
+// wrote both a `face` list and a `drawInfo` block meant the faces to still be
+// what collides. These triangles never do -- `CustomMesh.cxx`'s own
+// decorative/passable hack means upstream itself never gave a *zero-face*
+// drawInfo mesh any collision either, so `driveThrough`/`shootThrough` are
+// forced true here rather than left at the mesh's own state-byte flags.
+function applyMeshDrawInfo(r, texcoordStart, texcoordEnd, fakeTexcoordCount, mesh) {
+  if (mesh.vertices.length >= 1) mesh.vertices.pop(); // CustomMesh.cxx's extraneous vertex, tacked on only when a drawInfo owner
+  if (fakeTexcoordCount < 2) return;
+  const rewindLen = r.buf.readInt32BE(texcoordEnd - 8);
+  if (rewindLen <= 0 || rewindLen > fakeTexcoordCount * 8) return;
+  const dr = new Reader(r.buf);
+  dr.o = texcoordEnd - rewindLen;
+  let drawInfo;
+  try {
+    drawInfo = unpackMeshDrawInfo(dr);
+  } catch {
+    return; // malformed drawInfo blob -- keep the (bogus) texcoords already read, nothing else to lose
+  }
+
+  const fakeTxcds = rewindLen / 8;
+  const tr = new Reader(r.buf);
+  tr.o = texcoordStart;
+  mesh.texcoords = Array.from({ length: fakeTexcoordCount - fakeTxcds }, () => [tr.f32(), tr.f32()]);
+
+  if (drawInfo.name) mesh.name = drawInfo.name; // MeshObstacle::unpack: "get the proxied name" -- a mesh has no name of its own on the wire otherwise
+  // A marker only -- resolved to a real label and moved into
+  // `discardedAnimationNames` by whichever `parseGroupDefinition` call
+  // placed this mesh, the only scope that knows the enclosing `define`'s own
+  // name (a mesh with no `drawInfo.name` of its own has nothing better).
+  if (drawInfo.angvel) mesh._discardedSpinName = drawInfo.name || null;
+  if (mesh.faces.length > 0 || drawInfo.lods.length === 0 || drawInfo.corners.length === 0) return;
+
+  // A raw pool of its own means the drawInfo's corners index into it, not
+  // into the mesh's regular vertex/normal/texcoord lists -- append it so a
+  // single index space covers both (`printMesh` below writes every vertex it
+  // is given, whether or not this mesh's own text ever names the extra ones).
+  const usesRawPool = drawInfo.rawVerts.length > 0;
+  const vertexOffset = usesRawPool ? mesh.vertices.length : 0;
+  const normalOffset = usesRawPool ? mesh.normals.length : 0;
+  const texcoordOffset = usesRawPool ? mesh.texcoords.length : 0;
+  if (usesRawPool) {
+    mesh.vertices = mesh.vertices.concat(drawInfo.rawVerts);
+    mesh.normals = mesh.normals.concat(drawInfo.rawNorms);
+    mesh.texcoords = mesh.texcoords.concat(drawInfo.rawTxcds);
+  }
+
+  // `compareLengthPerPixel` (MeshDrawInfo.cxx): smaller lengthPerPixel is
+  // higher resolution, meant for a closer camera -- bzo picks that one
+  // always, the highest-detail LOD a distance-aware client would only use up
+  // close.
+  const lod0 = [...drawInfo.lods].sort((a, b) => a.lengthPerPixel - b.lengthPerPixel)[0];
+  const newFaces = [];
+  for (const drawSet of lod0.sets) {
+    for (const cmd of drawSet.cmds) {
+      for (const tri of drawCmdToTriangles(cmd)) {
+        if (tri.some((ci) => !drawInfo.corners[ci])) continue;
+        newFaces.push({
+          vertexIdx: tri.map((ci) => drawInfo.corners[ci].vertex + vertexOffset),
+          normalIdx: tri.map((ci) => drawInfo.corners[ci].normal + normalOffset),
+          texcoordIdx: tri.map((ci) => drawInfo.corners[ci].texcoord + texcoordOffset),
+          matindex: drawSet.material, phydrv: -1,
+          driveThrough: true, shootThrough: true,
+          smoothBounce: false, noclusters: false, ricochet: false,
+        });
+      }
+    }
+  }
+  mesh.faces = newFaces;
+}
+
 function parseMesh(r) {
   const checkCount = r.i32();
   const checks = Array.from({ length: checkCount }, () => ({ type: r.u8(), point: r.vec3() }));
@@ -520,20 +714,21 @@ function parseMesh(r) {
   const normalCount = r.i32();
   const normals = Array.from({ length: normalCount }, () => r.vec3());
   const texcoordCount = r.i32();
-  // Usually literal (u,v) pairs; a mesh built with drawInfo optimization hides
-  // extra binary data in this same region, which we don't attempt to detect --
-  // we still consume the right number of bytes either way, so nothing downstream
-  // of the mesh is affected, but such a mesh's last texcoord line or two may be
-  // bogus rather than real UVs.
+  const texcoordStart = r.o;
   const texcoords = Array.from({ length: texcoordCount }, () => [r.f32(), r.f32()]);
+  const texcoordEnd = r.o;
   const faceSize = r.i32();
   const faces = Array.from({ length: faceSize }, () => parseMeshFace(r));
   const state = r.u8();
-  return {
+  const mesh = {
     checks, vertices, normals, texcoords, faces,
     driveThrough: !!(state & 1), shootThrough: !!(state & 2),
     smoothBounce: !!(state & 4), noclusters: !!(state & 8), ricochet: !!(state & 32),
   };
+  // Bit 1<<4, `drawInfoOwner` (MeshObstacle::unpack) -- a mesh built with
+  // BZFlag's MeshDrawInfo render optimization; see `applyMeshDrawInfo` (#87).
+  if (state & 16) applyMeshDrawInfo(r, texcoordStart, texcoordEnd, texcoordCount, mesh);
+  return mesh;
 }
 
 function parseCurved(r, kind) {
@@ -608,6 +803,15 @@ function parseGroupDefinition(r, isWorld) {
     const count = r.u32();
     obstacles[kind] = Array.from({ length: count }, () => OBSTACLE_PARSERS[kind](r));
   }
+  // `_discardedSpinName` (`applyMeshDrawInfo`) resolved: a mesh's own
+  // proxied name if it had one, else this definition's -- "SpinTank" itself,
+  // for the mesh that gave #88 its name, since the mesh had none of its own.
+  for (const mesh of obstacles.mesh) {
+    if ('_discardedSpinName' in mesh) {
+      discardedAnimationNames.push(mesh._discardedSpinName || name || null);
+      delete mesh._discardedSpinName;
+    }
+  }
   const groupInstanceCount = r.u32();
   const groupInstances = Array.from({ length: groupInstanceCount }, () => parseGroupInstance(r));
   return { name, isWorld, obstacles, groupInstances };
@@ -644,6 +848,7 @@ function parseEntryZone(r) {
 }
 
 function parseWorldDatabase(fullBuf) {
+  discardedAnimationNames = [];
   const header = new Reader(fullBuf);
   header.u16(); // length (legacy field, unused by this reader)
   const code = header.u16();
@@ -680,6 +885,12 @@ function parseWorldDatabase(fullBuf) {
     trailingBytes: r.remaining,
     managers: { dynamicColors, textureMatrices, materials, physicsDrivers, meshTransforms },
     world, groupDefs, links, waterLevel, waterMaterial, weapons, zones,
+    // Which drawInfo-owning meshes (#87) asked for a continuous spin bzo has
+    // no way to play (#88) -- one name (or `null`, if truly nameless) per
+    // mesh, resolved by `parseGroupDefinition`. `performRemoteMapImport`
+    // folds this into the same "things bzo does not process yet" report a
+    // remote import already gives an operator for everything else.
+    discardedAnimationNames,
   };
 }
 
@@ -845,6 +1056,7 @@ function buildBZWText(serverMeta, tree, fetchedAt) {
 
   function printMesh(lines, o, indent) {
     lines.push(`${indent}mesh`);
+    if (o.name) lines.push(`${indent}  name ${o.name}`);
     for (const c of o.checks) lines.push(`${indent}  ${c.type === 0 ? 'inside' : 'outside'} ${fmt3(c.point)}`);
     for (const v of o.vertices) lines.push(`${indent}  vertex ${fmt3(v)}`);
     for (const n of o.normals) lines.push(`${indent}  normal ${fmt3(n)}`);
