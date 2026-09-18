@@ -6,6 +6,32 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.33] - 2026-09-18
+
+### Changed
+- **`OO` (Oscillation Overthruster)'s inside-a-building glow is now the same
+  everywhere.** Upstream draws it two different ways -- a real-texture,
+  inside-out glow for a mesh, an unrelated scattered dot cloud for a box or
+  pyramid -- and bzo used to match that split. Every obstacle now gets both:
+  the real geometry glowing from the inside, plus a scattered cloud (a
+  mesh's own version ray-casts candidate points against its triangles,
+  since it has no simple footprint to sample). The effect also now follows
+  wherever the camera actually is, not just the tracked tank's own hitbox --
+  third-person and an observer's follow-leader view put the eye at a fixed
+  offset with no wall-avoidance, so backing into a wall could show broken
+  geometry for a moment before the effect caught up.
+
+### Fixed
+- **The interdimensional-light streaks `OO` draws on entry/exit now work
+  on a mesh wall, not just a box or a pyramid.** The crossing-plane math
+  behind them only ever understood a box's own width/depth.
+- **A wall shared by two overlapping obstacles, or a mesh's own floor,
+  no longer glows through itself.** The new inside-out glow above skips a
+  face already known to be buried against a neighboring obstacle, and a
+  mesh's ground-level floor (never drawn from outside, so often left with
+  whatever texture was already lying around) is skipped outright rather
+  than additively blended over the real ground it z-fought with.
+
 ## [1.2.32] - 2026-09-18
 
 ### Fixed
