@@ -1425,27 +1425,25 @@ async function performRemoteMapImportNow(host, port, safeMapName) {
   );
   const filePath = path.join(RUNTIME_MAPS_DIR, safeMapName);
   await fs.promises.writeFile(filePath, text);
+  // `tree.discardedAnimationNames` (remote-world-import.cjs) is known only
+  // here, before the wire-protocol detail behind it is flattened to `.bzw`
+  // text -- fed into `parseBZWMap` as `extraMessages` so it goes through the
+  // exact same `warn` (logged, collected, and -- once baked back into the
+  // file below -- shown to a player) as everything `parseBZWMap` detects on
+  // its own, rather than a second, separate mechanism.
+  const spinCount = tree.discardedAnimationNames.length;
+  const spinNames = Array.from(new Set(tree.discardedAnimationNames.filter(Boolean))).sort();
+  const extraMessages = spinCount > 0
+    ? [`${safeMapName} ignored: ${spinCount} mesh animation${spinCount === 1 ? '' : 's'}`
+      + (spinNames.length > 0 ? ` (${spinNames.join(', ')})` : '')]
+    : [];
   // Hashed synchronously rather than left to the background trickle
   // (`hashRemainingMapsInBackground`): this is the one file that just
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
-  let mapData = parseBZWMap(filePath);
-  // `tree.discardedAnimationNames` (remote-world-import.cjs) is known only
-  // here, before the wire-protocol detail behind it is flattened to `.bzw`
-  // text -- `mapData.warnedMessages` alone, from re-reading that text, could
-  // never see it. Folded into the one "this import has things bzo does not
-  // process yet" report rather than a second, separate one.
-  const spinCount = tree.discardedAnimationNames.length;
-  const spinNames = Array.from(new Set(tree.discardedAnimationNames.filter(Boolean))).sort();
-  const importWarnings = spinCount > 0
-    ? [
-      ...mapData.warnedMessages,
-      `${safeMapName} ignored: ${spinCount} mesh animation${spinCount === 1 ? '' : 's'}`
-      + (spinNames.length > 0 ? ` (${spinNames.join(', ')})` : ''),
-    ]
-    : mapData.warnedMessages;
-  if (importWarnings.length > 0) {
-    await fs.promises.appendFile(filePath, `\n${buildImportWarningOptionsBlock(importWarnings)}`);
+  let mapData = parseBZWMap(filePath, { extraMessages });
+  if (mapData.warnedMessages.length > 0) {
+    await fs.promises.appendFile(filePath, `\n${buildImportWarningOptionsBlock(mapData.warnedMessages)}`);
     // Quiet: this is the same file the first parse above just fully logged,
     // plus the options block this very function appended -- re-parsing it
     // is only to pick up that block's own `-srvmsg` lines in `mapData`, not
@@ -3338,7 +3336,7 @@ function resolveBzwTextureName(rawName) {
   return null;
 }
 
-function parseBZWMap(filename, { quiet = false } = {}) {
+function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // Diagnostic detail about this one file -- which refs, textures, or spins
   // it dropped -- worth an operator's attention for the live map and for one
   // just imported, but not for the hundred cached maps
@@ -3349,8 +3347,21 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   // below so a caller that DOES want them (a remote import writing them back
   // as `-srvmsg` lines, see `performRemoteMapImport`) always can, regardless
   // of `quiet`.
+  //
+  // `warnedMessages` is the one list, for the one reason -- every one of
+  // these is "here is a thing bzo does not do", console and player alike:
+  // `warn` both logs it (unless `quiet`) and collects it, and `messages`
+  // below is built directly from this same list rather than each caller
+  // re-wording the same fact a second time for a chat line.
   const warnedMessages = [];
   const warn = (message) => { warnedMessages.push(message); if (!quiet) log(message); };
+  // `extraMessages` -- a fact only knowable outside this function's own text
+  // parsing (a remote import's own wire-protocol decode, e.g. a mesh's
+  // discarded spin animation -- `performRemoteMapImportNow`) fed through the
+  // exact same `warn`, so it is logged, collected, and (once baked back into
+  // the file as its own `-srvmsg` line) shown to a player the same way as
+  // everything this function detects on its own.
+  extraMessages.forEach(warn);
   // The map's own name is all a warning needs to say -- `filename` itself is
   // always this same process's own absolute `maps/` path, which only repeats
   // noise a reader already knows on every line.
@@ -3507,14 +3518,6 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   // load-failure outcome, not a host it refused to try). Named on load so
   // it is visible that a map asked for one at all.
   const externalTextureUrls = new Set();
-  // Set below, once, if this map has any -- carried out to the player-facing
-  // `messages` build near the end of this function rather than pushed there
-  // directly, since that is also where `mapLabel`'s own line gets its exact
-  // wording decided.
-  let externalTextureSummary = null;
-  // Set below, once, the same way `externalTextureSummary` is -- see it for
-  // why this is not simply pushed onto `messages` at the point it is known.
-  let lightingPropsSummary = null;
   // `ambient`/`specular`/`emission`/`shininess` -- BzMaterial's own
   // Blinn-Phong coefficients (`BzMaterial::reset` defaults: ambient
   // 0.2 0.2 0.2 1, specular/emission 0 0 0 1, shininess 0) -- bzo has no
@@ -5936,9 +5939,8 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     );
   }
   if (materialsWithUnappliedLighting.size > 0) {
-    lightingPropsSummary = `${materialsWithUnappliedLighting.size} material${materialsWithUnappliedLighting.size === 1 ? '' : 's'}`
-      + ` (${Array.from(unappliedLightingProps).sort().join('/')})`;
-    warn(`${mapLabel} ignored: ${lightingPropsSummary}`);
+    const count = materialsWithUnappliedLighting.size;
+    warn(`${mapLabel} ignored: ${count} material${count === 1 ? '' : 's'} (${Array.from(unappliedLightingProps).sort().join('/')})`);
   }
   if (externalTextureUrls.size > 0) {
     // Counted by host, not listed one URL at a time -- a real map can name a
@@ -5961,16 +5963,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       .sort((a, b) => b[1] - a[1])
       .map(([host, count]) => `${count} - ${host}`)
       .join(', ');
-    // Worth both server.log and a joining/viewing player's own chat -- which
-    // hosts this map trusted for textures. Not routed through `warn`, though:
-    // that would also land it in `warnedMessages`, which a remote import bakes
-    // back into the file as its own "This import has things bzo does not
-    // process yet:" -srvmsg block (`buildImportWarningOptionsBlock`) -- a
-    // header this FYI note does not belong under, since nothing about it went
-    // unprocessed. `externalTextureSummary` carries it to `messages` below
-    // instead, its own line with its own framing.
-    if (!quiet) log(`textures from ${mapLabel}: ${summary}`);
-    externalTextureSummary = summary;
+    warn(`${mapLabel} textures: ${summary}`);
   }
 
   // Joined into `obstacles` before the tally below, so "included" counts a
@@ -6061,37 +6054,30 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     );
   }
 
-  // What a player actually sees when they view or join this map -- not just
-  // server.log. `-srvmsg` (serverOptions.serverMessages) reads as a message
-  // the *map* says to whoever arrives on it (bzfs.cxx:2507); the
-  // dropped-feature tally is the same kind of thing, so it rides along in the
-  // same list rather than a separate mechanism. Built here, once, per file
-  // (see registerMapFile): the client reads this from the map's own registry
-  // entry and says it locally the moment a player actually starts viewing
-  // that map, never during the entry dialog's preview-while-choosing.
-  const messages = [...serverOptions.serverMessages];
-  if (externalTextureSummary) {
-    messages.push(`${mapLabel} textures: ${externalTextureSummary}`);
-  }
-  if (lightingPropsSummary) {
-    messages.push(`${mapLabel} ignored: ${lightingPropsSummary}`);
-  }
   if (unsupportedCounts.size > 0) {
-    const included = obstacles.length;
     const dropped = Array.from(unsupportedCounts.values()).reduce((sum, n) => sum + n, 0);
     const droppedList = Array.from(unsupportedCounts.entries())
       .sort((a, b) => b[1] - a[1])
       .map(([keyword, count]) => `${count} ${keyword}`)
       .join(', ');
-    messages.push(
-      `This map has ${included} obstacle${included === 1 ? '' : 's'} bzo reads `
-      + `(box/pyramid/base/teleporter/mesh) and dropped ${dropped} it doesn't `
-      + `yet: ${droppedList}.`
-    );
-    warn(
-      `Ignoring unsupported blocks in ${mapLabel}: ${droppedList}`
-    );
+    warn(`${mapLabel} ignored: ${dropped} unsupported block${dropped === 1 ? '' : 's'} (${droppedList})`);
   }
+
+  // What a player actually sees when they view or join this map -- not just
+  // server.log. `-srvmsg` (serverOptions.serverMessages) reads as a message
+  // the *map* says to whoever arrives on it (bzfs.cxx:2507); every "bzo does
+  // not do this" fact this function found is the same kind of thing, so it
+  // rides along in the same list rather than a separate, re-worded one --
+  // `warnedMessages` already carries the exact line each one was logged
+  // with. Deduplicated: a second parse of the same file (see
+  // `performRemoteMapImportNow`, after baking these back in as `-srvmsg`)
+  // re-detects the same facts fresh *and* reads them back off
+  // `serverOptions.serverMessages`, so without this every line would say
+  // itself twice. Built here, once, per file (see `registerMapFile`): the
+  // client reads this from the map's own registry entry and says it locally
+  // the moment a player actually starts viewing that map, never during the
+  // entry dialog's preview-while-choosing.
+  const messages = Array.from(new Set([...serverOptions.serverMessages, ...warnedMessages]));
 
   // Ground texture (issue #81) -- the one surface that is never an
   // obstacle, so it gets no `matref`d registry entry of its own the way
