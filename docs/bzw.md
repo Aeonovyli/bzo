@@ -558,6 +558,20 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _rainType <rain\|snow\|fatrain\|frog\|particle\|bubble>` | turns on weather -- see **Weather** |
 | `-srvmsg <text>` | a line the world says to each player as they join |
 | `-admsg <text>` | a line said to everyone already playing, repeated every 15 minutes |
+| `-gndtex <name>` | the ground's texture -- a stock name or an external URL, same as any other `texture` line; a map can equally get the same effect with an explicit `material name GroundMaterial ... end` block |
+
+## Ground texture
+
+Two ways to the same effect: `-gndtex <name>` in the options table above, or
+an explicit top-level `material name GroundMaterial ... end` block. Both
+register a material named `GroundMaterial`, and upstream's
+`BackgroundRenderer::setupGroundMaterials` (`BackgroundRenderer.cxx:265-303`)
+looks it up by that exact name to texture the ground plane and tint it from
+the material's own `diffuse`/`color` -- the same lookup bzo's own
+`parseBZWMap` performs (against `materialsByName`, case-insensitively) to
+build the `groundMaterial` that `render.js`'s `buildGround` textures the
+plane from. A map that gives neither keeps the `std_ground` checkerboard
+every other map already gets.
 
 ## A pad flush with the ground
 

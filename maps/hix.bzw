@@ -61,6 +61,12 @@ material
 	addtexture http://images.bzflag.org/pmatous/concrete-jigsaw-light.png
 end
 
+# The ground too -- see "Ground texture" in docs/bzw.md
+material
+	name GroundMaterial
+	matref concrete
+end
+
 # barbed wire fence in use as metal grid on walkways to see up through
 material
 	name seethrough

@@ -1308,7 +1308,10 @@ async function performRemoteMapImport(host, port) {
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
   const mapData = parseBZWMap(filePath);
-  registerMapFile(safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather);
+  registerMapFile(
+    safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
+    mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather, mapData.groundMaterial
+  );
   return { safeMapName, byteLength: worldDatabase.length };
 }
 
@@ -2830,6 +2833,17 @@ function parseBZWServerOptions(lines) {
         }
       }
     }
+    // -gndtex <name>: the map's ground texture. Upstream's own bzfs option
+    // (`CmdLineOptions.cxx:785-792`) never calls `checkFromWorldFile` for
+    // it, so unlike most options here it is legal both on the command line
+    // and inside a map's own `options` block; it registers a material
+    // literally named `GroundMaterial` holding that one texture, the same
+    // name `BackgroundRenderer::setupGroundMaterials`
+    // (`BackgroundRenderer.cxx:265-303`) looks up to draw the ground, and
+    // the same name a mapper can write an explicit `material` block under
+    // instead (resolved against `materialsByName` once the whole file is
+    // read; see the `groundMaterial` build below).
+    if (option === '-gndtex' && value) options.groundTexture = value;
     // -srvmsg <text>: a line said to each player as they join. Upstream
     // accumulates every occurrence into one string separated by a literal `\n`
     // and splits it again on the way out (bzfs.cxx:2507), so a map may write
@@ -5729,6 +5743,29 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     );
   }
 
+  // Ground texture (issue #81) -- the one surface that is never an
+  // obstacle, so it gets no `matref`d registry entry of its own the way
+  // box/pyramid/mesh materials do. Upstream reads either spelling into the
+  // same registry entry (see the `-gndtex` comment above), so a map's own
+  // explicit `material name GroundMaterial ... end` block -- fuller, since
+  // it can also carry a tint `BackgroundRenderer::setupGroundMaterials`
+  // reads for `groundColor` -- wins when a map somehow writes both.
+  let mapGroundMaterial = null;
+  const groundMaterialBlock = materialsByName.get('groundmaterial') || null;
+  if (groundMaterialBlock
+    && (groundMaterialBlock.texture || groundMaterialBlock.textureUrl || groundMaterialBlock.color)) {
+    mapGroundMaterial = {
+      texture: groundMaterialBlock.texture,
+      textureUrl: groundMaterialBlock.textureUrl,
+      color: groundMaterialBlock.color,
+    };
+  } else if (serverOptions.groundTexture) {
+    const resolved = resolveBzwTextureName(serverOptions.groundTexture);
+    if (resolved) {
+      mapGroundMaterial = { texture: resolved.stock || null, textureUrl: resolved.url || null, color: null };
+    }
+  }
+
   const teleporterGraph = buildTeleporterLinks();
   return {
     obstacles,
@@ -5743,6 +5780,7 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     freeCtfSpawns: mapFreeCtfSpawns,
     waterLevel: mapWaterLevel,
     weather: serverOptions.weather || null,
+    groundMaterial: mapGroundMaterial,
     messages,
   };
 }
@@ -5843,6 +5881,11 @@ let mapWaterLevel = null;
 // server-side reader of its own; it only rides along in the live map's own
 // JSON (`registerMapFile`) the same way.
 let mapWeather = null;
+// `groundMaterial` -- `null` when the map states no `-gndtex` or explicit
+// `GroundMaterial` block. Purely a client render, same as `weather` above:
+// no server-side reader, it only rides along in the live map's own JSON
+// (`registerMapFile`) for the client to texture the ground plane itself.
+let mapGroundMaterial = null;
 if (MAP_SOURCE === 'random') {
   OBSTACLES = generateObstacles();
   TELEPORTER_GRAPH = { teleporters: [], links: [] };
@@ -5874,6 +5917,10 @@ if (MAP_SOURCE === 'random') {
   if (mapWaterLevel) log(`Map option waterLevel: height=${mapWaterLevel.height}`);
   mapWeather = mapData.weather || null;
   if (mapWeather) log(`Map option _rainType: ${mapWeather.type}`);
+  mapGroundMaterial = mapData.groundMaterial || null;
+  if (mapGroundMaterial) {
+    log(`Map option -gndtex: ${mapGroundMaterial.texture || mapGroundMaterial.textureUrl}`);
+  }
   log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
   const meshObstacleCount = OBSTACLES.filter((obs) => obs.type === 'mesh').length;
   if (meshObstacleCount > 0) {
@@ -5917,7 +5964,9 @@ try {
 // second, brotli-only cache would only complicate the pipeline for no real
 // disk saving, so this reuses it exactly as public/'s assets do, raw copy and
 // negotiated fallback included.
-function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel, weather) {
+function registerMapFile(
+  fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel, weather, groundMaterial
+) {
   // Seeded from the map's own geometry (not from `fileName`, so a map that is
   // renamed but not edited still lands on the same clouds and the same hash)
   // -- deterministic across processes, unlike `MAP_SOURCE === 'random'`'s
@@ -5948,6 +5997,10 @@ function registerMapFile(fileName, obstacles, teleporterGraph, teamMode, mapSize
     // map states no `_rainType`. Purely a client render: no collision, so
     // there is no server-side equivalent of `mapWaterLevel`'s kill check.
     weather: weather || null,
+    // `groundMaterial` -- a Map Viewer preview draws it from this same JSON
+    // too (see `applyWorldData`/`buildGround` in client.js/render.js),
+    // `null` when the map states no `-gndtex` or `GroundMaterial` block.
+    groundMaterial: groundMaterial || null,
     // What this map says to a player who arrives on it -- -srvmsg lines and
     // the dropped-unsupported-feature tally, both from parseBZWMap. Read by
     // the client only at the moment it actually starts viewing this map
@@ -6069,8 +6122,14 @@ function sweepStaleImports() {
 }
 
 const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
-  ? registerMapFile('random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel, null)
-  : registerMapFile(MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls, mapWaterLevel, mapWeather);
+  ? registerMapFile(
+    'random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls,
+    mapWaterLevel, null, null
+  )
+  : registerMapFile(
+    MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls,
+    mapWaterLevel, mapWeather, mapGroundMaterial
+  );
 
 // A Map Viewer's requested map file, checked against what this process has
 // actually hashed -- the client fetched its preview from `init.viewableMaps`
@@ -6119,7 +6178,10 @@ function hashRemainingMapsInBackground() {
         // actually views or joins it to see (`mapData.messages`, still
         // built either way), not a log line about a map nobody chose today.
         const mapData = parseBZWMap(filePath, { quiet: true });
-        if (registerMapFile(fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize, mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather)) {
+        if (registerMapFile(
+          fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
+          mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather, mapData.groundMaterial
+        )) {
           converted += 1;
         }
       }

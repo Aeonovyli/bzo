@@ -3051,13 +3051,24 @@ class RenderManager {
     this.ground.geometry.attributes.uv.needsUpdate = true;
   }
 
-  buildGround(mapSize) {
+  // `groundMaterial` -- the parsed `-gndtex`/`GroundMaterial` block (see
+  // `groundMaterial` in server.js's `parseBZWMap`), `null` for a map that
+  // states neither, which keeps upstream's own default `std_ground`
+  // checkerboard (`BackgroundRenderer::setupGroundMaterials`,
+  // `BackgroundRenderer.cxx:265-303` -- falls back to `stdGroundTexture`
+  // the same way when no material named `GroundMaterial` is registered).
+  buildGround(mapSize, groundMaterial = null) {
     if (!this.scene) return;
     this.clearGround();
 
     const groundExtent = mapSize * 10;
     const groundGeometry = this._buildCenteredGroundGeometry(groundExtent);
-    const groundTexture = createGroundTexture();
+    const hasCustomTexture = !!(groundMaterial?.texture || groundMaterial?.textureUrl);
+    const groundTexture = hasCustomTexture
+      ? resolveObstacleTextureFactory(
+        groundMaterial.texture, groundMaterial.textureUrl, '/textures/std_ground.png', createGroundTexture,
+      )(() => {})
+      : createGroundTexture();
     groundTexture.wrapS = THREE.RepeatWrapping;
     groundTexture.wrapT = THREE.RepeatWrapping;
 
@@ -3066,14 +3077,21 @@ class RenderManager {
     // and every other surface here is Lambert; a metalness/roughness BRDF over
     // that many fragments is paid for nothing. Front faces only: the ground is
     // never seen from below.
-    const groundMaterial = new THREE.MeshLambertMaterial({
+    const groundMeshMaterial = new THREE.MeshLambertMaterial({
       map: groundTexture,
+      // `groundColor` upstream (`BackgroundRenderer.cxx:271-283`) tints the
+      // ground the same way any other material's `diffuse` line tints a
+      // textured obstacle here -- `MeshLambertMaterial`'s `color` multiplies
+      // the map, white leaving the texture exactly as shipped.
+      color: groundMaterial?.color
+        ? new THREE.Color(...groundMaterial.color)
+        : 0xffffff,
       side: THREE.FrontSide,
     });
 
     this._groundTexture = groundTexture;
     this._zoneGroundTexture = null;
-    this.ground = new THREE.Mesh(groundGeometry, groundMaterial);
+    this.ground = new THREE.Mesh(groundGeometry, groundMeshMaterial);
     this.ground.frustumCulled = false;
     this.groundExtent = groundExtent;
     this.groundMapSize = mapSize;

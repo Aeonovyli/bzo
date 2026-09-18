@@ -1982,7 +1982,7 @@ function applyWorldData(world) {
   // fallback only ever applies to a world that failed to fetch.
   currentWorldMapSize = Number.isFinite(world?.mapSize) ? world.mapSize : DEFAULT_MAP_SIZE;
   currentWorldNoWalls = !!world?.noWalls;
-  renderManager.buildGround(currentWorldMapSize);
+  renderManager.buildGround(currentWorldMapSize, world?.groundMaterial || null);
   renderManager.setGroundGridEnabled(showDebugGeometry, currentWorldMapSize);
   renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls);
   renderManager.createMountains(currentWorldMapSize);
