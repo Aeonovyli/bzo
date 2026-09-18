@@ -169,6 +169,7 @@ const {
   isAdminSession,
   isLocalAdminRequest,
   isLoopbackAddress,
+  parseAdminWhitelist,
   createSessionStore,
 } = require('./server/sessions.cjs');
 const {
@@ -766,6 +767,19 @@ function normalizeTankModelId(modelId) {
 
 app.get('/api/tank-models', (req, res) => {
   res.json({ models: getAvailableTankModels() });
+});
+
+// Called only by this server, on itself, via `PUBLIC_URL` -- see
+// probeAdminWhitelist. Echoes back exactly what the request looked like by the
+// time it reached this process, which is what a real external connection would
+// look like too, so that call can tell whether the proxy in front is safe to
+// trust X-Forwarded-For through.
+app.get('/api/_admin-probe', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    remoteAddress: req.socket.remoteAddress,
+    xForwardedFor: req.headers['x-forwarded-for'] || null,
+  });
 });
 
 // A position, a flag, a speed -- everything `/playerlist` doesn't say, for
@@ -1400,6 +1414,7 @@ server.listen(PORT, LISTEN_HOST, () => {
   // After the port is open, never before it: the game is playable while the
   // sidecars are built, and a request that arrives first is served identity.
   precompress.start({ log }).catch((error) => logError(`[BR] ${error.message}`));
+  probeAdminWhitelist().catch((error) => logError(`[ADMIN] probe failed: ${error.message}`));
 });
 
 // `adminGroups` in `server.json`: the global groups this server would grant
@@ -1441,6 +1456,81 @@ const refusedAdminGroups = (Array.isArray(serverConfig.adminGroups) ? serverConf
 if (refusedAdminGroups.length > 0) {
   log(`Admin groups refused (a group name may not contain a colon or a newline):`
     + ` ${refusedAdminGroups.map((group) => JSON.stringify(group)).join(', ')}`);
+}
+
+// `adminWhitelist` in server.json: addresses beyond loopback that `localAdmin`
+// should also cover, e.g. an operator's home network. Entries are addresses or
+// IPv4 CIDR blocks; validated and logged the same way ADMIN_GROUPS is.
+const { entries: ADMIN_WHITELIST, refused: refusedAdminWhitelist } =
+  parseAdminWhitelist(serverConfig.adminWhitelist);
+if (refusedAdminWhitelist.length > 0) {
+  log(`Admin whitelist entries refused (not an address or IPv4 CIDR block):`
+    + ` ${refusedAdminWhitelist.map((entry) => JSON.stringify(entry)).join(', ')}`);
+}
+
+// `publicUrl` in server.json: this server's own externally-reachable address,
+// e.g. `https://bz.rikers.org`. Used only for the startup probe below; nothing
+// else on this server needs to know its own public name.
+const PUBLIC_URL = typeof serverConfig.publicUrl === 'string' ? serverConfig.publicUrl.trim() : '';
+
+// Whether a forwarded address can be trusted for `isLocalAdminRequest`, and
+// how to read one if so. Stays 'distrust' -- unproxied loopback only -- until
+// `probeAdminWhitelist` below proves otherwise; see isLocalAdminRequest for
+// what each value means.
+let forwardedForPolicy = 'distrust';
+
+// issue #80: is whatever reverse proxy sits in front of this server (if any)
+// safe to trust X-Forwarded-For through, and if so, does it overwrite the
+// header on each hop or append to it? Answered empirically rather than
+// assumed, by calling this server on its own PUBLIC_URL -- through real DNS
+// and whatever proxy that resolves to, the same path an actual client takes --
+// once plain and once with a poisoned X-Forwarded-For already attached.
+//
+// A trustworthy proxy never lets that poisoned value survive as the last
+// entry: either it replaces the header outright (one value left, matching
+// what the plain call saw), or it appends its own real contribution after it
+// (multiple values, the last matching the plain call). If the poisoned value
+// is still last, or the plain call's own contribution cannot be found there,
+// the proxy cannot be trusted to say who a client really is, and the
+// whitelist stays limited to unproxied loopback -- the one case that needs no
+// proxy trust at all, because a remote client cannot manufacture it.
+const ADMIN_PROBE_SENTINEL = '203.0.113.66'; // RFC 5737 TEST-NET-3: never a real peer.
+async function probeAdminWhitelist() {
+  if (!LOCAL_ADMIN || !PUBLIC_URL) return;
+  const probeUrl = `${PUBLIC_URL.replace(/\/+$/, '')}/api/_admin-probe`;
+  const fetchProbe = async (forwardedFor) => {
+    const response = await fetch(probeUrl, {
+      headers: {
+        'User-Agent': `bzo ${CLIENT_BUILD}`,
+        ...(forwardedFor ? { 'X-Forwarded-For': forwardedFor } : {}),
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  };
+  const splitChain = (value) => (typeof value === 'string' ? value : '')
+    .split(',').map((part) => part.trim()).filter(Boolean);
+  try {
+    const plain = await fetchProbe(null);
+    const poisoned = await fetchProbe(ADMIN_PROBE_SENTINEL);
+    const plainChain = splitChain(plain.xForwardedFor);
+    const poisonedChain = splitChain(poisoned.xForwardedFor);
+    const expected = plainChain[plainChain.length - 1] ?? null;
+    const last = poisonedChain[poisonedChain.length - 1] ?? null;
+    if (last === null || last === ADMIN_PROBE_SENTINEL || expected === null || last !== expected) {
+      log(`[ADMIN] ${PUBLIC_URL} does not confirm its proxy replaces X-Forwarded-For;`
+        + ' admin whitelist stays limited to unproxied loopback');
+      return;
+    }
+    forwardedForPolicy = poisonedChain.length === 1 ? 'trust-first' : 'trust-last';
+    log(`[ADMIN] ${PUBLIC_URL}'s proxy ${forwardedForPolicy === 'trust-first' ? 'overwrites' : 'appends to'}`
+      + ' X-Forwarded-For safely; admin whitelist active for loopback'
+      + (ADMIN_WHITELIST.length > 0 ? ` and ${ADMIN_WHITELIST.length} whitelisted address(es)` : ''));
+  } catch (error) {
+    log(`[ADMIN] Could not verify ${PUBLIC_URL}'s proxy handling of X-Forwarded-For (${error.message});`
+      + ' admin whitelist stays limited to unproxied loopback');
+  }
 }
 
 // Sessions from the global login. Held in a Map like every other piece of bzo's
@@ -12827,7 +12917,11 @@ wss.on('connection', (ws, req) => {
   // trustworthy as the proxy -- see docs/commands-plan.md on why a ban cannot
   // rest on it as read.
   player.clientIP = clientIP;
-  player.localAdmin = isLocalAdminRequest(LOCAL_ADMIN, req.socket.remoteAddress, req.headers);
+  player.localAdmin = isLocalAdminRequest(req.socket.remoteAddress, req.headers, {
+    enabled: LOCAL_ADMIN,
+    whitelist: ADMIN_WHITELIST,
+    forwardedForPolicy,
+  });
   if (player.localAdmin) {
     log(`Player ${player.playerNumber} is an operator: connected from this machine (localAdmin)`);
   }

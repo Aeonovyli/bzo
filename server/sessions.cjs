@@ -19,6 +19,7 @@
 // what the list server actually answers.
 
 const crypto = require('crypto');
+const net = require('net');
 
 // 8 hours, absolute. Group membership is a snapshot -- the token is spent at
 // `/login` and cannot be re-asked -- so the lifetime is also how long a
@@ -198,33 +199,102 @@ function isLoopbackAddress(address) {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare);
 }
 
+// A whitelist entry from `server.json`'s `adminWhitelist`: a bare IPv4/IPv6
+// address (an implicit /32 or /128) or an IPv4 CIDR block. Returns null for
+// anything unparseable rather than throwing, so one bad entry can be refused
+// and logged instead of crashing startup.
+function parseWhitelistEntry(raw) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const [addr, prefixRaw] = trimmed.split('/');
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
+  if (ipv4Match) {
+    const octets = ipv4Match.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) return null;
+    const prefix = prefixRaw === undefined ? 32 : Number(prefixRaw);
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+    const value = octets.reduce((acc, octet) => (acc << 8) | octet, 0) >>> 0;
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    return { family: 4, network: value & mask, mask };
+  }
+  // IPv6 is matched as a single address, not a range: bzo's own whitelist
+  // entries are `::1` and operator IPv4s, and a full IPv6 CIDR matcher is more
+  // machinery than that use has earned so far.
+  if (prefixRaw !== undefined) return null;
+  const bare = addr.replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '');
+  if (!net.isIPv6(bare)) return null;
+  return { family: 6, address: bare };
+}
+
+// `adminWhitelist` in server.json, validated and logged the way `adminGroups`
+// is at startup: accepted entries kept, malformed ones named and refused
+// rather than silently dropped.
+function parseAdminWhitelist(list) {
+  const raw = Array.isArray(list) ? list : [];
+  const entries = [];
+  const refused = [];
+  for (const item of raw) {
+    const parsed = parseWhitelistEntry(item);
+    if (parsed) entries.push(parsed);
+    else refused.push(item);
+  }
+  return { entries: Object.freeze(entries), refused };
+}
+
+function addressMatchesWhitelist(address, entries) {
+  if (typeof address !== 'string' || address === '') return false;
+  const bare = address.replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '');
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
+  const asIpv4 = ipv4Match
+    ? (ipv4Match.slice(1).map(Number).reduce((acc, octet) => (acc << 8) | octet, 0) >>> 0)
+    : null;
+  return entries.some((entry) => {
+    if (entry.family === 4) return asIpv4 !== null && (asIpv4 & entry.mask) === entry.network;
+    return entry.family === 6 && entry.address === bare;
+  });
+}
+
 // `localAdmin` in server.json: whether a connection from this machine is an
-// operator without logging in. It exists so a test client -- a headless browser,
-// a raw WebSocket probe -- can drive the Operator panel and, once bzo has them,
-// the server commands, without a bzflag.org account.
+// operator without logging in, generalised to a whitelist of addresses (issue
+// #80's `adminWhitelist`) once the proxy in front of this server is known to
+// handle `X-Forwarded-For` safely. It exists so a test client -- a headless
+// browser, a raw WebSocket probe -- can drive the Operator panel and the server
+// commands without a bzflag.org account, and so an operator's own network can
+// too, without a login.
 //
 // **Off by default, and it has to be.** bzo does not terminate TLS, so a public
 // deployment is behind a reverse proxy, and a proxy on the *same host* makes
 // every request in the world arrive from 127.0.0.1. Granting admin on the peer
 // address alone would hand it to the internet.
 //
-// So the peer must be loopback *and* the request must carry no `X-Forwarded-For`.
-// That is the half a remote client cannot forge: it can add the header but not
-// remove it, and a proxy that follows the deployment notes in the README sets it
-// on every hop (`RequestHeader set`, so a client's own copy never survives). A
-// proxy that omits it entirely is the case this cannot see, which is the whole
-// reason an operator has to ask for this rather than get it by default.
-function isLocalAdminRequest(enabled, remoteAddress, headers = {}) {
+// `forwardedForPolicy` is the result of the startup probe in server.js, which
+// calls this server on its own public URL -- once plain, once with a poisoned
+// `X-Forwarded-For` -- to see whether the header that reaches this process can
+// be trusted, and if so, how a chain from it should be read. Until that probe
+// finishes, or when it finds the proxy unsafe, the policy is `'distrust'`:
+// unproxied loopback (no forwarded header at all) still gets admin, since that
+// needs no proxy trust to be safe, but a forwarded address never does.
+function isLocalAdminRequest(remoteAddress, headers = {}, options = {}) {
+  const { enabled = false, whitelist = [], forwardedForPolicy = 'distrust' } = options;
   if (enabled !== true) return false;
-  if (!isLoopbackAddress(remoteAddress)) return false;
-  // Any of them, not just X-Forwarded-For: a request that went through a proxy
-  // at all is not a request from this machine, however it was labelled.
-  return !Object.keys(headers).some((name) => /^x-forwarded-/i.test(name));
+  const hasForwarded = Object.keys(headers).some((name) => /^x-forwarded-/i.test(name));
+  if (!hasForwarded) return isLoopbackAddress(remoteAddress);
+  if (forwardedForPolicy === 'distrust') return false;
+  const xff = headers['x-forwarded-for'];
+  if (typeof xff !== 'string' || xff.trim() === '') return false;
+  const parts = xff.split(',').map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+  const address = forwardedForPolicy === 'trust-last' ? parts[parts.length - 1] : parts[0];
+  if (isLoopbackAddress(address)) return true;
+  return addressMatchesWhitelist(address, whitelist);
 }
 
 module.exports = {
   isLoopbackAddress,
   isLocalAdminRequest,
+  parseAdminWhitelist,
+  addressMatchesWhitelist,
   SESSION_TTL_MS,
   SESSION_ID_BYTES,
   MAX_SESSIONS,

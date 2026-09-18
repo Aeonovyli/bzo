@@ -9,6 +9,8 @@
     "DEVELOPERS",
     "BZADMIN"
   ],
+  "adminWhitelist": [],
+  "publicUrl": "",
   "listen": "[::]:3000",
   "teamMode": {
     "enabled": false,

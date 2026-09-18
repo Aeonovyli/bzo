@@ -13,6 +13,8 @@ const {
   createSessionStore,
   isLoopbackAddress,
   isLocalAdminRequest,
+  parseAdminWhitelist,
+  addressMatchesWhitelist,
 } = require('../server/sessions.cjs');
 
 // No real callsign or BZID belongs in a test. These are the shapes the list
@@ -168,29 +170,92 @@ assert.equal(isAdminSession(createSessionRecord({ bzid: '1', callsign: 'x' }, 10
   assert.equal(isLoopbackAddress(undefined), false);
 
   // Off unless the operator asked, whatever the peer.
-  assert.equal(isLocalAdminRequest(false, '::1', {}), false);
-  assert.equal(isLocalAdminRequest(undefined, '127.0.0.1', {}), false);
-  assert.equal(isLocalAdminRequest('yes', '127.0.0.1', {}), false, 'true, not truthy');
+  assert.equal(isLocalAdminRequest('::1', {}, { enabled: false }), false);
+  assert.equal(isLocalAdminRequest('127.0.0.1', {}, { enabled: undefined }), false);
+  assert.equal(isLocalAdminRequest('127.0.0.1', {}, { enabled: 'yes' }), false, 'true, not truthy');
+  assert.equal(isLocalAdminRequest('127.0.0.1', {}), false, 'no options, no admin');
 
   // On, and genuinely from this machine.
-  assert.equal(isLocalAdminRequest(true, '::1', {}), true);
-  assert.equal(isLocalAdminRequest(true, '127.0.0.1', {}), true);
-  assert.equal(isLocalAdminRequest(true, '::ffff:127.0.0.1', {}), true);
-  assert.equal(isLocalAdminRequest(true), false, 'no address, no admin');
+  assert.equal(isLocalAdminRequest('::1', {}, { enabled: true }), true);
+  assert.equal(isLocalAdminRequest('127.0.0.1', {}, { enabled: true }), true);
+  assert.equal(isLocalAdminRequest('::ffff:127.0.0.1', {}, { enabled: true }), true);
+  assert.equal(isLocalAdminRequest(undefined, {}, { enabled: true }), false, 'no address, no admin');
 
-  // The part that keeps a same-host proxy from handing admin to the internet: a
-  // request that went through a proxy is not a request from this machine, and a
+  // A forwarded address is untrusted by default ('distrust'): a request that
+  // went through a proxy is not provably a request from this machine, and a
   // remote client can add a forwarding header but cannot remove one.
-  assert.equal(isLocalAdminRequest(true, '::1', { 'x-forwarded-for': '1.2.3.4' }), false);
-  assert.equal(isLocalAdminRequest(true, '127.0.0.1', { 'X-Forwarded-For': '1.2.3.4' }), false);
+  assert.equal(isLocalAdminRequest('::1', { 'x-forwarded-for': '1.2.3.4' }, { enabled: true }), false);
+  assert.equal(isLocalAdminRequest('127.0.0.1', { 'X-Forwarded-For': '1.2.3.4' }, { enabled: true }), false);
   // Any of them, not just X-Forwarded-For -- however the hop was labelled.
-  assert.equal(isLocalAdminRequest(true, '::1', { 'x-forwarded-proto': 'https' }), false);
-  assert.equal(isLocalAdminRequest(true, '::1', { 'x-forwarded-host': 'bz.rikers.org' }), false);
+  assert.equal(isLocalAdminRequest('::1', { 'x-forwarded-proto': 'https' }, { enabled: true }), false);
+  assert.equal(isLocalAdminRequest('::1', { 'x-forwarded-host': 'bz.rikers.org' }, { enabled: true }), false);
   // A header that is not a forwarding header changes nothing.
-  assert.equal(isLocalAdminRequest(true, '::1', { 'user-agent': 'probe', cookie: 'a=b' }), true);
+  assert.equal(
+    isLocalAdminRequest('::1', { 'user-agent': 'probe', cookie: 'a=b' }, { enabled: true }),
+    true,
+  );
 
   // And a remote peer is never local, headers or no headers.
-  assert.equal(isLocalAdminRequest(true, '166.70.97.196', {}), false);
+  assert.equal(isLocalAdminRequest('166.70.97.196', {}, { enabled: true }), false);
+
+  // A verified proxy ('trust-first'/'trust-last', from the startup probe in
+  // server.js) is what lets a forwarded address count at all, and only then
+  // against loopback or the configured whitelist.
+  const opts = (forwardedForPolicy, whitelist = []) => (
+    { enabled: true, forwardedForPolicy, whitelist: parseAdminWhitelist(whitelist).entries }
+  );
+  assert.equal(
+    isLocalAdminRequest('203.0.113.9', { 'x-forwarded-for': '::1' }, opts('trust-first')),
+    true,
+    'a proxy that overwrites the header puts its one value first',
+  );
+  assert.equal(
+    isLocalAdminRequest('203.0.113.9', { 'x-forwarded-for': '9.9.9.9, ::1' }, opts('trust-last')),
+    true,
+    'a proxy that appends puts its own contribution last',
+  );
+  assert.equal(
+    isLocalAdminRequest('203.0.113.9', { 'x-forwarded-for': '9.9.9.9, ::1' }, opts('trust-first')),
+    false,
+    'trust-first reads only the first element, not any loopback later in the chain',
+  );
+  assert.equal(
+    isLocalAdminRequest('203.0.113.9', { 'x-forwarded-for': '166.70.97.196' }, opts('trust-first')),
+    false,
+    'trusted policy, but the address itself is neither loopback nor whitelisted',
+  );
+  assert.equal(
+    isLocalAdminRequest(
+      '203.0.113.9',
+      { 'x-forwarded-for': '166.70.97.196' },
+      opts('trust-first', ['166.70.97.0/24']),
+    ),
+    true,
+    'a whitelisted CIDR block, once the forwarded address is trusted',
+  );
+}
+
+// `adminWhitelist` entries, validated the same way `adminGroups` is.
+{
+  const { entries, refused } = parseAdminWhitelist([
+    '166.70.97.196',
+    '10.0.0.0/8',
+    '::1',
+    'not an address',
+    '999.0.0.1',
+    '10.0.0.0/33',
+  ]);
+  assert.equal(entries.length, 3);
+  assert.deepEqual(refused, ['not an address', '999.0.0.1', '10.0.0.0/33']);
+
+  assert.equal(addressMatchesWhitelist('166.70.97.196', entries), true);
+  assert.equal(addressMatchesWhitelist('166.70.97.197', entries), false, 'a /32 is exact');
+  assert.equal(addressMatchesWhitelist('10.1.2.3', entries), true, 'inside the /8');
+  assert.equal(addressMatchesWhitelist('11.1.2.3', entries), false, 'outside the /8');
+  assert.equal(addressMatchesWhitelist('::1', entries), true);
+  assert.equal(addressMatchesWhitelist('::2', entries), false);
+
+  assert.deepEqual(parseAdminWhitelist(undefined).entries, []);
 }
 
 console.log('session tests passed');
