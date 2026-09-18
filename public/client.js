@@ -7867,7 +7867,12 @@ function resolveTankStep(velocityX, velocityY, velocityZ, angularVelocity, delta
         halfWidth: TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
         halfLength: TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1),
       };
-      return getTankHitNormal(obs, px, py, pz, paz, hitY, TANK_COLLISION_HEIGHT, sweep);
+      const n = getTankHitNormal(obs, px, py, pz, paz, hitY, TANK_COLLISION_HEIGHT, sweep);
+      // Debug tap for the xwall/oct stuck investigation -- uncomment to
+      // capture which face/normal each hit resolved to, alongside the
+      // BZO-STUCK-DUMP block in handleMotion below (both toggle together).
+      // window.__bzoDebugLastNormal = { obs: obs ? (obs.name || obs.type) : null, n, sweep: { fromX, fromZ, toX, toZ, hitX, hitZ } };
+      return n;
     },
     isFlatTop: (obs) => {
       if (!obs) return false;
@@ -7878,6 +7883,10 @@ function resolveTankStep(velocityX, velocityY, velocityZ, angularVelocity, delta
     getObstacleTop: (obs) => getColliderTopY(obs),
     // `_maxBumpHeight`, a server or a map may change (see server.js).
     maxBumpHeight: gameConfig.MAX_BUMP_HEIGHT,
+    // Carried on the tank itself across frames -- `resolveTankMotion` only
+    // counts consecutive stuck frames within a single call, so persistence
+    // between calls is this caller's job, same as `verticalVelocity`.
+    stuckFrameCount: myTank.userData.stuckFrameCount || 0,
   });
 }
 
@@ -9430,6 +9439,7 @@ function handleMotion(deltaTime) {
     angularVelocity,
     deltaTime,
   );
+  myTank.userData.stuckFrameCount = step.stuckFrameCount;
   const intendedTravelX = velocityX * deltaTime;
   const intendedTravelZ = velocityZ * deltaTime;
   let result = {
@@ -9560,6 +9570,43 @@ function handleMotion(deltaTime) {
   onGround = nextOnGround;
   isInAir = nextInAir;
   lastMotionObstacle = step.obstacle || null;
+  // Debug instrumentation for the still-open xwall/oct stuck investigation
+  // (issue #84 -- not yet root-caused as of this commit).
+  // Uncomment to resume it: keeps a rolling ~1.5s buffer of every frame's
+  // position/velocity/obstacle/normal and dumps it over the existing
+  // debugLog channel (so it lands in server.log, not just the browser
+  // console) the moment forward progress stalls for a real player -- no
+  // manual console commands needed to catch a live repro.
+  // window.__bzoDebugBuf = window.__bzoDebugBuf || [];
+  // window.__bzoDebugStuckStreak = window.__bzoDebugStuckStreak || 0;
+  // window.__bzoDebugDumped = window.__bzoDebugDumped || false;
+  // {
+  //   const moveDist = Math.hypot(step.x - playerX, step.z - playerZ);
+  //   window.__bzoDebugBuf.push({
+  //     t: performance.now().toFixed(0),
+  //     x: step.x.toFixed(3), y: step.y.toFixed(3), z: step.z.toFixed(3),
+  //     az: step.azimuth.toFixed(3),
+  //     vx: step.velocityX.toFixed(2), vy: step.velocityY.toFixed(2), vz: step.velocityZ.toFixed(2),
+  //     moveDist: moveDist.toFixed(4),
+  //     obstacle: step.obstacle ? (step.obstacle.name || step.obstacle.type) : null,
+  //     onObstacle, onGround, isInAir,
+  //     stuckFrameCount: myTank.userData.stuckFrameCount || 0,
+  //     lastNormal: window.__bzoDebugLastNormal || null,
+  //   });
+  //   window.__bzoDebugLastNormal = null;
+  //   if (window.__bzoDebugBuf.length > 90) window.__bzoDebugBuf.shift();
+  //   const requestedSpeed = Math.hypot(velocityX, velocityZ);
+  //   if (moveDist < 0.05 && requestedSpeed > 0.5) {
+  //     window.__bzoDebugStuckStreak++;
+  //   } else {
+  //     window.__bzoDebugStuckStreak = 0;
+  //     window.__bzoDebugDumped = false;
+  //   }
+  //   if (window.__bzoDebugStuckStreak > 10 && !window.__bzoDebugDumped) {
+  //     window.__bzoDebugDumped = true;
+  //     debugLog(JSON.stringify(window.__bzoDebugBuf), 'BZO-STUCK-DUMP');
+  //   }
+  // }
   // Unlimited Wings while driving (issue #68): grounded recharges to it same
   // as everywhere else, so a phantom tank landing and taking off again never
   // runs dry either.

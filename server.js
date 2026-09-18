@@ -4736,9 +4736,11 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       current.d = Math.abs(rawD) * 2;
       current.h = Math.abs(rawH);
       if (current.type === 'pyramid') {
-        // A negative height is upstream's ZFlip, and `flipz` says the same thing
-        // outright. Either may come first, so neither clears the other.
-        current.inverted = rawH < 0 || current.inverted === true;
+        // Deferred to `end` (see its own comment) -- whether a negative
+        // height here means a real flip depends on whether a per-face
+        // command shows up anywhere else in this same block, which may
+        // still be ahead of this line.
+        current.rawH = rawH;
       }
     } else if (current && (token === 'rotation' || token === 'rot')) {
       // BZFlag rotation is CCW around +Z; our world maps BZFlag +Y (north) to -Z,
@@ -4768,7 +4770,9 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         nonVerticalSpinCount++;
       }
     } else if (current && current.type === 'pyramid' && token === 'flipz') {
-      current.inverted = true;
+      // Deferred to `end` -- see its own comment on why `flipz` alone means
+      // something different once a per-face command also shows up.
+      current.explicitFlipZ = true;
     } else if (current && token === 'border') {
       const [, border] = line.split(/\s+/);
       current.border = Math.abs(parseFloat(border) || 0);
@@ -4780,6 +4784,11 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       // where a `group` instance is expanded, below.
       const [, driverName] = line.split(/\s+/);
       current.phydrv = driverName || null;
+      if (current.type === 'pyramid') {
+        // CustomPyramid.cxx: `phydrv` also flips `isOldPyramid` false, same
+        // as any per-face command -- see the `end` handler.
+        current.hasFaceCommand = true;
+      }
     } else if (current && current.kind === 'base' && token === 'color') {
       const [, color] = line.split(/\s+/);
       const team = parseInt(color, 10);
@@ -4811,6 +4820,12 @@ function parseBZWMap(filename, { quiet = false } = {}) {
       // block can say is skipped here rather than rejected: `top texsize 4 4`
       // names a face bzo understands and a property it does not, and arrives
       // as an untextured box either way.
+      if (current.type === 'pyramid') {
+        // CustomPyramid.cxx: any per-face command (sides/edge/bottom/a named
+        // face, or that face's own matref/texture/color) flips isOldPyramid
+        // to false -- see the `end` handler for what that changes.
+        current.hasFaceCommand = true;
+      }
       const words = line.split(/\s+/);
       const group = BZW_FACE_GROUPS.get(token);
       const keyword = (group ? words[1] || '' : words[0]).toLowerCase();
@@ -4922,6 +4937,48 @@ function parseBZWMap(filename, { quiet = false } = {}) {
         }
         current = null;
       } else {
+        // CustomPyramid.cxx:319-350: a plain pyramid (no per-face command
+        // anywhere in its block) builds a `PyramidBuilding` straight from
+        // `fabsf()` of each size component, and negative height there really
+        // is `setZFlip()` -- an actual, visible inversion. But the moment a
+        // pyramid uses even one per-face command -- `sides`/`edge`/`bottom`/
+        // an individual face name, a face's own `matref`/texture/color,
+        // `texsize`, `texoffset`, or `phydrv` -- upstream's own `isOldPyramid`
+        // flag goes false and it switches to building a `MeshTransform`
+        // instead, scaled by the *signed*, non-`fabsf`'d size. `hix.bzw`
+        // gives every one of its pyramids `sides matref`, so every one of
+        // them takes this second path in real bzflag, and on this path a
+        // negative height is not a flip at all: `position`'s own Z anchors
+        // whichever end the sign points at (the apex when height is
+        // negative, the base otherwise), and the shape extends by `|height|`
+        // toward the other end -- so it is always apex-up, base-down, however
+        // its height's sign was chosen for the map author's own convenience
+        // in anchoring the piece. The one condition that still produces a
+        // real, visible inversion here is upstream's own literal `flipz`
+        // command with a *non-negative* height (`flipActive` below true from
+        // `explicitFlipZ` alone) -- confirmed against `bz4.rikers.org:5154`'s
+        // own wire-protocol geometry for this exact map's support struts:
+        // its cap pieces (negative height, no `flipz`) come back apex at the
+        // stated position and base below it, base-down like every other
+        // pyramid there.
+        if (current.type === 'pyramid' && current.hasFaceCommand) {
+          const rawH = Number.isFinite(current.rawH) ? current.rawH : current.h;
+          const statedZ = current.baseY || 0;
+          const flipActive = current.explicitFlipZ === true || rawH < 0;
+          const apexZ = flipActive ? statedZ : statedZ + rawH;
+          const baseZ = flipActive ? statedZ + rawH : statedZ;
+          current.baseY = Math.min(apexZ, baseZ);
+          current.inverted = apexZ < baseZ;
+          // `h` is already `Math.abs(rawH)` from the `size` line -- unchanged.
+        } else if (current.type === 'pyramid') {
+          // Old-style pyramid (no per-face command at all): upstream's own
+          // `isOldPyramid` path, unchanged from bzo's original behavior --
+          // `position` is the base, and a negative height or literal `flipz`
+          // really does mean `setZFlip()`. `baseY` stays exactly as parsed.
+          const rawH = Number.isFinite(current.rawH) ? current.rawH : current.h;
+          current.inverted = rawH < 0 || current.explicitFlipZ === true;
+        }
+
         // BaseBuilding::inMovingBox (BaseBuilding.cxx:77), in upstream's own words:
         // "if a base is just the ground (z == 0 && height == 0) no collision --
         // ground is already handled". A pad with no height is not something
@@ -5227,6 +5284,123 @@ function parseBZWMap(filename, { quiet = false } = {}) {
     return edgePlanes;
   }
 
+  // Whether a planar face's own vertices wind consistently convex -- the
+  // same test upstream's `MeshFace::finalize` runs (MeshFace.cxx:139-151)
+  // before it trusts a face's whole polygon: for every vertex, the turn
+  // from the incoming edge to the outgoing one must agree with the face's
+  // own plane normal. Upstream never plays a mapper's non-convex face as
+  // broken, though -- it falls back to triangulating it
+  // (`MeshObstacle::addFace`, MeshObstacle.cxx:181-249) rather than either
+  // dropping it or handing it to a collision test that assumes convexity,
+  // which is exactly what `computeMeshFaceEdgePlanes`'s own per-edge
+  // "fence" planes do (a point inside a concave face's real area can sit
+  // outside one of those, since a concave shape is not the intersection of
+  // its edges' own half-spaces the way a convex one is). `triangulateFace`
+  // below is that same fallback, not upstream's exact algorithm (its own
+  // scoring picks prettier strips; this only needs a correct, gap-free
+  // covering).
+  function isFaceConvex(vertices, vertexIndices, plane) {
+    const n = vertexIndices.length;
+    if (n <= 3) return true;
+    const [pnx, pny, pnz] = plane;
+    for (let i = 0; i < n; i++) {
+      const v0 = vertices[vertexIndices[i]];
+      const v1 = vertices[vertexIndices[(i + 1) % n]];
+      const v2 = vertices[vertexIndices[(i + 2) % n]];
+      const e0x = v1.x - v0.x; const e0y = v1.y - v0.y; const e0z = v1.z - v0.z;
+      const e1x = v2.x - v1.x; const e1y = v2.y - v1.y; const e1z = v2.z - v1.z;
+      const cx = (e0y * e1z) - (e0z * e1y);
+      const cy = (e0z * e1x) - (e0x * e1z);
+      const cz = (e0x * e1y) - (e0y * e1x);
+      const d = (cx * pnx) + (cy * pny) + (cz * pnz);
+      if (d <= 0) return false;
+    }
+    return true;
+  }
+
+  // Ear-clipping a simple (non-self-intersecting) planar polygon into
+  // triangles -- upstream's own fallback for a face that fails
+  // `isFaceConvex` above. Repeatedly clips a convex corner whose triangle
+  // holds none of the polygon's other corners, until three vertices are
+  // left, projecting to 2D by dropping whichever axis the face's own plane
+  // normal points along most (the ear test only needs positions within the
+  // face's own flat plane). Returns `null` -- caller keeps the original
+  // face rather than risk a wrong cut -- if no valid ear is ever found,
+  // which a genuinely simple polygon should never do.
+  function triangulateFacePolygon(vertices, indices, plane) {
+    const [pnx, pny, pnz] = plane;
+    const ax = Math.abs(pnx); const ay = Math.abs(pny); const az = Math.abs(pnz);
+    // Drop whichever axis the normal points along most, keeping the other two
+    // in whichever cyclic order (x->y->z->x) makes a positive-signed
+    // component project a CCW polygon to a CCW one -- a negative component
+    // needs the pair swapped instead, or the ear test's sign convention
+    // silently flips for half of all possible face orientations (every axis
+    // this picks the same way `computeMeshFacePlane`'s own right-hand-rule
+    // cross product already does, just projected rather than kept in 3D).
+    let pt;
+    if (ax >= ay && ax >= az) {
+      pt = (i) => { const v = vertices[i]; return pnx >= 0 ? [v.y, v.z] : [v.z, v.y]; };
+    } else if (ay >= ax && ay >= az) {
+      pt = (i) => { const v = vertices[i]; return pny >= 0 ? [v.z, v.x] : [v.x, v.z]; };
+    } else {
+      pt = (i) => { const v = vertices[i]; return pnz >= 0 ? [v.x, v.y] : [v.y, v.x]; };
+    }
+    const cross2 = (o, a, b) => (((a[0] - o[0]) * (b[1] - o[1])) - ((a[1] - o[1]) * (b[0] - o[0])));
+
+    const remaining = indices.slice();
+    const triangles = [];
+    let guard = (remaining.length * remaining.length) + 8;
+    while (remaining.length > 3 && guard-- > 0) {
+      const n = remaining.length;
+      let clipped = false;
+      for (let i = 0; i < n; i++) {
+        const iPrev = (i + n - 1) % n;
+        const iNext = (i + 1) % n;
+        const a = pt(remaining[iPrev]);
+        const b = pt(remaining[i]);
+        const c = pt(remaining[iNext]);
+        if (cross2(a, b, c) <= 0) continue;
+        let containsOther = false;
+        for (let j = 0; j < n; j++) {
+          if (j === iPrev || j === i || j === iNext) continue;
+          const p = pt(remaining[j]);
+          const c1 = cross2(a, b, p);
+          const c2 = cross2(b, c, p);
+          const c3 = cross2(c, a, p);
+          if ((c1 >= 0 && c2 >= 0 && c3 >= 0) || (c1 <= 0 && c2 <= 0 && c3 <= 0)) { containsOther = true; break; }
+        }
+        if (containsOther) continue;
+        triangles.push([remaining[iPrev], remaining[i], remaining[iNext]]);
+        remaining.splice(i, 1);
+        clipped = true;
+        break;
+      }
+      if (!clipped) return null;
+    }
+    if (remaining.length === 3) triangles.push(remaining);
+    return triangles;
+  }
+
+  // A non-convex face split into triangles, each a shallow copy of the
+  // original carrying its own three vertices/texcoords/normals -- every
+  // other property (texture, matref-resolved fields, passability, phydrv)
+  // stays shared, the same as upstream's own triangles all keeping the
+  // one face's own material. Falls back to the untouched original,
+  // singly, if `triangulateFacePolygon` can't safely clip it.
+  function triangulateMeshFace(vertices, face) {
+    const tris = triangulateFacePolygon(vertices, face.vertexIndices, face.plane);
+    if (!tris) return [face];
+    const hasTex = face.texcoordIndices && face.texcoordIndices.length === face.vertexIndices.length;
+    const hasNorm = face.normalIndices && face.normalIndices.length === face.vertexIndices.length;
+    const posOf = (globalVertexIndex) => face.vertexIndices.indexOf(globalVertexIndex);
+    return tris.map((triVertexIndices) => ({
+      ...face,
+      vertexIndices: triVertexIndices,
+      texcoordIndices: hasTex ? triVertexIndices.map((gi) => face.texcoordIndices[posOf(gi)]) : [],
+      normalIndices: hasNorm ? triVertexIndices.map((gi) => face.normalIndices[posOf(gi)]) : [],
+    }));
+  }
+
   // Bounds plus a per-face plane (and its edge planes), computed once a
   // mesh's vertices are in their final world positions -- a top-level mesh
   // right when it closes, or a `group`-placed one right after its own
@@ -5235,14 +5409,34 @@ function parseBZWMap(filename, { quiet = false } = {}) {
   // definition may be placed more than once, each landing somewhere
   // different). `baseY` matches every other obstacle's own field, so
   // `getObstacleHeight`/the collision pair's height gate read a mesh the
-  // same way they already read a box or a pyramid.
+  // same way they already read a box or a pyramid. A face that fails
+  // `isFaceConvex` is replaced here by its own triangulation, root and
+  // branch, rather than finalized as-is -- so nothing downstream of this
+  // function ever sees a concave face at all, the same guarantee upstream
+  // gives every one of its own collision/rendering paths.
   function finalizeMeshGeometry(mesh) {
     mesh.bounds = computeMeshBounds(mesh.vertices);
     mesh.baseY = mesh.bounds ? mesh.bounds.minY : 0;
+    const finalFaces = [];
     for (const face of mesh.faces) {
       face.plane = computeMeshFacePlane(mesh.vertices, face.vertexIndices);
+      if (face.plane && face.vertexIndices.length > 3
+        && !isFaceConvex(mesh.vertices, face.vertexIndices, face.plane)) {
+        const triFaces = triangulateMeshFace(mesh.vertices, face);
+        if (triFaces.length > 1) {
+          for (const triFace of triFaces) {
+            triFace.plane = computeMeshFacePlane(mesh.vertices, triFace.vertexIndices);
+            triFace.edgePlanes = computeMeshFaceEdgePlanes(mesh.vertices, triFace.vertexIndices, triFace.plane);
+            finalFaces.push(triFace);
+          }
+          continue;
+        }
+        log(`Could not triangulate a non-convex mesh face in ${mesh.name || '(unnamed mesh)'}, using it as-is`);
+      }
       face.edgePlanes = computeMeshFaceEdgePlanes(mesh.vertices, face.vertexIndices, face.plane);
+      finalFaces.push(face);
     }
+    mesh.faces = finalFaces;
     return mesh;
   }
 
@@ -7617,6 +7811,44 @@ defineCommand('/mv', COMMAND_TIER.OPERATOR,
     if (subject !== player) replyToPlayer(subject, `An operator moved you to ${where}`);
   });
 
+// `/pos` is bzo's own, the read half of `/mv` -- for the same reason `/mv`
+// exists at all: reporting a live bug ("I'm stuck") is much more useful with
+// an exact, timestamped position than a screenshot, and `/api/players` needs
+// a second terminal to poll while `/pos` lands right in server.log next to
+// whatever else was happening at that moment. Open to everyone for their own
+// tank -- any player hitting a bug should be able to log where it happened
+// without needing operator status -- but pinpointing someone *else's* exact
+// position is the same privacy line `/mv`/`/playerlist` already draw, so that
+// still requires it.
+defineCommand('/pos', COMMAND_TIER.OPEN,
+  '[player] - log a tank\'s exact current position, for reporting exactly where a bug happened',
+  (player, args) => {
+    let subject = player;
+    if (args.trim().length > 0) {
+      if (!isAdmin(player)) {
+        replyToPlayer(player, 'Checking another player\'s position requires operator status');
+        return;
+      }
+      const target = resolveCommandTarget(args);
+      if (!target.id) {
+        replyToPlayer(player, target.error || 'Usage: /pos [player]');
+        return;
+      }
+      subject = players.get(target.id);
+    }
+    if (subject.team === PLAYER_TEAM.OBSERVER) {
+      replyToPlayer(player, 'An observer has no tank position');
+      return;
+    }
+    const where = `${subject.x.toFixed(2)},${subject.y.toFixed(2)},${subject.z.toFixed(2)}`;
+    log(`[POS] "${player.name}" checked "${subject.name}": pos=(${where}), r=${subject.rotation.toFixed(2)},`
+      + ` fs=${(subject.forwardSpeed || 0).toFixed(2)}, rs=${(subject.rotationSpeed || 0).toFixed(2)},`
+      + ` vv=${(subject.verticalVelocity || 0).toFixed(2)}`);
+    replyToPlayer(player, subject === player
+      ? `You are at ${where} facing ${rotationToBearingName(subject.rotation)}`
+      : `"${subject.name}" is at ${where} facing ${rotationToBearingName(subject.rotation)}`);
+  });
+
 // Which settings can be changed without starting a new game. Everything else is
 // a new game -- the map today, and the game's shape when the panel grows into it
 // -- because bzo resolves the world and the team layout once at boot. See
@@ -9615,7 +9847,7 @@ function findFlagLandingY(x, z, fromY) {
     // isValidLanding() skips anything a tank can drive through, and the world
     // boundary is not somewhere a flag belongs.
     if (obs.collisionKind === 'boundary' || obs.kind === 'teleporter') continue;
-    const top = (obs.baseY || 0) + (obs.h || 0);
+    const top = getColliderTopY(obs);
     if (top > fromY || top <= landingY) continue;
     if (!isOverFlatTop(obs, x, z)) continue;
     landingY = top;
@@ -12971,10 +13203,10 @@ wss.on('connection', (ws, req) => {
             const expectedLandX = x + dx;
             const expectedLandZ = z + dz;
             const expectedLandR = r + rs * rotSpeed * jumpTime;
-            log(`[JUMP] "${player.name}" jumped: pos=(${x.toFixed(2)},${z.toFixed(2)}), r=${r.toFixed(2)}, fs=${fs.toFixed(2)}, rs=${rs.toFixed(2)}, vv=${vv.toFixed(2)}`);
+            log(`[JUMP] "${player.name}" jumped: pos=(${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}), r=${r.toFixed(2)}, fs=${fs.toFixed(2)}, rs=${rs.toFixed(2)}, vv=${vv.toFixed(2)}`);
             log(`[JUMP] Expected landing: pos=(${expectedLandX.toFixed(2)},${expectedLandZ.toFixed(2)}), r=${expectedLandR.toFixed(2)}`);
           } else if (isLanding) {
-            log(`[LAND] "${player.name}" landed: pos=(${x.toFixed(2)},${z.toFixed(2)}), r=${r.toFixed(2)}, fs=${fs.toFixed(2)}, rs=${rs.toFixed(2)}, vv=${vv.toFixed(2)}`);
+            log(`[LAND] "${player.name}" landed: pos=(${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}), r=${r.toFixed(2)}, fs=${fs.toFixed(2)}, rs=${rs.toFixed(2)}, vv=${vv.toFixed(2)}`);
           } else if (isFallStart) {
             log(`[FALL] "${player.name}" started falling: pos=(${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}), r=${r.toFixed(2)}, fs=${fs.toFixed(2)}, rs=${rs.toFixed(2)}, vv=${vv.toFixed(2)}`);
           }

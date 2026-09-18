@@ -27,6 +27,12 @@ const MAX_BUMP_HEIGHT = 0.33;
 const ZERO_TOLERANCE = 1e-8;
 // Upstream loops until the timestep is spent; this bounds a pathological wedge.
 const MAX_SLIDE_PASSES = 4;
+// LocalPlayer.cxx:426, "only any 100 frames while stuck, take an action".
+const STUCK_FRAME_LIMIT = 100;
+// LocalPlayer.cxx:470: the escape shove is bounded to what a laggy frame would
+// otherwise cover, so a stall right before a huge `dt` cannot fling the tank
+// through a wall it would never have reached under a normal step.
+const STUCK_ESCAPE_MAX_DT = 0.1;
 
 function nearZero(value) {
   return Math.abs(value) < ZERO_TOLERANCE;
@@ -53,6 +59,10 @@ function resolveTankMotion({
   // lower with `-set`/`maxBumpHeight` -- see server.js. Defaulting to the
   // module constant is what every existing caller keeps getting for free.
   maxBumpHeight = MAX_BUMP_HEIGHT,
+  // LocalPlayer.cxx:421-490's own `stuckFrameCount`, a tank-lifetime counter
+  // the caller carries across frames and hands back in -- this function is
+  // otherwise stateless, so it cannot count consecutive frames itself.
+  stuckFrameCount = 0,
 }) {
   let posX = x;
   let posY = y;
@@ -65,6 +75,35 @@ function resolveTankMotion({
   let remaining = timeStep;
   let obstacle = null;
   let onBuilding = false;
+
+  // A tank whose *resting* pose -- no movement at all -- is still found
+  // inside a solid every single frame is wedged, not merely blocked: sliding
+  // alone can leave it there forever where two or more obstacles pinch a
+  // gap too tight to slide out of (LocalPlayer.cxx:441-490). A pinch like
+  // that is exactly what letting a mesh's flat top take priority over a
+  // wall (`pickPriorityMeshFace`) cannot fix by itself -- that rule only
+  // says which *single* face wins a query, not what to do when the winning
+  // answer still leaves no clear direction to slide in. Upstream counts
+  // consecutive stuck frames and, past the limit, shoves the tank back out
+  // along the obstacle's own normal instead of resolving the frame
+  // normally; this is that shove, applied to the starting pose before the
+  // ordinary slide loop below ever runs, exactly where upstream applies it.
+  const restingHit = hitTest(posX, posY, posZ, az, posX, posY, posZ, az);
+  let nextStuckFrameCount = restingHit ? stuckFrameCount + 1 : 0;
+  if (nextStuckFrameCount > STUCK_FRAME_LIMIT) {
+    nextStuckFrameCount = 0;
+    const escapeNormal = getNormal(restingHit, posX, posY, posZ, az, posX, posY, posZ, az, posX, posZ, az, posX, posZ, az);
+    if (escapeNormal) {
+      const desiredSpeed = Math.hypot(velX, velZ);
+      const delta = Math.min(remaining, STUCK_ESCAPE_MAX_DT);
+      const movementMax = desiredSpeed * delta;
+      posX += movementMax * escapeNormal.x;
+      posZ += movementMax * escapeNormal.z;
+      velX = movementMax * escapeNormal.x;
+      velZ = movementMax * escapeNormal.z;
+      remaining -= delta;
+    }
+  }
 
   for (let pass = 0; pass < MAX_SLIDE_PASSES && remaining > MIN_SEARCH_STEP; pass++) {
     const fromX = posX;
@@ -203,9 +242,11 @@ function resolveTankMotion({
     angularVelocity: angVel,
     obstacle,
     onBuilding,
+    stuckFrameCount: nextStuckFrameCount,
   };
 }
 module.exports = {
+  STUCK_FRAME_LIMIT,
   TINY_DISTANCE,
   MAX_BUMP_HEIGHT,
   resolveTankMotion,

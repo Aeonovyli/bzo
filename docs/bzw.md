@@ -69,6 +69,35 @@ still falls back to bzo's 4.
 An obstacle with no `name` is given one -- `B0`, `P3`, `t2` -- because the name
 is what the collision log, the debug labels and the teleporter links refer to.
 
+A bare `box`, `pyramid` and `base`, each at upstream's own default `size` for
+one that gives none (`_boxBase`/`6 * _muzzleHeight`, `30.0`/`9.42`; `_pyrBase`/
+`5 * _tankHeight`, `8.20`/`10.25`; a `base`'s own zero-height default, see
+above):
+
+```
+box
+	position     x     y     0.0
+	rotation     deg
+	size         30.0  30.0  9.42
+end
+
+pyramid
+	position     x     y     0.0
+	rotation     deg
+	size         8.20  8.20  10.25
+end
+
+base
+	position     x     y     0.0
+	rotation     deg
+	size         30.0  30.0  0.0
+	color        1
+end
+```
+
+A `base` is a `box` under a different `kind`, so `rotation` and a real,
+non-zero `size` height both work exactly as they do on one.
+
 ### Colour
 
 On a `box` or a `pyramid`, `color` is the colour the obstacle is painted, and
@@ -450,7 +479,16 @@ A `teleporter` is a box with a `border`, and its two faces are named
 defaults from the `CustomGate` constructor -- half width `0.5 * _teleportWidth`,
 half breadth `_teleportBreadth`, height `2 * _teleportHeight`, and a border of
 twice the half width, so `0.56 / 4.48 / 20.16 / 1.12` -- which is what
-`maps/bzo.bzw` relies on and every other map in `maps/` spells out.
+`maps/bzo.bzw` relies on and every other map in `maps/` spells out:
+
+```
+teleporter
+	position     x     y     0.0
+	rotation     deg
+	size         0.56  4.48  20.16
+	border       1.12
+end
+```
 
 **The importer resolves the border into the solid, and the world goes out
 collision-ready.** `Teleporter::finalize` grows the stated size by the border --
@@ -473,6 +511,13 @@ which may be:
 - a face name, `ne_tele_low:f`;
 - a glob over face names, `ne_*:f` or `?w_tele_high:b`, matched case-insensitively;
 - a numeric face id, `0` for the first teleporter's front face, `1` for its back.
+
+```
+link
+	from ne_tele_low:f
+	to ne_tele_high:b
+end
+```
 
 A trailing `F` or `B` is accepted for `f` and `b`, and a leading `:` is dropped.
 As upstream does, **a source face with no link of its own passes through to the
@@ -660,6 +705,17 @@ than rejecting the switch.
 
 A map with no `world` block gets upstream's own default: `_worldSize` 800, which
 is the full width, so the world spans +/-400.
+
+```
+world
+	size        400.0
+	flagHeight  10.0
+end
+```
+
+(`size` is the half width -- see **Coordinates**, above -- and `flagHeight` is
+one of the three more fields below; a bare `name` line is neither upstream's
+nor bzo's, and is read and dropped like any other unhandled token.)
 
 ## World fields
 

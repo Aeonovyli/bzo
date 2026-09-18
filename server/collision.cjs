@@ -644,6 +644,106 @@ function meshIntersectsTank(obs, x, y, z, rotation, height, slack = 0, tankScale
   ) !== null;
 }
 
+// Every face of `obs` touching the box, rather than `findMeshHitFaceOriented`'s
+// first -- `World::hitBuilding` (World.cxx:295-378) needs every candidate face
+// gathered *before* it decides which one actually answers (see
+// `pickPriorityMeshFace`'s own comment for why one mesh's wall is not allowed
+// to out-rank a *different* mesh's flat top), so this is that function's own
+// loop body with `return` swapped for a push. Appends to `out` and returns it.
+function collectMeshHitFacesTank(
+  obs, x, y, z, rotation, halfWidth, halfLength, height, passField, direction, out,
+) {
+  const { bounds } = obs;
+  const boundingRadius = Math.hypot(halfWidth, halfLength);
+  if (bounds && (x + boundingRadius < bounds.minX || x - boundingRadius > bounds.maxX
+    || z + boundingRadius < bounds.minZ || z - boundingRadius > bounds.maxZ)) {
+    return out;
+  }
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const boxMins = [-halfWidth, 0, -halfLength];
+  const boxMaxs = [halfWidth, height, halfLength];
+  for (const face of obs.faces) {
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    const localPoints = face.vertexIndices.map((vi) => {
+      const v = obs.vertices[vi];
+      const dx = v.x - x;
+      const dz = v.z - z;
+      return [(dx * cos) - (dz * sin), v.y - y, (dx * sin) + (dz * cos)];
+    });
+    const [nx, ny, nz, d] = face.plane;
+    const localPlane = [
+      (nx * cos) - (nz * sin),
+      ny,
+      (nx * sin) + (nz * cos),
+      d + (nx * x) + (ny * y) + (nz * z),
+    ];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) out.push({ obs, face });
+  }
+  return out;
+}
+
+// The cylinder's own version of `collectMeshHitFacesTank`, mirroring
+// `findMeshHitFace`'s loop the same way that one mirrors
+// `findMeshHitFaceOriented`.
+function collectMeshHitFacesCylinder(obs, x, y, z, radius, height, passField, direction, out) {
+  const { bounds } = obs;
+  if (bounds && (x + radius < bounds.minX || x - radius > bounds.maxX
+    || z + radius < bounds.minZ || z - radius > bounds.maxZ)) {
+    return out;
+  }
+  const boxMins = [-radius, 0, -radius];
+  const boxMaxs = [radius, height, radius];
+  for (const face of obs.faces) {
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    const localPoints = face.vertexIndices.map((vi) => {
+      const v = obs.vertices[vi];
+      return [v.x - x, v.y - y, v.z - z];
+    });
+    const [nx, ny, nz, d] = face.plane;
+    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) out.push({ obs, face });
+  }
+  return out;
+}
+
+// `World::compareHitNormal` (World.cxx:268-293) plus its caller's own accept
+// test right below it: an up plane always outranks a wall, whichever mesh
+// each belongs to, because a tank standing on a flat top has nothing
+// meaningful to slide along a *different* mesh's wall with -- that wall
+// happening to also brush the query box at the exact seam between two
+// abutting meshes is geometry, not a reason to stop. Ties between two up
+// planes go to the higher one; ties between walls go to whichever the query
+// is heading into more squarely (most negative dot first), upstream's own
+// order, kept here only because it is free once the list is already sorted.
+//
+// This is what `findTankObstacle` did not do before: it asked each mesh in
+// turn and returned the first one that answered at all, so which of two
+// abutting meshes' faces won depended on their position in the obstacle
+// list, not on which one actually mattered. A tank crossing from one mesh's
+// flat top onto another's could have the far mesh's own perimeter wall --
+// found first only because of array order -- answer instead of the near
+// mesh's floor, and a wall's answer is "you are blocked," which a floor's
+// never is.
+function pickPriorityMeshFace(candidates, direction) {
+  if (candidates.length === 0) return null;
+  const scored = candidates.map((candidate) => {
+    const { face } = candidate;
+    const isUp = face.plane[1] >= MESH_FLAT_PLANE_THRESHOLD;
+    const dot = direction
+      ? (direction.x * face.plane[0]) + (direction.y * face.plane[1]) + (direction.z * face.plane[2])
+      : -1;
+    const upHeight = isUp ? candidate.obs.vertices[face.vertexIndices[0]].y : 0;
+    return { ...candidate, isUp, dot, upHeight };
+  });
+  scored.sort((a, b) => {
+    if (a.isUp !== b.isUp) return a.isUp ? -1 : 1;
+    if (a.isUp) return b.upHeight - a.upHeight;
+    return a.dot - b.dot;
+  });
+  return scored[0].obs;
+}
+
 // The plane normal to reflect a ricocheting shot about. `hitFace`, when
 // given, is the exact face `findMeshFaceCrossing` already found by walking
 // the ray itself -- the caller's job, since only the ray sweep knows which
@@ -740,6 +840,13 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
     )
     : radius;
 
+  // A mesh face is never returned the instant it answers -- see
+  // `pickPriorityMeshFace`'s own comment -- so every touching face from
+  // every mesh obstacle collects here first, and only the winner of that
+  // whole set is returned once the loop below finishes without a non-mesh
+  // hit.
+  const meshCandidates = [];
+
   for (const obs of obstacles) {
     if (!obs) continue;
     if (ignoreTeleporters && obs.kind === 'teleporter') continue;
@@ -789,10 +896,17 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
     }
 
     if (obs.type === 'mesh') {
-      const hits = useTankBox
-        ? meshIntersectsTank(obs, x, y, z, rotation, height, slack, tankScale, direction)
-        : meshIntersectsCylinder(obs, x, y, z, radius - slack, height, 'driveThrough', direction);
-      if (hits) return obs;
+      if (useTankBox) {
+        const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
+        const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+        const trim = Math.max(0, Math.min(slack, halfWidth));
+        collectMeshHitFacesTank(
+          obs, x, y, z, rotation, halfWidth - trim, halfLength - trim, height, 'driveThrough', direction,
+          meshCandidates,
+        );
+      } else {
+        collectMeshHitFacesCylinder(obs, x, y, z, radius - slack, height, 'driveThrough', direction, meshCandidates);
+      }
       continue;
     }
 
@@ -833,7 +947,7 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
 
     if (hitsRect(obs.w / 2, obs.d / 2, slack)) return obs;
   }
-  return null;
+  return pickPriorityMeshFace(meshCandidates, direction);
 }
 
 // The obstacle a physics driver applies from at this position -- a support
@@ -907,9 +1021,51 @@ function getBaseTeamAtPoint(obstacles, x, y, z) {
   return null;
 }
 
+// MeshFace::isUpPlane's own threshold (MeshFace.cxx: `(fabsf(plane[2]) + fudge)
+// >= 1.0f`, upstream's Z being bzo's Y) -- a face this close to horizontal, and
+// no closer, counts as a real flat top rather than a steep roof someone could
+// still stand near the peak of.
+const MESH_FLAT_TOP_MIN_UP = 1 - 1e-4;
+
+// isValidLanding()'s mesh case: upstream never asks a whole MeshObstacle
+// whether it isFlatTop() -- a mesh has no one answer, since one of its faces
+// may be a wall and another a roof -- it asks each `MeshFace` alone, because
+// the collision manager's ray test already hands back individual faces. bzo
+// has no per-face ray test to reuse here, so this walks every face itself and
+// asks the same two questions upstream's ray hit would have answered for it:
+// pointing up, and standing under (x, z). The point-in-polygon test reuses
+// `testPolygonInAxisBox` with a box shrunk to a fleck -- the same call
+// `findMeshFaceAt` makes for a real occupant, just with no size of its own.
+function isOverMeshFlatTopAt(obs, x, z) {
+  const { bounds } = obs;
+  if (!bounds || x < bounds.minX || x > bounds.maxX || z < bounds.minZ || z > bounds.maxZ) {
+    return false;
+  }
+  const speck = 1e-3;
+  return obs.faces.some((face) => {
+    if (!face.plane || face.plane[1] < MESH_FLAT_TOP_MIN_UP) return false;
+    const y = obs.vertices[face.vertexIndices[0]].y;
+    const localPoints = face.vertexIndices.map((vi) => {
+      const v = obs.vertices[vi];
+      return [v.x - x, v.y - y, v.z - z];
+    });
+    const [nx, ny, nz, d] = face.plane;
+    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
+    return testPolygonInAxisBox(
+      localPoints,
+      localPlane,
+      [-speck, -speck, -speck],
+      [speck, speck, speck],
+    );
+  });
+}
+
 // The footprint test a flag drop uses, with no radius: DropGeometry gives a team
 // flag a radius of 0, so only the point itself has to be over the surface.
 function isOverFlatTop(obs, x, z) {
+  if (obs.type === 'mesh') {
+    return isOverMeshFlatTopAt(obs, x, z);
+  }
   if (obs.type === 'pyramid') {
     if (!isPyramidFlatTop(obs)) return false;
     return isWithinPyramidFootprint(obs, x, z);
@@ -1874,6 +2030,9 @@ function traceShotStep({
 }
 module.exports = {
   ZERO_TOLERANCE,
+  collectMeshHitFacesTank,
+  collectMeshHitFacesCylinder,
+  pickPriorityMeshFace,
   getColliderLocalPoint,
   testOrigRectCircle,
   TANK_HALF_LENGTH,
