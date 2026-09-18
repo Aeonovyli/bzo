@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.30] - 2026-09-18
+
+### Added
+- **Maps can now set a custom ground texture (`-gndtex`), matching
+  upstream.** A map's `options` block may state `-gndtex <name>`, or an
+  explicit `material name GroundMaterial ... end` block, either a stock
+  texture name or an external URL, the same as any other material. The
+  ground plane textures and tints from it, falling back to the stock
+  `std_ground` checkerboard when a map states neither. `hix.bzw`'s ground
+  now matches its own box/octagon/walkway tops via `matref concrete`. See
+  "Ground texture" in `docs/bzw.md`.
+
 ## [1.2.29] - 2026-09-18
 
 ### Fixed
