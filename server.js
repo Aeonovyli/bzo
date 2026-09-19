@@ -480,15 +480,14 @@ app.get(['/', '/index.html'], (req, res) => {
   res.type('html').send(renderIndex(host));
 });
 
-// bzflag.org's global login, as a probe rather than a feature. Nothing here
-// grants anything: it answers whether the weblogin round trip and the token
-// check work for a server like bzo, and it prints what came back. See
-// AGENTS.md, "What a real login would look like".
+// bzflag.org's global login. See docs/login.md for what it grants and
+// AGENTS.md, "The global login", for the token-flow research it rests on.
 //
-// Two routes because the flow has two halves. `/login/start` is the redirect
-// -- `misc/checkToken.php` requires that the site send the player to
-// bzflag.org's own form rather than collecting a password itself, and a 302
-// from here is exactly that. `/login` is where bzflag.org sends them back.
+// One route serves both halves of the round trip, below: with no `t` yet it
+// is the redirect -- `misc/checkToken.php` requires that the site send the
+// player to bzflag.org's own form rather than collecting a password itself,
+// and a 302 from here is exactly that -- and with a `t` it is where
+// bzflag.org sends them back.
 const BZFLAG_LOGIN_URL = 'https://my.bzflag.org/weblogin.php';
 const BZFLAG_LIST_SERVER_URL = 'https://my.bzflag.org/db/';
 
@@ -599,12 +598,13 @@ app.get('/login', loginRateLimit, async (req, res) => {
   }
 
   res.type('text/plain');
-  // Plain text, and nothing the query string carried is echoed into it: what
-  // comes back is either a fixed sentence or bzflag.org's own reply, which is
-  // the raw material the probe exists to show. A reflected `t` would be markup
-  // in a response of bzo's own making -- text/plain or not, that is a page an
-  // attacker wrote -- and the log line below already records the value for
-  // anybody diagnosing a real callback.
+  // Plain text, and nothing the query string carried is echoed into it: a
+  // malformed callback gets one of bzo's own fixed sentences below, never
+  // bzflag.org's reply or anything reflected back from `t`. A reflected `t`
+  // would be markup in a response of bzo's own making -- text/plain or not,
+  // that is a page an attacker wrote -- and the `[LOGIN]` lines already record
+  // the value for anybody diagnosing a real callback. A verified callback
+  // never reaches this response at all: `finishLogin` redirects instead.
   //
   // A `t` that is present but unusable is an error rather than a fresh start.
   // Redirecting on it would send the player back to bzflag.org, which would

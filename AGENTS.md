@@ -2324,11 +2324,14 @@ arrived beside it. All three only fire when somebody else sent it. A message fro
 the *server* is silent, which is upstream's default -- its private sound is gated
 on `beepOnServerMsg`, a setting bzo does not ship.
 
-### What a real login would look like
+### The global login
 
-Not implemented, and recorded here because it is the one thing that would
-replace `isAdmin` rather than dress it up. bzflag.org's global registration is
-**two different token flows**, and only one of them suits a browser:
+Built -- see `docs/login.md` for what it supports and `docs/login-plan.md` for
+the few pieces still missing (a login row that stashes its staged draft, an
+`Origin` check on the WebSocket upgrade, the `__Host-` cookie prefix).
+bzflag.org's global registration is **two different token flows**, and only
+one of them suits a browser -- this section stays as the record of that
+research, since it is what the design above rests on:
 
 - **The one bzfs uses.** The client POSTs
   `action=GETTOKEN&callsign=&password=&nameport=` to `https://my.bzflag.org/db/`
@@ -2428,19 +2431,18 @@ empty parameter, forever. What the probe has settled so far:
   becomes `%25TOKEN%25` and weblogin.php has nothing it recognises to
   substitute. The route sets the `Location` header itself.
 
-**Where a session would live, once there is one.** Decided, not built. The
-browser gets **one opaque value and nothing else**: 32 random bytes in an
-`HttpOnly; Secure; SameSite=Lax` cookie. Every attribute -- the BZID, the
-callsign, the group memberships, whether any of them grants admin -- stays in a
-server-side record that the cookie is a key to.
+**Where the session lives.** The browser gets **one opaque value and nothing
+else**: 32 random bytes in an `HttpOnly; Secure; SameSite=Lax` cookie. Every
+attribute -- the BZID, the callsign, the group memberships, whether any of them
+grants admin -- stays in a server-side record that the cookie is a key to.
 
 The reason is that a player can write their own cookies and their own
 `localStorage`, so anything stored there is attacker-chosen. That is harmless
 only as long as the server never *parses* trust out of it but *looks it up*: an
 invented id matches no record and is anonymous. A signed client-side claim -- a
 JWT carrying the groups -- would break exactly this, and could not be revoked
-either. `isAdmin` becomes a lookup against `adminGroups` at the moment an action
-is checked, and the client is still only *told* the answer, for the reason given
+either. `isAdmin` is a lookup against `adminGroups` at the moment an action is
+checked, and the client is still only *told* the answer, for the reason given
 above: a greyed-out button reads an answer rather than keeping a second copy of
 the question.
 
@@ -2468,19 +2470,18 @@ nothing server-side should key on it. The browser leg is HTTPS regardless --
 `Origin` says so -- and a `Secure` cookie is honoured by the browser without
 the server needing to know.
 
-The probe is unauthenticated, so anyone who finds it can make bzo send one
-request to my.bzflag.org. That is acceptable for a probe on a dev server and is
-a reason it should not survive as-is into anything that grants a permission.
+`/login` is rate limited (`docs/login.md`) rather than left open the way the
+early probe was, for the same reason: an unauthenticated route that makes bzo
+send a request to my.bzflag.org is worth bounding on a public server.
 
-What is left to build is a real callback and session -- and everything under
-"what it would cost" below. The login form is not the part that needs designing.
+What was built from here is the callback and session below -- the login form
+was never the part that needed designing.
 
-What it would buy: a **BZID**, a stable numeric identity bzo could key
-permissions to, and **group membership**, which is what upstream's
-`PlayerAccessInfo` keys to -- so the admin gate would become a real question
-with a real answer.
+What it bought: a **BZID**, a stable numeric identity bzo keys permissions to,
+and **group membership**, which is what upstream's `PlayerAccessInfo` keys to
+-- so the admin gate is a real question with a real answer.
 
-What it would cost, and why it is not a small change:
+What it cost, and why it was not a small change:
 
 - The script's own rule is that the site **must** redirect the user to
   bzflag.org's form; login info arriving from any other form is rejected. So
