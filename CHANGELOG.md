@@ -6,6 +6,36 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.38] - 2026-09-19
+
+### Added
+- **The scoreboard now tracks a personal record against each opponent**:
+  how many times you've killed them and how many times they've killed you,
+  shown as `wins~losses` beside their row and dropped first on a phone-width
+  screen. Your own row shows a self-destruct count instead, matching
+  upstream's `Player::localWins`/`localLosses` and `getSelfKills()`. Closes
+  #65.
+- **A player's row shows 🔊 instead of 🎤 while their voice is actually
+  audible**, not just enabled, from a live read of their incoming audio
+  level.
+- The in-game Help panel documents the scoreboard's stats format and every
+  glyph drawn next to a name.
+
+### Changed
+- Chat lines now colour the named player in their own shade in every
+  message kind, not just team and admin messages, and add the rabbit mark
+  where it applies. The redundant `(Team)` suffix upstream's notices carry
+  is gone from bzo's, since the name is already coloured there.
+- Default voice channel is now **All** rather than **Nearby**.
+- Roam leader-follow is recomputed only when the scoreboard's own model
+  changes (a join, a leave, a kill, a flag), not once a rendered frame.
+
+### Fixed
+- **A Bouncy tank stopped bouncing, and an airborne tank's rotation froze,
+  the moment its pilot opened chat.** Both are physics that has nothing to
+  do with the keyboard, but shared an input-context check with the code
+  that reads it. Closes #95, #99.
+
 ## [1.2.37] - 2026-09-19
 
 ### Added
