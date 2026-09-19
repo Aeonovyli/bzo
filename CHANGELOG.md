@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.39] - 2026-09-19
+
+### Fixed
+- **The sun's glow no longer draws in front of mountains, tanks, and
+  everything else in the world.** It was on Three.js's transparent render
+  list, which always draws after every opaque object regardless of draw
+  order. Closes #102.
+
 ## [1.2.38] - 2026-09-19
 
 ### Added
