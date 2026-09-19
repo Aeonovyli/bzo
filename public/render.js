@@ -749,6 +749,19 @@ function applyTextureMatrix(tm, t, out) {
   );
 }
 
+// `MeshDrawInfo::updateAnimation` (#88): a mesh's own `angvel`, degrees/sec
+// about its own placement, evaluated off the same shared wall clock
+// `_updateAnimatedMaterials` uses (`Date.now()`, not `performance.now()`) so
+// every connected client agrees on the angle at any given real moment, the
+// same reason a map's `dyncol`/`texmat` already reads that clock. Exported
+// for `client.js`'s own radar draw, which projects a spinning mesh's faces
+// itself rather than through this module's `THREE.Object3D` tree.
+export function meshSpinRadians(angvel, timeSeconds = Date.now() * 0.001) {
+  if (!angvel) return 0;
+  const angleDeg = (angvel * timeSeconds) % 360;
+  return angleDeg * (Math.PI / 180);
+}
+
 // Upstream's own default teleporter glow is a `LinkMaterial` a map can
 // override but every sampled real one leaves at its stock values --
 // `textureMatrix name LinkMaterial \n shift 0 -0.05 \n end` (confirmed
@@ -1333,6 +1346,11 @@ class RenderManager {
     this._animatedMaterials = [];
     // One `THREE.Mesh` per parsed `mesh` block -- render-only, see `setMeshes`.
     this.meshObjects = [];
+    // `{ group, angvel }` per spinning mesh (`angvel`, #88) -- `group` is the
+    // pivot wrapper `setMeshes` puts around that mesh's own (otherwise
+    // static) `THREE.Mesh`, driven each frame by `_updateMeshSpins`. Reset
+    // wholesale on every `clearMeshes`, same as `meshObjects` itself.
+    this._meshSpins = [];
     // Keyed by the obstacle the tank is inside, built on demand.
     this.insideBuildingNodes = new Map();
     this.visibleInsideBuildingNodes = [];
@@ -2037,12 +2055,22 @@ class RenderManager {
 
   // The whole cost of a shadow, per frame: one matrix multiply.
   //
-  // A caster is either a mesh with geometry of its own -- an obstacle fragment
-  // -- or a tank, which is a group of parts casting one merged silhouette.
+  // A caster is either a mesh with geometry of its own -- an obstacle
+  // fragment, or a `mesh`-block object (#88's own spin wrapper included) --
+  // or a tank, which is a group of parts casting one merged silhouette.
   _projectShadowForMesh(mesh, projection, casting = true) {
     if (!mesh) return;
-    const isTank = !mesh.geometry;
-    if (isTank && mesh.userData.drawGroup !== 'tank') return;
+    const isTank = mesh.userData.drawGroup === 'tank';
+    if (!isTank && !mesh.geometry) {
+      // A group that is not a tank has no geometry of its own to project --
+      // a spinning mesh's own pivot wrapper (`_wrapMeshSpin`, #88) is the one
+      // case today. Its child already carries the group's own rotation in
+      // its `matrixWorld` (`updateWorldMatrices` runs first), so projecting
+      // each child is exactly as correct as projecting the group would be,
+      // and still one matrix multiply per real mesh underneath.
+      mesh.children.forEach((child) => this._projectShadowForMesh(child, projection, casting));
+      return;
+    }
     if (!casting || mesh.visible === false) {
       const shadowMesh = mesh.userData.shadowMesh;
       if (shadowMesh) shadowMesh.visible = false;
@@ -2248,6 +2276,13 @@ class RenderManager {
       .multiply(this._projectedShadowWorldToLocal);
 
     for (const mesh of this.obstacleMeshes) {
+      this._projectShadowForMesh(mesh, projection);
+    }
+
+    // A `mesh` block's own render object (`setMeshes`) -- the same
+    // projection as the box/pyramid fragments above, so a drawInfo tank, a
+    // beam, or any other `mesh` obstacle casts one too.
+    for (const mesh of this.meshObjects) {
       this._projectShadowForMesh(mesh, projection);
     }
 
@@ -2552,6 +2587,7 @@ class RenderManager {
     // same phase at the same real moment, the way a cycling billboard sign
     // reads the same picture on every screen watching it.
     this._updateAnimatedMaterials(Date.now() * 0.001);
+    this._updateMeshSpins(Date.now() * 0.001);
 
     if (this.projectileLights) {
       for (const [projectile, light] of this.projectileLights.entries()) {
@@ -3000,6 +3036,17 @@ class RenderManager {
       if (entry.textureMatrix) {
         applyTextureMatrix(entry.textureMatrix, timeSeconds, entry.texture.matrix);
       }
+    }
+  }
+
+  // A spinning mesh's own pivot group (`angvel`, #88 -- see `setMeshes`),
+  // rotated fresh each frame off the same shared wall clock rather than
+  // accumulated -- `MeshDrawInfo::updateAnimation`'s own `fmod(angvel * time,
+  // 360)`, not a per-frame delta, so a client that just joined starts every
+  // spinning mesh at the same phase as one that has been watching it all along.
+  _updateMeshSpins(timeSeconds = 0) {
+    for (const spin of this._meshSpins) {
+      spin.group.rotation.y = meshSpinRadians(spin.angvel, timeSeconds);
     }
   }
 
@@ -4065,6 +4112,10 @@ class RenderManager {
     // is tagged `source: 'mesh'`, dropped here the same way `clearObstacles`
     // drops only its own `'obstacle'`-tagged entries.
     this._animatedMaterials = this._animatedMaterials.filter((entry) => entry.source !== 'mesh');
+    // Every spinning mesh's pivot group comes down with `meshObjects` above
+    // (each is that same list's own entry, or its parent) -- this only drops
+    // the bookkeeping `_updateMeshSpins` would otherwise still walk.
+    this._meshSpins = [];
     // The labels themselves come down with their own mesh object already
     // (each is a child of it, per `_addDebugLabel`) -- this only clears the
     // bookkeeping entry `_updateDebugLabelsVisibility` would otherwise still
@@ -4083,16 +4134,41 @@ class RenderManager {
     if (!this.scene) return;
     this.clearMeshes();
     meshes.forEach((meshObs, i) => {
-      const object3D = this._buildMeshObject(meshObs, i);
-      if (!object3D) return;
-      this.worldGroup.add(this._tagDraws(object3D, 'mesh'));
-      this.meshObjects.push(object3D);
+      const meshMesh = this._buildMeshObject(meshObs, i);
+      if (!meshMesh) return;
       // `_addDebugLabel` reads the object's own geometry bounding box for
       // where to float the label -- already computed in `_buildMeshObject`,
       // and already in world space, since a mesh's vertices are baked in
       // directly rather than carried as a position a matrix would move.
-      this._addDebugLabel(object3D, 'mesh');
+      // Read before any spin-wrapping below, which repositions the mesh
+      // itself but never touches its geometry.
+      this._addDebugLabel(meshMesh, 'mesh');
+      const object3D = (meshObs.angvel && meshObs.spinPivot)
+        ? this._wrapMeshSpin(meshMesh, meshObs.spinPivot, meshObs.angvel)
+        : meshMesh;
+      this.worldGroup.add(this._tagDraws(object3D, 'mesh'));
+      this.meshObjects.push(object3D);
     });
+  }
+
+  // Wraps a spinning mesh's own static `THREE.Mesh` (`_buildMeshObject`,
+  // whose vertices are baked in absolute world coordinates, matrixAutoUpdate
+  // off) in a `THREE.Group` centred on its own pivot (`meshObs.spinPivot`,
+  // #88 -- see `applyGroupInstanceTransformToMesh`/`finalizeMeshGeometry`,
+  // server.js). The inner mesh is shifted back by that same pivot once, so
+  // at rotation 0 it still sits exactly where its baked geometry already
+  // puts it; only the group's own `rotation.y`, driven every frame by
+  // `_updateMeshSpins`, turns it from there -- `MeshDrawMgr::executeSet`'s
+  // own `glRotatef` wrapped around an otherwise-unmoved draw.
+  _wrapMeshSpin(meshMesh, spinPivot, angvel) {
+    const group = new THREE.Group();
+    group.name = meshMesh.name;
+    group.position.set(spinPivot.x, spinPivot.y, spinPivot.z);
+    meshMesh.position.set(-spinPivot.x, -spinPivot.y, -spinPivot.z);
+    meshMesh.updateMatrix();
+    group.add(meshMesh);
+    this._meshSpins.push({ group, angvel });
+    return group;
   }
 
   // One `THREE.Mesh` per parsed `mesh` block, its faces fan-triangulated

@@ -593,14 +593,6 @@ function unpackDrawLod(r) {
   return { sets, lengthPerPixel };
 }
 
-// Reset at the start of every `parseWorldDatabase` call and read back off
-// its return value (`tree.discardedAnimationNames`) once parsing finishes --
-// see the comments there and in `parseGroupDefinition`. Safe as a
-// module-level array only because `parseWorldDatabase` is fully synchronous
-// top to bottom (no `await` anywhere inside its call graph), so two calls
-// can never interleave.
-let discardedAnimationNames = [];
-
 // `MeshDrawInfo::unpack` (MeshDrawInfo.cxx:1386). `radarLods` and the
 // trailing sphere/extents are read (to stay aligned) but not kept -- bzo has
 // no distance-based LOD system, so only the highest-resolution `lods` entry
@@ -661,11 +653,14 @@ function applyMeshDrawInfo(r, texcoordStart, texcoordEnd, fakeTexcoordCount, mes
   mesh.texcoords = Array.from({ length: fakeTexcoordCount - fakeTxcds }, () => [tr.f32(), tr.f32()]);
 
   if (drawInfo.name) mesh.name = drawInfo.name; // MeshObstacle::unpack: "get the proxied name" -- a mesh has no name of its own on the wire otherwise
-  // A marker only -- resolved to a real label and moved into
-  // `discardedAnimationNames` by whichever `parseGroupDefinition` call
-  // placed this mesh, the only scope that knows the enclosing `define`'s own
-  // name (a mesh with no `drawInfo.name` of its own has nothing better).
-  if (drawInfo.angvel) mesh._discardedSpinName = drawInfo.name || null;
+  // `MeshDrawInfo::updateAnimation`/`MeshDrawMgr::executeSet` (#88): a
+  // continuous spin about the mesh's own placement, degrees/sec. Carried
+  // straight onto the mesh object so `printMesh` can re-state it as bzo's own
+  // mesh-level `angvel` line -- there is no per-mesh pivot upstream itself
+  // (a hand-authored `drawInfo { angvel N }` spins about world origin), so
+  // stating it as a plain mesh property rather than nesting a whole unused
+  // `drawInfo` sub-grammar loses nothing real.
+  if (drawInfo.angvel) mesh.angvel = drawInfo.angvel;
   if (mesh.faces.length > 0 || drawInfo.lods.length === 0 || drawInfo.corners.length === 0) return;
 
   // A raw pool of its own means the drawInfo's corners index into it, not
@@ -803,14 +798,11 @@ function parseGroupDefinition(r, isWorld) {
     const count = r.u32();
     obstacles[kind] = Array.from({ length: count }, () => OBSTACLE_PARSERS[kind](r));
   }
-  // `_discardedSpinName` (`applyMeshDrawInfo`) resolved: a mesh's own
-  // proxied name if it had one, else this definition's -- "SpinTank" itself,
-  // for the mesh that gave #88 its name, since the mesh had none of its own.
+  // A spinning mesh with no `drawInfo.name` of its own (`applyMeshDrawInfo`)
+  // falls back to this enclosing definition's name -- "SpinTank" itself, for
+  // the mesh that gave #88 its name, since the mesh had none of its own.
   for (const mesh of obstacles.mesh) {
-    if ('_discardedSpinName' in mesh) {
-      discardedAnimationNames.push(mesh._discardedSpinName || name || null);
-      delete mesh._discardedSpinName;
-    }
+    if (mesh.angvel && !mesh.name) mesh.name = name || null;
   }
   const groupInstanceCount = r.u32();
   const groupInstances = Array.from({ length: groupInstanceCount }, () => parseGroupInstance(r));
@@ -848,7 +840,6 @@ function parseEntryZone(r) {
 }
 
 function parseWorldDatabase(fullBuf) {
-  discardedAnimationNames = [];
   const header = new Reader(fullBuf);
   header.u16(); // length (legacy field, unused by this reader)
   const code = header.u16();
@@ -885,12 +876,6 @@ function parseWorldDatabase(fullBuf) {
     trailingBytes: r.remaining,
     managers: { dynamicColors, textureMatrices, materials, physicsDrivers, meshTransforms },
     world, groupDefs, links, waterLevel, waterMaterial, weapons, zones,
-    // Which drawInfo-owning meshes (#87) asked for a continuous spin bzo has
-    // no way to play (#88) -- one name (or `null`, if truly nameless) per
-    // mesh, resolved by `parseGroupDefinition`. `performRemoteMapImport`
-    // folds this into the same "things bzo does not process yet" report a
-    // remote import already gives an operator for everything else.
-    discardedAnimationNames,
   };
 }
 
@@ -1057,6 +1042,11 @@ function buildBZWText(serverMeta, tree, fetchedAt) {
   function printMesh(lines, o, indent) {
     lines.push(`${indent}mesh`);
     if (o.name) lines.push(`${indent}  name ${o.name}`);
+    // `MeshDrawInfo`'s own `angvel` (#88), re-stated as a plain mesh property
+    // rather than the unused `drawInfo { ... }` sub-block it travelled in
+    // upstream -- bzo's own mesh parser reads it directly (see
+    // `docs/bzw.md`'s Mesh section).
+    if (o.angvel) lines.push(`${indent}  angvel ${fmt(o.angvel)}`);
     for (const c of o.checks) lines.push(`${indent}  ${c.type === 0 ? 'inside' : 'outside'} ${fmt3(c.point)}`);
     for (const v of o.vertices) lines.push(`${indent}  vertex ${fmt3(v)}`);
     for (const n of o.normals) lines.push(`${indent}  normal ${fmt3(n)}`);
@@ -1244,6 +1234,14 @@ function buildBZWText(serverMeta, tree, fetchedAt) {
   if (worldSize != null) {
     lines.push('world');
     lines.push(`  size ${fmt(worldSize / 2)}`);
+    // `BZWReader::defineWorldFromFile` only calls `makeWalls()` (the four
+    // border `WallObstacle`s) when `noWalls` was never set -- so a `nowalls`
+    // map's own compiled world simply has none, on the wire or in
+    // `world.obstacles.wall` here, same as an ordinary mapper-placed
+    // obstacle a map chose not to include. Nothing else on the wire says
+    // `nowalls` directly; an empty `wall` array is the only signal left once
+    // the world is already compiled, so it is read back the same way.
+    if (world.obstacles.wall.length === 0) lines.push('  nowalls');
     lines.push('end');
     lines.push('');
   }

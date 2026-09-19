@@ -6,6 +6,27 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.36] - 2026-09-19
+
+### Added
+- **A mesh can spin.** `angvel <degrees/sec>` turns a mesh continuously about
+  its own placement -- upstream's `MeshDrawInfo` animation, previously
+  decoded from a remote import and reported as something bzo couldn't play
+  (#87) but now applied, in the 3D view and on radar alike. Purely visual:
+  a spinning mesh's faces still collide and block shots as if they never
+  moved, matching upstream's own zero-face-drawInfo behavior. Closes #88.
+
+### Fixed
+- **A remote import of a map with `nowalls` built bzo's own default border
+  wall anyway.** Upstream never sends a `wall` obstacle at all once a map's
+  own `world` block says `nowalls` -- an empty `wall` list on the wire is the
+  only trace that flag leaves once compiled, and a remote import never
+  checked for it.
+- **A `mesh` obstacle -- a drawInfo tank, a beam, any other mesh block --
+  cast no shadow.** Box and pyramid obstacles already project one every
+  frame off the same shared stencil pass; `mesh`-type obstacles were simply
+  never in that loop.
+
 ## [1.2.35] - 2026-09-18
 
 ### Added

@@ -468,9 +468,12 @@ Not yet read:
   obstacle one way today; reading these needs a lighting model first, not
   only a parser change.
 - **`shader`/`addshader`/`noshaders`, `alphathresh`, `noculling`,
-  `nosorting`, `noshadow`, `occluder`, `groupAlpha`, `spheremap`,
-  `notexalpha`, `notexcolor`, `resetmat`.** Read and dropped, the same as any
-  other property this section does not act on.
+  `nosorting`, `occluder`, `groupAlpha`, `spheremap`, `notexalpha`,
+  `notexcolor`, `resetmat`.** Read and dropped, the same as any other
+  property this section does not act on.
+- **`noshadow`.** Read and kept on the material (see **Materials**), but
+  nothing yet skips building a caster's projected shadow for one that asks
+  for none -- every solid obstacle casts one regardless.
 
 ## Teleporters and links
 
@@ -1100,6 +1103,19 @@ radar-drawn, and collided with (a tank and a shot both stop at a mesh face,
 per face-level `drivethrough`/`shootthrough`, a tank slides off one the same
 way it slides off a box corner, and the oriented tank box is its own precise
 case rather than a circle standing in for it) -- see **Groups** above.
+
+- `angvel <degrees/sec>` -- a continuous spin, upstream's own `MeshDrawInfo`
+  render-optimization animation (`angvel`, inside a `drawInfo { ... }`
+  sub-block bzo does not otherwise read -- see "What is ignored" below and
+  #87). Since upstream itself gives a hand-authored spin no pivot of its own
+  (it turns about world origin unless placed through a `group`, in which case
+  it turns about wherever that instance's own local origin landed), bzo reads
+  it as a plain mesh-level property rather than modelling the unused
+  `drawInfo` grammar around it, and pivots the same way: about the mesh's own
+  local (0,0,0), placed by however many `group` instances (if any) it took to
+  reach the world. Purely visual -- a spinning mesh's faces (upstream: any
+  drawInfo-optimized one, always) collide and block shots exactly as if they
+  never moved.
 
 All six primitives that expand to a mesh upstream are read too:
 

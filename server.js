@@ -1425,23 +1425,11 @@ async function performRemoteMapImportNow(host, port, safeMapName) {
   );
   const filePath = path.join(RUNTIME_MAPS_DIR, safeMapName);
   await fs.promises.writeFile(filePath, text);
-  // `tree.discardedAnimationNames` (remote-world-import.cjs) is known only
-  // here, before the wire-protocol detail behind it is flattened to `.bzw`
-  // text -- fed into `parseBZWMap` as `extraMessages` so it goes through the
-  // exact same `warn` (logged, collected, and -- once baked back into the
-  // file below -- shown to a player) as everything `parseBZWMap` detects on
-  // its own, rather than a second, separate mechanism.
-  const spinCount = tree.discardedAnimationNames.length;
-  const spinNames = Array.from(new Set(tree.discardedAnimationNames.filter(Boolean))).sort();
-  const extraMessages = spinCount > 0
-    ? [`${safeMapName} ignored: ${spinCount} mesh animation${spinCount === 1 ? '' : 's'}`
-      + (spinNames.length > 0 ? ` (${spinNames.join(', ')})` : '')]
-    : [];
   // Hashed synchronously rather than left to the background trickle
   // (`hashRemainingMapsInBackground`): this is the one file that just
   // changed, so there is no reason to make the caller wait on a queue that
   // also revisits everything else already sitting in maps/.
-  let mapData = parseBZWMap(filePath, { extraMessages });
+  let mapData = parseBZWMap(filePath);
   if (mapData.warnedMessages.length > 0) {
     await fs.promises.appendFile(filePath, `\n${buildImportWarningOptionsBlock(mapData.warnedMessages)}`);
     // Quiet: this is the same file the first parse above just fully logged,
@@ -3356,11 +3344,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   const warnedMessages = [];
   const warn = (message) => { warnedMessages.push(message); if (!quiet) log(message); };
   // `extraMessages` -- a fact only knowable outside this function's own text
-  // parsing (a remote import's own wire-protocol decode, e.g. a mesh's
-  // discarded spin animation -- `performRemoteMapImportNow`) fed through the
-  // exact same `warn`, so it is logged, collected, and (once baked back into
-  // the file as its own `-srvmsg` line) shown to a player the same way as
-  // everything this function detects on its own.
+  // parsing (a remote import's own wire-protocol decode -- `performRemote
+  // MapImportNow`) fed through the exact same `warn`, so it is logged,
+  // collected, and (once baked back into the file as its own `-srvmsg` line)
+  // shown to a player the same way as everything this function detects on
+  // its own.
   extraMessages.forEach(warn);
   // The map's own name is all a warning needs to say -- `filename` itself is
   // always this same process's own absolute `maps/` path, which only repeats
@@ -3784,6 +3772,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         target.color = referenced.color;
         target.noRadar = referenced.noRadar;
         target.noLighting = referenced.noLighting;
+        target.noShadow = referenced.noShadow;
         target.dynamicColor = referenced.dynamicColor;
         target.textureMatrix = referenced.textureMatrix;
       } else if (rawRef) {
@@ -3881,6 +3870,10 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     }
     if (token === 'nolighting') {
       target.noLighting = true;
+      return true;
+    }
+    if (token === 'noshadow') {
+      target.noShadow = true;
       return true;
     }
     if (token === 'ambient' || token === 'specular' || token === 'emission' || token === 'shininess') {
@@ -4162,8 +4155,8 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         continue;
       }
       // `matref`/`color`/`diffuse`/`addtexture`/`texture`/`notextures`/
-      // `noradar`/`nolighting`/`dyncol`/`texmat` -- a material's own
-      // `matref <name>` copies another already-defined material wholesale
+      // `noradar`/`nolighting`/`noshadow`/`dyncol`/`texmat` -- a material's
+      // own `matref <name>` copies another already-defined material wholesale
       // (BzMaterial's plain struct assignment), which a property stated
       // after it then overrides, the same sequential-read semantics as
       // everything else in this block. `applyBzwMaterialToken` is the same
@@ -4174,7 +4167,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       // Everything else a material block can say -- ambient/specular/
       // emission/shininess (need a lighting model bzo does not have yet),
       // shader/addshader/noshaders, alphathresh, noculling, nosorting,
-      // noshadow, occluder, groupAlpha, spheremap, notexalpha, notexcolor,
+      // occluder, groupAlpha, spheremap, notexalpha, notexcolor,
       // resetmat -- is read and dropped.
       continue;
     }
@@ -4912,6 +4905,12 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         phydrv: null, noclusters: false, smoothBounce: false, decorative: false,
         driveThrough: false, shootThrough: false, ricochet: false,
         texture: 'mesh', textureUrl: null, color: null, noRadar: false, noLighting: false,
+        // `MeshDrawInfo`'s own `angvel` (#88, degrees/sec) -- upstream states
+        // it inside an unrelated render-optimization sub-block bzo does not
+        // otherwise read (`drawInfo { ... }`, see `server/remote-world-
+        // import.cjs`'s `printMesh`), so bzo takes it as a plain mesh
+        // property instead. 0 (no spin) unless a mesh states it.
+        angvel: 0,
       };
       currentMeshFace = null;
     } else if (current && current.type === 'mesh') {
@@ -4997,6 +4996,8 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         current.noclusters = true;
       } else if (token === 'decorative') {
         current.decorative = true;
+      } else if (token === 'angvel') {
+        current.angvel = Number(words[1]) || 0;
       } else if (token === 'face') {
         // CustomMeshFace's own constructor -- a snapshot of the mesh's
         // defaults as they stand right now, not a live reference to them:
@@ -5507,6 +5508,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       // face in place. Reusing the template's array would let the last
       // instance placed overwrite every earlier one's collision plane.
       faces: mesh.faces.map((face) => ({ ...face })),
+      // The point a spinning mesh (`angvel`, #88) rotates about -- upstream
+      // has no per-mesh pivot of its own (a hand-authored `drawInfo` spins
+      // about world origin), so this is just the mesh's own local (0,0,0)
+      // carried through the same placement every vertex above gets. Treating
+      // a definition already placed once (nested `group`s) as one more local
+      // point rather than always restarting from world origin here is what
+      // makes an arbitrarily deep nesting land in the right place.
+      spinPivot: mesh.angvel ? placePoint(mesh.spinPivot || { x: 0, y: 0, z: 0 }) : mesh.spinPivot,
     };
     finalizeMeshGeometry(placedMesh);
     // The instance's own `phydrv`/`matref` override, same rule and same
@@ -5748,6 +5757,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   function finalizeMeshGeometry(mesh) {
     mesh.bounds = computeMeshBounds(mesh.vertices);
     mesh.baseY = mesh.bounds ? mesh.bounds.minY : 0;
+    // A mesh placed directly in the world, never through any `group`
+    // instance, never runs `applyGroupInstanceTransformToMesh`'s own
+    // `spinPivot` line above -- give it the same default that line would
+    // have (world origin, matching upstream's own hand-authored `drawInfo`).
+    if (mesh.angvel && !mesh.spinPivot) mesh.spinPivot = { x: 0, y: 0, z: 0 };
     const finalFaces = [];
     for (const face of mesh.faces) {
       face.plane = computeMeshFacePlane(mesh.vertices, face.vertexIndices);

@@ -134,7 +134,9 @@ import {
   bindToggleButton,
   fitText
 } from './hud.js';
-import { renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE } from './render.js';
+import {
+  renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
+} from './render.js';
 import { describeMeasurements, describeRenderCapabilities } from './capabilities.mjs';
 import {
   describeGrowth,
@@ -12742,12 +12744,25 @@ function updateRadar() {
   // Draw a mesh's own upward-facing faces -- see `getRadarMeshFaces`. Each
   // face's own vertices are already in world space (no obstacle rotation to
   // apply, unlike a box), so this projects them directly rather than
-  // rotating a local rectangle the way the obstacle loop above does.
+  // rotating a local rectangle the way the obstacle loop above does -- unless
+  // the mesh itself has an `angvel` (#88), in which case its faces are
+  // rotated live about its own `spinPivot` first, the 2D (x/z) equivalent of
+  // `renderManager`'s own `rotation.y` on that mesh's 3D pivot group
+  // (`meshSpinRadians` is the one shared formula both read).
   if (typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES)) {
     getRadarMeshFaces().forEach(({ obs, face }) => {
+      const spinAngle = obs.angvel && obs.spinPivot ? meshSpinRadians(obs.angvel) : 0;
+      const spinCos = Math.cos(spinAngle);
+      const spinSin = Math.sin(spinAngle);
       const radarPolygon = face.vertexIndices.map((vi) => {
         const v = obs.vertices[vi];
-        return toRadarRelative(v.x, v.z);
+        if (!spinAngle) return toRadarRelative(v.x, v.z);
+        const dx = v.x - obs.spinPivot.x;
+        const dz = v.z - obs.spinPivot.z;
+        return toRadarRelative(
+          obs.spinPivot.x + (dx * spinCos) + (dz * spinSin),
+          obs.spinPivot.z - (dx * spinSin) + (dz * spinCos),
+        );
       });
       const clippedPolygon = clipPolygonToRadarSquare(radarPolygon, radarDistance);
       if (clippedPolygon.length < 3) return;
