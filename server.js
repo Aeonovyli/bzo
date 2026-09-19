@@ -1703,6 +1703,19 @@ server.listen(PORT, LISTEN_HOST, () => {
   precompress.start({ log }).catch((error) => logError(`[BR] ${error.message}`));
   probeAdminWhitelist().catch((error) => logError(`[ADMIN] probe failed: ${error.message}`));
   reportToListServer('boot');
+  if (IS_DESIGNATED_LIST_SERVER) {
+    // Excludes this instance's own self-report row: reportToListServer just
+    // above already refreshed it in-process, and validating it here would
+    // be a real HTTP round trip to itself for something already current.
+    const cutoff = Date.now() - LIST_SERVER_RECENT_CHECK_WINDOW_MS;
+    const recent = listServerKeys.listAll().filter((record) => record.url !== PUBLIC_URL
+      && (record.lastChecked ?? record.dateRequested) >= cutoff);
+    log(`[LISTSERVER] polling ${recent.length} recently-active key(s) immediately after restart`);
+    for (const record of recent) {
+      validateListServerKey(record)
+        .catch((error) => logError(`[LISTSERVER] boot poll failed for ${record.url}: ${error.message}`));
+    }
+  }
 });
 
 // `adminGroups` in `server.json`: the global groups this server would grant
@@ -1915,6 +1928,17 @@ const LIST_SERVER_OWNER_BZID =
 const LIST_SERVER_OWNER_CALLSIGN =
   typeof serverConfig.listServerOwnerCallsign === 'string' ? serverConfig.listServerOwnerCallsign.trim() : '';
 
+// A restart of the designated instance loses every row's `live` state at
+// once (it is never persisted, see the key store) -- normally repaired
+// gradually as each reporting instance's own boot/~15-minute/join-part
+// cadence catches up. On a designated instance that itself restarts often
+// (a dev box, mid-iteration), that means every registered server blinking
+// off `/list` on every restart, not just once. Polling anything checked
+// this recently, immediately on boot, is what makes that a few seconds
+// instead of however long the slowest registered server's own cadence
+// takes -- see "Speeding up a restart" in docs/list-server.md.
+const LIST_SERVER_RECENT_CHECK_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
+
 // Whether *this* instance is the one every other bzo server reports to.
 // Decided by comparing its own advertised address to the list server it is
 // configured to report to -- the same `publicUrl` the admin-whitelist probe
@@ -2030,6 +2054,27 @@ function describeListServerKeyRow(record) {
 // The list server never trusts a URL an ADD payload itself supplies -- it
 // calls back the URL already on file for that key, with a nonce the target
 // has to sign with the key it has configured. See "Validation" in the plan.
+// Untrusted input either way -- a POST body from a reporting instance, or a
+// challenge response from one being validated -- so both paths funnel
+// through the same field-by-field parse rather than trusting either shape.
+function sanitizeListServerStatus(body) {
+  const players = Number(body?.players);
+  const maxPlayers = Number(body?.maxPlayers);
+  const gameOptionsBits = Number(body?.gameOptionsBits);
+  const maxShots = Number(body?.maxShots);
+  return {
+    title: typeof body?.title === 'string' ? body.title.slice(0, 120) : '',
+    description: typeof body?.description === 'string' ? body.description.slice(0, 500) : '',
+    players: Number.isFinite(players) ? players : 0,
+    maxPlayers: Number.isFinite(maxPlayers) ? maxPlayers : 0,
+    version: typeof body?.version === 'string' ? body.version.slice(0, 40) : '',
+    gameOptionsBits: Number.isFinite(gameOptionsBits) ? gameOptionsBits : 0,
+    maxShots: Number.isFinite(maxShots) ? maxShots : 0,
+    style: typeof body?.style === 'string' ? body.style.slice(0, 20) : '',
+    voiceEnabled: body?.voiceEnabled === true,
+  };
+}
+
 async function validateListServerKey(record) {
   const nonce = crypto.randomBytes(16).toString('hex');
   try {
@@ -2043,6 +2088,13 @@ async function validateListServerKey(record) {
       throw new Error('signature mismatch');
     }
     listServerKeys.markChecked(record, true);
+    // The status rides with a valid signature -- restoring `live` here is
+    // what makes a restart's boot-time poll (below) actually put a row back
+    // on `/list` immediately, rather than just confirming it is reachable
+    // and leaving the row missing until the target's own next report.
+    if (body.status && typeof body.status === 'object') {
+      listServerKeys.report(record, sanitizeListServerStatus(body.status));
+    }
     log(`[LISTSERVER] validated ${record.url}`);
   } catch (error) {
     listServerKeys.markChecked(record, false, error.message);
@@ -2154,21 +2206,7 @@ app.post('/api/list-server/report', listServerRateLimit, (req, res) => {
     res.json({ success: true });
     return;
   }
-  const players = Number(req.body?.players);
-  const maxPlayers = Number(req.body?.maxPlayers);
-  const gameOptionsBits = Number(req.body?.gameOptionsBits);
-  const maxShots = Number(req.body?.maxShots);
-  listServerKeys.report(record, {
-    title: typeof req.body?.title === 'string' ? req.body.title.slice(0, 120) : '',
-    description: typeof req.body?.description === 'string' ? req.body.description.slice(0, 500) : '',
-    players: Number.isFinite(players) ? players : 0,
-    maxPlayers: Number.isFinite(maxPlayers) ? maxPlayers : 0,
-    version: typeof req.body?.version === 'string' ? req.body.version.slice(0, 40) : '',
-    gameOptionsBits: Number.isFinite(gameOptionsBits) ? gameOptionsBits : 0,
-    maxShots: Number.isFinite(maxShots) ? maxShots : 0,
-    style: typeof req.body?.style === 'string' ? req.body.style.slice(0, 20) : '',
-    voiceEnabled: req.body?.voiceEnabled === true,
-  });
+  listServerKeys.report(record, sanitizeListServerStatus(req.body));
   res.json({ success: true });
   // After the response, not before -- a reporting instance should not wait on
   // this any more than an ordinary ADD would.
@@ -2219,7 +2257,12 @@ app.get('/api/list-server/challenge', listServerRateLimit, (req, res) => {
     res.status(400).json({ error: 'Missing nonce' });
     return;
   }
-  res.json({ signature: signListServerChallenge(LIST_SERVER_KEY, nonce) });
+  // The status rides along with the signature -- a caller who already knows
+  // this server's key (the only one who could verify the signature meant
+  // anything) gets the same fields a report would have carried, so a
+  // validation poll can restore a row's live state, not just its
+  // reachability. See "Speeding up a restart" in docs/list-server.md.
+  res.json({ signature: signListServerChallenge(LIST_SERVER_KEY, nonce), status: computeListServerStatus() });
 });
 
 if (IS_DESIGNATED_LIST_SERVER) {
@@ -10760,10 +10803,13 @@ function computeLocalGameOptionsBits() {
 // "Reporting". The designated instance about itself never leaves the process:
 // there is no key to hold for a server reporting to itself, and no HTTPS round
 // trip worth making to its own loopback.
-function reportToListServer(reason) {
-  if (!LIST_SERVER_URL) return;
-  const payload = {
-    reason,
+// This server's own list-server row, as either a report's payload or a
+// challenge response answers it -- the same fields either way, since a
+// validation poll that already has to reach this server for its signature
+// might as well come back with what a report would have said too. See
+// "Speeding up a restart" in docs/list-server.md.
+function computeListServerStatus() {
+  return {
     title: serverConfig.serverName || '',
     description: serverConfig.description || '',
     players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,
@@ -10781,6 +10827,11 @@ function reportToListServer(reason) {
     // actually work here" rather than "does this build have the feature."
     voiceEnabled: VOICE_ICE_SERVERS.length > 0,
   };
+}
+
+function reportToListServer(reason) {
+  if (!LIST_SERVER_URL) return;
+  const payload = { reason, ...computeListServerStatus() };
   if (IS_DESIGNATED_LIST_SERVER) {
     // No key exists for "this server reporting to itself" -- report straight
     // into the registry instead. Found by `url` (this instance's own

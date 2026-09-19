@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.42] - 2026-09-19
+
+### Changed
+- **A restart of the designated list server no longer waits on each
+  registered server's own cadence to reappear on `/list`.** The signed
+  validation callback now answers with the same status a report would have
+  carried, and on boot the designated instance immediately re-validates
+  every key checked in the last two days rather than waiting for the daily
+  poll or the next push -- a few seconds instead of up to however long the
+  slowest registered server's own reporting interval is. Needs both sides
+  updated to take effect for a given server.
+
 ## [1.2.41] - 2026-09-19
 
 ### Added

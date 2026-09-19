@@ -122,6 +122,27 @@ rule ever deletes a registration, which keeps "temporarily unreachable" and
 "abandoned a month ago" two honestly different states. An expired key is
 refused on its next report with a clear reason to regenerate.
 
+## Speeding up a restart
+
+A restart of the designated instance loses every row's `live` state at once
+-- it is never persisted (see "Keys" above) -- and normally that repairs
+itself gradually as each reporting instance's own boot/~15-minute/join-part
+cadence catches up, one row at a time. On a designated instance that itself
+restarts often, that meant every registered server blinking off `/list` on
+every restart, not just once.
+
+The validation callback (`GET /api/list-server/challenge`) answers with the
+same fields a report would have -- `computeListServerStatus()` builds both
+-- since a caller who already holds the shared key to verify the signature
+against is exactly who a report would trust anyway. `validateListServerKey`
+folds that status straight into `live` on a successful check, and on boot
+the designated instance immediately validates every key checked within the
+last two days (`LIST_SERVER_RECENT_CHECK_WINDOW_MS`), rather than waiting
+for the daily poll or for each target's own next push. This needs both
+sides updated to take effect for a given row -- an older reporting instance's
+challenge response has no `status` field, and is treated the same as a
+successful validation with nothing new to report.
+
 ## `/list`
 
 One page, top to bottom: a nav line of jump links (bzo, bzflag, maps, keys),
