@@ -174,6 +174,25 @@ These are deliberate. Do not "fix" them without being asked.
   the moon rather than as spheres in the distance. Do not report the arc, the
   missing phases, or the absence of latitude as parity gaps.
 
+- **Sky clouds are real 3D puff-sphere meshes with ordinary depth testing, not
+  upstream's flat billboard texture.** `BackgroundRenderer::renderGroundEffects`
+  draws its cloud layer (`cloudsGState`, `BackgroundRenderer.cxx:698-709`) in the
+  same depth-test-off pass as the sky and the mountains, before the real scene
+  -- it stays behind everything solid purely because of *when* it is drawn, the
+  same trick `MOUNTAIN_RENDER_ORDER` uses (see `createMountains`). bzo's clouds
+  (`puffs` in `server.js`, `_buildCloudGeometry`/`_getCloudMaterial` in
+  `public/render.js`) are real geometry instead -- five to twelve overlapping
+  spheres per cloud, sitting in the world and drifting through it, so a tank can
+  fly up into one. That needs the opposite of the mountain trick: a `transparent:
+  true` cloud material keeps ordinary depth testing on purpose, because
+  disabling it would paint a cloud over every already-drawn box, mesh and tank
+  unconditionally (`_getCloudMaterial`'s own comment). The cost is the occasional
+  close-up z-fight against something right up against a cloud -- issue #92's "to
+  a lesser extent" comment. Accepted for now, and may change -- do not report the
+  z-fight as the same bug as #92's mountain one, and do not "fix" it by copying
+  the mountain's no-zbuffer approach without being asked: that would trade the
+  z-fight for a cloud that paints over the whole scene.
+
 - **The radar range is not saved between sessions.** BZFlag persists
   `displayRadarRange` with the rest of BZDB. bzo starts every session at
   upstream's `0.5` default (Medium) instead, because a headset has no key,

@@ -5534,8 +5534,19 @@ class RenderManager {
       this.sunMesh = addCelestialMesh(new THREE.MeshBasicMaterial({
         color: 0xffff00, fog: false, depthTest: true, depthWrite: false, toneMapped: false,
       }), CELESTIAL_RENDER_ORDER);
+      // `transparent: true` would put this in Three.js's transparent render
+      // list, which always draws after the *entire* opaque list -- mountains,
+      // tanks, everything -- regardless of renderOrder (issue #102; the same
+      // trap createMountains's own comment warns about, from the other side).
+      // CustomBlending with plain alpha factors gets the same translucent
+      // look while keeping the glow opaque-queue-sorted, so mountains still
+      // paint over it as intended.
       this.sunGlowMesh = addCelestialMesh(new THREE.MeshBasicMaterial({
-        color: 0xffff88, transparent: true, opacity: 0.3, fog: false,
+        color: 0xffff88, opacity: 0.3, fog: false,
+        blending: THREE.CustomBlending,
+        blendEquation: THREE.AddEquation,
+        blendSrc: THREE.SrcAlphaFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
         depthTest: true, depthWrite: false, toneMapped: false,
       }), CELESTIAL_RENDER_ORDER - 1);
       this.moonMesh = addCelestialMesh(new THREE.MeshBasicMaterial({
