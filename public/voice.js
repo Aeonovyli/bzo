@@ -17,6 +17,15 @@ import {
 } from './volume.mjs';
 import { DEFAULT_VOICE_CHANNEL, normalizeVoiceChannel } from './voice-channels.mjs';
 
+// Mic-on only says a peer's microphone is live, not that anyone is talking
+// right now. Whether they are is read off the remote track's own audio
+// energy rather than trusted from the peer -- a level a client cannot fake
+// as "on" without a real signal reaching it. Polled on an interval instead of
+// the render loop: nothing here needs a new number every frame, and a peer
+// list rarely changes who is talking mid-poll.
+const SPEAKING_POLL_INTERVAL_MS = 200;
+const SPEAKING_RMS_THRESHOLD = 0.02;
+
 function normalizePlayerId(value) {
   if (value === null || value === undefined || value === '') return null;
   return String(value);
@@ -157,6 +166,7 @@ export function createVoiceManager(options = {}) {
   let microphoneRequest = null;
   let lifecycleGeneration = 0;
   let lastError = null;
+  let speakingPollTimer = null;
 
   const roster = new Map();
   const peers = new Map();
@@ -368,6 +378,67 @@ export function createVoiceManager(options = {}) {
     entry.remoteAudio = null;
   }
 
+  // One MediaStreamAudioSourceNode per peer, built off the same AudioContext
+  // the microphone gain stage uses. It is only ever read from (an analyser
+  // pulled by pollSpeaking below), never connected onward -- playback stays
+  // on the <audio> element ontrack already wired up, so this cannot change
+  // what anyone hears.
+  function attachSpeakingAnalyser(entry, stream) {
+    if (entry.speakingAnalyser) return;
+    const context = getAudioContext();
+    if (!context || typeof context.createMediaStreamSource !== 'function') return;
+    try {
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.2;
+      source.connect(analyser);
+      entry.speakingSource = source;
+      entry.speakingAnalyser = analyser;
+      entry.speakingData = new Uint8Array(analyser.fftSize);
+      entry.speaking = false;
+    } catch {
+      // A context in a state that refuses new nodes (e.g. closed) just means
+      // no speaking indicator for this peer -- the rest of the call is fine.
+    }
+  }
+
+  function detachSpeakingAnalyser(entry) {
+    try {
+      entry.speakingSource?.disconnect();
+    } catch {
+      // Already disconnected by the browser is not an error here.
+    }
+    entry.speakingSource = null;
+    entry.speakingAnalyser = null;
+    entry.speakingData = null;
+    if (entry.speaking) {
+      entry.speaking = false;
+      invoke('onSpeakingChange', { peerId: entry.peerId, speaking: false });
+    }
+  }
+
+  // The RMS of one analyser read, 0..1. Time-domain bytes centre on 128.
+  function readAnalyserRms(analyser, data) {
+    analyser.getByteTimeDomainData(data);
+    let sumSquares = 0;
+    for (let i = 0; i < data.length; i += 1) {
+      const centered = (data[i] - 128) / 128;
+      sumSquares += centered * centered;
+    }
+    return Math.sqrt(sumSquares / data.length);
+  }
+
+  function pollSpeaking() {
+    peers.forEach((entry) => {
+      if (!entry.speakingAnalyser) return;
+      const speaking = readAnalyserRms(entry.speakingAnalyser, entry.speakingData) >= SPEAKING_RMS_THRESHOLD;
+      if (speaking === entry.speaking) return;
+      entry.speaking = speaking;
+      invoke('onSpeakingChange', { peerId: entry.peerId, speaking });
+    });
+  }
+
   function updatePeerState(entry, state = {}) {
     invoke('onPeerChange', {
       peerId: entry.peerId,
@@ -490,6 +561,7 @@ export function createVoiceManager(options = {}) {
         });
       }
       invoke('onRemoteTrack', { peerId, stream, track: event.track, element: entry.remoteAudio });
+      attachSpeakingAnalyser(entry, stream);
       // `track.muted` at ontrack time is a snapshot, not an answer -- it is
       // normal for a track to start muted the instant it exists, before any
       // packet has arrived, and this is what actually says whether it ever
@@ -595,6 +667,7 @@ export function createVoiceManager(options = {}) {
     } catch {
       // A peer can already be closed by the browser after a network failure.
     }
+    detachSpeakingAnalyser(entry);
     removeRemoteAudio(entry);
     peers.delete(peerId);
     invoke('onPeerRemoved', { peerId });
@@ -1006,6 +1079,10 @@ export function createVoiceManager(options = {}) {
 
   async function shutdown() {
     if (closed) return;
+    if (speakingPollTimer) {
+      clearInterval(speakingPollTimer);
+      speakingPollTimer = null;
+    }
     await reset();
     closed = true;
     started = false;
@@ -1025,6 +1102,9 @@ export function createVoiceManager(options = {}) {
     }
     if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
       addListener(navigator.mediaDevices, 'devicechange', () => { void refreshInputDevices(); });
+    }
+    if (typeof setInterval === 'function') {
+      speakingPollTimer = setInterval(pollSpeaking, SPEAKING_POLL_INTERVAL_MS);
     }
     sendVoiceState();
     emitState();

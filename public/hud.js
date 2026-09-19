@@ -625,7 +625,26 @@ export function getScoreboardStatsHeader(rabbitChase = false, abbreviated = fals
   return rabbitChase ? `Rank ${score}` : score;
 }
 
-export function formatScoreboardStats(player) {
+// The "Kills" column ScoreboardRenderer draws beside "Score"
+// (drawPlayerScore, ScoreboardRenderer.cxx:692): `wins~losses` against this
+// one opponent for every other row, or a self-destruct count for my own --
+// upstream's tilde in place of the score column's hyphen is kept here so the
+// two read as different things at a glance. Blank for an observer, same as
+// the score column, and blank for an opponent I have no record against yet
+// rather than a "0~0" that reads as information about a fight that never
+// happened.
+export function formatPersonalTally(player) {
+  if (player.isObserver) return '';
+  if (player.isCurrent) return player.selfKills > 0 ? `${player.selfKills} self` : '';
+  if (!player.localWins && !player.localLosses) return '';
+  return `${player.localWins}~${player.localLosses}`;
+}
+
+// `compact` drops the head-to-head tally, the one field here with no upstream
+// obligation to stay -- everything else mirrors ScoreboardRenderer's own
+// columns, but a phone-width scoreboard has to give something up first
+// (issue #65).
+export function formatScoreboardStats(player, { compact = false } = {}) {
   if (player.isObserver) return '';
   const score = `${player.kills} / ${player.deaths}`;
   const stats = typeof player.rank === 'number'
@@ -635,7 +654,10 @@ export function formatScoreboardStats(player) {
   // (ScoreboardRenderer.cxx:675-686). bzo draws it only once there is
   // something to say, the same restraint the rank column already gets --
   // a zero is the expected state for almost every row, not information.
-  return player.teamKills > 0 ? `${stats} [${player.teamKills}]` : stats;
+  const withTeamKills = player.teamKills > 0 ? `${stats} [${player.teamKills}]` : stats;
+  if (compact) return withTeamKills;
+  const tally = formatPersonalTally(player);
+  return tally ? `${withTeamKills}  ${tally}` : withTeamKills;
 }
 
 // Rabbit Chase marks the rabbit's row so the scoreboard says who everyone is
@@ -672,22 +694,20 @@ export function formatPlayerLabel({ name, nameColor = null, flag = null, mark = 
 }
 
 // The `(<Team>)` upstream puts after a callsign in a message (playing.cxx:4016
-// and :4488), for the teams where it says something.
+// and :4488), kept only where it says something a reader could not already see.
 //
-// A colour team names itself, because a shade inside that team's band is not
-// something a reader can name from one line of text however clearly it reads on
-// a tank. The rabbit names itself, because it is the one thing in the world
-// everybody is hunting. Rogue, observer and hunter name nothing: every bzo player
-// has a colour of their own, so `(Rogue)` on every line of an OpenFFA server
-// would be noise, and in Rabbit Chase everyone who is not the rabbit is a hunter.
+// A colour team names nothing: `describePlayer` already colours the name
+// itself in that player's own shade, so `(Red)` beside an already-red name is
+// the word "Player" before a quoted name, not information. The rabbit names
+// itself, because it is the one thing in the world everybody is hunting, and
+// no notice colours a name specifically to mean "the rabbit". Rogue, observer
+// and hunter name nothing either, for the plainer reason that every bzo player
+// has a colour of their own: `(Rogue)` on every line of an OpenFFA server
+// would be noise, and in Rabbit Chase everyone who is not the rabbit is a
+// hunter.
 export function getPlayerTeamMark(team) {
   const normalized = normalizePlayerTeam(team);
-  if (isRabbitTeam(normalized)) return SCOREBOARD_RABBIT_MARK;
-  if (!isColorTeam(normalized)) return null;
-  return {
-    label: `(${PLAYER_TEAM_LABELS[normalized].replace(/ Team$/, '')})`,
-    color: getPlayerTeamColor(normalized),
-  };
+  return isRabbitTeam(normalized) ? SCOREBOARD_RABBIT_MARK : null;
 }
 
 export function getPlayerStatusIndicator(state) {
@@ -743,8 +763,20 @@ export function buildScoreboardRows({
       kills: state.kills || 0,
       deaths: state.deaths || 0,
       teamKills: state.teamKills || 0,
+      // The head-to-head record: my kills against this player and theirs
+      // against me, tracked only for opponents (Player::localWins/
+      // localLosses, playing.cxx:2556) -- and, on my own row, how many times
+      // I've self-destructed (Player::selfKills), which is what upstream
+      // shows there instead. See handlePlayerHit in client.js for where
+      // these are kept.
+      localWins: state.localWins || 0,
+      localLosses: state.localLosses || 0,
+      selfKills: state.selfKills || 0,
       paused: Boolean(state.paused),
       micOn: Boolean(state.voiceMicEnabled),
+      // Mic-on says the peer could be heard; this says voice.js's own read of
+      // their track's audio energy says they are being heard right now.
+      speaking: Boolean(state.voiceSpeaking),
       // No rank for an observer, on a Rabbit Chase world or any other. An
       // observer can never be anointed -- `canBeRabbit` refuses one outright --
       // so a rank would read as a place in a queue it cannot be picked from.
@@ -801,6 +833,11 @@ export function updateScoreboard({
   timeLeft = null,
   gameOver = false,
 }) {
+  // A phone-width viewport gives up the head-to-head tally first -- the one
+  // field here bzo added on top of upstream's own columns, and so the first
+  // one it can afford to lose (issue #65). Matches the breakpoint the rest of
+  // the mobile layout already uses.
+  const compact = window.innerWidth <= 600;
   updateMatchClock(timeLeft, gameOver);
   updateTeamScoreboard(teamRows);
   const statsHeader = document.getElementById('scoreboardStatsHeader');
@@ -873,7 +910,10 @@ export function updateScoreboard({
     // bracket, for whether this player's microphone is currently on.
     const micSpan = document.createElement('span');
     micSpan.className = 'scoreboardMic';
-    micSpan.textContent = player.micOn ? '\u{1F3A4}' : '';
+    // Speaking gets its own glyph rather than just recoloring the mic one --
+    // a colour-only difference would be lost on a colourblind viewer the same
+    // way team colour alone would be.
+    micSpan.textContent = player.speaking ? '\u{1F50A}' : player.micOn ? '\u{1F3A4}' : '';
     // After the flag, so the pair upstream draws tight together stays tight and
     // the mark reads as something said about the row rather than part of a name.
     const rabbitSpan = document.createElement('span');
@@ -892,7 +932,7 @@ export function updateScoreboard({
     // An observer gets neither column, which is upstream's own `if (player
     // ->getTeam() != ObserverTeam)` around both (:829). It cannot kill or die, so
     // `0 / 0` is the absence of a score rather than a score.
-    statsSpan.textContent = formatScoreboardStats(player);
+    statsSpan.textContent = formatScoreboardStats(player, { compact });
 
     entry.append(labelSpan, statsSpan);
     scoreboardList.appendChild(entry);

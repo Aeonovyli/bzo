@@ -27,7 +27,9 @@ client.VOICE_CHANNELS.forEach((channel) => {
   assert.ok(channel.label, `${channel.id} has no label`);
   assert.ok(channel.hint, `${channel.id} has no hint`);
 });
-assert.equal(client.DEFAULT_VOICE_CHANNEL, client.VOICE_CHANNEL_NEARBY);
+// All rather than Nearby, so a fresh multi-device test session can hear
+// everyone without an extra step.
+assert.equal(client.DEFAULT_VOICE_CHANNEL, client.VOICE_CHANNEL_ALL);
 
 // Anything unrecognized lands on the default rather than on nothing, so an
 // older or newer client still has a voice.

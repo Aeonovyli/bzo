@@ -1376,6 +1376,17 @@ function handleVoiceRemoteTrackMuteChange({ peerId, muted } = {}) {
   logVoiceEvent(`${describeVoicePeer(peerId)} track ${muted ? 'muted' : 'unmuted'}`);
 }
 
+// A peer's mic-enabled flag says they could be heard, not that they are being
+// heard right now -- this is voice.js's own read of their track's audio
+// energy, so it tracks real transmission the way the mic glyph cannot.
+// Mirrors voiceMicToggled's own write to the same playerState.
+function handleVoiceSpeakingChange({ peerId, speaking } = {}) {
+  const state = tanks.get(peerId)?.userData?.playerState;
+  if (!state) return;
+  state.voiceSpeaking = speaking === true;
+  refreshScoreboards();
+}
+
 // getStats() is async and not pushed the way the state-change events are, so
 // this runs as a side effect of each debug-HUD tick (getVoiceDebugState,
 // called only while the panel is open) rather than its own timer: the next
@@ -1470,6 +1481,7 @@ function getVoiceDebugState() {
         // rather than the roster's own (unused) mic field, so debug and
         // scoreboard cannot disagree about the same player.
         mic: tanks.get(peerId)?.userData?.playerState?.voiceMicEnabled === true,
+        speaking: tanks.get(peerId)?.userData?.playerState?.voiceSpeaking === true,
       };
     }),
   };
@@ -1688,6 +1700,7 @@ function initializeVoiceManager() {
       onRosterChange: handleVoiceRosterChange,
       onRemoteTrack: handleVoiceRemoteTrack,
       onRemoteTrackMuteChange: handleVoiceRemoteTrackMuteChange,
+      onSpeakingChange: handleVoiceSpeakingChange,
     },
   });
   updateVoiceHud();
@@ -2602,6 +2615,16 @@ function getPlayerName(id) {
     : `Player ${normalizedId}`;
 }
 
+// The colour to write a player's name in wherever it appears in a chat line --
+// their own raw colour, not the effective (Masquerade-adjusted) one, since
+// Masquerade changes how a tank looks rather than who said something. `null`
+// for a target with no tank behind it (ALL, SERVER, TEAM, ADMIN, or a player
+// who has since left), which is left uncoloured rather than guessed at.
+function getChatPlayerColor(id) {
+  const state = tanks.get(id)?.userData?.playerState;
+  return state ? colorToCSS(state.color) : null;
+}
+
 function formatNetworkMessage(message) {
   const text = typeof message.text === 'string' ? message.text : '';
   const src = normalizeMessageEndpoint(message.src ?? message.from, CHAT_TARGET_SERVER);
@@ -2611,6 +2634,16 @@ function formatNetworkMessage(message) {
     : (message.msgType === CHAT_KIND_SERVER ? CHAT_KIND_SERVER : CHAT_KIND_CHAT);
   const fromName = getPlayerName(src);
   const toName = getPlayerName(dst);
+  // The rabbit mark, exactly as every notice already shows it (describePlayer,
+  // via getPlayerTeamMark): chat had never said who is -- or was, at the time
+  // they sent it -- the rabbit, though the scoreboard and every other line
+  // naming a tank already do. `null` for a target with no team to speak of
+  // (ALL, SERVER, TEAM, ADMIN), same as for anyone who currently isn't it.
+  const fromMark = getPlayerTeamMark(getPlayerTeamById(src));
+  const toMark = getPlayerTeamMark(getPlayerTeamById(dst));
+  const fromSuffix = fromMark ? ` ${fromMark.label}` : '';
+  const toSuffix = toMark ? ` ${toMark.label}` : '';
+  const markSegment = (mark) => (mark ? [{ text: ` ${mark.label}`, color: colorToCSS(mark.color) }] : []);
 
   if (msgType === CHAT_KIND_SERVER || src === CHAT_TARGET_SERVER) {
     return { text: `[SERVER] ${text}`, tabs: ['server', 'all'], kind: CHAT_KIND_SERVER };
@@ -2631,12 +2664,13 @@ function formatNetworkMessage(message) {
     const senderState = tanks.get(src)?.userData?.playerState;
     const separator = msgType === CHAT_KIND_ACTION ? ' ' : ': ';
     return {
-      text: `[ADMIN] ${fromName}${separator}${text}`,
+      text: `[ADMIN] ${fromName}${fromSuffix}${separator}${text}`,
       tabs: ['chat', 'all'],
       kind: CHAT_KIND_ADMIN,
       segments: [
         { text: '[ADMIN]', color: colorToCSS(getChatKindColor(CHAT_KIND_ADMIN)) },
         { text: ` ${fromName}`, color: colorToCSS(senderState?.color ?? getChatKindColor(CHAT_KIND_ADMIN)) },
+        ...markSegment(fromMark),
         { text: `${separator}${text}` },
       ],
     };
@@ -2651,32 +2685,66 @@ function formatNetworkMessage(message) {
     const label = `[${teamName.replace(/ Team$/, '')}]`;
     const separator = msgType === CHAT_KIND_ACTION ? ' ' : ': ';
     return {
-      text: `${label} ${fromName}${separator}${text}`,
+      text: `${label} ${fromName}${fromSuffix}${separator}${text}`,
       tabs: ['chat', 'all'],
       kind: CHAT_KIND_TEAM,
       segments: [
         { text: label, color: colorToCSS(getPlayerTeamColor(senderState?.team)) },
         { text: ` ${fromName}`, color: colorToCSS(senderState?.color ?? getChatKindColor(CHAT_KIND_TEAM)) },
+        ...markSegment(fromMark),
         { text: `${separator}${text}` },
       ],
     };
   }
-  if (msgType === CHAT_KIND_ACTION) {
-    if (typeof dst === 'string') {
-      if (src === myPlayerId) {
-        return { text: `[->${toName}] ${text}`, tabs: ['chat', 'all'], kind: CHAT_KIND_DIRECT_OUT };
-      }
-      return { text: `[${fromName}->] ${text}`, tabs: ['chat', 'all'], kind: CHAT_KIND_DIRECT_IN };
-    }
-    return { text: `${fromName} ${text}`, tabs: ['chat', 'all'], kind: CHAT_KIND_ACTION };
-  }
+  // Whoever's name appears gets their own colour, same as the team and admin
+  // branches above -- playing.cxx colours the sender's name too, though only
+  // by team; bzo already goes further there, so plain chat and a direct
+  // message (action or not, the bracket reads the same either way) should not
+  // be the two kinds of line where a name is left uncoloured. `undefined` when
+  // there is no tank behind the id (a name from a player who has since left),
+  // which leaves the line exactly as uncoloured as it already was.
   if (typeof dst === 'string') {
     if (src === myPlayerId) {
-      return { text: `[->${toName}] ${text}`, tabs: ['chat', 'all'], kind: CHAT_KIND_DIRECT_OUT };
+      const toColor = getChatPlayerColor(dst);
+      return {
+        text: `[->${toName}${toSuffix}] ${text}`,
+        tabs: ['chat', 'all'],
+        kind: CHAT_KIND_DIRECT_OUT,
+        segments: toColor
+          ? [{ text: '[->' }, { text: toName, color: toColor }, ...markSegment(toMark), { text: `] ${text}` }]
+          : undefined,
+      };
     }
-    return { text: `[${fromName}->] ${text}`, tabs: ['chat', 'all'], kind: CHAT_KIND_DIRECT_IN };
+    const fromColor = getChatPlayerColor(src);
+    return {
+      text: `[${fromName}${fromSuffix}->] ${text}`,
+      tabs: ['chat', 'all'],
+      kind: CHAT_KIND_DIRECT_IN,
+      segments: fromColor
+        ? [{ text: '[' }, { text: fromName, color: fromColor }, ...markSegment(fromMark), { text: `->] ${text}` }]
+        : undefined,
+    };
   }
-  return { text: `${fromName}: ${text}`, tabs: ['chat', 'all'], kind: CHAT_KIND_CHAT };
+  if (msgType === CHAT_KIND_ACTION) {
+    const fromColor = getChatPlayerColor(src);
+    return {
+      text: `${fromName}${fromSuffix} ${text}`,
+      tabs: ['chat', 'all'],
+      kind: CHAT_KIND_ACTION,
+      segments: fromColor
+        ? [{ text: fromName, color: fromColor }, ...markSegment(fromMark), { text: ` ${text}` }]
+        : undefined,
+    };
+  }
+  const fromColor = getChatPlayerColor(src);
+  return {
+    text: `${fromName}${fromSuffix}: ${text}`,
+    tabs: ['chat', 'all'],
+    kind: CHAT_KIND_CHAT,
+    segments: fromColor
+      ? [{ text: fromName, color: fromColor }, ...markSegment(fromMark), { text: `: ${text}` }]
+      : undefined,
+  };
 }
 
 // What being an admin, or not, looks like. Two things: the ADMIN destination is
@@ -5649,7 +5717,7 @@ function handleServerMessage(message) {
           myTank.position.set(playerX, playerY, playerZ);
           myTank.rotation.y = playerRotation;
           myTank.userData.verticalVelocity = message.player.verticalVelocity || 0;
-          myTank.userData.playerState = message.player;
+          myTank.userData.playerState = withClientLocalPlayerState(myTank.userData.playerState, message.player);
 
           // Update name label with confirmed name from server
           if (myTank.userData.nameLabel && myTank.userData.nameLabel.material) {
@@ -6171,10 +6239,33 @@ function handleServerMessage(message) {
   }
 }
 
+// Fields the server's own state carries no opinion about, because they are
+// what this client alone has watched: the personal kill record (`handlePlayerHit`,
+// mirroring Player::changeLocalScore, playing.cxx:2556) and whether this
+// peer's voice is audibly active right now (voice.js). A join, a respawn and
+// a plain roster update each replace a tank's whole playerState wholesale
+// with a fresh object from the server, which was the bug: a kill counted a
+// moment before the victim's respawn message arrived was one the respawn threw
+// away for having never heard of it. Every wholesale replacement goes through
+// this instead of copying the field list three times.
+const CLIENT_LOCAL_PLAYER_STATE_FIELDS = ['localWins', 'localLosses', 'selfKills', 'voiceSpeaking'];
+
+function withClientLocalPlayerState(previousState, serverPlayer) {
+  if (!previousState) return serverPlayer;
+  const preserved = {};
+  for (const field of CLIENT_LOCAL_PLAYER_STATE_FIELDS) {
+    if (previousState[field] !== undefined) preserved[field] = previousState[field];
+  }
+  return { ...serverPlayer, ...preserved };
+}
+
 function addPlayer(player) {
   const playerTankModelId = getTankModelIdFromPlayer(player);
   const playerTankModelPath = getTankModelPathById(playerTankModelId);
   let tank = tanks.get(player.id);
+  // Captured before a colour or model change discards and recreates `tank`
+  // below, so a rebuild cannot lose what a plain update would have kept.
+  const previousPlayerState = tank?.userData?.playerState;
 
   // The colour the tank is actually built from, which is rogue for everyone else
   // while colourblind. Comparing against the effective colour rather than the
@@ -6221,7 +6312,7 @@ function addPlayer(player) {
   tank.position.set(player.x, player.y, player.z);
   tank.rotation.y = player.rotation;
   tank.userData.tankModel = playerTankModelId;
-  tank.userData.playerState = player; // Store player state for scoreboard
+  tank.userData.playerState = withClientLocalPlayerState(previousPlayerState, player); // Store player state for scoreboard
   applySilenceToVoice(player.id);
   tank.userData.verticalVelocity = player.verticalVelocity;
   tank.userData.forwardSpeed = player.forwardSpeed || 0;
@@ -6733,6 +6824,20 @@ function handlePlayerHit(message) {
     if (victimTank && victimTank.userData.playerState) {
       victimTank.userData.playerState.deaths = (victimTank.userData.playerState.deaths || 0) + 1;
     }
+    // Personal head-to-head record (Player::changeLocalScore, playing.cxx:2556):
+    // kept on the opponent's own state, not mine, so their scoreboard row can
+    // show my score against them specifically -- the aggregate kills/deaths
+    // above is everyone else's fight too, not just ours. A self-destruct
+    // updates neither side of it; it only ever moves my own selfKills.
+    if (isSelfDestruct) {
+      if (victimId === myPlayerId && victimTank?.userData.playerState) {
+        victimTank.userData.playerState.selfKills = (victimTank.userData.playerState.selfKills || 0) + 1;
+      }
+    } else if (shooterId === myPlayerId && victimTank?.userData.playerState) {
+      victimTank.userData.playerState.localWins = (victimTank.userData.playerState.localWins || 0) + 1;
+    } else if (victimId === myPlayerId && shooterTank?.userData.playerState) {
+      shooterTank.userData.playerState.localLosses = (shooterTank.userData.playerState.localLosses || 0) + 1;
+    }
     refreshScoreboards();
   }
 
@@ -6792,8 +6897,11 @@ function handlePlayerRespawn(message) {
     tank.userData.airVelocityX = message.player.airVelocityX || 0;
     tank.userData.airVelocityZ = message.player.airVelocityZ || 0;
 
-    // Update player state with full respawn data (including health = 100)
-    tank.userData.playerState = message.player;
+    // Update player state with full respawn data (including health = 100).
+    // Merged forward through the same helper addPlayer() uses, not a plain
+    // overwrite -- a respawn is exactly the message that used to erase the
+    // kill just landed on this player a moment earlier.
+    tank.userData.playerState = withClientLocalPlayerState(tank.userData.playerState, message.player);
 
     // Update ghost mesh position BEFORE making it visible
     if (tank.userData.ghostMesh) {
@@ -8677,10 +8785,29 @@ function getRoamCandidates() {
   return candidates;
 }
 
-// buildRoamingLabel() resolves a null target to the leader every frame rather
-// than pinning one, so the view follows whoever is winning.
+// getRoamCandidates() walks every tank and re-derives visibility (blindness,
+// cloak, Seer) each time, which is wasted work run once a frame when the
+// answer only ever changes on the events that already invalidate the
+// scoreboard model -- a join, a leave, a kill, a flag change. So this is kept
+// in step with that model instead of the render loop: cached per
+// scoreboardVersion, and rebuilt the first time that version is asked for.
+let roamCandidatesCacheVersion = -1;
+let roamCandidatesCache = [];
+function getCachedRoamCandidates() {
+  const version = getScoreboardModel().version;
+  if (roamCandidatesCacheVersion !== version) {
+    roamCandidatesCacheVersion = version;
+    roamCandidatesCache = getRoamCandidates();
+  }
+  return roamCandidatesCache;
+}
+
+// A null target resolves to the leader rather than pinning one, so the view
+// follows whoever is winning. Resolved off the cached candidates above, so
+// this is as cheap to call every frame as reading the target's own transform
+// is -- deciding *who* to follow only moves with the scoreboard.
 function getRoamTargetId() {
-  const candidates = getRoamCandidates();
+  const candidates = getCachedRoamCandidates();
   if (roamTargetId !== null && candidates.some((candidate) => candidate.id === roamTargetId)) {
     return roamTargetId;
   }
@@ -9218,7 +9345,6 @@ function handleInputEvents() {
   // only `handleRoamMotion` still treats it as an observer, for the camera
   // and the heartbeat.
   if (isObserver() && !isPhantomDriving()) return;
-  if (!isGameplayInputActive()) return;
 
   // Where the tank is standing is not asked again here. doUpdateMotion reads
   // `location` at the top of the frame from whatever the last step resolved
@@ -9241,7 +9367,7 @@ function handleInputEvents() {
     // unsampled and has to be treated as released. Landing therefore re-arms it,
     // which is what makes holding jump bounce a tank down a building.
     jumpWasHeld = false;
-  } else {
+  } else if (isGameplayInputActive()) {
     const drive = gatherDriveInput();
     // The input clamps: reversed controls, and the four flags that take
     // one direction away. They belong here, on the raw stick, because that is
@@ -9262,11 +9388,22 @@ function handleInputEvents() {
       wingsFlapsLeft--;
     }
     jumpWasHeld = drive.up;
+  } else {
+    // Chat (or a menu) owns the keyboard: nothing fresh to read, so the tank
+    // holds still on the ground rather than a stale key or mouse offset
+    // driving it -- but that is the only thing this player was doing, not the
+    // whole simulation. A dialog freezes the rest of it too, moments later,
+    // once the server confirms the auto-pause syncAutoPause asked for; chat
+    // never asks for one, so nothing below should wait on this player's
+    // keyboard either. Issues #95 and #99.
+    jumpWasHeld = false;
   }
 
   // Bouncy takes the decision off the player entirely: a tank on a surface is
   // thrown back up as soon as its landing delay expires, and `canJump` lets it
-  // through even on a world where nothing else may jump.
+  // through even on a world where nothing else may jump. Neither that nor a
+  // tank already coasting through the air above reads a key, so unlike the
+  // branch above, chat does not touch either one.
   if (!jumpTriggered) {
     const bounce = getBounceState(
       carriedFlagType,
@@ -12067,7 +12204,7 @@ function ensureXRScoreboardOverlay() {
     // The flat scoreboard's own paused hourglass and mic glyph, drawn after
     // the flag the same way there.
     const pausedLabel = player.paused ? '⏳' : '';
-    const micLabel = player.micOn ? '\u{1F3A4}' : '';
+    const micLabel = player.speaking ? '\u{1F50A}' : player.micOn ? '\u{1F3A4}' : '';
     // A carried flag shares the row with the name, so the name gives up room for
     // it rather than the panel growing a column nothing usually fills. The mark
     // comes out of the same allowance.

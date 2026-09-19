@@ -104,4 +104,28 @@ assert.deepEqual(
   'a barrel block with a stray loose edge should not count as a usable barrel',
 );
 
+// public/client.js keeps a hardcoded TANK_MODELS array as the tank it renders
+// before /api/tank-models answers (and if that call ever fails), falling back
+// to server.js's live directory scan once it does. Nothing else keeps that
+// array in sync with public/obj, so a renamed or removed file here would
+// silently break the very first frame until the async fetch corrects it.
+const clientSource = readFileSync(path.join(__dirname, '..', 'public', 'client.js'), 'utf8');
+const arrayLiteral = clientSource.match(/let TANK_MODELS = (\[[\s\S]*?\]);/)?.[1];
+assert.ok(arrayLiteral, 'public/client.js should declare a TANK_MODELS fallback array');
+const fallbackModels = new Function(`return ${arrayLiteral}`)();
+
+const offeredLower = new Set(offered.map((name) => name.toLowerCase()));
+for (const model of fallbackModels) {
+  const fileName = path.basename(model.path);
+  assert.ok(
+    offeredLower.has(fileName.toLowerCase()),
+    `client.js fallback model ${model.id} points at ${model.path}, which public/obj no longer offers`,
+  );
+  assert.equal(
+    model.id,
+    fileName.slice(0, -path.extname(fileName).length).toLowerCase(),
+    `client.js fallback model id ${model.id} does not match the id server.js derives from ${fileName}`,
+  );
+}
+
 console.log(`tank model parts OK (${offered.join(', ')})`);

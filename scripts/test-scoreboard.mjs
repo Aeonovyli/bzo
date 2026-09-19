@@ -16,6 +16,7 @@ import {
   SCOREBOARD_RABBIT_MARK,
   buildScoreboardRows,
   compareScoreboardPlayers,
+  formatPersonalTally,
   formatPlayerLabel,
   formatRabbitRank,
   formatScoreboardStats,
@@ -190,6 +191,29 @@ assert.equal(formatRabbitRank(0.539), '53%');
     formatScoreboardStats({ kills: 4, deaths: 2, rank: getPlayerRanking(4, 2), teamKills: 1 }),
     '53% 4 / 2 [1]'
   );
+
+  // The head-to-head tally (ScoreboardRenderer.cxx:692): blank until there is
+  // a record to show, tilde-joined once there is one, and my own row shows a
+  // self-destruct count instead -- never both.
+  assert.equal(formatScoreboardStats({ kills: 4, deaths: 2 }), '4 / 2');
+  assert.equal(
+    formatScoreboardStats({ kills: 4, deaths: 2, localWins: 3, localLosses: 1 }),
+    '4 / 2  3~1'
+  );
+  assert.equal(formatPersonalTally({ kills: 4, deaths: 2, localWins: 0, localLosses: 0 }), '');
+  assert.equal(
+    formatScoreboardStats({ kills: 4, deaths: 2, isCurrent: true, selfKills: 2 }),
+    '4 / 2  2 self'
+  );
+  assert.equal(
+    formatScoreboardStats({ kills: 4, deaths: 2, isCurrent: true, selfKills: 0 }),
+    '4 / 2'
+  );
+  // `compact` drops the tally first, for a phone-width scoreboard (issue #65).
+  assert.equal(
+    formatScoreboardStats({ kills: 4, deaths: 2, localWins: 3, localLosses: 1 }, { compact: true }),
+    '4 / 2'
+  );
 }
 
 // The break between the players and the observers, marked on the row so the flat
@@ -256,21 +280,21 @@ assert.equal(formatRabbitRank(0.539), '53%');
 }
 
 // The `(<Team>)` upstream puts after a callsign in a message (playing.cxx:4016),
-// for the teams where it says something.
+// kept only where it says something a reader could not already see.
 {
-  // A colour team names itself: a shade inside that team's band reads clearly on
-  // a tank and not at all in one line of text.
-  assert.deepEqual(getPlayerTeamMark(PLAYER_TEAM.RED), { label: '(Red)', color: 0xff0000 });
-  assert.equal(getPlayerTeamMark(PLAYER_TEAM.PURPLE).label, '(Purple)');
-  // " Team" is dropped from the label, as every other place bzo writes a team
-  // beside a name drops it.
-  assert.ok(!getPlayerTeamMark(PLAYER_TEAM.BLUE).label.includes('Team'));
+  // A colour team names nothing: describePlayer already colours the name in
+  // that player's own shade, so `(Red)` beside an already-red name would be
+  // the word "Player" before a quoted name, not information.
+  assert.equal(getPlayerTeamMark(PLAYER_TEAM.RED), null);
+  assert.equal(getPlayerTeamMark(PLAYER_TEAM.PURPLE), null);
+  assert.equal(getPlayerTeamMark(PLAYER_TEAM.BLUE), null);
   // The rabbit names itself, and with the same mark the scoreboard uses -- it is
-  // the one thing in the world everybody is hunting.
+  // the one thing in the world everybody is hunting, and no notice colours a
+  // name specifically to mean "the rabbit".
   assert.equal(getPlayerTeamMark(PLAYER_TEAM.RABBIT), SCOREBOARD_RABBIT_MARK);
-  // Rogue, observer and hunter name nothing. Every bzo player has a colour of
-  // their own, so `(Rogue)` on every line of an OpenFFA server would be noise,
-  // and in Rabbit Chase everyone who is not the rabbit is a hunter.
+  // Rogue, observer and hunter name nothing either. Every bzo player has a
+  // colour of their own, so `(Rogue)` on every line of an OpenFFA server would
+  // be noise, and in Rabbit Chase everyone who is not the rabbit is a hunter.
   assert.equal(getPlayerTeamMark(PLAYER_TEAM.ROGUE), null);
   assert.equal(getPlayerTeamMark(PLAYER_TEAM.OBSERVER), null);
   assert.equal(getPlayerTeamMark(PLAYER_TEAM.HUNTER), null);

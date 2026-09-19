@@ -25,7 +25,7 @@ export const VOICE_CHANNEL_ALL = 'all';
 export const VOICE_CHANNEL_NEARBY = 'nearby';
 export const VOICE_CHANNEL_TEAM = 'team';
 
-export const DEFAULT_VOICE_CHANNEL = VOICE_CHANNEL_NEARBY;
+export const DEFAULT_VOICE_CHANNEL = VOICE_CHANNEL_ALL;
 
 // In the order the Audio dialog and the XR Audio screen offer them.
 export const VOICE_CHANNELS = Object.freeze([
