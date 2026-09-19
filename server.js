@@ -986,6 +986,7 @@ function renderListPage({
       + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
+      + `<td>${s.voiceEnabled ? 'Yes' : ''}</td>`
       + `<td>${escapeHtml(s.title)}</td><td>${escapeHtml(s.version)}</td>`
       + `<td>${escapeHtml(s.url)}</td><td>${status}</td></tr>`;
   }).join('\n');
@@ -1072,7 +1073,7 @@ function renderListPage({
 </head>
 <body>
 ${navBlock}
-<h1 id="bzo">bzo servers</h1>
+<h1 id="bzo">Public bzo servers</h1>
 <p class="muted">From the designated list server, ${LIST_SERVER_URL
     ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
     : 'disabled on this instance'} --
@@ -1082,13 +1083,14 @@ click a row to go there; see "keys" above to manage a key.</p>
 <thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
 <th title="Jumping">Jump</th><th title="Superflags">Flag</th><th title="Ricochet">Rico</th>
 <th title="Antidote flag">Anti</th><th title="No Team Kills (friendly fire off)">TK</th>
+<th title="Voice chat has at least one ICE server configured">Voice</th>
 <th>Title</th><th>Version</th><th>URL</th><th>Status</th></tr></thead>
 <tbody>
 ${bzoServerRows}
 </tbody>
 </table>
 
-<h1 id="bzflag">Running BZFlag servers</h1>
+<h1 id="bzflag">Public BZFlag servers</h1>
 <p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
 <a href="/list">refresh</a>. Click a column heading to sort.</p>
 ${flash}
@@ -1447,6 +1449,7 @@ async function getBzoServerList() {
           players: record.live.players, maxPlayers: record.live.maxPlayers,
           version: record.live.version, gameOptionsBits: record.live.gameOptionsBits,
           maxShots: record.live.maxShots, style: record.live.style,
+          voiceEnabled: record.live.voiceEnabled,
           stale, staleReason: stale ? (record.lastError || 'no response') : null,
         };
       });
@@ -1859,7 +1862,9 @@ function writeSessionsSoon() {
   sessionWriteTimer = setTimeout(() => {
     sessionWriteTimer = null;
     try {
-      fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions.serialize()), { mode: 0o600 });
+      // Pretty-printed, the same reason list-server-keys.json is: an
+      // operator reasonably opens this file by hand, and it stays small.
+      fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions.serialize(), null, 2), { mode: 0o600 });
     } catch (error) {
       logError(`Could not write sessions to ${SESSIONS_PATH}:`, error);
     }
@@ -1930,7 +1935,11 @@ function writeListServerKeysSoon() {
   listServerKeysWriteTimer = setTimeout(() => {
     listServerKeysWriteTimer = null;
     try {
-      fs.writeFileSync(LIST_SERVER_KEYS_PATH, JSON.stringify(listServerKeys.serialize()), { mode: 0o600 });
+      // Pretty-printed, unlike sessions.json: an operator reasonably opens
+      // this file by hand to check a registration, and it's small enough
+      // that the extra bytes cost nothing.
+      fs.writeFileSync(
+        LIST_SERVER_KEYS_PATH, JSON.stringify(listServerKeys.serialize(), null, 2), { mode: 0o600 });
     } catch (error) {
       logError(`Could not write list server keys to ${LIST_SERVER_KEYS_PATH}:`, error);
     }
@@ -2158,6 +2167,7 @@ app.post('/api/list-server/report', listServerRateLimit, (req, res) => {
     gameOptionsBits: Number.isFinite(gameOptionsBits) ? gameOptionsBits : 0,
     maxShots: Number.isFinite(maxShots) ? maxShots : 0,
     style: typeof req.body?.style === 'string' ? req.body.style.slice(0, 20) : '',
+    voiceEnabled: req.body?.voiceEnabled === true,
   });
   res.json({ success: true });
   // After the response, not before -- a reporting instance should not wait on
@@ -2187,6 +2197,7 @@ app.get('/api/list-server/list', (req, res) => {
         gameOptionsBits: record.live.gameOptionsBits,
         maxShots: record.live.maxShots,
         style: record.live.style,
+        voiceEnabled: record.live.voiceEnabled,
         stale,
         staleReason: stale ? (record.lastError || 'no response') : null,
       };
@@ -10729,7 +10740,13 @@ function getSuperFlagPool() {
 // pool, so that bit never sets.
 function computeLocalGameOptionsBits() {
   let bits = 0;
-  if (SUPER_FLAGS.count > 0) bits |= GAME_OPTION_BITS.flags;
+  // Upstream's own test (CmdLineOptions.cxx:1861, "super flags?") is "does
+  // the resolved world have any flag beyond the ones a team's base forces",
+  // not "is the -s pool non-empty" -- a map's zone flags count too. `flags`
+  // is that resolved world: a team flag always carries a non-null `team`,
+  // so anything else (a zone flag or a pool slot) is what upstream calls a
+  // super flag here.
+  if (flags.some((flag) => flag.team === null)) bits |= GAME_OPTION_BITS.flags;
   if (GAME_CONFIG.ALLOW_JUMPING) bits |= GAME_OPTION_BITS.jumping;
   if (GAME_CONFIG.LINEAR_ACCELERATION > 0 || GAME_CONFIG.ANGULAR_ACCELERATION > 0) bits |= GAME_OPTION_BITS.inertia;
   if (GAME_CONFIG.ALL_SHOTS_RICOCHET) bits |= GAME_OPTION_BITS.ricochet;
@@ -10758,6 +10775,11 @@ function reportToListServer(reason) {
     // same vocabulary GAME_STYLES uses to decode a remote server's style.
     maxShots: GAME_CONFIG.SHOT_MAX_ACTIVE,
     style: GAME_TYPE,
+    // Voice chat itself is not a switch bzo has -- every client offers the
+    // mic -- but without at least one ICE server a peer connection across
+    // anything but a LAN typically never completes, so this is "will voice
+    // actually work here" rather than "does this build have the feature."
+    voiceEnabled: VOICE_ICE_SERVERS.length > 0,
   };
   if (IS_DESIGNATED_LIST_SERVER) {
     // No key exists for "this server reporting to itself" -- report straight

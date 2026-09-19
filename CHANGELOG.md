@@ -6,6 +6,38 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.41] - 2026-09-19
+
+### Added
+- **The server name is now editable live from the Operator panel**, desktop
+  and XR text entry both wired, the same as MOTD -- no restart, and it
+  updates the entry dialog and this server's title on `/list` immediately.
+- **`/list`'s bzo-servers table gained Shots, Style and Voice columns**,
+  matching what the bzfs table already shows plus one bzo-specific signal:
+  Voice reports whether at least one ICE server is configured, since a
+  voice connection across anything but a LAN typically needs one to work at
+  all.
+- The two `/list` table headings read "Public bzo servers" and "Public
+  BZFlag servers".
+
+### Fixed
+- **A bzo server whose flags come from map zones rather than the `-s` pool
+  now correctly reports having superflags** on `/list`. The option bit only
+  checked the pool's count, matching upstream's own `-s` switch but missing
+  upstream's own broader test for it (`CmdLineOptions.cxx`'s "does the
+  resolved world have any flag beyond a team's own"), which zone flags
+  satisfy too.
+- **Typing a space into the Server Name or MOTD field was impossible.**
+  Both re-synced the field from a trimmed copy of itself on every
+  keystroke, which snapped a just-typed trailing space back out before the
+  next character could follow it.
+- `/list`'s bzo-servers table could show a stale snapshot -- missing a
+  server that had already reported back in -- for up to 5 minutes after the
+  designated instance restarted. Its own in-process read had no reason to
+  be cached at all; only the cross-instance HTTP fetch does.
+- `sessions.json` and `list-server-keys.json` are now written pretty-printed,
+  for anyone opening either by hand.
+
 ## [1.2.40] - 2026-09-19
 
 ### Added

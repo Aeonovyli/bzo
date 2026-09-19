@@ -7668,13 +7668,20 @@ function stageOperatorRabbit(direction) {
 
 function wireOperatorPanel() {
   buildOperatorTeamLimitRows();
+  // Not trimmed here: stageOperatorChange re-syncs the field from the staged
+  // value on every keystroke (syncOperatorPanel), and trimming a value that
+  // still has the input's own trailing space in it makes that sync snap the
+  // field back and eat the space the moment it's typed -- there is no way to
+  // type a space at all, only ever paste one in already-trimmed. The server
+  // trims on commit regardless (applyServerConfigChanges), so nothing here
+  // needs to.
   const serverNameInput = document.getElementById('serverNameInput');
   if (serverNameInput) {
-    serverNameInput.addEventListener('input', () => stageOperatorChange('serverName', serverNameInput.value.trim()));
+    serverNameInput.addEventListener('input', () => stageOperatorChange('serverName', serverNameInput.value));
   }
   const motdInput = document.getElementById('motdInput');
   if (motdInput) {
-    motdInput.addEventListener('input', () => stageOperatorChange('motd', motdInput.value.trim()));
+    motdInput.addEventListener('input', () => stageOperatorChange('motd', motdInput.value));
   }
   // `input` rather than `change`, so dragging a slider updates the label and the
   // confirm as it moves rather than only on release.
