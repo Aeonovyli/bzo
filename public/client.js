@@ -687,6 +687,23 @@ function sendMatchControl(action) {
   sendToServer({ type: 'matchControl', action });
 }
 
+// `init.listServer` -- admin-only, see docs/list-server-plan.md -- shows or
+// hides the panel's key row and fills in its status line. Never shown the
+// key itself, only whether one is configured: `setListServerKey` is a
+// write-only field the same way a password field is.
+function syncListServerRow(listServer) {
+  const row = document.getElementById('listServerRow');
+  const status = document.getElementById('listServerKeyStatus');
+  if (!row) return;
+  row.hidden = !listServer;
+  if (!listServer || !status) return;
+  status.textContent = listServer.designated
+    ? 'this is the designated list server'
+    : !listServer.url
+      ? 'disabled (no listServerUrl)'
+      : `reporting to ${listServer.url}: ${listServer.keyConfigured ? 'key configured' : 'no key yet'}`;
+}
+
 function applyMatchTimeUpdate(timeLeft) {
   matchTimeLeft = timeLeft;
   matchTimeReceivedAt = sampleEpochClock();
@@ -4808,6 +4825,13 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById(id)?.addEventListener('click', () => sendMatchControl(action));
   });
 
+  document.getElementById('listServerKeySetBtn')?.addEventListener('click', () => {
+    const input = document.getElementById('listServerKeyInput');
+    if (!input) return;
+    sendToServer({ type: 'setListServerKey', key: input.value.trim() });
+    input.value = '';
+  });
+
   wireOperatorPanel();
   const btn = document.getElementById('debugLabelsBtn');
   if (btn) {
@@ -5462,6 +5486,10 @@ function handleServerMessage(message) {
   switch (message.type) {
     case 'init': {
       if (!checkClientBuild(message.clientBuild)) return;
+      const operatorPanelTitleEl = document.getElementById('operatorPanelTitle');
+      if (operatorPanelTitleEl && typeof message.serverVersion === 'string') {
+        operatorPanelTitleEl.textContent = `Operator Panel (v${message.serverVersion})`;
+      }
       const sequenceId = ++initSequence;
       activeInitSequence = sequenceId;
       // A fresh world clears every tank, so anything queued against the old one
@@ -5532,6 +5560,10 @@ function handleServerMessage(message) {
       // The panel is wired before the first `init` arrives, so its rows start on
       // placeholders. This is where the server's real values first exist.
       if (!operatorStaged) syncOperatorPanelFromServer();
+      // Admin-only (server.js's `init` deliberately omits this for anyone
+      // `isAdmin` refuses) -- see docs/list-server-plan.md. The row stays
+      // hidden for everyone else.
+      syncListServerRow(message.listServer || null);
       if (message.voiceRtcConfig && typeof message.voiceRtcConfig === 'object') {
         voiceRtcConfig = message.voiceRtcConfig;
         callVoiceManager('setRtcConfig', voiceRtcConfig);
@@ -7076,7 +7108,7 @@ function populateViewMapTable(viewableMaps) {
 
 // The View dialog's remote-server table. `listRemoteServers` never connects
 // to any server it lists (see server.js) -- only pressing Import does that,
-// same as the /view page this mirrors.
+// same as the /list page this mirrors.
 function handleRemoteServerList(message) {
   lastRemoteServers = Array.isArray(message.servers) ? message.servers : [];
   renderServerTable();
@@ -7201,7 +7233,7 @@ function handleImportMapForViewResult(message) {
   }
 }
 
-// Shared by both View dialog tables (and mirrors the same few lines /view's
+// Shared by both View dialog tables (and mirrors the same few lines /list's
 // own inline script uses): click a header to sort by that column, type in
 // the filter box to hide rows that do not match anywhere in the row's text.
 function attachSortFilter(tableId, filterId) {

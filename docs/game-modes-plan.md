@@ -463,6 +463,9 @@ publish to a bzo-specific directory, where reusing this exact blob costs nothing
 and buys tooling that can read either; or get a web-client field into the list
 server, which is a conversation upstream rather than a patch here.
 
+The middle one is built: `docs/list-server.md`, issue #46. `my.bzflag.org`
+itself never did support adding a bzo server, for exactly the reasons above.
+
 What to do meanwhile: keep upstream's field names and units as the match-end
 work lands -- `shakeTimeout` in tenths of a second, `maxTime` in seconds --
 because bzo already holds every other field in that packet, and a publisher

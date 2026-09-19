@@ -19,7 +19,7 @@
 </head>
 <body>
     <div id="operatorOverlay" class="dialog">
-      <div class="dialogTitle">Operator Panel <button id="closeOperatorBtn" class="closeBtn">&times;</button></div>
+      <div class="dialogTitle"><span id="operatorPanelTitle">Operator Panel</span> <button id="closeOperatorBtn" class="closeBtn">&times;</button></div>
       <div class="dialogContent">
         <div id="motd">MOTD: </div>
         <!-- Every row stages a value and nothing reaches the server until the
@@ -131,6 +131,16 @@
           <button id="matchPauseBtn" class="btn" type="button">Pause</button>
           <button id="matchResumeBtn" class="btn" type="button">Resume</button>
           <button id="matchGameOverBtn" class="btn" type="button">End Match</button>
+        </div>
+        <!-- Also immediate, not staged -- see setListServerKey in server.js.
+             This row only ever appears for an operator: `init.listServer` is
+             admin-only, and this row's container starts hidden until that
+             field shows up. docs/list-server-plan.md. -->
+        <div id="listServerRow" class="operatorRow" hidden>
+          <label for="listServerKeyInput">List Server Key:</label>
+          <input type="password" id="listServerKeyInput" placeholder="paste key from /list-server">
+          <button id="listServerKeySetBtn" class="btn" type="button">Set</button>
+          <span id="listServerKeyStatus"></span>
         </div>
         <!-- One confirm, labelled by what it is about to do: Apply while every
              staged change is live, Restart the moment one is not. Cancel and the

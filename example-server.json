@@ -14,6 +14,10 @@
     "::1"
   ],
   "publicUrl": "",
+  "listServerUrl": "https://bz.rikers.org",
+  "listServerKey": "",
+  "listServerOwnerBzid": "",
+  "listServerOwnerCallsign": "",
   "listen": "[::]:3000",
   "teamMode": {
     "enabled": false,

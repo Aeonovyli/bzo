@@ -5,6 +5,7 @@ node_modules/
 *.patch
 server.json
 sessions.json
+list-server-keys.json
 data/
 cache/
 

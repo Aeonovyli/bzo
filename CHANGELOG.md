@@ -6,6 +6,27 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.40] - 2026-09-19
+
+### Added
+- **bzo now has its own server list, since `my.bzflag.org`'s list server
+  cannot validate a bzo server or dial its HTTPS/WebSocket connection.** One
+  bzo instance is designated (defaulting to `https://bz.rikers.org`); every
+  other instance registers a per-server key on it, reports over HTTPS/JSON
+  on the same cadence bzfs uses (boot, ~15 minutes, join/part, and a
+  REMOVE-equivalent on shutdown), and is validated by a signed HMAC
+  challenge rather than a round trip of the raw key. Closes #46.
+- **`/list`** replaces `/view` and the standalone key-admin page: bzo
+  servers, the public bzfs list, local maps, and this instance's own key
+  admin, in that order, with a jump-link nav and this instance's login state
+  at the top. `/view` and `/list-server` both redirect there.
+- The Operator panel gained a List Server Key row, admin-only and never
+  echoed back to any other client.
+
+### Changed
+- `/login` grew an optional `/login/list` form so a login started from
+  `/list` returns there instead of to `/`.
+
 ## [1.2.39] - 2026-09-19
 
 ### Fixed

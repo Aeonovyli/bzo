@@ -173,6 +173,13 @@ const {
   createSessionStore,
 } = require('./server/sessions.cjs');
 const {
+  KEY_MAX_AGE_MS: LIST_SERVER_KEY_MAX_AGE_MS,
+  signListServerChallenge,
+  verifyListServerChallenge,
+  isKeyStale: isListServerKeyStale,
+  createKeyStore: createListServerKeyStore,
+} = require('./server/list-server.cjs');
+const {
   createLagTracker,
   formatLagStats,
   compareByLag,
@@ -539,9 +546,20 @@ function parseGlobalTokenReply(body) {
   return result;
 }
 
-// Both endings of a login are a redirect to `/`, so the page reloads and comes
-// back on a fresh socket -- there is no identity to migrate onto a live
-// connection, and a failed login needs nothing beyond clearing the cookie.
+// Where either ending of a login sends the browser: back to the page that
+// started it, so `/list`'s own login button returns there rather than to `/`.
+// A path segment on `/login` itself carries this rather than a query
+// parameter, because the callback below already has to stay free of `&` --
+// see the comment on `callback` -- and an extra path segment costs it
+// nothing. Keyed by an allowlist rather than trusting whatever segment
+// arrives: `/login/<anything>` reaching this far unrecognised would otherwise
+// be an open redirect.
+const LOGIN_RETURN_PATHS = Object.freeze({ list: '/list' });
+
+// Both endings of a login are a redirect back to `returnPath`, so the page
+// reloads and comes back on a fresh socket -- there is no identity to migrate
+// onto a live connection, and a failed login needs nothing beyond clearing the
+// cookie.
 //
 // Failure is reported in the **fragment**. A fragment never reaches a server, so
 // nothing lands in an access log or a `Referer`, and its value only picks a
@@ -552,7 +570,7 @@ function parseGlobalTokenReply(body) {
 // by construction, since `/login` builds it that way -- `SameSite=Lax` off a
 // cross-site WebSocket handshake, and no `Domain` keeps it host-only rather
 // than shared with every sibling of this host.
-function finishLogin(res, sessionId) {
+function finishLogin(res, sessionId, returnPath = '/') {
   if (sessionId) {
     res.cookie(SESSION_COOKIE_NAME, sessionId, {
       httpOnly: true,
@@ -561,17 +579,27 @@ function finishLogin(res, sessionId) {
       path: '/',
       maxAge: SESSION_TTL_MS,
     });
-    res.redirect(302, '/');
+    res.redirect(302, returnPath);
     return;
   }
   res.clearCookie(SESSION_COOKIE_NAME, { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
-  res.redirect(302, '/#login=failed');
+  res.redirect(302, `${returnPath}#login=failed`);
 }
 
 // One route for both halves, because the query string already says which is
 // wanted: arriving with no `t` at all is someone who has not been to
-// bzflag.org yet, and arriving with one is bzflag.org sending them back.
-app.get('/login', loginRateLimit, async (req, res) => {
+// bzflag.org yet, and arriving with one is bzflag.org sending them back. The
+// optional `:returnPage` segment is only ever `list` today (see
+// `LOGIN_RETURN_PATHS`); both halves read it the same way, since bzflag.org's
+// callback is this same URL with `t` filled in.
+app.get('/login/:returnPage?', loginRateLimit, async (req, res) => {
+  const returnPath = req.params.returnPage === undefined
+    ? '/'
+    : LOGIN_RETURN_PATHS[req.params.returnPage];
+  if (returnPath === undefined) {
+    res.status(404).type('text/plain').send('Unknown login return page.\n');
+    return;
+  }
   // No `t` parameter: start the round trip.
   if (req.query.t === undefined) {
     const host = requestHost(req);
@@ -585,8 +613,10 @@ app.get('/login', loginRateLimit, async (req, res) => {
     // so a second parameter would never arrive. checkToken.php's alternative is
     // to encode the whole value, which would also encode the two placeholders,
     // and whether they still substitute is not documented -- so this is the
-    // shape known to work.
-    const callback = `https://${host}/login?t=%TOKEN%:%USERNAME%`;
+    // shape known to work. The return page rides in the *path* instead, for the
+    // same reason: it costs no `&` either.
+    const callback = `https://${host}/login${req.params.returnPage ? `/${req.params.returnPage}` : ''}`
+      + `?t=%TOKEN%:%USERNAME%`;
     const target = `${BZFLAG_LOGIN_URL}?action=weblogin&url=${callback}`;
     log(`[LOGIN] redirecting to bzflag.org, callback ${callback}`);
     // The header is set rather than sent through `res.redirect`, which runs the
@@ -634,7 +664,7 @@ app.get('/login', loginRateLimit, async (req, res) => {
     for (const line of parsed.lines) log(`[LOGIN] < ${line}`);
     if (!parsed.good || !parsed.bzid) {
       log(`[LOGIN] refused "${callsign}" (${url})`);
-      finishLogin(res, null);
+      finishLogin(res, null, returnPath);
       return;
     }
     // A group asked about and not named back is a group this player is not in,
@@ -650,10 +680,10 @@ app.get('/login', loginRateLimit, async (req, res) => {
     log(`[LOGIN] "${parsed.callsign || callsign}" bzid=${parsed.bzid} signed in`
       + `; admin=${isAdminSession(sessions.get(sessionId), ADMIN_GROUPS)}`
       + `; sessions=${sessions.size}`);
-    finishLogin(res, sessionId);
+    finishLogin(res, sessionId, returnPath);
   } catch (err) {
     logError('[LOGIN] CHECKTOKENS failed', err);
-    finishLogin(res, null);
+    finishLogin(res, null, returnPath);
   }
 });
 
@@ -843,7 +873,7 @@ app.get('/api/ready', (req, res) => {
 });
 
 // A server-rendered, standalone page -- not part of the game client bundle,
-// no websocket -- listing what /view's two data sources already are: the
+// no websocket -- listing what /list's data sources already are: the
 // public BZFlag list server (`getRemoteServerList`, cached 5 minutes and
 // shared across every visitor) and bzo's own maps/ directory. Both viewing
 // and importing are open to anyone: importing costs this server one fetch
@@ -882,11 +912,40 @@ function statMtimeOrBlank(filePath) {
   }
 }
 
-function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
+// `/list`: bzo servers, bzfs servers, local maps, and (bottom) this
+// instance's list-server key admin -- one page rather than the `/view` +
+// `/list-server` split that predated this, since a visitor came here for
+// "what's running" either way and the key admin is the one part that only
+// ever applies to an operator, so it reads better last. See
+// docs/list-server-plan.md.
+function renderListPage({
+  servers, bzoServers, cacheAgeSeconds, imported, importError, session, admin,
+}) {
   const localMaps = listAvailableMapFiles().map((fileName) => ({
     fileName,
     hashed: fileName === 'random' || MAP_REGISTRY.has(fileName),
   }));
+
+  // One nav line at the very top: a jump link to each section below, then
+  // this instance's own login state last -- it authenticates this instance's
+  // bzflag.org session either way, but only unlocks the key admin section
+  // when this instance is the designated one.
+  const identityBlock = session
+    ? `<strong>${escapeHtml(session.callsign)}</strong>${admin ? ' (admin)' : ''}`
+      + ` -- <a href="/logout">Log out</a>`
+    : `<a href="/login/list">Log in with your bzflag.org account</a>`
+      + `${IS_DESIGNATED_LIST_SERVER ? ' to register a server' : ''}`;
+  // "keys" is the one link here that is not always this page's own section:
+  // key admin only exists on the designated instance, so anywhere else it
+  // jumps straight to the real thing rather than to this page's own
+  // redirect-to-there notice. bzo/bzflag/maps stay relative -- every
+  // instance actually has those three itself.
+  const keysHref = IS_DESIGNATED_LIST_SERVER || !LIST_SERVER_URL
+    ? '#keys'
+    : `${escapeHtml(LIST_SERVER_URL)}/list#keys`;
+  const navBlock = `<p class="nav">`
+    + `<a href="#bzo">bzo</a> | <a href="#bzflag">bzflag</a> | <a href="#maps">maps</a> | <a href="${keysHref}">keys</a>`
+    + ` | ${identityBlock}</p>`;
 
   const serverRows = servers.map((s) => {
     const players = s.info && typeof s.info.players === 'number' ? String(s.info.players) : '';
@@ -899,7 +958,7 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
     // registered yet, so there is no state where clicking the row is wrong.
     const viewmapHref = `/?viewmap=${encodeURIComponent(importFileName)}`;
     const alreadyImported = MAP_REGISTRY.has(importFileName);
-    const importCell = `<form method="post" action="/view/import" class="inlineForm">`
+    const importCell = `<form method="post" action="/list/import" class="inlineForm">`
       + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
       + `<input type="hidden" name="port" value="${s.port}">`
       + `<button type="submit">${alreadyImported ? 'Re-import' : 'Import'}</button></form>`;
@@ -910,6 +969,25 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
       + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td><td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
       + `<td>${escapeHtml(s.title)}</td><td>${escapeHtml(s.host)}</td><td>${s.port}</td>`
       + `<td>${importCell}</td></tr>`;
+  }).join('\n');
+
+  // bzo's own list server (docs/list-server-plan.md): a third table, read
+  // from the designated instance's public endpoint rather than dialled the
+  // way a bzfs row above is. Clicking a row navigates the browser there
+  // directly (`location.href`) -- each one is its own origin and its own
+  // websocket, not something to import a map from.
+  const bzoServerRows = bzoServers.map((s) => {
+    const hasOption = (bit) => ((s.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
+    const status = s.stale
+      ? `<span class="stale" title="${escapeHtml(s.staleReason || '')}">stale</span>`
+      : 'up';
+    return `<tr class="clickable" data-href="${escapeHtml(s.url)}"><td>${s.players}</td><td>${s.maxPlayers}</td>`
+      + `<td>${s.maxShots}</td><td>${escapeHtml(s.style)}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
+      + `<td>${escapeHtml(s.title)}</td><td>${escapeHtml(s.version)}</td>`
+      + `<td>${escapeHtml(s.url)}</td><td>${status}</td></tr>`;
   }).join('\n');
 
   const mapRows = localMaps.map((m) => {
@@ -951,6 +1029,8 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
   h1 { font-size: 1.3rem; margin: 2rem 0 0.5rem; color: #4CAF50; }
   a { color: #66bb6a; }
   .muted { color: #999; font-size: 0.9em; }
+  .nav { font-size: 1.5rem; padding-bottom: 0.5rem; border-bottom: 1px solid #333; }
+  code { color: #ccc; }
   input[type=text] {
     padding: 0.4rem 0.6rem;
     margin: 0.5rem 0;
@@ -987,12 +1067,30 @@ function renderViewPage({ servers, cacheAgeSeconds, imported, importError }) {
   .flash { padding: 0.5rem 0.8rem; border-radius: 4px; border: 1px solid; }
   .flash.success { background: #16321f; color: #b7e2c2; border-color: #4CAF50; }
   .flash.error { background: #3a1a17; color: #f0b8b2; border-color: #c0392b; }
+  .stale { color: #f0b8b2; }
 </style>
 </head>
 <body>
-<h1>Running BZFlag servers</h1>
+${navBlock}
+<h1 id="bzo">bzo servers</h1>
+<p class="muted">From the designated list server, ${LIST_SERVER_URL
+    ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
+    : 'disabled on this instance'} --
+click a row to go there; see "keys" above to manage a key.</p>
+<input id="bzoServerFilter" type="text" placeholder="Filter…">
+<table id="bzoServerTable">
+<thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
+<th title="Jumping">Jump</th><th title="Superflags">Flag</th><th title="Ricochet">Rico</th>
+<th title="Antidote flag">Anti</th><th title="No Team Kills (friendly fire off)">TK</th>
+<th>Title</th><th>Version</th><th>URL</th><th>Status</th></tr></thead>
+<tbody>
+${bzoServerRows}
+</tbody>
+</table>
+
+<h1 id="bzflag">Running BZFlag servers</h1>
 <p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
-<a href="/view">refresh</a>. Click a column heading to sort.</p>
+<a href="/list">refresh</a>. Click a column heading to sort.</p>
 ${flash}
 <input id="serverFilter" type="text" placeholder="Filter…">
 <table id="serverTable">
@@ -1005,7 +1103,7 @@ ${serverRows}
 </tbody>
 </table>
 
-<h1>Local maps</h1>
+<h1 id="maps">Local maps</h1>
 <p class="muted">Already in this server's <code>maps/</code>, including anything imported above. Click a row to view it.</p>
 <input id="mapFilter" type="text" placeholder="Filter…">
 <table id="mapTable">
@@ -1016,16 +1114,23 @@ ${mapRows}
 </table>
 
 <script>
-function attachTable(tableId, filterId) {
+// A row's own data-href -- clicking anywhere on it goes to that map's
+// viewmap link, except a click on the Import/Re-import form, which needs
+// its own click (stopPropagation there would work too, but this reads
+// clearer from the row's side: "unless it's the form"). A table with no
+// data-href rows at all (the key table) just never matches, so the same
+// function serves it for sorting and filtering without also wiring
+// navigation it never asked for.
+// Global (not per-page-load scoped) so the key admin section's own script,
+// which runs later in the same page for a fetched-in table, can call it too.
+// NOTE: no backticks in this comment block -- it lives inside server.js's
+// own outer template literal, and an unescaped backtick here would close it.
+window.attachTable = function attachTable(tableId, filterId) {
   var table = document.getElementById(tableId);
   if (!table) return;
   var tbody = table.tBodies[0];
-  // A row's own data-href -- clicking anywhere on it goes to that map's
-  // viewmap link, except a click on the Import/Re-import form, which
-  // needs its own click (stopPropagation there would work too, but this
-  // reads clearer from the row's side: "unless it's the form").
   tbody.addEventListener('click', function (e) {
-    if (e.target.closest('.inlineForm')) return;
+    if (e.target.closest('.inlineForm') || e.target.closest('button')) return;
     var row = e.target.closest('tr[data-href]');
     if (row) window.location.href = row.dataset.href;
   });
@@ -1053,45 +1158,63 @@ function attachTable(tableId, filterId) {
       });
     });
   }
-}
+};
 attachTable('serverTable', 'serverFilter');
+attachTable('bzoServerTable', 'bzoServerFilter');
 attachTable('mapTable', 'mapFilter');
 </script>
+
+${renderListServerKeyAdminSection({ session, admin })}
 </body>
 </html>`;
 }
 
-app.get('/view', async (req, res) => {
+app.get('/list', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
-    const servers = [...await getRemoteServerList()]
-      .sort((a, b) => (b.info?.players ?? -1) - (a.info?.players ?? -1));
-    res.type('html').send(renderViewPage({
+    const [servers, bzoServers] = await Promise.all([
+      getRemoteServerList().then((list) => [...list]
+        .sort((a, b) => (b.info?.players ?? -1) - (a.info?.players ?? -1))),
+      getBzoServerList().then((list) => [...list].sort((a, b) => (b.players ?? -1) - (a.players ?? -1))),
+    ]);
+    const session = sessionFromRequest(req);
+    res.type('html').send(renderListPage({
       servers,
+      bzoServers,
       cacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
       imported: typeof req.query.imported === 'string' ? req.query.imported : null,
       importError: typeof req.query.error === 'string' ? req.query.error : null,
+      session,
+      admin: session ? isAdminSession(session, ADMIN_GROUPS) : false,
     }));
   } catch (error) {
-    logError('/view failed to reach the list server:', error);
+    logError('/list failed to reach the list server:', error);
     res.status(502).type('text/plain').send('Could not reach the BZFlag list server. Try again shortly.\n');
   }
 });
 
-app.post('/view/import', (req, res) => {
+// `/view` and `/list-server` both merged into `/list` above -- redirected
+// rather than removed outright, since either could be bookmarked.
+app.get('/view', (req, res) => {
+  const query = new URLSearchParams(req.query).toString();
+  res.redirect(301, query ? `/list?${query}` : '/list');
+});
+app.get('/list-server', (req, res) => res.redirect(301, '/list#keys'));
+
+app.post('/list/import', (req, res) => {
   const target = parseHostPort(`${req.body?.host || ''}:${req.body?.port || ''}`);
   if (!target) {
-    res.redirect(302, `/view?${new URLSearchParams({ error: 'Expected host:port' })}`);
+    res.redirect(302, `/list?${new URLSearchParams({ error: 'Expected host:port' })}`);
     return;
   }
   const { host, port } = target;
-  log(`/view is importing a remote map from ${host}:${port}`);
+  log(`/list is importing a remote map from ${host}:${port}`);
   performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
-    log(`Imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes) via /view`);
-    res.redirect(302, `/view?${new URLSearchParams({ imported: safeMapName })}`);
+    log(`Imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes) via /list`);
+    res.redirect(302, `/list?${new URLSearchParams({ imported: safeMapName })}`);
   }).catch((error) => {
-    logError(`Remote map import from ${host}:${port} failed (via /view):`, error);
-    res.redirect(302, `/view?${new URLSearchParams({ error: error.message })}`);
+    logError(`Remote map import from ${host}:${port} failed (via /list):`, error);
+    res.redirect(302, `/list?${new URLSearchParams({ error: error.message })}`);
   });
 });
 
@@ -1282,7 +1405,7 @@ const RUNTIME_MAPS_DIR = process.env.MAPS_PATH
   ? path.resolve(process.env.MAPS_PATH)
   : path.join(path.dirname(configPath), 'maps');
 
-// The Operator panel's "Import Remote Map" dropdown, and the public `/view`
+// The Operator panel's "Import Remote Map" dropdown, and the public `/list`
 // page below, both read this -- one POST to the public list server decodes
 // every running server's live player count and game type (PingPacket's own
 // hex blob, see remote-world-import.cjs), so populating either one never
@@ -1302,10 +1425,54 @@ async function getRemoteServerList() {
   return servers;
 }
 
+// bzo's own list server's public read endpoint (docs/list-server-plan.md),
+// for `/list`'s third table. Same cache shape as `getRemoteServerList` and
+// the same reason: shared across every visitor rather than one fetch each.
+let bzoServerListCache = { at: 0, servers: [] };
+
+async function getBzoServerList() {
+  if (!LIST_SERVER_URL) return [];
+  if (Date.now() - bzoServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
+    return bzoServerListCache.servers;
+  }
+  // The designated instance already holds this in-process -- no reason to
+  // round-trip HTTPS to itself for its own `/list`.
+  if (IS_DESIGNATED_LIST_SERVER) {
+    const servers = listServerKeys.listAll()
+      .filter((record) => record.live !== null)
+      .map((record) => {
+        const stale = isListServerKeyStale(record);
+        return {
+          url: record.url, title: record.live.title, description: record.live.description,
+          players: record.live.players, maxPlayers: record.live.maxPlayers,
+          version: record.live.version, gameOptionsBits: record.live.gameOptionsBits,
+          maxShots: record.live.maxShots, style: record.live.style,
+          stale, staleReason: stale ? (record.lastError || 'no response') : null,
+        };
+      });
+    bzoServerListCache = { at: Date.now(), servers };
+    return servers;
+  }
+  try {
+    const response = await fetch(`${LIST_SERVER_URL}/api/list-server/list`, {
+      headers: { 'User-Agent': `bzo ${CLIENT_BUILD}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json();
+    const servers = Array.isArray(body.servers) ? body.servers : [];
+    bzoServerListCache = { at: Date.now(), servers };
+    return servers;
+  } catch (error) {
+    logError(`/list could not reach the bzo list server at ${LIST_SERVER_URL}:`, error.message || error);
+    return bzoServerListCache.servers;
+  }
+}
+
 // Parses "host:port", downloads that server's world over the real wire
 // protocol, and saves it as an ordinary .bzw in RUNTIME_MAPS_DIR -- the one
 // piece of work behind both the websocket `importMap` (used by the Operator
-// panel) and the `/view` page's plain HTTP form below. Throws with a message
+// panel) and the `/list` page's plain HTTP form below. Throws with a message
 // safe to show the caller; does not hash the file or tell anyone about it --
 // that is the caller's job, since a websocket reply and an HTTP redirect say
 // it differently.
@@ -1317,7 +1484,7 @@ function parseHostPort(hostPort) {
   return { host: match[1], port };
 }
 
-// Shared with `/view`'s cross-reference below: the only place either one is
+// Shared with `/list`'s cross-reference below: the only place either one is
 // allowed to name a remote server's import file, so a check there and the
 // file `performRemoteMapImport` actually writes can never name it two ways.
 function remoteMapFileName(host, port) {
@@ -1412,7 +1579,7 @@ async function performRemoteMapImportNow(host, port, safeMapName) {
   if (tree.gameSettings) tree.worldSize = tree.gameSettings.worldSize;
   // Neither the title nor the per-team maximums travel over the direct
   // connection above -- both are the list server's own words about this
-  // host:port (`fetchServerList`), cached from whichever `/view` load or
+  // host:port (`fetchServerList`), cached from whichever `/list` load or
   // background refresh last populated it. A server an operator names by
   // hand rather than picking from that list simply has no cache entry, and
   // both fall back to nothing, the same as any other field this import
@@ -1531,6 +1698,7 @@ server.listen(PORT, LISTEN_HOST, () => {
   // sidecars are built, and a request that arrives first is served identity.
   precompress.start({ log }).catch((error) => logError(`[BR] ${error.message}`));
   probeAdminWhitelist().catch((error) => logError(`[ADMIN] probe failed: ${error.message}`));
+  reportToListServer('boot');
 });
 
 // `adminGroups` in `server.json`: the global groups this server would grant
@@ -1713,6 +1881,472 @@ try {
 // Expiry is only noticed on a read otherwise, and an expired session sitting in
 // the file is an identity kept longer than it was granted for.
 setInterval(() => sessions.prune(), 15 * 60 * 1000).unref?.();
+
+// bzo's own list server (docs/list-server-plan.md, issue #46). `listServerUrl`
+// names which instance is designated; unset defaults to bz.rikers.org, the
+// same way bzfs itself defaults `-list` to my.bzflag.org rather than shipping
+// with nothing to report to. An operator who wants the feature off entirely
+// sets it to an empty string -- that is a choice, not the default.
+const DEFAULT_LIST_SERVER_URL = 'https://bz.rikers.org';
+const LIST_SERVER_URL = (typeof serverConfig.listServerUrl === 'string'
+  ? serverConfig.listServerUrl
+  : DEFAULT_LIST_SERVER_URL).trim().replace(/\/+$/, '');
+// This server's own credential on the designated instance, pasted into the
+// Operator panel (`listServerKey`) from the account the operator generated it
+// under. Never sent to a client -- see `getOperatorConfigState`, which
+// deliberately does not read this.
+let LIST_SERVER_KEY = typeof serverConfig.listServerKey === 'string' ? serverConfig.listServerKey.trim() : '';
+
+// Who the designated instance's own self-report row (see `reportToListServer`)
+// is attributed to on the admin key table's Owner column. Unset defaults to
+// the reserved "self" bzid and this server's own name -- a placeholder, not
+// a real forum account, so it renders as plain text rather than a broken
+// profile link. An operator who is also a registered bzflag.org user can name
+// their own BZID here so their own server's row reads the same as everyone
+// else's.
+const LIST_SERVER_OWNER_BZID =
+  typeof serverConfig.listServerOwnerBzid === 'string' ? serverConfig.listServerOwnerBzid.trim() : '';
+const LIST_SERVER_OWNER_CALLSIGN =
+  typeof serverConfig.listServerOwnerCallsign === 'string' ? serverConfig.listServerOwnerCallsign.trim() : '';
+
+// Whether *this* instance is the one every other bzo server reports to.
+// Decided by comparing its own advertised address to the list server it is
+// configured to report to -- the same `publicUrl` the admin-whitelist probe
+// already uses -- rather than a second flag that could disagree with it.
+const IS_DESIGNATED_LIST_SERVER =
+  LIST_SERVER_URL !== '' && PUBLIC_URL !== ''
+  && LIST_SERVER_URL === PUBLIC_URL.trim().replace(/\/+$/, '');
+
+// The designated instance's key registry. Persisted beside sessions.json for
+// the same reason: a restart should not silently revoke every operator's
+// registration. Non-designated instances still create the (empty, unused)
+// store -- simpler than threading its absence through every handler below --
+// but never populate or read it.
+const LIST_SERVER_KEYS_PATH = path.join(path.dirname(configPath), 'list-server-keys.json');
+let listServerKeysWriteTimer = null;
+function writeListServerKeysSoon() {
+  if (listServerKeysWriteTimer) return;
+  listServerKeysWriteTimer = setTimeout(() => {
+    listServerKeysWriteTimer = null;
+    try {
+      fs.writeFileSync(LIST_SERVER_KEYS_PATH, JSON.stringify(listServerKeys.serialize()), { mode: 0o600 });
+    } catch (error) {
+      logError(`Could not write list server keys to ${LIST_SERVER_KEYS_PATH}:`, error);
+    }
+  }, 1000);
+  listServerKeysWriteTimer.unref?.();
+}
+const listServerKeys = createListServerKeyStore({ onChange: writeListServerKeysSoon });
+if (IS_DESIGNATED_LIST_SERVER) {
+  try {
+    if (fs.existsSync(LIST_SERVER_KEYS_PATH)) {
+      const loaded = listServerKeys.load(JSON.parse(fs.readFileSync(LIST_SERVER_KEYS_PATH, 'utf8')));
+      log(`[LISTSERVER] restored ${loaded} registered key(s)`);
+    }
+  } catch (error) {
+    logError(`Could not read list server keys from ${LIST_SERVER_KEYS_PATH}, starting empty:`, error);
+  }
+  log(`[LISTSERVER] this instance is the designated list server (${PUBLIC_URL})`);
+} else if (LIST_SERVER_URL) {
+  log(`[LISTSERVER] reporting to ${LIST_SERVER_URL}`
+    + (LIST_SERVER_KEY ? '' : ' (no listServerKey configured yet -- reports will not be sent)'));
+} else {
+  log('[LISTSERVER] disabled (listServerUrl is empty)');
+}
+
+// Same ceiling as `/login` -- see "Abuse resistance" in docs/list-server-plan.md.
+// Both are new places an anonymous or logged-in caller can make the list
+// server do outbound work (the validation callback below), so both carry the
+// same limit from day one rather than after something abuses it.
+const listServerRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: requestAddress,
+  validate: { xForwardedForHeader: false },
+  handler: (req, res, _next, options) => {
+    log(`[LISTSERVER] rate limited ${requestAddress(req)}:`
+      + ` more than ${options.limit} requests in ${options.windowMs / 1000}s`);
+    res.status(options.statusCode).type('text/plain')
+      .send('Too many requests. Try again in a minute.\n');
+  },
+});
+
+// The account UI and the registry endpoints below only exist on the
+// designated instance -- see "`/list`" in docs/list-server-plan.md: a
+// non-designated instance links out rather than duplicating either.
+function requireDesignatedListServer(req, res) {
+  if (IS_DESIGNATED_LIST_SERVER) return true;
+  res.status(404).type('text/plain').send('This instance is not the designated list server.\n');
+  return false;
+}
+
+// The bzflag.org session a browser already holds from `/login`, read the same
+// way `/logout` does -- there is no separate account system here, see
+// "Accounts: reuse the existing login".
+function sessionFromRequest(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionId = cookies[SESSION_COOKIE_NAME];
+  return sessionId ? sessions.get(sessionId) : undefined;
+}
+
+// What `GET /api/list-server/keys` hands back. The key rides in full --
+// `/api/list-server/keys` only ever returns a caller's own rows (`listForBzid`)
+// or, for an admin, every row (`listAll`), and either caller is exactly who
+// is allowed to hold that credential already: an owner pasting it into their
+// own server's Operator panel, or a local admin who can already revoke any
+// row here. Masking it from the one place that could otherwise copy it back
+// out would just be security theatre.
+function describeListServerKeyRow(record) {
+  const stale = isListServerKeyStale(record);
+  return {
+    id: record.id,
+    key: record.key,
+    url: record.url,
+    callsign: record.callsign,
+    bzid: record.bzid,
+    dateRequested: record.dateRequested,
+    lastChecked: record.lastChecked,
+    stale,
+    // A stale row says why, the same way /list already reports "could not
+    // reach the list server" rather than going silent.
+    lastError: stale ? record.lastError : null,
+    live: record.live ? { ...record.live } : null,
+    expiresAt: (record.lastChecked ?? record.dateRequested) + LIST_SERVER_KEY_MAX_AGE_MS,
+  };
+}
+
+// The list server never trusts a URL an ADD payload itself supplies -- it
+// calls back the URL already on file for that key, with a nonce the target
+// has to sign with the key it has configured. See "Validation" in the plan.
+async function validateListServerKey(record) {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  try {
+    const response = await fetch(
+      `${record.url}/api/list-server/challenge?${new URLSearchParams({ nonce })}`,
+      { headers: { 'User-Agent': `bzo ${CLIENT_BUILD}` }, signal: AbortSignal.timeout(8000) },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json();
+    if (!verifyListServerChallenge(record.key, nonce, body.signature)) {
+      throw new Error('signature mismatch');
+    }
+    listServerKeys.markChecked(record, true);
+    log(`[LISTSERVER] validated ${record.url}`);
+  } catch (error) {
+    listServerKeys.markChecked(record, false, error.message);
+    log(`[LISTSERVER] could not validate ${record.url}: ${error.message}`);
+  }
+}
+
+// "Adds a key" -- a logged-in bzflag.org user, from their own session, naming
+// the server URL up front. Per-server, not per-account (bzfs's `-publickey`
+// is per-server too): a leaked key compromises one row, not everything the
+// operator runs.
+app.post('/api/list-server/keys', listServerRateLimit, (req, res) => {
+  if (!requireDesignatedListServer(req, res)) return;
+  const session = sessionFromRequest(req);
+  if (!session) {
+    res.status(401).json({ error: 'Log in at /login first' });
+    return;
+  }
+  let parsed;
+  try {
+    parsed = new URL(typeof req.body?.url === 'string' ? req.body.url.trim() : '');
+  } catch {
+    res.status(400).json({ error: "Enter the server's own https:// URL (its publicUrl)" });
+    return;
+  }
+  if (parsed.protocol !== 'https:') {
+    res.status(400).json({ error: 'The URL must be https://' });
+    return;
+  }
+  const url = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+  // One key per URL, not one per request: two active registrations for the
+  // same server would both get validated and both get reported, which is
+  // ambiguity `/list`'s bzo-servers table and the daily poll have no reason
+  // to carry. Case-insensitively, since a host name is.
+  const existing = listServerKeys.listAll()
+    .find((candidate) => candidate.url.toLowerCase() === url.toLowerCase());
+  if (existing) {
+    res.status(409).json({
+      error: existing.bzid === session.bzid
+        ? 'You already have a key for this URL. Revoke it below before generating another.'
+        : 'Another operator already holds a key for this URL.',
+    });
+    return;
+  }
+  const record = listServerKeys.requestKey({ bzid: session.bzid, callsign: session.callsign, url });
+  log(`[LISTSERVER] "${session.callsign}" (bzid=${session.bzid}) generated a key for ${url}`);
+  res.json({ key: record.key, url: record.url, dateRequested: record.dateRequested });
+});
+
+app.delete('/api/list-server/keys/:id', listServerRateLimit, (req, res) => {
+  if (!requireDesignatedListServer(req, res)) return;
+  const session = sessionFromRequest(req);
+  if (!session) {
+    res.status(401).json({ error: 'Log in at /login first' });
+    return;
+  }
+  const record = listServerKeys.get(req.params.id);
+  if (!record) {
+    res.status(404).json({ error: 'No such key' });
+    return;
+  }
+  const admin = isAdminSession(session, ADMIN_GROUPS);
+  if (record.bzid !== session.bzid && !admin) {
+    res.status(403).json({ error: 'Not your key' });
+    return;
+  }
+  listServerKeys.revoke(record.id);
+  log(`[LISTSERVER] "${session.callsign}" revoked the key for ${record.url}`
+    + (record.bzid !== session.bzid ? ' (admin revoking another operator\'s key)' : ''));
+  res.json({ success: true });
+});
+
+app.get('/api/list-server/keys', (req, res) => {
+  if (!requireDesignatedListServer(req, res)) return;
+  res.set('Cache-Control', 'no-store');
+  const session = sessionFromRequest(req);
+  if (!session) {
+    res.status(401).json({ error: 'Log in at /login first' });
+    return;
+  }
+  const admin = isAdminSession(session, ADMIN_GROUPS);
+  const rows = admin ? listServerKeys.listAll() : listServerKeys.listForBzid(session.bzid);
+  res.json({ admin, keys: rows.map(describeListServerKeyRow) });
+});
+
+// The reasons a report may name. `join`/`part` only update the live counts
+// below; only `boot`/`periodic` also trigger the validation callback -- "an
+// active game should not cost an outbound HTTPS round trip per player."
+const LIST_SERVER_REPORT_REASONS = new Set(['boot', 'periodic', 'join', 'part', 'shutdown']);
+
+// The ADD/REMOVE-equivalent every other bzo instance posts here. JSON, not
+// bzfs's form-encoded body -- both ends are bzo, so there is no reason to
+// mimic the wire format bzfs uses to talk to a server that predates JSON
+// everywhere. See "Reporting" in the plan.
+app.post('/api/list-server/report', listServerRateLimit, (req, res) => {
+  if (!requireDesignatedListServer(req, res)) return;
+  const key = typeof req.body?.key === 'string' ? req.body.key : '';
+  const record = listServerKeys.getByKey(key);
+  if (!record) {
+    // Absolute, not relative: this response is read by another instance's
+    // log line, not rendered on this one's own page, so a bare "/list#keys"
+    // would be ambiguous about which server it names.
+    res.status(403).json({ error: `Unknown or expired key. Generate a new one at ${PUBLIC_URL}/list#keys.` });
+    return;
+  }
+  const reason = LIST_SERVER_REPORT_REASONS.has(req.body?.reason) ? req.body.reason : 'periodic';
+  if (reason === 'shutdown') {
+    listServerKeys.unreport(record);
+    res.json({ success: true });
+    return;
+  }
+  const players = Number(req.body?.players);
+  const maxPlayers = Number(req.body?.maxPlayers);
+  const gameOptionsBits = Number(req.body?.gameOptionsBits);
+  const maxShots = Number(req.body?.maxShots);
+  listServerKeys.report(record, {
+    title: typeof req.body?.title === 'string' ? req.body.title.slice(0, 120) : '',
+    description: typeof req.body?.description === 'string' ? req.body.description.slice(0, 500) : '',
+    players: Number.isFinite(players) ? players : 0,
+    maxPlayers: Number.isFinite(maxPlayers) ? maxPlayers : 0,
+    version: typeof req.body?.version === 'string' ? req.body.version.slice(0, 40) : '',
+    gameOptionsBits: Number.isFinite(gameOptionsBits) ? gameOptionsBits : 0,
+    maxShots: Number.isFinite(maxShots) ? maxShots : 0,
+    style: typeof req.body?.style === 'string' ? req.body.style.slice(0, 20) : '',
+  });
+  res.json({ success: true });
+  // After the response, not before -- a reporting instance should not wait on
+  // this any more than an ordinary ADD would.
+  if (reason === 'boot' || reason === 'periodic') {
+    validateListServerKey(record).catch((error) => logError(`[LISTSERVER] validation failed: ${error.message}`));
+  }
+});
+
+// The public read endpoint every instance's `/list` third table fetches from
+// the designated one. Only rows that have reported at least once (`live`) --
+// a registered-but-never-run key names nobody to list.
+app.get('/api/list-server/list', (req, res) => {
+  if (!requireDesignatedListServer(req, res)) return;
+  res.set('Cache-Control', 'no-store');
+  const servers = listServerKeys.listAll()
+    .filter((record) => record.live !== null)
+    .map((record) => {
+      const stale = isListServerKeyStale(record);
+      return {
+        url: record.url,
+        title: record.live.title,
+        description: record.live.description,
+        players: record.live.players,
+        maxPlayers: record.live.maxPlayers,
+        version: record.live.version,
+        gameOptionsBits: record.live.gameOptionsBits,
+        maxShots: record.live.maxShots,
+        style: record.live.style,
+        stale,
+        staleReason: stale ? (record.lastError || 'no response') : null,
+      };
+    });
+  res.json({ servers });
+});
+
+// The signed-challenge target every instance (designated or not) answers on,
+// for whichever instance holds a key to validate against it -- "a signed
+// challenge, not a round trip of the raw key."
+app.get('/api/list-server/challenge', listServerRateLimit, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!LIST_SERVER_KEY) {
+    res.status(404).type('text/plain').send('No list server key configured.\n');
+    return;
+  }
+  const nonce = typeof req.query.nonce === 'string' ? req.query.nonce : '';
+  if (!nonce) {
+    res.status(400).json({ error: 'Missing nonce' });
+    return;
+  }
+  res.json({ signature: signListServerChallenge(LIST_SERVER_KEY, nonce) });
+});
+
+if (IS_DESIGNATED_LIST_SERVER) {
+  // A backstop for a server that has gone quiet on the push side (a blocked
+  // outbound leg, a missed restart) but is actually still reachable --
+  // initiated by the list server itself rather than waited for.
+  setInterval(() => {
+    for (const record of listServerKeys.listAll()) {
+      validateListServerKey(record)
+        .catch((error) => logError(`[LISTSERVER] daily poll failed for ${record.url}: ${error.message}`));
+    }
+  }, 24 * 60 * 60 * 1000).unref?.();
+  // Unused keys expire after 30 days -- see "Key lifetime". A failed check
+  // marks a row stale (above); only this sweep ever deletes a registration.
+  setInterval(() => {
+    const dropped = listServerKeys.sweepExpired();
+    if (dropped > 0) {
+      log(`[LISTSERVER] ${dropped} key(s) expired`
+        + ` (unused for ${Math.round(LIST_SERVER_KEY_MAX_AGE_MS / 86400000)} days)`);
+    }
+  }, 60 * 60 * 1000).unref?.();
+}
+
+// The bottom section of `/list` (docs/list-server-plan.md): this instance's
+// own list-server key admin. Login lives at the top of the page now, not
+// here -- this section only ever assumes a session exists when it needs one,
+// for the register-a-key form.
+function renderListServerKeyAdminSection({ session, admin }) {
+  if (!IS_DESIGNATED_LIST_SERVER) {
+    return `<h1 id="keys">List server key</h1>
+${LIST_SERVER_URL
+    ? `<p class="muted">This instance is not the designated list server. Manage this server's key at `
+      + `<a href="${escapeHtml(LIST_SERVER_URL)}/list#keys">${escapeHtml(LIST_SERVER_URL)}/list</a>.</p>`
+    : `<p class="muted">The list server is disabled on this instance (<code>listServerUrl</code> is empty).</p>`}`;
+  }
+  const formBlock = session
+    ? `<form id="addForm">
+<input id="urlInput" type="text" placeholder="https://your-server.example.com" required>
+<button type="submit">Generate key</button>
+</form>
+<p class="muted">Enter the server's own <code>publicUrl</code> -- the same address it already answers
+admin-whitelist probes on. The list server calls this address back to validate a report; it never
+trusts one a report claims for itself.</p>
+<div id="newKeyFlash"></div>`
+    : `<p class="muted">Log in above to register a server and generate a key.</p>`;
+  return `<h1 id="keys">${admin ? 'All registered keys' : 'Your keys'}</h1>
+<p class="muted">This instance (<code>${escapeHtml(PUBLIC_URL)}</code>) is the designated list server --
+every other bzo instance reports here, so its own <code>/list</code> can show the bzo servers
+table above.</p>
+<input id="keyFilter" type="text" placeholder="Filter…">
+<table id="keyTable">
+<thead><tr><th>URL</th>${admin ? '<th>Owner</th>' : ''}<th>Key</th><th>Requested</th><th>Last checked</th>
+<th>Status</th><th></th></tr></thead>
+<tbody></tbody>
+</table>
+${formBlock}
+<script>
+var admin = ${admin ? 'true' : 'false'};
+// ISO-ish, the same reason /list's own "Modified" column (Local maps table)
+// is: it sorts correctly as plain text, unlike a locale-formatted string.
+function fmt(ts) { return ts ? new Date(ts).toISOString().replace('T', ' ').slice(0, 19) : 'never'; }
+// A row's url/callsign/lastError all come from whoever registered or ran
+// that server, not from bzo itself -- escaped before going into innerHTML
+// the same reason the server side does it with escapeHtml everywhere else.
+function esc(text) {
+  return String(text == null ? '' : text).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\\'': '&#39;' }[c];
+  });
+}
+function renderRows(keys) {
+  var tbody = document.querySelector('#keyTable tbody');
+  tbody.innerHTML = '';
+  keys.forEach(function (row) {
+    var tr = document.createElement('tr');
+    var status = row.stale ? '<span class="stale">stale' + (row.lastError ? ' (' + esc(row.lastError) + ')' : '') + '</span>'
+      : row.live ? (row.live.players + '/' + row.live.maxPlayers + ' players') : 'never reported';
+    // A real forum BZID is numeric -- linked to its profile so an admin can
+    // see who they're looking at. (Two backslashes in this source: this text
+    // is itself inside server.js's own template literal, which would eat a
+    // single one.)
+    var ownerCell = /^\\d+$/.test(row.bzid)
+      ? '<a href="https://forums.bzflag.org/memberlist.php?mode=viewprofile&u=' + encodeURIComponent(row.bzid)
+        + '" target="_blank" rel="noopener noreferrer">' + esc(row.callsign) + '</a>'
+      : esc(row.callsign);
+    tr.innerHTML = '<td><a href="' + esc(row.url) + '" target="_blank" rel="noopener noreferrer">' + esc(row.url) + '</a></td>'
+      + (admin ? '<td>' + ownerCell + '</td>' : '')
+      + '<td><code>' + row.key + '</code></td>'
+      + '<td>' + fmt(row.dateRequested) + '</td>'
+      + '<td>' + fmt(row.lastChecked) + '</td>'
+      + '<td>' + status + '</td>'
+      + '<td><button type="button" data-id="' + row.id + '">Revoke</button></td>';
+    tbody.appendChild(tr);
+  });
+}
+function loadKeys() {
+  fetch('/api/list-server/keys').then(function (r) { return r.ok ? r.json() : { keys: [] }; })
+    .then(function (data) { renderRows(data.keys || []); });
+}
+// Sortable headers and the filter box, exactly like the three tables above --
+// attachTable (defined in that earlier script) is safe here too: this
+// table's rows carry no data-href, so the row-click-navigates behaviour it
+// also wires never matches anything. (No backticks in this comment: this
+// whole section is server.js's own template literal text.)
+attachTable('keyTable', 'keyFilter');
+document.querySelector('#keyTable tbody').addEventListener('click', function (e) {
+  var button = e.target.closest('button[data-id]');
+  if (!button) return;
+  fetch('/api/list-server/keys/' + encodeURIComponent(button.dataset.id), { method: 'DELETE' })
+    .then(loadKeys);
+});
+var addForm = document.getElementById('addForm');
+if (addForm) {
+  addForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var url = document.getElementById('urlInput').value.trim();
+    fetch('/api/list-server/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url }),
+    }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+      .then(function (result) {
+        var flash = document.getElementById('newKeyFlash');
+        if (!result.ok) {
+          flash.innerHTML = '<p class="flash error">' + (result.data.error || 'Failed') + '</p>';
+          return;
+        }
+        flash.innerHTML = '<p class="flash success">Key for ' + result.data.url + ': <code>' + result.data.key
+          + '</code><br>Paste this into that server\\'s Operator panel -- also readable from the table above any time.</p>';
+        // Left filled in, the field reads as "still registering this one" --
+        // clearing it is what makes a second submit type a fresh URL instead
+        // of appending to the one just registered.
+        document.getElementById('urlInput').value = '';
+        loadKeys();
+      });
+  });
+}
+loadKeys();
+</script>`;
+}
 
 let MAP_SOURCE = serverConfig.mapFile || 'random';
 let mapPath = '';
@@ -10068,6 +10702,98 @@ function getSuperFlagPool() {
   return SUPER_FLAGS.allowed.filter((abbreviation) => !forbidden.includes(abbreviation));
 }
 
+// The same option bits `/list` already computes for a remote bzfs row
+// (GAME_OPTION_BITS, server/remote-world-import.cjs), read off this server's
+// own resolved config instead of decoded off the wire. bzo has no handicap
+// pool, so that bit never sets.
+function computeLocalGameOptionsBits() {
+  let bits = 0;
+  if (SUPER_FLAGS.count > 0) bits |= GAME_OPTION_BITS.flags;
+  if (GAME_CONFIG.ALLOW_JUMPING) bits |= GAME_OPTION_BITS.jumping;
+  if (GAME_CONFIG.LINEAR_ACCELERATION > 0 || GAME_CONFIG.ANGULAR_ACCELERATION > 0) bits |= GAME_OPTION_BITS.inertia;
+  if (GAME_CONFIG.ALL_SHOTS_RICOCHET) bits |= GAME_OPTION_BITS.ricochet;
+  if (FLAG_SHAKE_TIMEOUT > 0 || FLAG_SHAKE_WINS > 0) bits |= GAME_OPTION_BITS.shaking;
+  if (GAME_CONFIG.ANTIDOTE_FLAGS) bits |= GAME_OPTION_BITS.antidote;
+  if (NO_TEAM_KILLS) bits |= GAME_OPTION_BITS.noTeamKills;
+  return bits;
+}
+
+// Reports this server to the designated list server -- docs/list-server-plan.md
+// "Reporting". The designated instance about itself never leaves the process:
+// there is no key to hold for a server reporting to itself, and no HTTPS round
+// trip worth making to its own loopback.
+function reportToListServer(reason) {
+  if (!LIST_SERVER_URL) return;
+  const payload = {
+    reason,
+    title: serverConfig.serverName || '',
+    description: serverConfig.description || '',
+    players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,
+    maxPlayers: MAX_REAL_PLAYERS,
+    version: SERVER_VERSION,
+    gameOptionsBits: computeLocalGameOptionsBits(),
+    // The two fields the bzfs table on this same page already shows
+    // (Shots, Style) that a bzo row was missing -- GAME_TYPE is already the
+    // same vocabulary GAME_STYLES uses to decode a remote server's style.
+    maxShots: GAME_CONFIG.SHOT_MAX_ACTIVE,
+    style: GAME_TYPE,
+  };
+  if (IS_DESIGNATED_LIST_SERVER) {
+    // No key exists for "this server reporting to itself" -- report straight
+    // into the registry instead. Found by `url` (this instance's own
+    // PUBLIC_URL) rather than by a fabricated id or a fixed bzid: `requestKey`
+    // always mints its own random UUID, so a restart that reloaded this same
+    // row from disk cannot be found by any id chosen here, and the dedupe
+    // check on `/api/list-server/keys` already guarantees no other row can
+    // ever share this exact URL -- which also leaves bzid/callsign free to
+    // change (`LIST_SERVER_OWNER_BZID`/`_CALLSIGN`, below) without breaking
+    // the lookup.
+    if (!PUBLIC_URL) return;
+    let self = listServerKeys.listAll().find((record) => record.url === PUBLIC_URL);
+    if (!self) {
+      self = listServerKeys.requestKey({
+        bzid: LIST_SERVER_OWNER_BZID || 'self',
+        callsign: LIST_SERVER_OWNER_CALLSIGN || serverConfig.serverName || '',
+        url: PUBLIC_URL,
+      });
+      // Never expires like an ordinary key would: it is re-validated (by
+      // this very call, below) every time it reports, exactly as if a daily
+      // poll always passed.
+    } else {
+      // Kept in sync on every report, not just at creation, so an operator
+      // who names their bzid after the row already exists sees it take
+      // effect on the next boot rather than needing to revoke and re-create.
+      self.bzid = LIST_SERVER_OWNER_BZID || 'self';
+      self.callsign = LIST_SERVER_OWNER_CALLSIGN || serverConfig.serverName || '';
+    }
+    if (reason === 'shutdown') {
+      listServerKeys.unreport(self);
+    } else {
+      listServerKeys.report(self, payload);
+      listServerKeys.markChecked(self, true);
+    }
+    return;
+  }
+  if (!LIST_SERVER_KEY) return;
+  fetch(`${LIST_SERVER_URL}/api/list-server/report`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'User-Agent': `bzo ${CLIENT_BUILD}` },
+    body: JSON.stringify({ key: LIST_SERVER_KEY, ...payload }),
+    signal: AbortSignal.timeout(8000),
+  }).then(async (response) => {
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${response.status}`);
+    }
+    log(`[LISTSERVER] reported (${reason}) to ${LIST_SERVER_URL}`);
+  }).catch((error) => {
+    log(`[LISTSERVER] report (${reason}) to ${LIST_SERVER_URL} failed: ${error.message}`);
+  });
+}
+// `ListServerReAddTime` upstream, bzfs.cxx:84 -- ~15 minutes, for live counts
+// even when nobody has joined or left.
+setInterval(() => reportToListServer('periodic'), 15 * 60 * 1000).unref?.();
+
 // DropGeometry::dropFlag tests a tank-radius cylinder _flagHeight tall, so a
 // spawning flag never appears somewhere a tank could not drive to reach it.
 // checkCollision tests a box as tall as the radius it is handed, so the cylinder
@@ -13277,6 +14003,10 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({
     type: 'init',
     clientBuild: CLIENT_BUILD,
+    // package.json's version, `/version`'s own answer -- shown in the
+    // Operator panel's title so an operator glancing at the panel already
+    // knows what they're running, without typing the chat command for it.
+    serverVersion: SERVER_VERSION,
     player: player.getState(),
     players: getRosterFor(player),
     config: clientGameConfig,
@@ -13292,6 +14022,15 @@ wss.on('connection', (ws, req) => {
     // in here too, and the panel keeps reading those from the live config -- a
     // `serverConfigUpdate` moves them without an `init`.
     operatorConfig: getOperatorConfigState(),
+    // Admin-only, and deliberately not part of `operatorConfig` above, which
+    // this same message sends to every player: the key itself never appears
+    // here, only whether one is configured, and `undefined` drops the whole
+    // field for anyone `isAdmin` refuses -- see `setListServerKey`.
+    listServer: player.admin ? {
+      url: LIST_SERVER_URL,
+      designated: IS_DESIGNATED_LIST_SERVER,
+      keyConfigured: Boolean(LIST_SERVER_KEY),
+    } : undefined,
     // bzfs.cxx:2437 sends MsgNewRabbit to a joining player for the same reason:
     // the rabbit is world state, not an event, so a client that arrives mid-game
     // has to be told who it is.
@@ -14084,6 +14823,7 @@ wss.on('connection', (ws, req) => {
           player.voiceMicEnabled = false;
           player.joined = true;
           player.voiceRosterSignature = '';
+          reportToListServer('join');
           // An observer never comes alive. health 0 is the state the join flow
           // already renders as a scoreboard entry with an invisible tank, which
           // is exactly what an observer wants, and it leaves every path that
@@ -14419,6 +15159,33 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ success: true, restarted: Boolean(outcome.restarted) }));
           break;
         }
+
+        // Deliberately not part of `setOperatorConfig`/`OPERATOR_CONFIG_KEYS`:
+        // that state rides in `init.operatorConfig`, sent to every connecting
+        // player (see getOperatorConfigState), and this server's own list
+        // server credential must never reach a client that is not this
+        // operator. Applied live -- "no restart, no new auth surface" -- and
+        // only ever echoed back as whether a key is now configured, never the
+        // value itself.
+        case 'setListServerKey': {
+          if (refuseNonOperator(ws, player, 'setListServerKey')) break;
+          const key = typeof message.key === 'string' ? message.key.trim() : '';
+          try {
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            config.listServerKey = key;
+            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+          } catch (error) {
+            logError(`Failed to update config at ${configPath}:`, error);
+            ws.send(JSON.stringify({ error: 'Failed to update config' }));
+            break;
+          }
+          LIST_SERVER_KEY = key;
+          serverConfig.listServerKey = key;
+          log(`[LISTSERVER] key ${key ? 'configured' : 'cleared'} by operator "${player.name}"`);
+          if (key) reportToListServer('boot');
+          ws.send(JSON.stringify({ success: true, listServerKeyConfigured: Boolean(key) }));
+          break;
+        }
       }
     } catch (err) {
       logError('Error handling message:', err.stack || err.message);
@@ -14439,6 +15206,7 @@ wss.on('connection', (ws, req) => {
     const leavingTeam = player.team;
     dropPlayerFlag(player.id);
     players.delete(player.id);
+    if (wasJoined) reportToListServer('part');
     // playing.cxx:1685. A lock onto a player who has gone is cleared rather than
     // left to expire, so nobody is told to steer at an id that no longer names
     // anyone.
@@ -14480,6 +15248,22 @@ process.on('SIGUSR1', () => {
   console.log('Received SIGUSR1 signal');
   forceClientReload();
 });
+
+// REMOVE-equivalent on a clean shutdown -- docs/list-server-plan.md
+// "Reporting". Registering a handler replaces Node's default terminate
+// action for these signals, so the process.exit below is what actually ends
+// it; a short grace period lets the outbound report go out rather than
+// promising it resolves in that time.
+let listServerShuttingDown = false;
+function reportListServerShutdown(signal) {
+  if (listServerShuttingDown) return;
+  listServerShuttingDown = true;
+  log(`[LISTSERVER] ${signal} received; reporting removal before exit`);
+  reportToListServer('shutdown');
+  setTimeout(() => process.exit(0), 500);
+}
+process.on('SIGTERM', () => reportListServerShutdown('SIGTERM'));
+process.on('SIGINT', () => reportListServerShutdown('SIGINT'));
 
 // Watch for file changes and auto-reload clients
 const publicDir = path.join(__dirname, 'public');
