@@ -1611,6 +1611,21 @@ let forwardedForPolicy = 'distrust';
 // whitelist stays limited to unproxied loopback -- the one case that needs no
 // proxy trust at all, because a remote client cannot manufacture it.
 const ADMIN_PROBE_SENTINEL = '203.0.113.66'; // RFC 5737 TEST-NET-3: never a real peer.
+// A live game loop shares this same process and thread, so the probe below can
+// lose a race it would win on an idle box: an 8-second timeout is plenty of
+// slack for two round trips through a healthy proxy, but not for one that lands
+// while the loop is busy with real players (moving tanks, shots, precompress's
+// own brotli pass on a cold cache -- both run at the same moment this does,
+// right after `server.listen`'s callback fires). A single attempt made the
+// whole server's lifetime hostage to whichever instant it happened to fire in:
+// one unlucky window and `forwardedForPolicy` stayed 'distrust' -- silently
+// refusing every proxied admin, whitelisted or not -- until the next restart,
+// with nothing to explain why "it worked before". Retrying a few times with a
+// real gap between attempts gives it several different instants to land in
+// instead of one.
+const ADMIN_PROBE_ATTEMPTS = 4;
+const ADMIN_PROBE_RETRY_DELAY_MS = 5000;
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 async function probeAdminWhitelist() {
   if (!LOCAL_ADMIN || !PUBLIC_URL) return;
   const probeUrl = `${PUBLIC_URL.replace(/\/+$/, '')}/api/_admin-probe`;
@@ -1627,25 +1642,33 @@ async function probeAdminWhitelist() {
   };
   const splitChain = (value) => (typeof value === 'string' ? value : '')
     .split(',').map((part) => part.trim()).filter(Boolean);
-  try {
-    const plain = await fetchProbe(null);
-    const poisoned = await fetchProbe(ADMIN_PROBE_SENTINEL);
-    const plainChain = splitChain(plain.xForwardedFor);
-    const poisonedChain = splitChain(poisoned.xForwardedFor);
-    const expected = plainChain[plainChain.length - 1] ?? null;
-    const last = poisonedChain[poisonedChain.length - 1] ?? null;
-    if (last === null || last === ADMIN_PROBE_SENTINEL || expected === null || last !== expected) {
-      log(`[ADMIN] ${PUBLIC_URL} does not confirm its proxy replaces X-Forwarded-For;`
-        + ' admin whitelist stays limited to unproxied loopback');
+  for (let attempt = 1; attempt <= ADMIN_PROBE_ATTEMPTS; attempt += 1) {
+    try {
+      const plain = await fetchProbe(null);
+      const poisoned = await fetchProbe(ADMIN_PROBE_SENTINEL);
+      const plainChain = splitChain(plain.xForwardedFor);
+      const poisonedChain = splitChain(poisoned.xForwardedFor);
+      const expected = plainChain[plainChain.length - 1] ?? null;
+      const last = poisonedChain[poisonedChain.length - 1] ?? null;
+      if (last === null || last === ADMIN_PROBE_SENTINEL || expected === null || last !== expected) {
+        log(`[ADMIN] ${PUBLIC_URL} does not confirm its proxy replaces X-Forwarded-For;`
+          + ' admin whitelist stays limited to unproxied loopback');
+        return;
+      }
+      forwardedForPolicy = poisonedChain.length === 1 ? 'trust-first' : 'trust-last';
+      log(`[ADMIN] ${PUBLIC_URL}'s proxy ${forwardedForPolicy === 'trust-first' ? 'overwrites' : 'appends to'}`
+        + ' X-Forwarded-For safely; admin whitelist active for loopback'
+        + (ADMIN_WHITELIST.length > 0 ? ` and ${ADMIN_WHITELIST.length} whitelisted address(es)` : ''));
       return;
+    } catch (error) {
+      if (attempt === ADMIN_PROBE_ATTEMPTS) {
+        log(`[ADMIN] Could not verify ${PUBLIC_URL}'s proxy handling of X-Forwarded-For after`
+          + ` ${ADMIN_PROBE_ATTEMPTS} attempts (${error.message}); admin whitelist stays limited`
+          + ' to unproxied loopback');
+        return;
+      }
+      await sleep(ADMIN_PROBE_RETRY_DELAY_MS);
     }
-    forwardedForPolicy = poisonedChain.length === 1 ? 'trust-first' : 'trust-last';
-    log(`[ADMIN] ${PUBLIC_URL}'s proxy ${forwardedForPolicy === 'trust-first' ? 'overwrites' : 'appends to'}`
-      + ' X-Forwarded-For safely; admin whitelist active for loopback'
-      + (ADMIN_WHITELIST.length > 0 ? ` and ${ADMIN_WHITELIST.length} whitelisted address(es)` : ''));
-  } catch (error) {
-    log(`[ADMIN] Could not verify ${PUBLIC_URL}'s proxy handling of X-Forwarded-For (${error.message});`
-      + ' admin whitelist stays limited to unproxied loopback');
   }
 }
 
@@ -3506,18 +3529,6 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // load-failure outcome, not a host it refused to try). Named on load so
   // it is visible that a map asked for one at all.
   const externalTextureUrls = new Set();
-  // `ambient`/`specular`/`emission`/`shininess` -- BzMaterial's own
-  // Blinn-Phong coefficients (`BzMaterial::reset` defaults: ambient
-  // 0.2 0.2 0.2 1, specular/emission 0 0 0 1, shininess 0) -- bzo has no
-  // lighting model that reads them (one ambient + one directional light over
-  // plain Lambert materials, see `render.js`), so every material stays
-  // diffuse-only regardless of what a map states here. Read in
-  // `applyBzwMaterialToken` below purely to notice a *non-default* value --
-  // a mapper who never touched these should not be told about it -- and
-  // tallied per distinct property name and per material actually affected,
-  // rather than silently dropped the way they used to be.
-  const unappliedLightingProps = new Set();
-  const materialsWithUnappliedLighting = new Set();
   // How many of each UNSUPPORTED_TOP_LEVEL_KEYWORDS block this map asked for,
   // by keyword -- what turns into the player-facing chat message below and
   // (with `serverOptions.serverMessages`, i.e. -srvmsg) this function's
@@ -3775,6 +3786,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         target.noShadow = referenced.noShadow;
         target.dynamicColor = referenced.dynamicColor;
         target.textureMatrix = referenced.textureMatrix;
+        target.specular = referenced.specular;
+        target.emission = referenced.emission;
+        target.shininess = referenced.shininess;
       } else if (rawRef) {
         unresolvedMaterialRefs.add(rawRef.toLowerCase());
       }
@@ -3876,19 +3890,29 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       target.noShadow = true;
       return true;
     }
-    if (token === 'ambient' || token === 'specular' || token === 'emission' || token === 'shininess') {
-      // Defaults straight from `BzMaterial::reset` -- see the declaration
-      // above. A value that matches it is a mapper who never touched this
-      // property (or an exporter, like `remote-world-import.cjs`'s own
-      // `printMaterialBlock`, that always writes every property whether or
-      // not it changed anything), not one worth a warning.
-      const defaults = token === 'ambient' ? [0.2, 0.2, 0.2, 1] : token === 'shininess' ? [0] : [0, 0, 0, 1];
+    if (token === 'specular' || token === 'emission' || token === 'shininess') {
+      // `BzMaterial::reset` defaults for a component this line leaves
+      // unstated: specular/emission `0 0 0 1`, shininess `0`. These are the
+      // three of `BzMaterial`'s four lighting coefficients that reach real
+      // GL state upstream (`OpenGLMaterial`, fed from
+      // `MeshSceneNode.cxx:463-465`), which is why `render.js` mirrors them
+      // with `MeshPhongMaterial`'s `specular`/`shininess`/`emissive` --
+      // see `hasRealSpecular` there.
+      const defaults = token === 'shininess' ? [0] : [0, 0, 0, 1];
       const values = words.slice(1).map(Number);
-      const isDefault = defaults.every((def, i) => !Number.isFinite(values[i]) || Math.abs(values[i] - def) < 1e-6);
-      if (!isDefault) {
-        unappliedLightingProps.add(token);
-        materialsWithUnappliedLighting.add(target);
-      }
+      const resolved = defaults.map((def, i) => (Number.isFinite(values[i]) ? values[i] : def));
+      target[token] = token === 'shininess' ? resolved[0] : resolved;
+      return true;
+    }
+    if (token === 'ambient') {
+      // `BzMaterial::reset`'s own default (`0.2 0.2 0.2 1`) is exactly
+      // OpenGL's compiled-in material ambient, and nothing upstream ever
+      // calls `glMaterial(..., GL_AMBIENT, ...)` anywhere in its tree --
+      // confirmed by grep across the whole source. A mapper's own `ambient`
+      // line is therefore just as inert in a real bzflag client as it would
+      // be here, matching `BzMaterial.cxx:652`'s own comment on the field:
+      // "not really used". Read and dropped like any other property this
+      // parser recognizes but does not act on -- not a bzo gap to report.
       return true;
     }
     return false;
@@ -4118,6 +4142,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       currentMaterial = {
         name: null, texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
         dynamicColor: null, textureMatrix: null,
+        specular: null, emission: null, shininess: null,
       };
       continue;
     }
@@ -4126,9 +4151,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         // Upstream's own `MaterialManager` (`BzMaterialManager::addMaterial`)
         // reuses an existing entry instead of appending a second one for a
         // block whose properties already match one it already holds --
-        // fully, on every field it parses, most of which (`ambient`,
-        // `shininess`, a full multi-layer `addtexture` list, ...) bzo itself
-        // never keeps. Approximating that dedup against only the fields bzo
+        // fully, on every field it parses, some of which (`ambient`, a full
+        // multi-layer `addtexture` list, ...) bzo itself never keeps.
+        // Approximating that dedup against only the fields bzo
         // *does* keep collapses distinct upstream entries whose difference
         // lives entirely in a dropped field -- checked directly against
         // `import-bz4.rikers.org_5154.bzw`'s own 18 materials, where two
@@ -4164,11 +4189,10 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       if (applyBzwMaterialToken(currentMaterial, token, line.split(/\s+/))) {
         continue;
       }
-      // Everything else a material block can say -- ambient/specular/
-      // emission/shininess (need a lighting model bzo does not have yet),
-      // shader/addshader/noshaders, alphathresh, noculling, nosorting,
-      // occluder, groupAlpha, spheremap, notexalpha, notexcolor,
-      // resetmat -- is read and dropped.
+      // Everything else a material block can say -- ambient (read and
+      // dropped; see `applyBzwMaterialToken` above), shader/addshader/
+      // noshaders, alphathresh, noculling, nosorting, occluder, groupAlpha,
+      // spheremap, notexalpha, notexcolor, resetmat -- is read and dropped.
       continue;
     }
 
@@ -4905,6 +4929,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         phydrv: null, noclusters: false, smoothBounce: false, decorative: false,
         driveThrough: false, shootThrough: false, ricochet: false,
         texture: 'mesh', textureUrl: null, color: null, noRadar: false, noLighting: false,
+        specular: null, emission: null, shininess: null,
         // `MeshDrawInfo`'s own `angvel` (#88, degrees/sec) -- upstream states
         // it inside an unrelated render-optimization sub-block bzo does not
         // otherwise read (`drawInfo { ... }`, see `server/remote-world-
@@ -5011,6 +5036,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
           ricochet: false,
           texture: current.texture, textureUrl: current.textureUrl,
           color: current.color, noRadar: current.noRadar, noLighting: current.noLighting,
+          specular: current.specular, emission: current.emission, shininess: current.shininess,
         };
       } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
         Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
@@ -5139,6 +5165,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       current.materialOverride ??= {
         texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
         dynamicColor: null, textureMatrix: null,
+        specular: null, emission: null, shininess: null,
       };
       applyBzwMaterialToken(current.materialOverride, token, line.split(/\s+/));
     } else if (current && (BZW_FACE_GROUPS.has(token) || token === 'color' || token === 'diffuse'
@@ -5183,6 +5210,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
             if (material.noLighting) current.wallNoLighting = true;
             if (material.dynamicColor) current.wallDynamicColor = material.dynamicColor;
             if (material.textureMatrix) current.wallTextureMatrix = material.textureMatrix;
+            if (material.specular) current.wallSpecular = material.specular;
+            if (material.emission) current.wallEmission = material.emission;
+            if (material.shininess != null) current.wallShininess = material.shininess;
           }
           if (group !== 'walls') {
             if (material.texture) { current.capTexture = material.texture; current.capTextureUrl = null; }
@@ -5191,6 +5221,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
             if (material.noLighting) current.capNoLighting = true;
             if (material.dynamicColor) current.capDynamicColor = material.dynamicColor;
             if (material.textureMatrix) current.capTextureMatrix = material.textureMatrix;
+            if (material.specular) current.capSpecular = material.specular;
+            if (material.emission) current.capEmission = material.emission;
+            if (material.shininess != null) current.capShininess = material.shininess;
           }
           if (material.noRadar) current.noRadar = true;
         } else if (refName) {
@@ -5408,6 +5441,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
           next.color = request.materialOverride.color;
           next.noRadar = request.materialOverride.noRadar;
           next.noLighting = request.materialOverride.noLighting;
+          next.specular = request.materialOverride.specular;
+          next.emission = request.materialOverride.emission;
+          next.shininess = request.materialOverride.shininess;
         }
         return next;
       }),
@@ -5951,10 +5987,6 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       `Texture name(s) bzo has no local asset for in ${mapLabel}, kept at the `
       + `obstacle's plain default: ${Array.from(unresolvedTextureNames).sort().join(', ')}`
     );
-  }
-  if (materialsWithUnappliedLighting.size > 0) {
-    const count = materialsWithUnappliedLighting.size;
-    warn(`${mapLabel} ignored: ${count} material${count === 1 ? '' : 's'} (${Array.from(unappliedLightingProps).sort().join('/')})`);
   }
   if (externalTextureUrls.size > 0) {
     // Counted by host, not listed one URL at a time -- a real map can name a

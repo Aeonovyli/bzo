@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.37] - 2026-09-19
+
+### Added
+- **A material's `specular`/`shininess`/`emission` now shade a face**,
+  matching the three of `BzMaterial`'s four lighting coefficients that
+  reach real GL state upstream. A face with real specular gets a proper
+  highlight; `emission` gives it a self-lit tint. `ambient` is read but
+  never applied, matching upstream's own dead field -- nothing in the whole
+  upstream tree ever calls `glMaterial(..., GL_AMBIENT, ...)` either. Closes
+  #89.
+
+### Fixed
+- **A tank's name could z-fight with a distant mountain and flicker behind
+  it.** A mountain sits far enough out that reaching it stretches the
+  camera's far plane, thinning the depth buffer's precision for everything
+  nearer. Matching upstream's own "don't do zbuffer test" for mountains
+  fixes it. Closes #92.
+- **The admin whitelist's startup self-check now retries before giving
+  up.** A live game loop shares this process's one thread, so the probe's
+  timeout can lose a race to a busy moment right after boot, leaving every
+  proxied admin -- whitelisted or not -- refused for the rest of that run.
+
 ## [1.2.36] - 2026-09-19
 
 ### Added

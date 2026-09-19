@@ -218,6 +218,8 @@ A material's own fields:
 | `matref <name>` | copies another already-defined material wholesale, which a line stated after it then overrides |
 | `dyncol <name>` | replaces the material's own tint outright with a named `dynamicColor`'s live RGBA -- see **Animated materials**, below |
 | `texmat <name>` | a named `textureMatrix`'s live UV transform, layered on top of whatever UVs the texture already carries -- see **Animated materials**, below |
+| `specular <r g b [a]>`, `shininess <n>`, `emission <r g b [a]>` | a highlight on the face, and a self-lit tint -- see **Lighting**, below |
+| `ambient <r g b [a]>` | read and dropped -- see **Lighting**, below for why |
 
 **A `matref` may also name a material by number instead of by name**, upstream's
 own alternative for a `material` block that gave no `name` line at all --
@@ -457,6 +459,34 @@ needs `_getSharedObstacleMaterials`/`_addObstacleFragment` taught to skip
 baking a vertex tint for a dyncol'd slot specifically, rather than the
 whole-box `vertexColors` flag it is today.
 
+### Lighting: `specular`, `shininess`, `emission`, and `ambient`
+
+`BzMaterial`'s own four Blinn-Phong coefficients (`BzMaterial::reset`
+defaults: ambient `0.2 0.2 0.2 1`, specular/emission `0 0 0 1`, shininess
+`0`). Three of them reach real GL state upstream: `MeshSceneNode.cxx:463-465`
+feeds a face's `specular`/`emission`/`shininess` straight into an
+`OpenGLMaterial`, which sets `GL_SPECULAR`/`GL_EMISSION`/`GL_SHININESS`
+(`OpenGLMaterial.cxx:115-117`) -- and switches on an accurate, view-dependent
+specular term (`GL_LIGHT_MODEL_LOCAL_VIEWER`) whenever a material's specular
+is non-black (`:118-131`). bzo mirrors this: a face with real specular
+(any of its red/green/blue above zero) becomes a `THREE.MeshPhongMaterial`
+with that `specular`/`shininess`, and `emission` becomes `emissive` on
+whichever material class the face ends up with (`MeshLambertMaterial` has an
+`emissive` slot too, so a merely-emissive, non-specular face costs nothing
+extra). A face with no real specular stays `MeshLambertMaterial`, visually
+identical to a `MeshPhongMaterial` whose own specular is black but cheaper to
+draw -- `hasRealSpecular`/`pickLitMaterialClass` in `public/render.js`.
+
+**`ambient` is read and dropped, deliberately.** It is the fourth of
+`BzMaterial`'s own coefficients, but it never reaches a `glMaterial` call
+anywhere in the whole upstream tree -- confirmed by grep -- so a mapper's own
+`ambient` line does nothing in a real bzflag client either.
+`BzMaterial.cxx:652`'s own comment on the field says as much ("not really
+used"), and its `printMTL` export even writes it out as an OBJ *comment*
+(`#Ka`) rather than a real `Ka` line. bzo matches that by not applying it,
+the same as any other property this section reads but does not act on --
+not a parity gap to report.
+
 Not yet read:
 
 - **`texsize`/`texoffset`**, so a `matref`'d or `addtexture`'d picture always
@@ -464,9 +494,6 @@ Not yet read:
   in (8 units per tile on a box's or a pyramid's walls, 2 on a box's caps --
   see **Colour** and `_prepareBoxGeometry`) rather than at a size or an offset
   the map may have asked for.
-- **`ambient`/`specular`/`emission`/`shininess`.** bzo's renderer lights an
-  obstacle one way today; reading these needs a lighting model first, not
-  only a parser change.
 - **`shader`/`addshader`/`noshaders`, `alphathresh`, `noculling`,
   `nosorting`, `occluder`, `groupAlpha`, `spheremap`, `notexalpha`,
   `notexcolor`, `resetmat`.** Read and dropped, the same as any other
@@ -1190,12 +1217,12 @@ way, permanently rather than provisionally.
 Anything not listed above is skipped without comment, which means a map using it
 loads and plays with that part of it missing. The notable absences:
 
-- **Most of what a `material` block or a `matref` can still say**:
-  `texsize`, `texoffset`, `dynamicColor`, `textureMatrix`, and the
-  lighting inputs `ambient`, `specular`, `emission`, `shininess` -- see
+- **`texsize`/`texoffset` on a `material` block or a `matref`.** See
   **Materials** above for what a material *does* read now (`addtexture`/
   `texture` against bzo's own stock assets, `color`/`diffuse`, `noradar`,
-  `nolighting`) and what of this list is closest to landing next.
+  `nolighting`, `dyncol`/`texmat`, and -- see **Lighting** there --
+  `specular`/`shininess`/`emission`; `ambient` is read but never applied,
+  matching upstream's own dead field).
 - **`shear`, `xform`, and a `spin` about anything but the vertical axis.**
   `shift`, `scale` and a vertical `spin` are read now -- see **Groups**
   above, and its "Not yet read" list for what of this line is left.

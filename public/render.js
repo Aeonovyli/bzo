@@ -509,6 +509,25 @@ const BZFLAG_MOON_ANGULAR_RADIUS = Math.atan(Math.PI / 180);
 const CELESTIAL_RENDER_ORDER = -1000;
 // The glow is bzo's, and rides just outside the sun's disc.
 const CELESTIAL_GLOW_RATIO = 1.5;
+// Mountains, after the sky but still well before the ordinary depth-tested
+// scene -- `BackgroundRenderer::renderGroundEffects`
+// (`BackgroundRenderer.cxx:657-660`) draws them with the z-buffer test off:
+// "either everything is coplanar with the ground or is drawn back to front
+// and is occluded by everything drawn after it", and `drawMountains`'s own
+// call site says it plainly -- "don't do zbuffer test since they occlude
+// all drawn before them and are occluded by all drawn after" (`:691-695`).
+// A mountain sits at `2.25 * mapSize`, and stretching the camera's far
+// plane out to it (`_ensureMountainViewDistance`) thins the depth buffer's
+// precision for everything nearer too, so an ordinary depth-tested mountain
+// material leaves a tank's name sprite close enough to it in the quantized
+// depth range to z-fight (issue #92).
+// Matching upstream's own "don't test" -- `depthTest`/`depthWrite` both off
+// in `createMountains` -- removes it from that contest entirely: drawn
+// first, painted over by anything real that comes after, exactly as
+// upstream has it. This needs the *opaque* render list to actually draw
+// first, which is why `createMountains` also turns off `transparent` --
+// see the comment there.
+const MOUNTAIN_RENDER_ORDER = -500;
 // BZFlag does not draw the ground as one enormous quad. At its default quality
 // it draws a patch that follows the eye, skirted by four quads reaching the edge
 // of the world (BackgroundRenderer::drawGroundCentered, BackgroundRenderer.cxx:1132).
@@ -614,6 +633,55 @@ function animIdentityKey(descriptor) {
     animIdentityIds.set(descriptor, ++animIdentityCounter);
   }
   return String(animIdentityIds.get(descriptor));
+}
+
+// A material's `specular`/`shininess`/`emission` -- the coefficients that
+// reach real GL state upstream (`OpenGLMaterial`, fed from
+// `MeshSceneNode.cxx:463-465`). `ambient` is the fourth of `BzMaterial`'s own
+// set but never reaches one: nothing upstream ever calls
+// `glMaterial(..., GL_AMBIENT, ...)` anywhere in its tree, so a mapper's own
+// ambient line is exactly as inert in a real bzflag client as it is here --
+// see `applyBzwMaterialToken` in server.js, and `BzMaterial.cxx:652`'s own
+// "not really used". A material with no real specular stays
+// `MeshLambertMaterial`, cheaper and visually identical to a
+// `MeshPhongMaterial` whose own specular is black; one with real specular
+// becomes `MeshPhongMaterial` so the highlight -- and the shininess that
+// shapes it -- actually show, matching upstream's own
+// `RENDERER.useQuality() > 0` branch that turns on accurate, view-dependent
+// specular exactly when a material's specular is non-black
+// (`OpenGLMaterial.cxx:118-131`).
+function hasRealSpecular(specular) {
+  return !!specular && (specular[0] > 0 || specular[1] > 0 || specular[2] > 0);
+}
+
+function pickLitMaterialClass(specular) {
+  return hasRealSpecular(specular) ? THREE.MeshPhongMaterial : THREE.MeshLambertMaterial;
+}
+
+// `emissive` is a `MeshLambertMaterial` property too, so it costs nothing to
+// carry regardless of which class `pickLitMaterialClass` chose.
+function buildLightingMaterialOptions(specular, shininess, emission) {
+  const options = {};
+  if (emission && (emission[0] > 0 || emission[1] > 0 || emission[2] > 0)) {
+    options.emissive = new THREE.Color(emission[0], emission[1], emission[2]);
+  }
+  if (hasRealSpecular(specular)) {
+    options.specular = new THREE.Color(specular[0], specular[1], specular[2]);
+    options.shininess = shininess || 0;
+  }
+  return options;
+}
+
+// A shared obstacle material is cached by `key` alone (`_getSharedObstacleMaterials`),
+// so two obstacles whose specular/shininess/emission differ need different keys
+// or they would silently share whichever one built the material first.
+function materialLightingKey(specular, shininess, emission) {
+  if (!hasRealSpecular(specular) && !(emission && (emission[0] > 0 || emission[1] > 0 || emission[2] > 0))) {
+    return '';
+  }
+  const s = specular ? specular.slice(0, 3).join(',') : '';
+  const e = emission ? emission.slice(0, 3).join(',') : '';
+  return `${s}/${shininess || 0}/${e}`;
 }
 
 // `DynamicColor::update` (`src/game/DynamicColor.cxx:371-463`). A sequence
@@ -2680,12 +2748,12 @@ class RenderManager {
   // fight every frame; `dyncol` replaces a slot's diffuse outright upstream
   // too (`MeshSceneNode.cxx:487-491`), so this is the same rule, just not
   // yet arbitrated against `_addObstacleFragment`'s own tint argument.
-  _getSharedObstacleMaterials(key, sideTextureFactory, topTextureFactory, options = {}, unlit = {}, animation = {}) {
+  _getSharedObstacleMaterials(key, sideTextureFactory, topTextureFactory, options = {}, unlit = {}, animation = {}, lighting = {}) {
     if (!this._sharedObstacleMaterials) this._sharedObstacleMaterials = new Map();
     const existing = this._sharedObstacleMaterials.get(key);
     if (existing) return existing;
-    const SideClass = unlit.side ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
-    const CapClass = unlit.cap ? THREE.MeshBasicMaterial : THREE.MeshLambertMaterial;
+    const SideClass = unlit.side ? THREE.MeshBasicMaterial : pickLitMaterialClass(lighting.wallSpecular);
+    const CapClass = unlit.cap ? THREE.MeshBasicMaterial : pickLitMaterialClass(lighting.capSpecular);
     // `sideMaterial`/`capMaterial` are declared before either factory runs so
     // the alpha callback below always closes over the real material -- safe
     // even though a factory may invoke it before returning (an already-known
@@ -2696,10 +2764,12 @@ class RenderManager {
     sideMaterial = new SideClass({
       map: sideTextureFactory((hasAlpha) => applyTextureAlpha(sideMaterial, hasAlpha)),
       ...options,
+      ...(unlit.side ? {} : buildLightingMaterialOptions(lighting.wallSpecular, lighting.wallShininess, lighting.wallEmission)),
     });
     capMaterial = new CapClass({
       map: topTextureFactory((hasAlpha) => applyTextureAlpha(capMaterial, hasAlpha)),
       ...options,
+      ...(unlit.cap ? {} : buildLightingMaterialOptions(lighting.capSpecular, lighting.capShininess, lighting.capEmission)),
     });
     const materials = [sideMaterial, capMaterial];
     materials.forEach((material) => { material.userData.shared = true; });
@@ -3976,6 +4046,14 @@ class RenderManager {
           wallTextureMatrix: obs.wallTextureMatrix || null,
           capTextureMatrix: obs.capTextureMatrix || null,
         };
+        const pyramidLighting = {
+          wallSpecular: obs.wallSpecular || null,
+          wallShininess: obs.wallShininess || 0,
+          wallEmission: obs.wallEmission || null,
+          capSpecular: obs.capSpecular || null,
+          capShininess: obs.capShininess || 0,
+          capEmission: obs.capEmission || null,
+        };
         const pyramidKey = [
           tint ? 'pyramidTinted' : 'pyramid',
           pyramidWallTexture ? `w-${pyramidWallTexture}` : '',
@@ -3988,6 +4066,8 @@ class RenderManager {
           `cd-${animIdentityKey(pyramidAnimation.capDynamicColor)}`,
           `wt-${animIdentityKey(pyramidAnimation.wallTextureMatrix)}`,
           `ct-${animIdentityKey(pyramidAnimation.capTextureMatrix)}`,
+          `wm-${materialLightingKey(pyramidLighting.wallSpecular, pyramidLighting.wallShininess, pyramidLighting.wallEmission)}`,
+          `cm-${materialLightingKey(pyramidLighting.capSpecular, pyramidLighting.capShininess, pyramidLighting.capEmission)}`,
         ].join('');
         this._addObstacleFragment(
           fragments,
@@ -3999,6 +4079,7 @@ class RenderManager {
             tint ? { flatShading: true, vertexColors: true } : { flatShading: true },
             pyramidUnlit,
             pyramidAnimation,
+            pyramidLighting,
           ),
           geometry,
           obstacleMatrix(),
@@ -4041,6 +4122,14 @@ class RenderManager {
           wallTextureMatrix: obs.wallTextureMatrix || null,
           capTextureMatrix: obs.capTextureMatrix || null,
         };
+        const boxLighting = {
+          wallSpecular: obs.wallSpecular || null,
+          wallShininess: obs.wallShininess || 0,
+          wallEmission: obs.wallEmission || null,
+          capSpecular: obs.capSpecular || null,
+          capShininess: obs.capShininess || 0,
+          capEmission: obs.capEmission || null,
+        };
         const boxKey = [
           flatOnGround ? 'boxFlat' : 'box',
           tint ? 'Tinted' : '',
@@ -4054,6 +4143,8 @@ class RenderManager {
           `cd-${animIdentityKey(boxAnimation.capDynamicColor)}`,
           `wt-${animIdentityKey(boxAnimation.wallTextureMatrix)}`,
           `ct-${animIdentityKey(boxAnimation.capTextureMatrix)}`,
+          `wm-${materialLightingKey(boxLighting.wallSpecular, boxLighting.wallShininess, boxLighting.wallEmission)}`,
+          `cm-${materialLightingKey(boxLighting.capSpecular, boxLighting.capShininess, boxLighting.capEmission)}`,
         ].join('');
         this._addObstacleFragment(
           fragments,
@@ -4070,6 +4161,7 @@ class RenderManager {
             },
             boxUnlit,
             boxAnimation,
+            boxLighting,
           ),
           // BoxSceneNodeGenerator.cxx:66, in its own words: "Don't generate the
           // bottom polygon if on the ground (or lower)".
@@ -4291,13 +4383,16 @@ class RenderManager {
       if (triangleCount <= 0) return;
 
       const key = `${face.texture || ''}|${face.textureUrl || ''}|${(face.color || []).join(',')}`
-        + `|${animIdentityKey(face.dynamicColor)}|${animIdentityKey(face.textureMatrix)}`;
+        + `|${animIdentityKey(face.dynamicColor)}|${animIdentityKey(face.textureMatrix)}`
+        + `|${materialLightingKey(face.specular, face.shininess, face.emission)}`;
       let materialIndex = materialIndexByKey.get(key);
       if (materialIndex === undefined) {
         // A generic `mesh` face with no `texture`/`addtexture` at all (unlike
         // box/pyramid, which upstream always textures with a stock default)
         // is meant to be flat-colored -- falling back to the boxwall texture
         // here would draw a wall pattern the map never asked for.
+        const LitClass = pickLitMaterialClass(face.specular);
+        const lightingOptions = buildLightingMaterialOptions(face.specular, face.shininess, face.emission);
         let material;
         if (face.texture || face.textureUrl) {
           const textureFactory = resolveObstacleTextureFactory(
@@ -4308,11 +4403,12 @@ class RenderManager {
           // (`public/texture.js`) always defers to a microtask, so the
           // callback never actually fires until this statement (and `let`)
           // has finished, even when the answer was already known.
-          material = new THREE.MeshLambertMaterial({
+          material = new LitClass({
             map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha)),
+            ...lightingOptions,
           });
         } else {
-          material = new THREE.MeshLambertMaterial();
+          material = new LitClass(lightingOptions);
         }
         if (face.color) {
           material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);
@@ -5345,11 +5441,21 @@ class RenderManager {
       textureIndex < numMountainTextures;
       textureIndex += 1, n += numFacesPerTexture) {
       const texture = this._createSharedImageTexture(MOUNTAIN_TEXTURE_PATHS[textureIndex]);
+      // `transparent: false` matters as much as the depth flags below: Three.js
+      // always draws its transparent list after the whole opaque list, no
+      // matter what `renderOrder` says, so a `transparent: true` material can
+      // never be made to draw *before* an ordinary opaque box or tank --
+      // only after, which is what let the mountain's own disabled depth test
+      // paint over every already-drawn box, mesh and tank unconditionally.
+      // `alphaTest` alone still cuts the silhouette out of the square
+      // texture without needing the transparent list at all.
       const material = new THREE.MeshLambertMaterial({
         map: texture,
-        transparent: true,
+        transparent: false,
         alphaTest: 0.02,
         side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false,
       });
 
       const frontGeometry = this._createMountainStripGeometry(
@@ -5362,6 +5468,7 @@ class RenderManager {
       const frontMountain = new THREE.Mesh(frontGeometry, material);
       frontMountain.receiveShadow = false;
       frontMountain.castShadow = false;
+      frontMountain.renderOrder = MOUNTAIN_RENDER_ORDER;
       this.worldGroup.add(this._tagDraws(frontMountain, 'scenery'));
       this.mountainMeshes.push(frontMountain);
 
@@ -5375,6 +5482,7 @@ class RenderManager {
       const backMountain = new THREE.Mesh(backGeometry, material.clone());
       backMountain.receiveShadow = false;
       backMountain.castShadow = false;
+      backMountain.renderOrder = MOUNTAIN_RENDER_ORDER;
       this.worldGroup.add(this._tagDraws(backMountain, 'scenery'));
       this.mountainMeshes.push(backMountain);
     }
@@ -5468,6 +5576,14 @@ class RenderManager {
   // it is and how big, so nothing about the material can.
   _getCloudMaterial() {
     if (!this._cloudMaterial) {
+      // A real translucent puff needs `transparent: true`, which puts it in
+      // Three.js's transparent render list -- always drawn after the whole
+      // opaque list regardless of `renderOrder`, unlike a mountain's hard
+      // alpha-tested cutout (see `createMountains`). Disabling its depth
+      // test the same way would then paint it over every already-drawn box,
+      // mesh and tank unconditionally, so a cloud keeps ordinary depth
+      // testing and only the occasional near-field z-fight issue #92's own
+      // comment called "to a lesser extent".
       this._cloudMaterial = new THREE.MeshLambertMaterial({
         color: 0xffffff,
         transparent: true,

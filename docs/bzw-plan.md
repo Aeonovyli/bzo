@@ -188,10 +188,6 @@ mesh geometry does too.
       `PD_Conveyor`/`PD_Death` pads for the box/pyramid side -- see "Animated
       materials" in `docs/bzw.md`, including the one remaining assumption
       (a wall/cap slot with both a static tint and a `dyncol` at once).
-- [ ] `ambient`/`specular`/`emission`/`shininess` need a lighting model that
-      reads them -- bzo's renderer lights obstacles one way today, so this is
-      the one item here that is a rendering-architecture question first and a
-      parser task second.
 - [x] `matref`/`addtexture` on a `group` instance -- not the only-if-unset
       shape assumed here originally. Checked directly against upstream's own
       `ObstacleModifier::execute` (`ObstacleModifier.cxx:179-223`): it never
