@@ -7864,6 +7864,7 @@ function refreshCollisionColliders() {
   // The buildings a tank was inside belonged to the world that is going away,
   // and the renderer disposes their eighth-dimension nodes with it.
   insideBuildings = [];
+  renderedInsideBuildings = [];
 }
 
 function rebuildTeleporterRuntimeState() {
@@ -7904,9 +7905,15 @@ function getColliderTopY(obs) {
 // motion for. `insideBuildings` is upstream's own list
 // (LocalPlayer::collectInsideBuildings, LocalPlayer.cxx:966) and answers both
 // questions the flag asks: whether the tank is `InBuilding`, which is what takes
-// its reverse, its trigger and its drop control away, and which buildings the
-// eighth dimension is drawn inside of.
+// its reverse, its trigger and its drop control away.
 let insideBuildings = [];
+// What the renderer actually draws the eighth dimension inside of -- the
+// same body sweep above, unioned with whatever the current camera position
+// also lands inside (#77). Kept apart from `insideBuildings` because the two
+// questions have different answers once the camera can lead or lag the tank
+// (#104): the camera clipping into a wall should make that wall see-through,
+// not take the tank's drop/reverse/jump/fire away from it.
+let renderedInsideBuildings = [];
 // `desiredSpeed < 0` as `phasedObstacleExpels` asks it. Sampled where the stick
 // is read, which is a frame ahead of the collider that uses it -- as upstream's
 // is, `setDesiredSpeed` running off the input event and `getHitBuilding` off the
@@ -8137,8 +8144,15 @@ const OBSERVER_POINT_SCALE = Object.freeze({ width: 0, length: 0 });
 // wall-avoidance, so it can sit inside a solid before the tracked tank's own
 // body (or the observer's own roam position) ever would. Wherever the
 // current view actually renders from is unioned in on top of the sweep
-// above for exactly that reason -- both can name obstacles the other
-// misses, and the effect belongs on all of them.
+// above for the eighth-dimension shells the renderer draws -- both can name
+// obstacles the other misses, and *that* effect belongs on all of them.
+//
+// `insideBuildings` itself stays body-only, though (#104): it is also
+// `amInsideBuilding()`, which the drop/reverse/jump/fire rules all read as
+// "is the tank actually touching a wall". A third-person camera that has
+// swung into a wall the tank's own box has not reached is not that, and
+// gating gameplay on it left a flag undroppable for a reason only the
+// camera could see.
 function updateInsideBuildings() {
   const phased = amPhased();
   const observer = isObserver();
@@ -8147,18 +8161,23 @@ function updateInsideBuildings() {
     : observer
       ? findInsideBuildings(playerX, playerY, playerZ, playerRotation, OBSERVER_POINT_SCALE)
       : [];
+  if (found.length !== insideBuildings.length
+    || !found.every((obs, i) => obs === insideBuildings[i])) {
+    insideBuildings = found;
+  }
   const cameraPosition = (phased || observer) ? renderManager.getCameraPosition() : null;
+  const forRender = cameraPosition ? found.slice() : found;
   if (cameraPosition) {
     for (const obs of findInsideBuildings(
       cameraPosition.x, cameraPosition.y, cameraPosition.z, 0, OBSERVER_POINT_SCALE,
     )) {
-      if (!found.includes(obs)) found.push(obs);
+      if (!forRender.includes(obs)) forRender.push(obs);
     }
   }
-  if (found.length === insideBuildings.length
-    && found.every((obs, i) => obs === insideBuildings[i])) return;
-  insideBuildings = found;
-  renderManager.setInsideBuildings(insideBuildings);
+  if (forRender.length === renderedInsideBuildings.length
+    && forRender.every((obs, i) => obs === renderedInsideBuildings[i])) return;
+  renderedInsideBuildings = forRender;
+  renderManager.setInsideBuildings(renderedInsideBuildings);
 }
 
 // Intended input state

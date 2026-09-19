@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.43] - 2026-09-19
+
+### Fixed
+- **A third-person camera clipping into a wall no longer blocks flag drop,
+  reverse, jump, or firing for a tank that isn't actually touching it.**
+  Those gameplay checks had been reading the same "inside a building" list
+  the eighth-dimension see-through effect uses, which includes whatever the
+  rendered camera position lands inside of; now the two are tracked
+  separately, so gameplay only ever gates on the tank's own body. Closes #104.
+
 ## [1.2.42] - 2026-09-19
 
 ### Changed
