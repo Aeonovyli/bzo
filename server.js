@@ -1432,13 +1432,13 @@ let bzoServerListCache = { at: 0, servers: [] };
 
 async function getBzoServerList() {
   if (!LIST_SERVER_URL) return [];
-  if (Date.now() - bzoServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
-    return bzoServerListCache.servers;
-  }
   // The designated instance already holds this in-process -- no reason to
-  // round-trip HTTPS to itself for its own `/list`.
+  // round-trip HTTPS to itself for its own `/list`, and no reason to cache
+  // it either: unlike the fetch below, reading the registry costs nothing,
+  // and caching it would only add a window where a fresher report already
+  // landed but `/list` still shows the stale snapshot.
   if (IS_DESIGNATED_LIST_SERVER) {
-    const servers = listServerKeys.listAll()
+    return listServerKeys.listAll()
       .filter((record) => record.live !== null)
       .map((record) => {
         const stale = isListServerKeyStale(record);
@@ -1450,8 +1450,9 @@ async function getBzoServerList() {
           stale, staleReason: stale ? (record.lastError || 'no response') : null,
         };
       });
-    bzoServerListCache = { at: Date.now(), servers };
-    return servers;
+  }
+  if (Date.now() - bzoServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
+    return bzoServerListCache.servers;
   }
   try {
     const response = await fetch(`${LIST_SERVER_URL}/api/list-server/list`, {
@@ -8945,8 +8946,13 @@ defineCommand('/pos', COMMAND_TIER.OPEN,
 // `maxPlayerScore`/`maxTeamScore` are live for the same reason: they only
 // decide what the next kill or capture checks against.
 const LIVE_CONFIG_KEYS = Object.freeze([
-  'motd', 'shotMaxActive', 'ricochet', 'timeLimit', 'timeManualStart', 'maxPlayerScore', 'maxTeamScore',
+  'serverName', 'motd', 'shotMaxActive', 'ricochet', 'timeLimit', 'timeManualStart', 'maxPlayerScore', 'maxTeamScore',
 ]);
+// A server's own name, not upstream's -- bzfs has no such thing to cap.
+// Well under the 120 characters `/api/list-server/report` accepts for the
+// same value as its `title` field, so a name typed here is never silently
+// truncated on the way to `/list`.
+const SERVER_NAME_MAX_LENGTH = 60;
 // Upstream keeps no fixed ceiling on `-time`; this is the panel slider's own,
 // so a drag has somewhere to stop. A map or `server.json` may still set a
 // higher `timeLimit` directly -- the slider just cannot reach past an hour.
@@ -8991,6 +8997,7 @@ function getOperatorConfigState() {
     normalizeTeamLimits(serverConfig.teamMode?.limits, PLAYER_TEAMS, MAX_REAL_PLAYERS),
     MAX_REAL_PLAYERS);
   return {
+    serverName: serverConfig.serverName || '',
     motd: serverConfig.motd || '',
     shotMaxActive: GAME_CONFIG.SHOT_MAX_ACTIVE,
     ricochet: GAME_CONFIG.ALL_SHOTS_RICOCHET,
@@ -9060,6 +9067,15 @@ function applyServerConfigChanges(requested, byWhom) {
   const current = getOperatorConfigState();
   const has = (key) => Object.prototype.hasOwnProperty.call(requested, key);
   const next = {};
+  if (has('serverName')) {
+    if (typeof requested.serverName !== 'string') return { error: 'Invalid server name value' };
+    const serverName = requested.serverName.trim();
+    if (!serverName) return { error: 'Server name cannot be empty' };
+    if (serverName.length > SERVER_NAME_MAX_LENGTH) {
+      return { error: `Server name must be ${SERVER_NAME_MAX_LENGTH} characters or fewer` };
+    }
+    next.serverName = serverName;
+  }
   if (has('motd')) {
     if (typeof requested.motd !== 'string') return { error: 'Invalid motd value' };
     const motd = requested.motd.trim();
@@ -9158,6 +9174,10 @@ function applyServerConfigChanges(requested, byWhom) {
   }
 
   const changed = [];
+  if (next.serverName !== undefined) {
+    serverConfig.serverName = next.serverName;
+    changed.push('serverName');
+  }
   if (next.motd !== undefined) {
     serverConfig.motd = next.motd;
     changed.push('motd');
@@ -9223,6 +9243,7 @@ function applyServerConfigChanges(requested, byWhom) {
 
   broadcastAll({
     type: 'serverConfigUpdate',
+    serverName: serverConfig.serverName || '',
     motd: serverConfig.motd || '',
     shotMaxActive: GAME_CONFIG.SHOT_MAX_ACTIVE,
     ricochet: GAME_CONFIG.ALL_SHOTS_RICOCHET,

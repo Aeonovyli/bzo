@@ -462,6 +462,7 @@ let ws = null;
 let gameConfig = null;
 let serverDescriptionText = '';
 let serverMotdText = '';
+let serverNameText = '';
 let startupBuildInfoAnnounced = false;
 let lastAnnouncedServerDescription = null;
 let lastAnnouncedServerMotd = null;
@@ -5506,7 +5507,8 @@ function handleServerMessage(message) {
       const serverMotdEl = document.getElementById('serverMotd');
       serverDescriptionText = message.description || '';
       serverMotdText = message.motd || '';
-      if (serverNameEl) serverNameEl.textContent = 'Server: ' + (message.serverName || '');
+      serverNameText = message.serverName || '';
+      if (serverNameEl) serverNameEl.textContent = 'Server: ' + serverNameText;
       if (serverDescriptionEl) serverDescriptionEl.textContent = serverDescriptionText;
       if (serverMotdEl) serverMotdEl.textContent = serverMotdText;
       announceServerTextIfChanged();
@@ -7271,6 +7273,14 @@ function attachSortFilter(tableId, filterId) {
 }
 
 function handleServerConfigUpdate(message) {
+  if (typeof message.serverName === 'string') {
+    serverNameText = message.serverName;
+    const serverNameEl = document.getElementById('serverName');
+    const serverNameInput = document.getElementById('serverNameInput');
+    if (serverNameEl) serverNameEl.textContent = 'Server: ' + serverNameText;
+    if (serverNameInput) serverNameInput.value = serverNameText;
+  }
+
   if (typeof message.description === 'string') {
     serverDescriptionText = message.description;
     const serverDescriptionEl = document.getElementById('serverDescription');
@@ -7328,7 +7338,7 @@ let currentMapFile = '';
 // Sent in `init`: the settings that can change without starting a new game.
 // Read rather than duplicated, so the confirm's label cannot promise something
 // the server will not do.
-let liveConfigKeys = ['motd', 'shotMaxActive', 'ricochet'];
+let liveConfigKeys = ['serverName', 'motd', 'shotMaxActive', 'ricochet'];
 // Sent in `init` too: what every setting the panel offers is currently set to.
 // The three live ones are read from the live config below instead, since a
 // `serverConfigUpdate` moves those without an `init` to carry them.
@@ -7372,6 +7382,7 @@ const operatorLimitKey = (team) => `${team}Limit`;
 function getOperatorServerState() {
   return {
     ...serverOperatorConfig,
+    serverName: serverNameText || '',
     motd: serverMotdText || '',
     shotMaxActive: Number(gameConfig?.SHOT_MAX_ACTIVE) || SHOT_MAX_ACTIVE_MIN,
     ricochet: Boolean(gameConfig?.ALL_SHOTS_RICOCHET),
@@ -7541,6 +7552,10 @@ function paintOperatorRows(state) {
 
 function syncOperatorPanel() {
   if (!operatorStaged) return;
+  const serverNameInput = document.getElementById('serverNameInput');
+  if (serverNameInput && serverNameInput.value !== operatorStaged.serverName) {
+    serverNameInput.value = operatorStaged.serverName;
+  }
   const motdInput = document.getElementById('motdInput');
   if (motdInput && motdInput.value !== operatorStaged.motd) motdInput.value = operatorStaged.motd;
   const mapList = document.getElementById('mapList');
@@ -7653,6 +7668,10 @@ function stageOperatorRabbit(direction) {
 
 function wireOperatorPanel() {
   buildOperatorTeamLimitRows();
+  const serverNameInput = document.getElementById('serverNameInput');
+  if (serverNameInput) {
+    serverNameInput.addEventListener('input', () => stageOperatorChange('serverName', serverNameInput.value.trim()));
+  }
   const motdInput = document.getElementById('motdInput');
   if (motdInput) {
     motdInput.addEventListener('input', () => stageOperatorChange('motd', motdInput.value.trim()));
@@ -13448,6 +13467,14 @@ function getXROperatorMenuItems() {
     : 'Loading...';
   return [
     {
+      id: 'operatorServerNameXR',
+      label: 'Server Name',
+      // The headset's own keyboard where the session has one; see
+      // beginXRTextEntry. A paired physical keyboard is untested.
+      value: keyboard ? (staged.serverName || '(empty)') : 'Desktop only',
+      disabled: !keyboard,
+    },
+    {
       id: 'operatorMotdXR',
       label: 'MOTD',
       // The headset's own keyboard where the session has one; see
@@ -13674,6 +13701,13 @@ function activateXRSettingsMenuSelection(item) {
   else if (item.id === 'voiceEchoXR') document.getElementById('voiceEchoCancellation')?.click();
   else if (item.id === 'voiceNoiseXR') document.getElementById('voiceNoiseSuppression')?.click();
   else if (item.id === 'voiceGainXR') document.getElementById('voiceAutoGainControl')?.click();
+  else if (item.id === 'operatorServerNameXR') {
+    // Staged like every other row: the headset keyboard returns the text and the
+    // confirm is what sends it.
+    beginXRTextEntry((operatorStaged || getOperatorServerState()).serverName, (typed) => {
+      stageOperatorChange('serverName', typed.trim());
+    });
+  }
   else if (item.id === 'operatorMotdXR') {
     // Staged like every other row: the headset keyboard returns the text and the
     // confirm is what sends it.

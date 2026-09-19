@@ -27,6 +27,13 @@
              than text boxes so the whole panel is reachable with left, right and
              select, which is all a headset has; see
              docs/operator-panel-plan.md. -->
+        <!-- Shown in the entry dialog ("Server: <name>") and, once
+             registered, as the title on /list's bzo-servers table
+             (docs/list-server.md) -- so it's live, the same as MOTD. -->
+        <div class="operatorRow operatorConfigRow">
+          <label for="serverNameInput">Server Name:</label>
+          <input type="text" id="serverNameInput" maxlength="60" placeholder="Server name">
+        </div>
         <div class="operatorRow operatorConfigRow">
           <label for="motdInput">Set MOTD:</label>
           <input type="text" id="motdInput" maxlength="140" placeholder="Message of the day">
