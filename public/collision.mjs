@@ -1273,6 +1273,16 @@ export const SHOT_COLLISION_RADIUS = 0.1;
 // 100 for the same reason: a shot wedged into a corner must not spin the loop.
 // A step that spends them all forfeits whatever travel it had left.
 export const MAX_SHOT_BOUNCES_PER_STEP = 4;
+// How far off a surface a bounced shot resumes from, along that surface's
+// normal, before its next pass is traced -- `traceShotBeam`'s own
+// `BEAM_SURFACE_CLEARANCE` (server.js), shared here so a beam's bounce and an
+// ordinary shot's agree. It has to clear `SHOT_COLLISION_RADIUS`: within that
+// distance the shot still reads as inside the obstacle it just left, and a
+// pass that starts inside something is carried straight through rather than
+// tested against it -- which at a grazing angle, where the reflection leaves
+// almost no perpendicular gap on its own, is what let a shot re-catch the
+// same face pass after pass rather than actually leaving it (#93).
+export const SHOT_BOUNCE_CLEARANCE = SHOT_COLLISION_RADIUS * 4;
 
 // An obstacle-local normal in world space, normalized. The rotation is the
 // inverse of getColliderLocalPoint's, so the sign follows the same reasoning.
@@ -1360,6 +1370,25 @@ export function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, ra
       }
     }
     best = { fraction: lo, obstacle };
+    // A mesh has no single flat top/bottom the way a box or a pyramid's
+    // `get3DNormal` fallthrough reads directly off `y`, so its own reflection
+    // needs a real face -- and asking for one at `lo`, the point this
+    // bisection deliberately leaves just outside the solid, always comes back
+    // empty (that emptiness is what makes `lo` "outside" in the first place),
+    // which is what let `getMeshHitNormal` fall through to its own last-resort
+    // straight-up normal here. `hi`, the last sample this bisection confirmed
+    // inside, is where a face is actually there to find (#93).
+    if (obstacle.type === 'mesh') {
+      best.face = findMeshHitFace(
+        obstacle,
+        fromX + (toX - fromX) * hi,
+        fromY + (toY - fromY) * hi,
+        fromZ + (toZ - fromZ) * hi,
+        radius,
+        radius,
+        'shootThrough'
+      );
+    }
   }
 
   const meshHit = findMeshRayImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius);
@@ -2017,6 +2046,11 @@ export function traceShotStep({
       dX = reflected.x;
       dY = reflected.y;
       dZ = reflected.z;
+      // Resume the next pass clear of the surface, along its normal -- see
+      // `SHOT_BOUNCE_CLEARANCE`.
+      posX = hitX + (normal.x * SHOT_BOUNCE_CLEARANCE);
+      posY = hitY + (normal.y * SHOT_BOUNCE_CLEARANCE);
+      posZ = hitZ + (normal.z * SHOT_BOUNCE_CLEARANCE);
       remaining *= 1 - obstacleFraction;
       bounces++;
       continue;
@@ -2033,6 +2067,7 @@ export function traceShotStep({
     // The ground's normal is straight up, so reflecting about it only flips the
     // vertical component.
     dY = -dY;
+    posY = groundLimit + SHOT_BOUNCE_CLEARANCE;
     remaining *= 1 - groundFraction;
     bounces++;
   }

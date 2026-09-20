@@ -106,6 +106,7 @@ const {
 } = require('./server/server-name.cjs');
 const {
   SHOT_COLLISION_RADIUS,
+  SHOT_BOUNCE_CLEARANCE,
   findShotObstacle,
   findShotSegmentImpact,
   getBaseTeamAtPoint,
@@ -13408,12 +13409,14 @@ function findSegmentTeleporterEvent(from, to, blockedTeleporterIndex, blockedDis
 // ends it rather than the range doing so.
 const MAX_BEAM_SEGMENTS = 100;
 // How far off a surface the next segment is traced from, along that surface's
-// normal. It has to clear SHOT_COLLISION_RADIUS: within that distance the shot
-// still counts as inside the obstacle, and a segment that starts inside
-// something is carried straight through it -- so a smaller clearance sent the
-// beam through the first wall it bounced off and out of the world. The drawn
-// segment still starts at the impact point, so there is no gap to see.
-const BEAM_SURFACE_CLEARANCE = SHOT_COLLISION_RADIUS * 4;
+// normal -- `traceShotStep`'s own `SHOT_BOUNCE_CLEARANCE` (collision.cjs),
+// shared so a beam's bounce and an ordinary shot's agree. It has to clear
+// SHOT_COLLISION_RADIUS: within that distance the shot still counts as inside
+// the obstacle, and a segment that starts inside something is carried
+// straight through it -- so a smaller clearance sent the beam through the
+// first wall it bounced off and out of the world. The drawn segment still
+// starts at the impact point, so there is no gap to see.
+const BEAM_SURFACE_CLEARANCE = SHOT_BOUNCE_CLEARANCE;
 
 function traceShotBeam(proj, now) {
   const obstacles = proj.throughBuildings ? [] : getCollisionColliders();
