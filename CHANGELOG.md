@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.47] - 2026-09-20
+
+### Fixed
+- HUD text that is too wide to fit now loses a whole character rather than half of one, so a truncated callsign, chat line or menu label holding an emoji or other non-ASCII character no longer ends in a replacement box.
+
 ## [1.2.46] - 2026-09-20
 
 ### Changed
