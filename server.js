@@ -13802,6 +13802,24 @@ function simulateProjectilesStep(stepSeconds, now) {
 let lastGameLoopAt = Date.now();
 let projectileSimAccumulator = 0;
 let lastVoiceRosterRefreshAt = 0;
+
+// Moves accepted since the last flush, one entry per player who sent one this
+// tick. `broadcast(pmPacket, ws)` used to fire the moment each move was
+// validated -- one WS frame per recipient per move. Collecting them here and
+// sending one `pmBatch` per client per tick trades that for one frame per
+// client, whatever the tick's move count.
+let pendingMoveBroadcasts = [];
+function flushMoveBroadcasts() {
+  if (pendingMoveBroadcasts.length === 0) return;
+  const moves = pendingMoveBroadcasts;
+  pendingMoveBroadcasts = [];
+  // broadcastAll, not `broadcast`: a mover's own id can ride in the same
+  // batch as everyone else's, since the client skips its own id on the way
+  // in (see the 'pmBatch' case in client.js) -- the same exclusion `broadcast`
+  // used to give for free by skipping the origin socket.
+  broadcastAll({ type: 'pmBatch', moves });
+}
+
 function gameLoop() {
 
   // Advance world time (20 ticks/sec, 24000 ticks/day)
@@ -13832,6 +13850,7 @@ function gameLoop() {
   expireLockTargets();
   updateFlags(now);
   tickMatchClock(now);
+  flushMoveBroadcasts();
 }
 
 // bzfs.cxx:7180's cadence: every 30 seconds while the clock runs, and once
@@ -14052,6 +14071,10 @@ wss.on('connection', (ws, req) => {
     // measurement, and costs no message of its own -- ping and pong are
     // WebSocket frames.
     player.lag.pongReceived(now);
+    // The client is *shown* the answer, never asked for it (docs/lag-plan.md):
+    // this is the player's own figure only, not a broadcast to the roster, so
+    // it carries no anti-cheat weight -- it just fills in the debug HUD's ping.
+    sendToPlayer(player, { type: 'lag', lagMs: player.lag.getLag(now) });
   });
 
   // Nobody is told about this player yet. bzfs's sendPlayerUpdate returns
@@ -14615,7 +14638,6 @@ wss.on('connection', (ws, req) => {
             if (Number.isFinite(clientTimestamp)) player.lastClientTimestamp = clientTimestamp;
 
             const pmPacket = {
-              type: 'pm',
               id: player.id,
               x,
               y,
@@ -14633,7 +14655,11 @@ wss.on('connection', (ws, req) => {
               pmPacket.d = d;
             }
 
-            broadcast(pmPacket, ws);
+            // Queued rather than broadcast here: one WS frame per move meant
+            // one per recipient per move, O(players^2) frames a tick. Batched
+            // in `flushMoveBroadcasts`, called once from `gameLoop`, so a busy
+            // tick costs one frame per connected client instead.
+            pendingMoveBroadcasts.push(pmPacket);
 
             checkAntidote(player, now);
           } else {

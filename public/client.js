@@ -5460,6 +5460,139 @@ function connectToServer() {
   };
 }
 
+// Shared body of the 'pm'/'pt' cases and each entry of a 'pmBatch': applies
+// one tank's server-confirmed move. Split out so a batch can replay it once
+// per move without duplicating the logic.
+function applyPlayerMoveMessage(message, isTeleportPacket) {
+  const tank = tanks.get(message.id);
+  if (!tank) return;
+  const oldVerticalVel = tank.userData.verticalVelocity || 0;
+  const oldJumpDirection = tank.userData.jumpDirection;
+
+  // Store server-confirmed position for ghost rendering
+  tank.userData.serverPosition = {
+    x: message.x,
+    y: message.y,
+    z: message.z,
+    r: message.r
+  };
+  tank.userData.lastUpdateTime = performance.now();
+
+  // Update position (will be overridden by extrapolation in animation loop)
+  tank.position.set(message.x, message.y, message.z);
+  tank.rotation.y = message.r;
+  tank.userData.forwardSpeed = message.fs;
+  tank.userData.rotationSpeed = message.rs;
+  tank.userData.verticalVelocity = message.vv;
+  tank.userData.slideDirection = message.d; // Optional slide direction (undefined if not sliding)
+  tank.userData.airVelocityX = Number.isFinite(message.vx)
+    ? message.vx
+    : tank.userData.airVelocityX || 0;
+  tank.userData.airVelocityZ = Number.isFinite(message.vz)
+    ? message.vz
+    : tank.userData.airVelocityZ || 0;
+
+  if (isTeleportPacket && message.jd !== undefined) {
+    tank.userData.jumpDirection = message.jd;
+  }
+
+  // Detect jump start (record jump direction). Upstream announces a flap
+  // with PlayerState::WingsSound; bzo already knows who carries what, so
+  // the flag answers instead of a bit in the packet.
+  if (oldVerticalVel <= 0 && message.vv > 10) {
+    tank.userData.jumpDirection = message.r;
+    const wings = hasAirControl(getPlayerFlag(message.id)?.type);
+    renderManager.playSound(wings ? 'flap' : 'jump', tank.position);
+    renderManager.fireTankJumpJets(tank);
+  }
+
+  // Detect fall start (drove off edge - record direction for air physics).
+  //
+  // A tank at or below ground level has driven off nothing: it is a Burrow
+  // tank digging itself in, or climbing back out of its hole once the flag
+  // is gone. Upstream never reads either as a fall -- its `location` stays
+  // `OnGround` for the whole of it, because only a z above zero makes a
+  // tank `InAir` (LocalPlayer.cxx:670), so `PlayerState::Falling` never
+  // sets and `justLanded` never becomes true. bzo infers both from the
+  // vertical velocity in the packet instead, and without this gate a
+  // burrow reads as a fall and the climb out as a landing: rings and a
+  // landing sound every time somebody puts the flag down.
+  if (oldJumpDirection === null && message.vv < 0 && message.vv > -1 && message.y > 0) {
+    tank.userData.jumpDirection = message.r;
+  }
+
+  // Detect landing (clear jump direction)
+  // Don't check oldVerticalVel < 0 because extrapolation doesn't update tank.userData.verticalVelocity
+  if (oldJumpDirection !== null && message.vv === 0) {
+    tank.userData.jumpDirection = null;
+    triggerLandingFeedback(tank, Math.abs(oldVerticalVel), { local: message.id === myPlayerId });
+  }
+
+  // Update ghost mesh position to server-confirmed position
+  if (tank.userData.ghostMesh) {
+    tank.userData.ghostMesh.position.set(message.x, message.y, message.z);
+    tank.userData.ghostMesh.rotation.y = message.r;
+    updatePacketMotionDebug(tank.userData.ghostMesh, {
+      fs: message.fs,
+      rs: message.rs,
+      vv: message.vv,
+      vx: message.vx,
+      vz: message.vz,
+      r: message.r,
+      d: message.d,
+      jumpDirection: tank.userData.jumpDirection
+    }, 'received');
+  }
+
+  if (tank.userData.jumpDirection !== null && tank.userData.jumpDirection !== undefined) {
+    updateJumpPredictionDebug(tank, {
+      x: message.x,
+      y: message.y,
+      z: message.z,
+      r: message.r,
+      forwardSpeed: message.fs,
+      rotationSpeed: message.rs,
+      verticalVelocity: message.vv,
+      jumpDirection: tank.userData.jumpDirection,
+      slideDirection: message.d,
+      airVelocityX: Number.isFinite(message.vx) ? message.vx : tank.userData.airVelocityX || 0,
+      airVelocityZ: Number.isFinite(message.vz) ? message.vz : tank.userData.airVelocityZ || 0,
+      flagType: getPlayerFlag(message.id)?.type ?? null
+    }, 'received');
+  } else {
+    clearJumpPredictionDebug(tank);
+  }
+
+  if (isTeleportPacket) {
+    // The sound and nothing else. Upstream's tank teleport is
+    // `playWorldSound(SFX_TELEPORT, pos)` (playing.cxx:3085) with no
+    // effect attached: `addSpawnEffect` belongs to the spawn handler, one
+    // line above `setStatus(PlayerState::Alive)`, and the teleport effect
+    // upstream does have -- `addShotTeleportEffect` -- is for shots. A
+    // tank that grew out of the floor on arrival read as a respawn, which
+    // is a different event with a different meaning. See issue #38.
+    const suppressLocalFx = message.id === myPlayerId && performance.now() < suppressLocalTeleportFxUntil;
+    if (!suppressLocalFx) {
+      renderManager.playSound('teleport', tank.position);
+    }
+
+    if (message.id === myPlayerId) {
+      playerX = message.x;
+      playerY = message.y;
+      playerZ = message.z;
+      playerRotation = message.r;
+      jumpDirection = tank.userData.jumpDirection ?? null;
+      localTeleportCooldownUntil = sampleEpochClock() + PLAYER_TELEPORT_COOLDOWN_MS;
+      lastSentForwardSpeed = Number.isFinite(message.fs) ? message.fs : lastSentForwardSpeed;
+      lastSentRotationSpeed = Number.isFinite(message.rs) ? message.rs : lastSentRotationSpeed;
+      lastSentVerticalVelocity = Number.isFinite(message.vv) ? message.vv : lastSentVerticalVelocity;
+      lastSentAirVelocityX = Number.isFinite(message.vx) ? message.vx : lastSentAirVelocityX;
+      lastSentAirVelocityZ = Number.isFinite(message.vz) ? message.vz : lastSentAirVelocityZ;
+      lastSentTime = performance.now();
+    }
+  }
+}
+
 function handleServerMessage(message) {
   // Let the voice manager consume signaling and nearby voice state while the
   // regular game switch continues to own player, render, and chat messages.
@@ -5870,139 +6003,21 @@ function handleServerMessage(message) {
       break;
 
     case 'pm':
-    case 'pt': {
-      const isTeleportPacket = message.type === 'pt';
-      // Compact playerMoved message
-      const tank = tanks.get(message.id);
-      if (tank) {
-        const oldVerticalVel = tank.userData.verticalVelocity || 0;
-        const oldJumpDirection = tank.userData.jumpDirection;
+    case 'pt':
+      applyPlayerMoveMessage(message, message.type === 'pt');
+      break;
 
-        // Store server-confirmed position for ghost rendering
-        tank.userData.serverPosition = {
-          x: message.x,
-          y: message.y,
-          z: message.z,
-          r: message.r
-        };
-        tank.userData.lastUpdateTime = performance.now();
-
-        // Update position (will be overridden by extrapolation in animation loop)
-        tank.position.set(message.x, message.y, message.z);
-        tank.rotation.y = message.r;
-        tank.userData.forwardSpeed = message.fs;
-        tank.userData.rotationSpeed = message.rs;
-        tank.userData.verticalVelocity = message.vv;
-        tank.userData.slideDirection = message.d; // Optional slide direction (undefined if not sliding)
-        tank.userData.airVelocityX = Number.isFinite(message.vx)
-          ? message.vx
-          : tank.userData.airVelocityX || 0;
-        tank.userData.airVelocityZ = Number.isFinite(message.vz)
-          ? message.vz
-          : tank.userData.airVelocityZ || 0;
-
-        if (isTeleportPacket && message.jd !== undefined) {
-          tank.userData.jumpDirection = message.jd;
-        }
-
-        // Detect jump start (record jump direction). Upstream announces a flap
-        // with PlayerState::WingsSound; bzo already knows who carries what, so
-        // the flag answers instead of a bit in the packet.
-        if (oldVerticalVel <= 0 && message.vv > 10) {
-          tank.userData.jumpDirection = message.r;
-          const wings = hasAirControl(getPlayerFlag(message.id)?.type);
-          renderManager.playSound(wings ? 'flap' : 'jump', tank.position);
-          renderManager.fireTankJumpJets(tank);
-        }
-
-        // Detect fall start (drove off edge - record direction for air physics).
-        //
-        // A tank at or below ground level has driven off nothing: it is a Burrow
-        // tank digging itself in, or climbing back out of its hole once the flag
-        // is gone. Upstream never reads either as a fall -- its `location` stays
-        // `OnGround` for the whole of it, because only a z above zero makes a
-        // tank `InAir` (LocalPlayer.cxx:670), so `PlayerState::Falling` never
-        // sets and `justLanded` never becomes true. bzo infers both from the
-        // vertical velocity in the packet instead, and without this gate a
-        // burrow reads as a fall and the climb out as a landing: rings and a
-        // landing sound every time somebody puts the flag down.
-        if (oldJumpDirection === null && message.vv < 0 && message.vv > -1 && message.y > 0) {
-          tank.userData.jumpDirection = message.r;
-        }
-
-        // Detect landing (clear jump direction)
-        // Don't check oldVerticalVel < 0 because extrapolation doesn't update tank.userData.verticalVelocity
-        if (oldJumpDirection !== null && message.vv === 0) {
-          tank.userData.jumpDirection = null;
-          triggerLandingFeedback(tank, Math.abs(oldVerticalVel), { local: message.id === myPlayerId });
-        }
-
-        // Update ghost mesh position to server-confirmed position
-        if (tank.userData.ghostMesh) {
-          tank.userData.ghostMesh.position.set(message.x, message.y, message.z);
-          tank.userData.ghostMesh.rotation.y = message.r;
-          updatePacketMotionDebug(tank.userData.ghostMesh, {
-            fs: message.fs,
-            rs: message.rs,
-            vv: message.vv,
-            vx: message.vx,
-            vz: message.vz,
-            r: message.r,
-            d: message.d,
-            jumpDirection: tank.userData.jumpDirection
-          }, 'received');
-        }
-
-        if (tank.userData.jumpDirection !== null && tank.userData.jumpDirection !== undefined) {
-          updateJumpPredictionDebug(tank, {
-            x: message.x,
-            y: message.y,
-            z: message.z,
-            r: message.r,
-            forwardSpeed: message.fs,
-            rotationSpeed: message.rs,
-            verticalVelocity: message.vv,
-            jumpDirection: tank.userData.jumpDirection,
-            slideDirection: message.d,
-            airVelocityX: Number.isFinite(message.vx) ? message.vx : tank.userData.airVelocityX || 0,
-            airVelocityZ: Number.isFinite(message.vz) ? message.vz : tank.userData.airVelocityZ || 0,
-            flagType: getPlayerFlag(message.id)?.type ?? null
-          }, 'received');
-        } else {
-          clearJumpPredictionDebug(tank);
-        }
-
-        if (isTeleportPacket) {
-          // The sound and nothing else. Upstream's tank teleport is
-          // `playWorldSound(SFX_TELEPORT, pos)` (playing.cxx:3085) with no
-          // effect attached: `addSpawnEffect` belongs to the spawn handler, one
-          // line above `setStatus(PlayerState::Alive)`, and the teleport effect
-          // upstream does have -- `addShotTeleportEffect` -- is for shots. A
-          // tank that grew out of the floor on arrival read as a respawn, which
-          // is a different event with a different meaning. See issue #38.
-          const suppressLocalFx = message.id === myPlayerId && performance.now() < suppressLocalTeleportFxUntil;
-          if (!suppressLocalFx) {
-            renderManager.playSound('teleport', tank.position);
-          }
-
-          if (message.id === myPlayerId) {
-            playerX = message.x;
-            playerY = message.y;
-            playerZ = message.z;
-            playerRotation = message.r;
-            jumpDirection = tank.userData.jumpDirection ?? null;
-            localTeleportCooldownUntil = sampleEpochClock() + PLAYER_TELEPORT_COOLDOWN_MS;
-            lastSentForwardSpeed = Number.isFinite(message.fs) ? message.fs : lastSentForwardSpeed;
-            lastSentRotationSpeed = Number.isFinite(message.rs) ? message.rs : lastSentRotationSpeed;
-            lastSentVerticalVelocity = Number.isFinite(message.vv) ? message.vv : lastSentVerticalVelocity;
-            lastSentAirVelocityX = Number.isFinite(message.vx) ? message.vx : lastSentAirVelocityX;
-            lastSentAirVelocityZ = Number.isFinite(message.vz) ? message.vz : lastSentAirVelocityZ;
-            lastSentTime = performance.now();
-          }
-        }
+    // One WebSocket frame per tick carrying every other tank's move instead
+    // of one frame per move (server.js batches `pendingMoveBroadcasts` in
+    // `gameLoop`). The sender's own id can appear here -- unlike plain 'pm',
+    // this is broadcastAll -- and is skipped for the same reason 'pm' was
+    // never sent back to its origin: applying it would fight local prediction.
+    case 'pmBatch':
+      for (const move of message.moves || []) {
+        if (move.id === myPlayerId) continue;
+        applyPlayerMoveMessage(move, false);
       }
       break;
-    }
 
     case 'positionCorrection':
       // Server corrected our position - update dead reckoning state
@@ -6126,6 +6141,14 @@ function handleServerMessage(message) {
     // scan; this is only the alert it puts on slot 1 for two seconds.
     case 'identifyResult':
       showIdentifyResult(message.targetId ?? null, message.locked === true);
+      break;
+
+    // The server's own measurement of this connection's round trip
+    // (docs/lag-plan.md) -- riding the existing keep-alive ping, not a
+    // client-side measurement, since a client cannot be trusted to report on
+    // the number it would be judged by.
+    case 'lag':
+      if (Number.isFinite(message.lagMs)) latency = message.lagMs;
       break;
 
     case 'shotEnd':

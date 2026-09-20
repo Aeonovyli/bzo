@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.46] - 2026-09-20
+
+### Changed
+- Other players' moves are relayed in one batched message per tick instead of one message per move, cutting WebSocket frame count under load.
+
+### Fixed
+- The debug HUD's ping figure was always 0ms; it now shows the server-measured round trip. Closes #108
+
 ## [1.2.45] - 2026-09-20
 
 ### Fixed
