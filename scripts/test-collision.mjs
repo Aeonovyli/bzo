@@ -506,22 +506,59 @@ const trapped = client.traceShotStep({ ...shotArgs, obstacles: corridor, ricoche
 assert.equal(trapped.bounces, client.MAX_SHOT_BOUNCES_PER_STEP, 'the bounce loop runs to its cap');
 assert.ok(Math.abs(trapped.x) < 1, 'and leaves the shot inside the corridor');
 
+// A wall built from thin stacked slices (bzo.bzw's `stack1`..`stack10`, 0.25
+// units each) must still bounce a level shot off its side, the same as one
+// solid wall would -- SHOT_VERTICAL_EPSILON eating a whole slice's height from
+// both ends at once let a side hit misread as already past the top, and
+// reflecting a level shot (no vertical component to flip) off that all-up
+// normal was a silent no-op indistinguishable from passing straight through.
+{
+  const slice = {
+    type: 'box', name: 'stack7', x: 80, z: 65, w: 16, d: 16, h: 0.25, baseY: 1.5, rotation: Math.PI,
+  };
+  const level = client.traceShotStep({
+    obstacles: [slice],
+    x: 80, y: 1.6, z: 40,
+    dirX: 0, dirY: 0, dirZ: 1,
+    distance: 30,
+    radius: client.SHOT_COLLISION_RADIUS,
+    ricochet: true,
+    groundLimit: -1000,
+  });
+  assert.equal(level.bounces, 1, 'a level shot bounces off a thin stacked slice');
+  assert.ok(level.dirZ < 0, 'and actually reverses course rather than passing through');
+}
+
 // findShotSegmentImpact answers over a segment of any length, which is what a
-// beam needs and what findShotImpact cannot do: bisecting from the far end only
-// finds an obstacle the far end is inside, so a 35000-unit laser sailed through
-// a wall four units thick and left the world.
+// beam needs: bisecting from the far end only finds an obstacle the far end is
+// inside, so a 35000-unit laser through a wall four units thick needs the ray
+// test rather than findShotImpact's own occupant-cylinder bisection to avoid
+// sailing through it and leaving the world. A box is exempt from that
+// limitation either way -- findShotImpact resolves it with the same exact
+// bare-ray test findShotSegmentImpact does, over the same 35000-unit reach,
+// since a box has no volume for a bisection to need to already be inside of
+// (#94) -- so this exercises a pyramid instead, which still relies on it.
 {
   const wall = { type: 'box', name: 'wall', x: 100, z: 0, w: 4, d: 400, h: 20, baseY: 0, rotation: 0 };
   const from = { x: 0, y: 1.5, z: 0 };
   const far = { x: 35000, y: 1.5, z: 0 };
   const radius = client.SHOT_COLLISION_RADIUS;
 
+  const farBoxImpact = client.findShotImpact(
+    [wall], from.x, from.y, from.z, far.x, far.y, far.z, radius
+  );
+  assert.ok(farBoxImpact, 'a box is found however far past it the segment reaches');
+  assert.equal(farBoxImpact.obstacle, wall);
+
+  const slope = {
+    type: 'pyramid', name: 'slope', x: 100, z: 0, w: 4, d: 400, h: 20, baseY: 0, rotation: 0,
+  };
   assert.equal(
     client.findShotImpact(
-      [wall], from.x, from.y, from.z, far.x, far.y, far.z, radius
+      [slope], from.x, from.y, from.z, far.x, far.y, far.z, radius
     ),
     null,
-    'the bisection cannot see a wall the far end is past'
+    'the bisection still cannot see a pyramid the far end is past'
   );
 
   const impact = client.findShotSegmentImpact([wall], from, far, radius);

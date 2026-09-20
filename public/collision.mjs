@@ -1262,9 +1262,18 @@ export function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
 // client draws the bounce and the server hits with it, and they agree because
 // this is the only copy of it.
 
-// checkCollision's vertical epsilon: an occupant resting exactly on a surface
-// is on it, not in it.
-const SHOT_VERTICAL_EPSILON = 0.15;
+// A shot resting exactly on a surface is on it, not in it -- upstream's own
+// version of this (BoxBuilding::get3DNormal's "cruft" top/bottom check) uses
+// `Epsilon`, which is `ZERO_TOLERANCE` (global.h), not a real physical
+// margin. This used to borrow the much larger tolerance an occupant's own
+// resting check needs (checkCollision's, in motion.mjs) -- fine for a box or
+// pyramid tens of units tall, but for a box shorter than twice that margin
+// (a thin stacked slice, `stack1`..`stack10` in bzo.bzw at 0.25 units each)
+// the margin eats the entire height from both ends at once, so every side hit
+// misreads as already past the top or short of the bottom, and reflecting a
+// level shot off that all-vertical normal is a no-op -- indistinguishable
+// from sailing straight through (a bug, not an upstream difference).
+const SHOT_VERTICAL_EPSILON = ZERO_TOLERANCE;
 // The cylinder a shot collides with, which is not the radius it is drawn at.
 // Upstream collides a shot as a ray, and a cylinder this thin is as near to one
 // as bzo's occupant test gets.
@@ -1331,26 +1340,142 @@ export function findShotObstacle(obstacles, x, y, z, radius) {
   return null;
 }
 
+// True when a point sits inside a box's real volume, no radius at all --
+// upstream's shot has none, and `findShotEmbeddedObstacle` below needs to ask
+// this rather than `shotInsideObstacle`'s padded version specifically for a
+// box: once a box's own hit detection is the exact bare ray
+// (`exactBoxShotHit`), an ordinary grazing pass can leave the shot's plain
+// position within the padding of a box it is still short of truly entering,
+// and the padded test would misread that graze as "already embedded," the
+// same carry-through a teleport exit gets -- silently waiving collision for
+// the rest of the flight instead of registering the real crossing a step or
+// two later (#94).
+function shotExactlyInsideBox(obs, x, y, z) {
+  const base = obs.baseY || 0;
+  const top = base + getObstacleHeight(obs);
+  if (y < base || y > top) return false;
+  const local = getColliderLocalPoint(x, z, obs);
+  return Math.abs(local.x) <= obs.w / 2 && Math.abs(local.z) <= obs.d / 2;
+}
+
+// The obstacle a shot's plain position (no radius) has to already be inside
+// for `traceShotStep`/`traceShotBeam` to carry it straight through rather
+// than test it for a new impact -- what a teleport exit looks like from here,
+// since there is no surface between where the shot is and where it came from
+// to bounce off. A box asks `shotExactlyInsideBox` instead of the padded
+// `findShotObstacle` above, for the same reason `exactBoxShotHit` does not
+// pad a box's own hit test; everything else keeps the padded read, unchanged.
+export function findShotEmbeddedObstacle(obstacles, x, y, z, radius) {
+  for (const obs of obstacles) {
+    if (obs.kind === 'teleporter') continue;
+    if (obs.shootThrough) continue;
+    if (obs.type === 'box') {
+      if (shotExactlyInsideBox(obs, x, y, z)) return obs;
+      continue;
+    }
+    if (shotInsideObstacle(obs, x, y, z, radius)) return obs;
+  }
+  return null;
+}
+
+// Where and which single face of a box a shot's own path actually crosses,
+// treating the shot as the bare ray upstream's `BoxBuilding::intersect` does --
+// radius left out entirely, unlike the occupant-cylinder bisection this
+// preempts. That bisection inflates the box by the shot's own (deliberately
+// thin, but nonzero) collision radius, so a shot grazing close enough to a
+// corner can register as "inside" while still short of either face's real
+// plane -- both a hit fraction earlier than a real ray would ever reach it,
+// and, since `getOrigRectNormal` always answers a corner the same way
+// upstream's occupant-normal helper does for a tank, a diagonal "corner"
+// normal a bare ray would never actually meet at all, since
+// `timeRayHitsOrigBox` always resolves to exactly one axis (#94).
+//
+// The side (x/z) faces and the top/bottom planes are both tested, same as
+// upstream's own `timeRayHitsOrigBox` tests all three axes -- a box stacked
+// on, or under, another (a step, a raised platform, a floating ledge) needs
+// the roof and floor answered exactly too, not just the walls, or a shot
+// approaching one from above or below finds nothing to stop it at all. Each
+// candidate is only considered when the segment actually starts on the far
+// side of that plane (mirroring upstream's own "doesn't matter" cases for an
+// axis the ray starts already inside), and validated against the *other* two
+// axes at its own crossing time, so a corner where two candidates would
+// otherwise both look valid resolves to whichever the ray truly reaches
+// first, never a blend of both.
+//
+// Null when the exact ray crosses none of the three axis pairs within this
+// segment's own length (`t` must land in [0, 1] -- a box a step merely passes
+// on its way toward, still several segments off, is not a hit yet) -- which
+// leaves the occupant-cylinder bisection to answer instead.
+function exactBoxShotHit(obs, fromX, fromY, fromZ, toX, toY, toZ) {
+  const halfW = obs.w / 2;
+  const halfD = obs.d / 2;
+  const base = obs.baseY || 0;
+  const top = base + getObstacleHeight(obs);
+  const vx = toX - fromX;
+  const vy = toY - fromY;
+  const vz = toZ - fromZ;
+
+  let best = null;
+
+  const side = timeAndSideRayHitsRect(fromX, fromZ, vx, vz, obs, halfW, halfD);
+  if (side.side >= 0 && side.t <= 1) {
+    const y = fromY + (vy * side.t);
+    if (y >= base && y <= top) best = { fraction: side.t, face: side.side };
+  }
+
+  let verticalT = -1;
+  if (fromY > top && vy < 0) verticalT = (top - fromY) / vy;
+  else if (fromY < base && vy > 0) verticalT = (base - fromY) / vy;
+  if (verticalT >= 0 && verticalT <= 1 && (!best || verticalT < best.fraction)) {
+    const local = getColliderLocalPoint(fromX + (vx * verticalT), fromZ + (vz * verticalT), obs);
+    if (Math.abs(local.x) <= halfW && Math.abs(local.z) <= halfD) {
+      // `getShotObstacleNormal`'s own top/bottom check reads the hit point's
+      // `y` before it ever looks at `face`, so a roof or floor crossing needs
+      // no face of its own here -- the fraction alone is enough to answer it.
+      best = { fraction: verticalT, face: null };
+    }
+  }
+
+  return best;
+}
+
 // Where along a segment a shot first meets solid geometry, as a fraction of the
 // segment, together with what it met. Null when the segment ends clear.
 //
-// The search settles on the last sample still outside, which is where the
-// impact is drawn and where a bounce starts from. Eight bisections is a fixed
-// and deliberately small budget: it resolves the impact to a fraction of a
-// world unit, and the reflected shot leaves the surface anyway.
+// A box is tested directly against the shot's own bare ray, every box in the
+// list, no padding: unlike a razor-thin mesh face a box's real volume has
+// nothing for a fast step to tunnel through, so there is no accuracy a radius
+// would buy here that `exactBoxShotHit` does not already answer exactly for
+// this exact segment (#94). Everything else -- chiefly a pyramid's sloped
+// cross-section -- still goes through the occupant-cylinder bisection below,
+// which settles on the last sample still outside (that is where the impact is
+// drawn and where a bounce starts from); eight bisections is a fixed and
+// deliberately small budget, resolving the impact to a fraction of a world
+// unit, and the reflected shot leaves the surface anyway.
 //
 // That bisection only ever runs once `findShotObstacle` already says the
-// segment's own endpoint landed inside something -- fine for a box or a
-// pyramid's real volume, which stays "inside" for the rest of a step once
-// entered, but a mesh face has none: `findMeshRayImpact` is folded in
-// alongside it, an exact ray-vs-face crossing this endpoint check alone
-// would otherwise miss whenever the far end of a fast step happens to clear
-// a razor-thin face's own tiny catch radius. See its own comment.
+// segment's own endpoint landed inside something -- fine for a pyramid's real
+// volume, which stays "inside" for the rest of a step once entered, but a
+// mesh face has none: `findMeshRayImpact` is folded in alongside it, an exact
+// ray-vs-face crossing this endpoint check alone would otherwise miss
+// whenever the far end of a fast step happens to clear a razor-thin face's
+// own tiny catch radius. See its own comment.
 export function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius) {
-  let obstacle = findShotObstacle(obstacles, toX, toY, toZ, radius);
   let best = null;
 
-  if (obstacle) {
+  for (const obs of obstacles) {
+    if (obs.kind === 'teleporter') continue;
+    if (obs.shootThrough) continue;
+    if (obs.type !== 'box') continue;
+    const exact = exactBoxShotHit(obs, fromX, fromY, fromZ, toX, toY, toZ);
+    if (exact && (!best || exact.fraction < best.fraction)) {
+      best = { fraction: exact.fraction, obstacle: obs, face: exact.face };
+    }
+  }
+
+  const paddedObstacle = findShotObstacle(obstacles, toX, toY, toZ, radius);
+  if (paddedObstacle && paddedObstacle.type !== 'box') {
+    let obstacle = paddedObstacle;
     let lo = 0;
     let hi = 1;
     for (let i = 0; i < 8; i++) {
@@ -1369,17 +1494,17 @@ export function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, ra
         lo = mid;
       }
     }
-    best = { fraction: lo, obstacle };
-    // A mesh has no single flat top/bottom the way a box or a pyramid's
-    // `get3DNormal` fallthrough reads directly off `y`, so its own reflection
-    // needs a real face -- and asking for one at `lo`, the point this
-    // bisection deliberately leaves just outside the solid, always comes back
-    // empty (that emptiness is what makes `lo` "outside" in the first place),
-    // which is what let `getMeshHitNormal` fall through to its own last-resort
+    const paddedBest = { fraction: lo, obstacle };
+    // A mesh has no single flat top/bottom the way a pyramid's `get3DNormal`
+    // fallthrough reads directly off `y`, so its own reflection needs a real
+    // face -- and asking for one at `lo`, the point this bisection
+    // deliberately leaves just outside the solid, always comes back empty
+    // (that emptiness is what makes `lo` "outside" in the first place), which
+    // is what let `getMeshHitNormal` fall through to its own last-resort
     // straight-up normal here. `hi`, the last sample this bisection confirmed
     // inside, is where a face is actually there to find (#93).
     if (obstacle.type === 'mesh') {
-      best.face = findMeshHitFace(
+      paddedBest.face = findMeshHitFace(
         obstacle,
         fromX + (toX - fromX) * hi,
         fromY + (toY - fromY) * hi,
@@ -1389,6 +1514,7 @@ export function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, ra
         'shootThrough'
       );
     }
+    if (!best || paddedBest.fraction < best.fraction) best = paddedBest;
   }
 
   const meshHit = findMeshRayImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius);
@@ -1590,6 +1716,28 @@ export function findShotSegmentImpact(obstacles, from, to, radius) {
   for (const candidate of candidates) {
     if (best && candidate.tMin >= best.fraction) break;
 
+    // A box gets the exact bare-ray answer directly, same reasoning as
+    // `findShotImpact`'s own shortcut, and it always fully replaces the
+    // occupant-cylinder bisection below rather than falling back to it on a
+    // miss: a box's real volume has nothing for a fast segment to tunnel
+    // through the way a razor-thin mesh face does, so a miss here (the ray
+    // does not cross this box's own footprint within this segment at all)
+    // means upstream would not have hit it either, not that the padded
+    // approximation is needed to catch it. Falling through to the bisection
+    // would also compare its `lo` -- a lower bound, since the radius can only
+    // make a hit register early, never late -- against another candidate's
+    // already-exact `best.fraction`, letting a closer-looking box win the
+    // comparison here only to prove worse once corrected, by which point the
+    // candidate it displaced is already gone. Resolving every box exactly up
+    // front keeps every comparison apples to apples.
+    if (candidate.obs.type === 'box') {
+      const exact = exactBoxShotHit(candidate.obs, from.x, from.y, from.z, to.x, to.y, to.z);
+      if (exact && (!best || exact.fraction < best.fraction)) {
+        best = { fraction: exact.fraction, obstacle: candidate.obs, face: exact.face };
+      }
+      continue;
+    }
+
     let lo = candidate.tMin;
     let hi = null;
     for (let sample = 1; sample <= SHOT_INTERVAL_SAMPLES; sample++) {
@@ -1610,7 +1758,9 @@ export function findShotSegmentImpact(obstacles, from, to, radius) {
       if (insideAt(candidate.obs, mid)) hi = mid;
       else lo = mid;
     }
-    if (!best || lo < best.fraction) best = { fraction: lo, obstacle: candidate.obs };
+    if (!best || lo < best.fraction) {
+      best = { fraction: lo, obstacle: candidate.obs };
+    }
   }
 
   const meshHit = findMeshRayImpact(obstacles, from.x, from.y, from.z, to.x, to.y, to.z, radius);
@@ -1651,6 +1801,15 @@ export function getShotObstacleNormal(obs, x, y, z, radius, hitFace = null) {
   // through to the side.
   if (y >= top - SHOT_VERTICAL_EPSILON) return { x: 0, y: 1, z: 0 };
   if (y + radius <= base + SHOT_VERTICAL_EPSILON) return { x: 0, y: -1, z: 0 };
+  // `hitFace`, when the caller already ran `exactBoxShotHit`'s bare-ray test,
+  // names the one real face upstream would have hit. Without it (a caller
+  // that never had a `from`/`to` to test, such as the debug outline's static
+  // position query) this falls back to `getOrigRectNormal`'s own corner
+  // guess, same as before.
+  if (Number.isInteger(hitFace)) {
+    const theta = hitFace * (Math.PI / 2);
+    return rotateNormalToWorld(obs, Math.cos(theta), 0, Math.sin(theta));
+  }
   const local = getColliderLocalPoint(x, z, obs);
   const side = getOrigRectNormal(obs.w / 2, obs.d / 2, local.x, local.z);
   return rotateNormalToWorld(obs, side.x, 0, side.z);
@@ -1702,7 +1861,7 @@ function timeAndSideRayHitsOrigRect(px, pz, vx, vz, halfW, halfD) {
 // (getColliderLocalPoint's own transform) and hands off to the Orig version.
 // `offsetZ` re-centres the rectangle along the obstacle's own local z axis --
 // a teleporter's jamb pillar, rather than its full footprint.
-function timeAndSideRayHitsRect(px, pz, vx, vz, obs, halfW, halfD, offsetZ = 0) {
+export function timeAndSideRayHitsRect(px, pz, vx, vz, obs, halfW, halfD, offsetZ = 0) {
   const local = getColliderLocalPoint(px, pz, obs);
   const cos = Math.cos(obs.rotation);
   const sin = Math.sin(obs.rotation);
@@ -2011,7 +2170,7 @@ export function traceShotStep({
     const groundFraction = (dY < 0 && toY < groundLimit)
       ? (groundLimit - posY) / (dY * remaining)
       : Infinity;
-    const impact = findShotObstacle(obstacles, posX, posY, posZ, radius)
+    const impact = findShotEmbeddedObstacle(obstacles, posX, posY, posZ, radius)
       ? null
       : findShotImpact(obstacles, posX, posY, posZ, toX, toY, toZ, radius);
     const obstacleFraction = impact ? impact.fraction : Infinity;
@@ -2041,7 +2200,7 @@ export function traceShotStep({
         remaining = 0;
         break;
       }
-      const normal = getShotObstacleNormal(impact.obstacle, hitX, hitY, hitZ, radius, impact.face || null);
+      const normal = getShotObstacleNormal(impact.obstacle, hitX, hitY, hitZ, radius, impact.face ?? null);
       const reflected = reflectShotDirection(dX, dY, dZ, normal);
       dX = reflected.x;
       dY = reflected.y;

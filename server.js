@@ -107,7 +107,7 @@ const {
 const {
   SHOT_COLLISION_RADIUS,
   SHOT_BOUNCE_CLEARANCE,
-  findShotObstacle,
+  findShotEmbeddedObstacle,
   findShotSegmentImpact,
   getBaseTeamAtPoint,
   getBaseTopY,
@@ -13450,7 +13450,7 @@ function traceShotBeam(proj, now) {
     // traceShotStep's rule for a shot that begins inside something: carry it
     // through, because there is no surface between where it is and where it came
     // from to stop it.
-    const impact = findShotObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS)
+    const impact = findShotEmbeddedObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS)
       ? null
       : findShotSegmentImpact(obstacles, point, far, SHOT_COLLISION_RADIUS);
     const obstacleFraction = impact ? impact.fraction : Infinity;
@@ -13462,7 +13462,7 @@ function traceShotBeam(proj, now) {
     if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
       reason = 'obstacle';
       obstacle = impact.obstacle;
-      obstacleFace = impact.face || null;
+      obstacleFace = impact.face ?? null;
       fraction = obstacleFraction;
     } else if (groundFraction < 1) {
       reason = 'ground';
