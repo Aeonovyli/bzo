@@ -1,0 +1,48 @@
+# Smoke test for #88 (mesh angvel). Load in the Map Viewer / a real match and
+# confirm both blades visibly spin: TopLevelSpin orbits world origin (upstream's
+# own behaviour for a hand-authored spin with no enclosing group), while the two
+# GroupBlade instances each spin in place about their own placed position.
+
+world
+	size 400
+end
+
+material
+	name spinmat
+	diffuse 1 0 0 1
+end
+
+mesh
+	name TopLevelSpin
+	angvel 90
+	vertex 25 0 0
+	vertex 35 0 0
+	vertex 30 0 5
+	face
+		vertices 0 1 2
+		matref spinmat
+		passable
+	endface
+end
+
+define SpinBlade
+	mesh
+		angvel 45
+		vertex -5 0 0
+		vertex 5 0 0
+		vertex 0 0 8
+		face
+			vertices 0 1 2
+			matref spinmat
+			passable
+		endface
+	end
+enddef
+
+group SpinBlade
+	shift -30 -30 0
+end
+
+group SpinBlade
+	shift 30 30 0
+end
