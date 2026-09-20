@@ -10764,7 +10764,30 @@ function refreshTankDisguises() {
     const state = tank?.userData?.playerState;
     if (!state) continue;
     if (getEffectiveTankColor(playerId, state.color) !== tank.userData.builtColor) {
-      addPlayer(state);
+      // This rebuild is for the colour alone. `state` is the last full
+      // `playerUpdated` snapshot, which the server only sends on join, rename or
+      // tank-model change -- not on movement, which travels over the frequent
+      // `pm`/`pt` packets that update the tank's live position and velocities
+      // directly (see the `pm`/`pt` handler above) without ever touching
+      // `state`. Passing `state` straight to addPlayer would snap the tank back
+      // to wherever it was as of that stale snapshot and reset the
+      // extrapolation from there -- a "ghost" the server's own hit test
+      // disagrees with (issue #103). Carry the tank's live motion state into
+      // the rebuild instead.
+      addPlayer({
+        ...state,
+        x: tank.position.x,
+        y: tank.position.y,
+        z: tank.position.z,
+        rotation: tank.rotation.y,
+        forwardSpeed: tank.userData.forwardSpeed,
+        rotationSpeed: tank.userData.rotationSpeed,
+        verticalVelocity: tank.userData.verticalVelocity,
+        jumpDirection: tank.userData.jumpDirection,
+        slideDirection: tank.userData.slideDirection,
+        airVelocityX: tank.userData.airVelocityX,
+        airVelocityZ: tank.userData.airVelocityZ,
+      });
     }
   }
 }
