@@ -179,6 +179,42 @@ function moveDialogFocus(dialog, currentElement, direction) {
   return focusElement(focusables[nextIndex]);
 }
 
+// Where a choice row stops meaning "back" and starts meaning "forward". The row
+// is a two-column grid -- the label in the left half, the current value in the
+// right -- so the seam between the two halves is the boundary, measured rather
+// than assumed, because which columns a row has is a styling decision. A row
+// laid out any other way falls back to its own middle.
+function getRowSplitX(row) {
+  const rect = row?.getBoundingClientRect?.();
+  if (!rect?.width) return null;
+  const halves = Array.from(row.children)
+    .filter((child) => isElementVisible(child))
+    .map((child) => child.getBoundingClientRect());
+  if (halves.length === 2 && halves[1].left >= halves[0].right) {
+    return (halves[0].right + halves[1].left) / 2;
+  }
+  return rect.left + rect.width / 2;
+}
+
+// Which way a click on a choice row steps it: the title steps back, the current
+// option steps forward. That hands a mouse and a touchscreen both directions of
+// a list, on the same split the arrow keys and an XR thumbstick already read on
+// the row.
+//
+// A click with no pointer behind it steps forward. Enter, a gamepad face button
+// and `activateFocusedControl` all arrive as a synthesised `click()` whose
+// coordinates are zero -- inside the label half of every row on screen -- and
+// would otherwise walk the list backwards on the key that is supposed to
+// advance it.
+export function getMenuClickDirection(event, row = event?.currentTarget) {
+  if (!event || !event.detail) return 1;
+  const x = Number(event.clientX);
+  if (!Number.isFinite(x)) return 1;
+  const split = getRowSplitX(row);
+  if (split === null) return 1;
+  return x < split ? -1 : 1;
+}
+
 function isRangeInput(element) {
   return element?.tagName === 'INPUT' && element.type === 'range';
 }

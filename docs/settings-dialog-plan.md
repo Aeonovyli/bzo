@@ -67,6 +67,12 @@ Keyboard events have one document listener in `public/input.js`. Application com
   submenu opens on Right, and an action row takes neither. Activation and back
   behavior remain shared, and back stays its own control -- Escape, B or grip --
   rather than being hung on Left.
+- A pointer reads the same split as the keys: clicking or tapping a choice row's
+  label steps the list back and clicking its current value steps forward, so a
+  mouse and a touchscreen reach both directions of a list. A chevron on each half
+  marks which way it goes, and rows with no list to walk carry neither. A click
+  with no coordinates behind it -- Enter, a gamepad face button, an XR trigger --
+  steps forward.
 - Dialogs marked `data-dialog-kind="document"` are the exception: Up/Down scroll
   the text and Left/Right move focus, because that is how a controller reaches
   the close button of a panel that is read rather than operated.

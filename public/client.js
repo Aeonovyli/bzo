@@ -103,6 +103,7 @@ import {
   toggleOperatorPanel,
   toggleViewPanel
 } from './input.js';
+import { getMenuClickDirection } from './menus.js';
 import { DestructCountdown, PauseState } from './pause.mjs';
 import { XRMenuRenderer } from './xr-menu.js';
 import {
@@ -1766,7 +1767,7 @@ function bindAudioControls() {
 
   const teamSelector = document.getElementById('entryTeamSelector');
   if (teamSelector) {
-    teamSelector.addEventListener('click', () => selectRelativePlayerTeam(1));
+    teamSelector.addEventListener('click', (event) => selectRelativePlayerTeam(getMenuClickDirection(event)));
     teamSelector.addEventListener('menuadjust', (event) => {
       const direction = Number(event.detail?.direction) < 0 ? -1 : 1;
       selectRelativePlayerTeam(direction);
@@ -1777,7 +1778,7 @@ function bindAudioControls() {
 
   const viewMapSelector = document.getElementById('entryViewMapSelector');
   if (viewMapSelector) {
-    viewMapSelector.addEventListener('click', () => selectRelativeViewMap(1));
+    viewMapSelector.addEventListener('click', (event) => selectRelativeViewMap(getMenuClickDirection(event)));
     viewMapSelector.addEventListener('menuadjust', (event) => {
       const direction = Number(event.detail?.direction) < 0 ? -1 : 1;
       selectRelativeViewMap(direction);
@@ -4754,7 +4755,7 @@ function updateDebugLabelsButton() {
 window.addEventListener('DOMContentLoaded', () => {
   updateRadarZoomButton();
 
-  document.getElementById('radarZoomBtn')?.addEventListener('click', () => cycleRadarZoomLevel(1));
+  document.getElementById('radarZoomBtn')?.addEventListener('click', (event) => cycleRadarZoomLevel(getMenuClickDirection(event)));
 
   // A context that cannot light the scene overrides the saved preference: the
   // row goes dead rather than promising something it cannot draw.

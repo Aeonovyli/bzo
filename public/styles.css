@@ -1216,11 +1216,18 @@ body {
 .entryTeamSelector[data-team="green"] .entryTeamValue { color: #33dd55; }
 .entryTeamSelector[data-team="purple"] .entryTeamValue { color: #ff55ff; }
 
-.entryTeamValue::before {
+/* Each half of a choice row is a click that steps the list that way -- the
+   title steps back, the current option steps forward -- so each half carries
+   the chevron for its own direction. A row with no list to walk takes neither,
+   which is why this is keyed to the row kind: the global login row wears the
+   same class and is an action. */
+.entryTeamSelector[data-menu-kind="choice"] .entryTeamLabel::before,
+.settingsMenuRow[data-menu-kind="choice"] .settingsMenuLabel::before {
   content: "‹ ";
 }
 
-.entryTeamValue::after {
+.entryTeamSelector[data-menu-kind="choice"] .entryTeamValue::after,
+.settingsMenuRow[data-menu-kind="choice"] .settingsMenuValue::after {
   content: " ›";
 }
 

@@ -9,7 +9,7 @@
 // Exports: setupInputHandlers, virtualInput, keys
 
 import { getXRControllerInput, xrState } from './webxr.js';
-import { focusDialogCloseControl, focusFirstDialogControl, getVisibleDialogRoot, handleDialogControllerInput, handleDialogKeydown, hideDialog, showDialog } from './menus.js';
+import { focusDialogCloseControl, focusFirstDialogControl, getMenuClickDirection, getVisibleDialogRoot, handleDialogControllerInput, handleDialogKeydown, hideDialog, showDialog } from './menus.js';
 import { initSettingsMenu } from './settings.js';
 import { INPUT_CONTEXT, InputContextManager } from './input-context.mjs';
 
@@ -1540,7 +1540,7 @@ function bindHudElements() {
     domRefs.cameraBtn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      cycleCameraMode();
+      cycleCameraMode(getMenuClickDirection(e));
     });
   }
 
