@@ -442,6 +442,25 @@ for (const [dx, dy, dz, nx, ny, nz] of [
   );
 }
 
+// Regression (issue #110): ShotStrategy::getFirstBuilding treats a
+// teleporter's frame as an ordinary building, and Teleporter::getNormal
+// answers off the nearest border column -- a ricocheting shot bounces off a
+// teleporter frame the same as any wall, not just off the border-square jamb
+// bzo's tank code already knew about (see the `jamb` case above).
+const shotPortal = { type: 'box', kind: 'teleporter', name: 'portal', x: 0, z: 0, baseY: 0, rotation: 0, w: 1.12, d: 8.96, h: 20.16, border: 1.12 };
+// halfW = 0.56 (the frame's own +x face); halfD = 4.48, so z = 4.0 sits in the
+// pillar band rather than the doorway (activeHalfD = 3.36).
+const frameNormal = client.getShotObstacleNormal(shotPortal, 0.56, 2, 4.0, 0.5);
+assert.equal(frameNormal.y, 0, 'a frame hit below the header is a side hit, not a floor or ceiling');
+assert.ok(frameNormal.x > 0.99, 'facing out along +x, the pillar\'s own outward face');
+assert.deepEqual(
+  server.getShotObstacleNormal(shotPortal, 0.56, 2, 4.0, 0.5),
+  frameNormal,
+  'client and server disagree on a teleporter frame\'s ricochet normal'
+);
+const frameBounce = client.reflectShotDirection(-1, 0, 0, frameNormal);
+assert.ok(frameBounce.x > 0.99, 'a shot flying straight at the frame bounces straight back');
+
 // A shot fired down the x axis into a box turns around and comes back, and it
 // stops at the wall instead when the shot does not ricochet.
 const shotBox = [{ type: 'box', name: 'wall', x: 20, z: 0, w: 4, d: 40, h: 10, baseY: 0, rotation: 0 }];

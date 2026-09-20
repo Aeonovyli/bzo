@@ -284,10 +284,12 @@ import {
 import { setupInstallPrompt } from './install.js';
 import {
   SHOT_COLLISION_RADIUS,
+  SHOT_BOUNCE_CLEARANCE,
   getBaseTeamAtPoint,
   getColliderLocalPoint,
   getObstacleHeight,
   getOrigRectNormal,
+  getShotObstacleNormal,
   getTankLocalAngle,
   getBoxCrossingPlane,
   getMeshCrossingPlane,
@@ -302,6 +304,7 @@ import {
   isPyramidFlatTop,
   movingTankOverlapsHeight,
   pyramidIntersectsTank,
+  reflectShotDirection,
   testOrigRectCircle,
   testOrigRectTank,
   TANK_HALF_LENGTH,
@@ -10419,6 +10422,54 @@ function getShotTeleporterCrossing(start, end, obs) {
   };
 }
 
+// Teleporter::isTeleported's other outcome: the outer, border-inclusive block
+// entered without a qualifying inner crossing -- the frame's own solid
+// material rather than its doorway. Mirrors server.js's function of the same
+// name; see its comment and issue #110 for why a shot bounces off this like
+// any other building instead of just ending here.
+function getShotTeleporterFrameHit(start, end, obs) {
+  const dims = getShotTeleporterDims(obs);
+  const startLocalXZ = getColliderLocalPoint(start.x, start.z, obs);
+  const endLocalXZ = getColliderLocalPoint(end.x, end.z, obs);
+
+  const localStart = {
+    x: startLocalXZ.x,
+    y: start.y - (obs.baseY || 0),
+    z: startLocalXZ.z,
+  };
+  const localEnd = {
+    x: endLocalXZ.x,
+    y: end.y - (obs.baseY || 0),
+    z: endLocalXZ.z,
+  };
+
+  const outerBounds = {
+    min: { x: -dims.halfW, y: 0, z: -dims.halfD },
+    max: { x: dims.halfW, y: dims.h, z: dims.halfD },
+  };
+  const innerBounds = {
+    min: { x: -dims.halfW, y: 0, z: -dims.activeHalfD },
+    max: { x: dims.halfW, y: dims.activeH, z: dims.activeHalfD },
+  };
+
+  const tOuter = getSegmentBoxEntryTime(localStart, localEnd, outerBounds);
+  if (tOuter === null || tOuter < 0 || tOuter > 1) return null;
+
+  const tInner = getSegmentBoxEntryTime(localStart, localEnd, innerBounds);
+  if (tInner !== null && tInner >= 0 && tInner <= 1 && (tInner - tOuter) <= BZFLAG_TELEPORT_TOLERANCE) {
+    return null;
+  }
+
+  return {
+    t: tOuter,
+    point: {
+      x: start.x + (end.x - start.x) * tOuter,
+      y: start.y + (end.y - start.y) * tOuter,
+      z: start.z + (end.z - start.z) * tOuter,
+    },
+  };
+}
+
 // _tankRadius (global.cxx:155): 0.72 * tankLength, the bounding-circle radius
 // used only for this proximity test -- everywhere else a tank is the
 // rectangle collision.mjs already carries.
@@ -10537,15 +10588,38 @@ function traceShotThroughTeleporters(start, dir, travelDistance, reentryBlockTel
     };
 
     let earliest = null;
+    let earliestFrameHit = null;
     for (const obs of TELEPORTER_OBSTACLES_BY_INDEX.values()) {
       const crossing = getShotTeleporterCrossing(point, end, obs);
-      if (!crossing) continue;
-      if (blockedTeleporterIndex !== null && blockedDistance > 1e-6 && obs.teleporterIndex === blockedTeleporterIndex) {
-        continue;
+      if (crossing) {
+        if (blockedTeleporterIndex === null || blockedDistance <= 1e-6 || obs.teleporterIndex !== blockedTeleporterIndex) {
+          if (!earliest || crossing.t < earliest.crossing.t) {
+            earliest = { obs, crossing };
+          }
+        }
       }
-      if (!earliest || crossing.t < earliest.crossing.t) {
-        earliest = { obs, crossing };
+
+      const frameHit = getShotTeleporterFrameHit(point, end, obs);
+      if (frameHit && (!earliestFrameHit || frameHit.t < earliestFrameHit.frameHit.t)) {
+        earliestFrameHit = { obs, frameHit };
       }
+    }
+
+    // A frame hit that comes no later than the nearest teleport crossing wins:
+    // same tie-break server.js's own loop uses, since a crossing this same
+    // step already proved it is not the frame (getShotTeleporterCrossing and
+    // getShotTeleporterFrameHit on the same obstacle are mutually exclusive).
+    if (earliestFrameHit && (!earliest || earliestFrameHit.frameHit.t < earliest.crossing.t)) {
+      return {
+        point: earliestFrameHit.frameHit.point,
+        direction,
+        teleports,
+        reentryBlockTeleporterIndex: blockedTeleporterIndex,
+        reentryBlockDistance: Math.max(0, blockedDistance - (remaining * earliestFrameHit.frameHit.t)),
+        frameHit: true,
+        frameHitObstacle: earliestFrameHit.obs,
+        frameHitRemaining: remaining * (1 - earliestFrameHit.frameHit.t),
+      };
     }
 
     if (!earliest) {
@@ -11667,9 +11741,58 @@ function updateProjectiles(deltaTime) {
         projectile.userData.teleportReentryBlockDistance,
       );
 
-      projectile.position.x = traced.point.x;
-      projectile.position.y = traced.point.y;
-      projectile.position.z = traced.point.z;
+      // A shot that ricochets of its own accord is traced against solid
+      // geometry every step, same as the server. One that does not still has
+      // to be checked, though: an obstacle can force a bounce of its own
+      // (`ricochet` in a `.bzw`, `traceShotStep`'s own `impact.obstacle.ricochet`
+      // test) regardless of what the shot itself carries, and an ordinary shot
+      // that met one would otherwise fly straight through it while the server
+      // reflects it -- the explosion lands in the right place with nothing
+      // shown getting it there. A plain stop against ordinary geometry is
+      // still left alone here: the server owns where an ordinary shot really
+      // ends, and applying one early is the second answer the shot doesn't
+      // need. `ricochet` below is the shot's own property, not a constant, so
+      // `traceShotStep` bounces off an obstacle that declares it and nothing
+      // else.
+      const ownRicochet = projectile.userData.ricochet === true;
+
+      // ShotStrategy::getFirstBuilding treats a teleporter frame as an
+      // ordinary building hit, so a ricocheting shot bounces off it visually
+      // the same as the server now does (issue #110). A shot that does not
+      // ricochet is left at the frame for the server's own `shotEnd` to
+      // remove -- the same "leave it to the server" rule the ordinary-geometry
+      // stop below already follows.
+      let frameBounceStart = null;
+      if (traced.frameHit) {
+        const impact = traced.point;
+        if (ownRicochet) {
+          const normal = getShotObstacleNormal(traced.frameHitObstacle, impact.x, impact.y, impact.z, SHOT_COLLISION_RADIUS);
+          const reflected = reflectShotDirection(traced.direction.x, traced.direction.y, traced.direction.z, normal);
+          renderManager.playSound('ricochet', impact);
+          renderManager.createRicochetEffect(
+            impact,
+            { x: reflected.x - traced.direction.x, y: reflected.y - traced.direction.y, z: reflected.z - traced.direction.z }
+          );
+          traced.direction = reflected;
+          frameBounceStart = {
+            x: impact.x + (normal.x * SHOT_BOUNCE_CLEARANCE),
+            y: impact.y + (normal.y * SHOT_BOUNCE_CLEARANCE),
+            z: impact.z + (normal.z * SHOT_BOUNCE_CLEARANCE),
+          };
+        } else {
+          projectile.position.x = impact.x;
+          projectile.position.y = impact.y;
+          projectile.position.z = impact.z;
+          projectile.userData.dirX = traced.direction.x;
+          projectile.userData.dirY = traced.direction.y;
+          projectile.userData.dirZ = traced.direction.z;
+          return;
+        }
+      }
+
+      projectile.position.x = frameBounceStart ? frameBounceStart.x : traced.point.x;
+      projectile.position.y = frameBounceStart ? frameBounceStart.y : traced.point.y;
+      projectile.position.z = frameBounceStart ? frameBounceStart.z : traced.point.z;
       if (traced.teleports > 0) {
         renderManager.createShotTeleportEffect(projectile);
       }
@@ -11686,27 +11809,15 @@ function updateProjectiles(deltaTime) {
         });
       }
 
-      // A shot that ricochets of its own accord is traced against solid
-      // geometry every step, same as the server. One that does not still has
-      // to be checked, though: an obstacle can force a bounce of its own
-      // (`ricochet` in a `.bzw`, `traceShotStep`'s own `impact.obstacle.ricochet`
-      // test) regardless of what the shot itself carries, and an ordinary shot
-      // that met one would otherwise fly straight through it while the server
-      // reflects it -- the explosion lands in the right place with nothing
-      // shown getting it there. A plain stop against ordinary geometry is
-      // still left alone here: the server owns where an ordinary shot really
-      // ends, and applying one early is the second answer the shot doesn't
-      // need. `ricochet` below is the shot's own property, not a constant, so
-      // `traceShotStep` bounces off an obstacle that declares it and nothing
-      // else.
-      const ownRicochet = projectile.userData.ricochet === true;
-
       // The segment to trace ends where the teleporter trace put the shot, so a
-      // step that crossed a portal is measured back from the far side of it.
+      // step that crossed a portal is measured back from the far side of it. A
+      // frame bounce already has its own start, clear of the surface it just
+      // reflected off.
       const stepDistance = projectileSpeed * SHOT_SIM_STEP_SECONDS;
-      const startX = traced.point.x - (traced.direction.x * stepDistance);
-      const startY = traced.point.y - (traced.direction.y * stepDistance);
-      const startZ = traced.point.z - (traced.direction.z * stepDistance);
+      const traceDistance = frameBounceStart ? traced.frameHitRemaining : stepDistance;
+      const startX = frameBounceStart ? frameBounceStart.x : traced.point.x - (traced.direction.x * stepDistance);
+      const startY = frameBounceStart ? frameBounceStart.y : traced.point.y - (traced.direction.y * stepDistance);
+      const startZ = frameBounceStart ? frameBounceStart.z : traced.point.z - (traced.direction.z * stepDistance);
       const step = traceShotStep({
         obstacles: getCollisionColliders(),
         x: startX,
@@ -11715,10 +11826,10 @@ function updateProjectiles(deltaTime) {
         dirX: traced.direction.x,
         dirY: traced.direction.y,
         dirZ: traced.direction.z,
-        distance: stepDistance,
+        distance: traceDistance,
         radius: SHOT_COLLISION_RADIUS,
         ricochet: ownRicochet,
-        justTeleported: traced.teleports > 0,
+        justTeleported: frameBounceStart ? false : traced.teleports > 0,
       });
       if (!ownRicochet && step.bounces === 0) return;
       projectile.position.x = step.x;

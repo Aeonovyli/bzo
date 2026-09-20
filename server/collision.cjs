@@ -1782,6 +1782,20 @@ function findShotSegmentImpact(obstacles, from, to, radius) {
 // re-deriving it here.
 function getShotObstacleNormal(obs, x, y, z, radius, hitFace = null) {
   if (obs.type === 'mesh') return getMeshHitNormal(obs, x, y, z, radius, hitFace);
+
+  // Teleporter::getNormal always answers off the nearest border column,
+  // treating it as a circular post regardless of where on the frame the ray
+  // actually landed -- there is no separate header case, unlike a tank's
+  // wider hit test (getTankHitNormal's own teleporter branch).
+  if (obs.kind === 'teleporter') {
+    const dims = getShotTeleporterDims(obs);
+    const pillarR = dims.border / 2;
+    const pillarOffset = dims.halfD - pillarR;
+    const local = getColliderLocalPoint(x, z, obs);
+    const offsetZ = local.z >= 0 ? pillarOffset : -pillarOffset;
+    return getSideNormal(obs, x, z, null, pillarR, pillarR, offsetZ);
+  }
+
   const base = obs.baseY || 0;
   const top = base + getObstacleHeight(obs);
 

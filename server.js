@@ -12563,6 +12563,7 @@ function traceShotThroughTeleporters(start, dir, travelDistance, projectileId, r
         reentryBlockDistance: Math.max(0, blockedDistance - (remaining * earliest.event.t)),
         frameHit: true,
         frameHitObstacle: earliest.obs,
+        frameHitRemaining: remaining * (1 - earliest.event.t),
       };
     }
 
@@ -13552,10 +13553,12 @@ function traceShotBeam(proj, now) {
     }
 
     // makeSegments promotes Stop to Reflect on a world where every shot bounces,
-    // so a laser fired there is a beam that bends. Both surfaces bounce it: a
-    // building about its own normal, the ground about straight up. A teleporter
-    // frame is the one surface that does not, as it is for a flying shot.
-    if (proj.ricochet && (reason === 'obstacle' || reason === 'ground')) {
+    // so a laser fired there is a beam that bends. All three surfaces bounce
+    // it: a building about its own normal, the ground about straight up, and
+    // a teleporter frame about its nearest border column's normal (issue #110
+    // -- upstream's ShotStrategy::getFirstBuilding treats a frame hit as an
+    // ordinary building hit, same as a flying shot).
+    if (proj.ricochet && (reason === 'obstacle' || reason === 'ground' || reason === 'frame_hit')) {
       const normal = reason === 'ground'
         ? { x: 0, y: 1, z: 0 }
         : getShotObstacleNormal(obstacle, end.x, end.y, end.z, SHOT_COLLISION_RADIUS, obstacleFace);
@@ -13659,28 +13662,48 @@ function simulateProjectilesStep(stepSeconds, now) {
     proj.teleportReentryBlockTeleporterIndex = traced.reentryBlockTeleporterIndex;
     proj.teleportReentryBlockDistance = traced.reentryBlockDistance;
 
+    // ShotStrategy::getFirstBuilding treats a teleporter frame as an ordinary
+    // building hit (Teleporter::isTeleported already ruled out the link), so
+    // a ricocheting shot bounces off it the same as any wall -- only a shot
+    // that does not ricochet stops here (issue #110).
+    let frameBounceStart = null;
     if (traced.frameHit && !proj.throughBuildings) {
       const impact = traced.point;
-      const hitName = traced.frameHitObstacle?.name || 'teleporter frame';
-      log(`Projectile ${id} hit obstacle "${hitName}" at (${impact.x.toFixed(2)}, ${impact.y.toFixed(2)}, ${impact.z.toFixed(2)})`);
-      logShotEnd(proj, 'frame_hit', impact, `obstacle=${hitName}`);
-      projectiles.delete(id);
-      broadcastAll({ type: 'shotEnd', id, reason: 0, x: impact.x, y: impact.y, z: impact.z });
-      return;
+      if (proj.ricochet) {
+        const normal = getShotObstacleNormal(traced.frameHitObstacle, impact.x, impact.y, impact.z, SHOT_COLLISION_RADIUS);
+        const reflected = reflectShotDirection(proj.dirX, proj.dirY, proj.dirZ, normal);
+        proj.dirX = reflected.x;
+        proj.dirY = reflected.y;
+        proj.dirZ = reflected.z;
+        proj.bounces++;
+        frameBounceStart = {
+          x: impact.x + (normal.x * SHOT_BOUNCE_CLEARANCE),
+          y: impact.y + (normal.y * SHOT_BOUNCE_CLEARANCE),
+          z: impact.z + (normal.z * SHOT_BOUNCE_CLEARANCE),
+        };
+      } else {
+        const hitName = traced.frameHitObstacle?.name || 'teleporter frame';
+        log(`Projectile ${id} hit obstacle "${hitName}" at (${impact.x.toFixed(2)}, ${impact.y.toFixed(2)}, ${impact.z.toFixed(2)})`);
+        logShotEnd(proj, 'frame_hit', impact, `obstacle=${hitName}`);
+        projectiles.delete(id);
+        broadcastAll({ type: 'shotEnd', id, reason: 0, x: impact.x, y: impact.y, z: impact.z });
+        return;
+      }
     }
 
     // The teleporter trace says where the step ends, not what the shot met on
     // the way, and a step that crossed a portal ends on the far side of it. The
     // segment to test is therefore measured back from that endpoint along the
     // direction the shot is now travelling, which for a step with no teleport in
-    // it is exactly where the shot already was.
-    const stepStart = traced.teleports > 0
+    // it is exactly where the shot already was. A frame bounce already has its
+    // own start, clear of the surface it just reflected off.
+    const stepStart = frameBounceStart || (traced.teleports > 0
       ? {
         x: traced.point.x - (proj.dirX * stepDistance),
         y: traced.point.y - (proj.dirY * stepDistance),
         z: traced.point.z - (proj.dirZ * stepDistance),
       }
-      : { x: prevX, y: prevY, z: prevZ };
+      : { x: prevX, y: prevY, z: prevZ });
 
     const step = traceShotStep({
       // Upstream's `Through`: a super bullet is traced against nothing, so no
@@ -13693,10 +13716,10 @@ function simulateProjectilesStep(stepSeconds, now) {
       dirX: proj.dirX,
       dirY: proj.dirY,
       dirZ: proj.dirZ,
-      distance: stepDistance,
+      distance: frameBounceStart ? traced.frameHitRemaining : stepDistance,
       radius: SHOT_COLLISION_RADIUS,
       ricochet: proj.ricochet,
-      justTeleported: traced.teleports > 0,
+      justTeleported: frameBounceStart ? false : traced.teleports > 0,
     });
     proj.x = step.x;
     proj.y = step.y;

@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.45] - 2026-09-20
+
+### Fixed
+- **A ricocheting shot now bounces off a teleporter's frame instead of
+  stopping dead or passing through it.** Hitting the solid border around a
+  teleporter's doorway killed the shot unconditionally, regardless of the
+  Ricochet flag or an all-shots-ricochet server, unlike every other obstacle;
+  matches upstream, which treats a frame hit as an ordinary building
+  collision. The client's own shot rendering had no model of a teleporter's
+  frame at all, so any observer's view of the shot could disagree with the
+  server outright rather than merely mishandle the bounce; it now traces and
+  reflects the same way the server does.
+
 ## [1.2.44] - 2026-09-20
 
 ### Fixed
