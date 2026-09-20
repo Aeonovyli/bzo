@@ -2132,10 +2132,15 @@ function reflectShotDirection(dirX, dirY, dirZ, normal) {
 // its own rather than as an obstacle (ShotStrategy::getGround). A shot that
 // ricochets is never stopped by either.
 //
-// A shot that begins the step already inside something -- which is what a
-// teleport exit looks like from here -- is carried straight through rather than
-// bounced, because there is no surface between where it is and where it came
-// from to bounce off.
+// A shot that begins the step already inside something because it just
+// exited a teleporter is carried straight through rather than bounced,
+// because there is no surface between where it is and where it came from to
+// bounce off. `justTeleported` scopes that to an actual teleport exit
+// (the caller's own `traceShotThroughTeleporters` crossing count) -- without
+// it, a shot whose muzzle spawned overlapping a thin wall (issue #83) hit
+// this same "already inside" case and was waved through the wall with no
+// impact at all, ending up whole on the far side instead of hitting the
+// wall it started against.
 function traceShotStep({
   obstacles,
   x,
@@ -2148,6 +2153,7 @@ function traceShotStep({
   radius,
   ricochet,
   groundLimit = 0,
+  justTeleported = false,
 }) {
   let posX = x;
   let posY = y;
@@ -2170,8 +2176,14 @@ function traceShotStep({
     const groundFraction = (dY < 0 && toY < groundLimit)
       ? (groundLimit - posY) / (dY * remaining)
       : Infinity;
-    const impact = findShotEmbeddedObstacle(obstacles, posX, posY, posZ, radius)
-      ? null
+    const embedded = findShotEmbeddedObstacle(obstacles, posX, posY, posZ, radius);
+    const impact = embedded
+      // A real teleport exit: no surface to hit, carry the shot through.
+      // Anything else that started embedded (a spawn overlapping a solid)
+      // is an immediate hit right where it started, same as upstream's
+      // muzzle guarantee would have made it, rather than being waved
+      // through untested.
+      ? (justTeleported ? null : { fraction: 0, obstacle: embedded, face: null })
       : findShotImpact(obstacles, posX, posY, posZ, toX, toY, toZ, radius);
     const obstacleFraction = impact ? impact.fraction : Infinity;
 

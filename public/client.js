@@ -11718,6 +11718,7 @@ function updateProjectiles(deltaTime) {
         distance: stepDistance,
         radius: SHOT_COLLISION_RADIUS,
         ricochet: ownRicochet,
+        justTeleported: traced.teleports > 0,
       });
       if (!ownRicochet && step.bounces === 0) return;
       projectile.position.x = step.x;

@@ -74,7 +74,21 @@ import {
   loadExternalTexture,
 } from './texture.js';
 
+const BZFLAG_TANK_LENGTH = 6.0;
 const DEFAULT_MUZZLE_FORWARD = 3.0;
+// BZDB_MUZZLEFRONT (global.cxx: "_tankRadius + 0.1") is upstream's own
+// invariant: the muzzle never sits more than 0.1 past the tank's closest
+// possible approach to a wall, whatever the model looks like, so a shot can
+// never originate beyond a wall the tank's own hull is already being kept
+// off of. Upstream's collision is a bounding circle (_tankRadius, 4.32), but
+// bzo's is box-precise -- a tank driven straight into a flat wall stops with
+// its nose (BZFLAG_TANK_LENGTH / 2, half the tank's own length) right at the
+// surface, closer than upstream's circle ever allows. bzo derives the
+// forward offset from each model's real barrel geometry for visual accuracy
+// (see _computeMuzzleFromBarrel below), but a long-barreled model can compute
+// a value past *this* tank's own closest approach -- letting the shot spawn
+// inside or past a thin wall (issue #83). Clamp to bzo's own invariant.
+const MAX_MUZZLE_FORWARD = (BZFLAG_TANK_LENGTH / 2) + 0.1;
 // BZDB_MUZZLEHEIGHT. Also the floor the roaming camera rests on, so an observer
 // sits at the eye height of a tank on the ground.
 export const DEFAULT_MUZZLE_HEIGHT = 1.57;
@@ -100,7 +114,6 @@ const SHOT_EXPLOSION_TEXTURES = [
   '/textures/explode1.png',
   '/textures/explode2.png',
 ];
-const BZFLAG_TANK_LENGTH = 6.0;
 // Muzzle flash, mirroring StdShotEffect. It is a flared cone out of the barrel,
 // not a billboard: drawRingYZ() builds a frustum whose inner circle sits at the
 // muzzle with radius `radius`, flaring to `radius + topsideOffset` a distance
@@ -1192,7 +1205,9 @@ class RenderManager {
 
     const avgY = avg.y / tipPoints.length;
     const avgZ = avg.z / tipPoints.length;
-    const forward = Number.isFinite(avgZ) ? Math.max(0.5, -avgZ) : DEFAULT_MUZZLE_FORWARD;
+    const forward = Number.isFinite(avgZ)
+      ? Math.min(MAX_MUZZLE_FORWARD, Math.max(0.5, -avgZ))
+      : DEFAULT_MUZZLE_FORWARD;
     const height = Number.isFinite(avgY) ? avgY : DEFAULT_MUZZLE_HEIGHT;
 
     return { forward, height };

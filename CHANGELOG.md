@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.44] - 2026-09-20
+
+### Fixed
+- **A shot fired point-blank into a thin wall no longer passes straight
+  through to the other side.** A tank's muzzle offset was computed straight
+  from its model's barrel geometry with no ceiling, so a long-barreled model
+  could spawn a shot's origin past the tank's own closest approach to a wall;
+  the "shot began already inside something" case that only makes sense right
+  after a teleporter exit was then applied to that spawn too, waving the shot
+  through untested. The muzzle is now capped at the tank's own closest
+  approach, and that bypass only applies to a real teleporter exit -- so a
+  tank pressed against a wall like hix's `xwall` now hits (and, with
+  ricochet on, can shoot itself) exactly as it does upstream. Closes #83.
+
 ## [1.2.43] - 2026-09-19
 
 ### Fixed

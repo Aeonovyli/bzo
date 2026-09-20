@@ -10316,8 +10316,16 @@ const ANTICHEAT_GROUND_SLACK = 0.2;
 // below for the projectile this shot creates so the position check and the
 // shot's own createdAt agree about when it was fired.
 function getShotRejection(player, shotX, shotY, shotZ, now = Date.now()) {
-  // Shot originates from barrel end, which is ~3 units from tank center
-  const barrelLength = 3.0;
+  // Upstream's own cap on the muzzle is BZDB_MUZZLEFRONT = "_tankRadius + 0.1"
+  // (global.cxx), because upstream's own tank-vs-wall collision keeps the
+  // tank's *center* a full tankRadius off a wall it approaches head-on. bzo's
+  // collision is box-precise rather than a bounding circle, so a tank driven
+  // straight into a flat wall stops with its nose (TANK_HALF_LENGTH, half the
+  // tank's own length) right at the surface -- a closer approach than
+  // upstream's circle ever allows. The client now clamps its model-derived
+  // muzzle offset the same way (render.js, MAX_MUZZLE_FORWARD, issue #83):
+  // tied to *this* tank's actual closest approach, not upstream's looser one.
+  const barrelLength = TANK_HALF_LENGTH + 0.1;
 
   if (!Number.isFinite(shotX) || !Number.isFinite(shotY) || !Number.isFinite(shotZ)) {
     return { reason: `shot origin is not finite (${shotX}, ${shotY}, ${shotZ})`, fatal: true };
@@ -13429,6 +13437,12 @@ function traceShotBeam(proj, now) {
   let remaining = proj.speed * proj.lifetimeSeconds;
   let blockedTeleporterIndex = null;
   let blockedDistance = 0;
+  // Scopes the "already inside, carry it through" read below to an actual
+  // teleport exit, the same way traceShotStep's own `justTeleported` does
+  // (issue #83): true only for the segment starting right after a teleport
+  // transform, never for the muzzle's own starting point or after an
+  // ordinary bounce.
+  let justTeleported = false;
   proj.segments = [];
 
   for (let segment = 0; segment < MAX_BEAM_SEGMENTS && remaining > 1e-6; segment++) {
@@ -13447,13 +13461,17 @@ function traceShotBeam(proj, now) {
     const groundFraction = (direction.y < 0 && far.y < 0)
       ? (0 - point.y) / (direction.y * remaining)
       : Infinity;
-    // traceShotStep's rule for a shot that begins inside something: carry it
-    // through, because there is no surface between where it is and where it came
-    // from to stop it.
-    const impact = findShotEmbeddedObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS)
-      ? null
+    // traceShotStep's rule for a shot that begins inside something because it
+    // just exited a teleporter: carry it through, because there is no surface
+    // between where it is and where it came from to stop it. Anything else
+    // that started embedded -- the muzzle's own spawn point overlapping a
+    // thin wall (issue #83) -- is an immediate hit right there instead.
+    const embeddedObstacle = findShotEmbeddedObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS);
+    const impact = embeddedObstacle
+      ? (justTeleported ? null : { fraction: 0, obstacle: embeddedObstacle, face: null })
       : findShotSegmentImpact(obstacles, point, far, SHOT_COLLISION_RADIUS);
     const obstacleFraction = impact ? impact.fraction : Infinity;
+    justTeleported = false;
 
     let reason = 'range';
     let obstacle = null;
@@ -13523,6 +13541,7 @@ function traceShotBeam(proj, now) {
       };
       direction = transformed.dirOut;
       drawFrom = { ...point };
+      justTeleported = true;
       blockedTeleporterIndex = destTeleporterIndex;
       blockedDistance = Math.max(
         SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE,
@@ -13677,6 +13696,7 @@ function simulateProjectilesStep(stepSeconds, now) {
       distance: stepDistance,
       radius: SHOT_COLLISION_RADIUS,
       ricochet: proj.ricochet,
+      justTeleported: traced.teleports > 0,
     });
     proj.x = step.x;
     proj.y = step.y;
