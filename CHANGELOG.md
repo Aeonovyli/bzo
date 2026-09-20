@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.48] - 2026-09-20
+
 ### Changed
 - A menu row that walks a list now steps both ways under a pointer: clicking or tapping the row's title steps back through the options and clicking the current option steps forward, which is the same split the arrow keys and an XR thumbstick already read on the row. The Team and Map rows in the entry dialog and the Camera and Radar Range rows in Settings all follow it, a chevron on each half marks which way it goes, and rows with no list to walk -- the global login row -- no longer wear one. Closes #96
 
