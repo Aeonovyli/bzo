@@ -16,6 +16,7 @@ import {
   SCOREBOARD_RABBIT_MARK,
   buildScoreboardRows,
   compareScoreboardPlayers,
+  fitText,
   formatPersonalTally,
   formatPlayerLabel,
   formatRabbitRank,
@@ -370,6 +371,29 @@ assert.equal(getPlayerStatusIndicator(null), '');
   assert.equal(alertHud.children.at(-1).children.at(-1).style.color, '#654321');
 
   delete globalThis.document;
+}
+
+// fitText truncates by code point, so a callsign or chat line that ends in an
+// astral character loses the whole character rather than half a surrogate pair.
+{
+  // One unit of width per code unit, which makes the widths below countable.
+  const context = { measureText: (text) => ({ width: text.length }) };
+
+  assert.equal(fitText(context, 'Tim Riker', 100), 'Tim Riker', 'text that fits is untouched');
+  assert.equal(fitText(context, 'Tim Riker', 8), 'Tim R...', 'ascii truncates to the width');
+
+  const withEmoji = 'Tim Riker\u{1F680}';
+  assert.equal(fitText(context, withEmoji, 10), 'Tim Rik...', 'the rocket goes whole');
+  assert.equal(fitText(context, '\u{1F680}', 1), '...', 'a lone astral character goes entirely');
+
+  const halfPair = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  for (let width = 1; width <= withEmoji.length; width += 1) {
+    const fitted = fitText(context, withEmoji, width);
+    assert.ok(
+      !halfPair.test(fitted),
+      `no half surrogate pair at width ${width}: ${JSON.stringify(fitted)}`,
+    );
+  }
 }
 
 console.log('scoreboard tests passed');

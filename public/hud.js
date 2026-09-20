@@ -90,12 +90,28 @@ function resizeHudCanvasIfNeeded(cache, canvas, width, height, dpr) {
 // ellipsis when anything was taken off. Both canvas HUDs -- the XR settings menu
 // and the XR chat panel -- lay text out in pixels rather than in characters, so
 // neither has to guess how wide a character is.
+// One character off the end, where a character is a code point rather than a
+// code unit. Callsigns and chat carry astral characters -- emoji, and much of
+// what is outside the Latin alphabet -- and half a surrogate pair draws as a
+// replacement box.
+function dropLastCodePoint(text) {
+  const end = text.length;
+  if (end >= 2) {
+    const low = text.charCodeAt(end - 1);
+    const high = text.charCodeAt(end - 2);
+    if (low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff) {
+      return text.slice(0, end - 2);
+    }
+  }
+  return text.slice(0, end - 1);
+}
+
 export function fitText(context, text, maxWidth) {
   const source = String(text || '');
   if (context.measureText(source).width <= maxWidth) return source;
   let result = source;
   while (result.length > 1 && context.measureText(`${result}...`).width > maxWidth) {
-    result = result.slice(0, -1);
+    result = dropLastCodePoint(result);
   }
   return `${result}...`;
 }
