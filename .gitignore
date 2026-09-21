@@ -10,7 +10,7 @@ data/
 cache/
 
 # bzfs stuff
-server.conf
+bzfs.conf
 groupdb.txt
 
 # Pulled in to validate the BZW parser against real usage, but licensed "Ask
