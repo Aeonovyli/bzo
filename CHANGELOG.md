@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.49] - 2026-09-21
+
+### Changed
+- A remote map import now only fetches from a server that is in the public
+  BZFlag list, so `/list`'s Import button, the in-game Import command and a
+  shared `?viewmap=` link can no longer be used to make this server connect
+  to an arbitrary host:port. A server that has since left the list is still
+  viewable from the copy already imported here -- the check refuses the
+  download, not the file.
+
 ## [1.2.48] - 2026-09-20
 
 ### Changed
