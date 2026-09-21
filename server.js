@@ -193,6 +193,7 @@ const {
   bearingToRotation,
   rotationToBearingName,
   parseMoveCoordinates,
+  formatFlagInfo,
   isCommandLine,
   parseCommandLine,
   parseHelpPrefix,
@@ -8800,23 +8801,64 @@ defineCommand('/playerlist', COMMAND_TIER.OPERATOR,
     }
   });
 
-// FlagCommand (commands.cxx:156), `<reset|up|show>`. Upstream's `up` sends every
-// superflag away and leaves the slots to refill; `reset` puts them all back;
-// `show` reports each one.
-// `drop` is bzo's own. Upstream's FlagCommand takes `<reset|up|show>`
-// (commands.cxx:593) and has no way to take a flag off one player: `up` sends
-// every superflag in the world away, which on a map built for testing flags
-// empties the thing you are standing on. bzo is developed by driving it, and the
-// move that costs a test run is being handed the wrong flag -- so this is the
+// flagCommandHelp (commands.cxx:1378), which is what upstream answers a `/flag`
+// with nothing it recognises. bzo's `reset` takes no argument, so its line says
+// so; the rest are upstream's own wording.
+const FLAG_COMMAND_HELP = Object.freeze([
+  '/flag up',
+  '/flag show',
+  '/flag reset',
+  '/flag take <#slot|PlayerName|"Player Name">',
+  '/flag give <#slot|PlayerName|"Player Name"> <#flagId|FlagAbbr> [force]',
+  '/flag drop [#slot|PlayerName|"Player Name"]',
+]);
+
+function flagCommandHelp(player) {
+  FLAG_COMMAND_HELP.forEach((line) => replyToPlayer(player, line));
+}
+
+// `sendMessage(ServerPlayer, AdminPlayers, buffer)` after upstream's own
+// `sendMessage(ServerPlayer, t, buffer)`: taking a flag off somebody or handing
+// one out is the kind of thing the other operators should see happen. The actor
+// is skipped because they already have the same sentence as their reply --
+// upstream sends it to them twice.
+function announceToAdmins(actor, text) {
+  const payload = JSON.stringify({
+    type: 'message',
+    src: -1,
+    dst: -3,
+    msgType: 'server',
+    text,
+    ts: Date.now(),
+  });
+  for (const admin of getAdmins()) {
+    if (admin === actor) continue;
+    if (admin.ws && admin.ws.readyState === 1) admin.ws.send(payload);
+  }
+}
+
+// FlagCommand (commands.cxx:156), `<up|show|reset|take|give>`. Upstream splits
+// these over two permissions -- `flagMod` for the forms that act on the whole
+// world and `flagMaster` for the ones that name a flag or a player -- which
+// bzo's two tiers collapse into OPERATOR; see docs/commands-plan.md.
+//
+// bzo's `reset` still takes no argument and means upstream's `reset all`.
+//
+// `drop` is bzo's own, and is not `take` with a different name: `take` sends the
+// flag back to a spawn point, `drop` throws it on the ground where the tank is
+// standing. bzo is developed by driving it, and the move that costs a test run
+// is being handed the wrong flag on the zone you meant to test -- so this is the
 // other half of `/mv`: put the tank on the zone you want, drop what it is
 // carrying, and take the one that is there.
 defineCommand('/flag', COMMAND_TIER.OPERATOR,
-  '<reset|up|show|drop [player]> - reset, remove or show the flags, or drop one player\'s',
+  '<up|show|reset|take|give|drop> - see, reset, hand out or take away the flags',
   (player, args) => {
     const trimmed = args.trim();
-    const what = trimmed.toLowerCase();
-    if (what === 'drop' || what.startsWith('drop ')) {
-      const rest = trimmed.slice(4).trim();
+    const split = trimmed.search(/\s/);
+    const what = (split === -1 ? trimmed : trimmed.slice(0, split)).toLowerCase();
+    const rest = split === -1 ? '' : trimmed.slice(split).trim();
+
+    if (what === 'drop') {
       // No target is your own flag, which is the form worth typing: the player
       // holding the wrong flag is the one running the test.
       let subject = player;
@@ -8852,7 +8894,7 @@ defineCommand('/flag', COMMAND_TIER.OPERATOR,
         // NoTeam, because sending a team flag away would end a CTF game.
         if (flag.team !== null) return;
         if (flag.status === FLAG_STATUS.NO_EXIST) return;
-        zapFlag(flag);
+        sendFlagUp(flag);
         count += 1;
       });
       log(`[CMD] "${player.name}" sent ${count} flags up`);
@@ -8870,20 +8912,155 @@ defineCommand('/flag', COMMAND_TIER.OPERATOR,
       return;
     }
     if (what === 'show') {
-      let shown = 0;
-      flags.forEach((flag) => {
-        if (flag.status === FLAG_STATUS.NO_EXIST) return;
-        const owner = flag.owner !== null && players.has(flag.owner)
-          ? ` on "${players.get(flag.owner).name}"`
-          : '';
-        replyToPlayer(player, `#${flag.index} ${flag.type || 'none'}`
-          + ` at ${flag.position.x.toFixed(0)},${flag.position.y.toFixed(0)},${flag.position.z.toFixed(0)}${owner}`);
-        shown += 1;
+      if (flags.length === 0) {
+        replyToPlayer(player, 'No flags are in the world');
+        return;
+      }
+      // Every slot, including the empty ones: `s:0` is a slot waiting on the
+      // insertion schedule, and which slots are waiting is half of what the
+      // question is asking.
+      flags.forEach((flag) => replyToPlayer(player, formatFlagInfo(describeFlagForCommand(flag))));
+      // bzo's own half of the answer. A superflag nobody is holding travels
+      // anonymous (`getFlagState`) and a client remembers every identity it is
+      // ever told (`keepFlagIdentity`), so the same reply also sends this one
+      // operator the unhidden states: the text says what flag #7 is, and this
+      // says which of the flags on the field is #7.
+      const now = Date.now();
+      sendToPlayer(player, {
+        type: 'flagUpdate',
+        flags: flags.map((flag) => getFlagState(flag, now, { reveal: true })),
       });
-      if (shown === 0) replyToPlayer(player, 'No flags are in the world');
       return;
     }
-    replyToPlayer(player, 'Usage: /flag <reset|up|show|drop [player]>');
+    if (what === 'take') {
+      const target = resolveCommandTarget(rest);
+      if (!target.id) {
+        replyToPlayer(player, target.error || 'Usage: /flag take <#slot|PlayerName>');
+        return;
+      }
+      const subject = players.get(target.id);
+      const flag = getPlayerFlag(subject.id);
+      if (!flag) {
+        replyToPlayer(player, `/flag take: player (${subject.name}) does not have a flag`);
+        return;
+      }
+      const abbreviation = flag.type;
+      const index = flag.index;
+      // resetFlag, which is upstream's own choice here and the whole difference
+      // from `/flag drop`: the flag goes back to a spawn point rather than onto
+      // the ground the tank is standing on.
+      resetFlag(flag);
+      const notice = `${player.name} took flag ${abbreviation}/${index} from ${subject.name}`;
+      log(`[CMD] "${player.name}" took ${abbreviation}/${index} from "${subject.name}"`);
+      replyToPlayer(player, notice);
+      announceToAdmins(player, notice);
+      return;
+    }
+    if (what === 'give') {
+      const target = resolveCommandTarget(rest);
+      if (!target.id) {
+        replyToPlayer(player, target.error
+          || 'Usage: /flag give <#slot|PlayerName> <#flagId|FlagAbbr> [force]');
+        return;
+      }
+      const subject = players.get(target.id);
+      const argv = target.rest.split(/\s+/).filter(Boolean);
+      if (argv.length === 0) {
+        flagCommandHelp(player);
+        return;
+      }
+      const force = (argv[1] || '').toLowerCase() === 'force';
+
+      let flag = null;
+      if (argv[0].startsWith('#')) {
+        const index = Number.parseInt(argv[0].slice(1), 10);
+        flag = Number.isInteger(index) ? flags[index] || null : null;
+        if (!flag) {
+          replyToPlayer(player, `flag ${argv[0]} is not in this world`);
+          return;
+        }
+        // Upstream drops a held flag on the floor here and answers nothing at
+        // all; the sentence is the one its `give <abbreviation>` already has for
+        // the same situation.
+        if (flag.owner !== null && !force) {
+          replyToPlayer(player, 'you may need to use the force');
+          return;
+        }
+        // An empty pool slot has no type to hand over. Upstream gives it
+        // anyway and the tank carries `Flags::Null`; bzo says so instead,
+        // because a flag with no type is not a flag anyone asked for.
+        if (!flag.type) {
+          replyToPlayer(player, `flag ${argv[0]} is an empty slot`);
+          return;
+        }
+      } else {
+        const abbreviation = argv[0].toUpperCase();
+        if (!getFlagType(abbreviation)) {
+          replyToPlayer(player, 'bad flag type');
+          return;
+        }
+        // The flag has to already be somewhere in this world -- upstream looks
+        // for a slot *holding* that type rather than conjuring one, so a type
+        // the pool has not rolled yet cannot be given.
+        // A slot that has been sent away still counts, as it does upstream:
+        // `/flag up` leaves a required slot holding its type with nothing in
+        // the world, and giving that flag out is how it comes back before a
+        // reset.
+        let unused = null;
+        let forced = null;
+        for (const candidate of flags) {
+          if (candidate.type !== abbreviation) continue;
+          forced = candidate;
+          if (candidate.owner === null) {
+            unused = candidate;
+            break;
+          }
+        }
+        if (unused) flag = unused;
+        else if (!forced) {
+          replyToPlayer(player, 'flag type not found');
+          return;
+        } else if (!force) {
+          replyToPlayer(player, 'you may need to use the force');
+          return;
+        } else flag = forced;
+      }
+
+      if (subject.team === PLAYER_TEAM.OBSERVER) {
+        replyToPlayer(player, 'An observer has no tank to carry a flag');
+        return;
+      }
+      // "do not give flags to dead players": the grab has to reach a tank that
+      // is on the field, or the flag would be carried by nothing.
+      if (subject.health <= 0) {
+        replyToPlayer(player, `/flag give: player (${subject.name}) is not alive`);
+        return;
+      }
+
+      // What the tank is already carrying. A team flag is thrown where it
+      // stands -- taking it out of the world would strand a capture -- and a
+      // superflag goes back to a spawn point.
+      const carried = getPlayerFlag(subject.id);
+      if (carried) {
+        if (carried.team !== null) dropFlag(carried);
+        else resetFlag(carried);
+      }
+      // And whoever was holding the flag being given, for a forced give. The
+      // flag changes hands rather than falling, so this is the drop message
+      // without a landing.
+      if (flag.owner !== null) sendFlagDrop(flag);
+
+      const abbreviation = flag.type;
+      // `grabFlag(index, flag, false)`: the position check is what the `false`
+      // turns off, because an operator handing a flag out is not standing on it.
+      grabFlag(subject, flag, Date.now(), { checkPos: false });
+      const notice = `${player.name} gave flag ${abbreviation}/${flag.index} to ${subject.name}`;
+      log(`[CMD] "${player.name}" gave ${abbreviation}/${flag.index} to "${subject.name}"`);
+      replyToPlayer(player, notice);
+      announceToAdmins(player, notice);
+      return;
+    }
+    flagCommandHelp(player);
   });
 
 // `/mv` is bzo's own: upstream has no command that moves a tank anywhere in
@@ -11012,8 +11189,10 @@ function getFlagOwner(flag) {
 }
 
 // FlagInfo::pack. A superflag nobody is holding goes out without its type.
-function getFlagState(flag, now = Date.now()) {
-  const hidden = flag.owner === null && flag.team === null;
+// `reveal` is `pack`'s `hide` argument turned off, which only `/flag show`
+// passes: an operator asking what is on the field is told.
+function getFlagState(flag, now = Date.now(), { reveal = false } = {}) {
+  const hidden = !reveal && flag.owner === null && flag.team === null;
   const flightTime = flag.flightStartedAt === 0
     ? 0
     : Math.min(flag.flightEnd, (now - flag.flightStartedAt) / 1000);
@@ -11032,6 +11211,21 @@ function getFlagState(flag, now = Date.now()) {
     // than as a toggle, so a client that predicted its own crossing converges on
     // this instead of flipping a second time.
     zoned: flag.zoned === true,
+  };
+}
+
+// The fields `/flag show` prints, read off a slot. `required` is upstream's
+// own: a team flag is a required slot there (CmdLineOptions.cxx:1840), as is
+// anything a map pinned to a type, and bzo carries the two separately.
+function describeFlagForCommand(flag) {
+  return {
+    index: flag.index,
+    type: flag.type,
+    player: flag.owner === null ? -1 : flag.owner,
+    required: flag.requiredType !== null || flag.team !== null,
+    grabs: flag.grabs,
+    status: flag.status,
+    position: flag.position,
   };
 }
 
@@ -11120,6 +11314,26 @@ function zapFlag(flag) {
   flag.status = FLAG_STATUS.NO_EXIST;
   flag.flightStartedAt = 0;
   resetFlag(flag);
+}
+
+// The `up` half of FlagCommand (commands.cxx:1425). The flag leaves the world
+// where it stands and stays gone: upstream sets FlagGoing and lets the next
+// tick turn that into FlagNoExist, which for a flag already on the ground is
+// the same tick, so bzo goes straight there.
+//
+// This is not zapFlag. A required slot keeps its type and waits for a `/flag
+// reset` -- upstream's `if (!flag.required) flag.flag.type = Flags::Null` --
+// which is the point of the command on a map of zone flags: it empties the
+// thing you are standing on. A pool slot empties and the insertion schedule
+// rolls it again in its own time.
+function sendFlagUp(flag) {
+  if (flag.status === FLAG_STATUS.ON_TANK) sendFlagDrop(flag);
+  flag.owner = null;
+  flag.status = FLAG_STATUS.NO_EXIST;
+  flag.flightStartedAt = 0;
+  flag.grabbedAt = 0;
+  if (flag.requiredType === null) flag.type = null;
+  broadcastFlagUpdate(flag);
 }
 
 // An operator switching the ricochet game style has to clear whatever the old
@@ -11332,16 +11546,20 @@ function isPlayerInsideBuilding(player, x, y, z, rotation) {
 // `grabbedAt` must agree on when the grab happened, or the shake timeout the
 // STICKY check counts against starts from a slightly different instant than
 // the one the reach check used.
-function grabFlag(player, flag, now = Date.now()) {
+function grabFlag(player, flag, now = Date.now(), { checkPos = true } = {}) {
   if (isObserverTeam(player.team)) return;
   if (player.health <= 0 || player.paused) return;
   if (getPlayerFlag(player.id)) return;
-  if (flag.status !== FLAG_STATUS.ON_GROUND) return;
+  // `checkPos` is upstream's own argument, and it guards exactly these two:
+  // where the flag is and how far away the tank is. `/flag give` is the caller
+  // that turns it off, because the operator handing the flag out is not the
+  // tank receiving it, and the flag need not be lying on the ground.
+  if (checkPos && flag.status !== FLAG_STATUS.ON_GROUND) return;
 
   const reach = GAME_CONFIG.TANK_SPEED + BZFLAG_TANK_RADIUS + FLAG_RADIUS;
   const extrapolated = player.getExtrapolatedPosition(now);
   const gap = distance(extrapolated.x, extrapolated.z, flag.position.x, flag.position.z);
-  if (Math.abs(extrapolated.y - flag.position.y) < FLAG_GRAB_LEVEL_TOLERANCE && gap > reach) {
+  if (checkPos && Math.abs(extrapolated.y - flag.position.y) < FLAG_GRAB_LEVEL_TOLERANCE && gap > reach) {
     const refused = reportCheat(player, 'flagRejected',
       `FLAG GRAB REJECTED flag ${flag.index} `
       + `${flag.position.x.toFixed(2)},${flag.position.z.toFixed(2)} is ${gap.toFixed(2)} away`

@@ -6,6 +6,31 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.50] - 2026-09-21
+
+### Added
+- `/flag take <player>` and `/flag give <player> <#flagId|FlagAbbr> [force]`,
+  upstream's own two. `take` sends the flag a tank is carrying back to a spawn
+  point; `give` hands one over, resetting or dropping whatever the tank held,
+  taking the flag off its current holder when `force` says so, and refusing a
+  player who is not alive. `/flag drop` is unchanged and is still the one that
+  leaves the flag on the ground where the tank is standing.
+
+### Changed
+- `/flag show` prints upstream's own line per slot -- type, carrier, whether
+  the slot is required, the grabs left in it and its status, alongside the
+  position -- for every slot, empty ones included. The same reply now also
+  fills the asking operator's own map in: a superflag nobody is holding travels
+  anonymous, so the identities go out to that one client and its flags stop
+  reading as unidentified.
+
+### Fixed
+- `/flag up` now empties the world and leaves it empty, as upstream does. A
+  required flag -- a zone flag, or one a map named -- came straight back the
+  moment it was sent away, which made the command useless on exactly the maps
+  it is for; it now waits for a `/flag reset`, while a pool slot refills on the
+  insertion schedule.
+
 ## [1.2.49] - 2026-09-21
 
 ### Changed

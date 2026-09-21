@@ -3332,14 +3332,26 @@ Three things to reach for, in the order they cost:
   instance started to keep a test tidy, and let it disconnect when it is done.
   Use `testSpawn` to put it somewhere specific.
 
+  A probe has admin, so **give it the flag the test needs rather than driving
+  to one**: `/flag give <probe name> <FlagAbbr>` typed into the chat line puts
+  that flag in its hands at once and resets whatever it was holding. See
+  **Testing a flag with `maps/bzo.bzw`** below for the whole set.
+
 ### Testing a flag with `maps/bzo.bzw`
 
-**That map exists for this, among other things.** It puts three of every flag
-in its own one-unit zone at a known coordinate, so a flag can be put in a
-probe's hands on purpose rather than waited for. A `zoneflag` slot is pinned
-to its type -- upstream's `setRequiredFlag`, and `addFlag` never draws from
-the pool for one -- so it always comes back as the flag its zone declared and
-repeated runs cannot exhaust it, whatever `_maxFlagGrabs` is set to.
+**`/flag give <player> <FlagAbbr>` is the first thing to reach for.** It hands
+the flag over wherever the tank is, so a test that only needs a tank carrying
+`OO` needs no zone, no drive and no wait. `/flag take <player>` puts it back,
+and `/flag drop [player]` leaves it on the ground the tank is standing on.
+
+**The map's zones are what the rest of this rests on.** It puts three of every
+flag in its own one-unit zone at a known coordinate, so a flag can be picked up
+on purpose rather than waited for -- and `/flag give` finds its slot by type,
+so those zones are also what makes giving one work here at all. A `zoneflag`
+slot is pinned to its type -- upstream's `setRequiredFlag`, and `addFlag` never
+draws from the pool for one -- so it always comes back as the flag its zone
+declared and repeated runs cannot exhaust it, whatever `_maxFlagGrabs` is set
+to.
 
 **Point `testSpawn` at the zone.** `testSpawn` in `server.json` spawns a named
 player at a fixed point, and a tank that spawns on a flag grabs it before it does
@@ -3357,16 +3369,21 @@ somewhere else to use it -- all inside one `--eval`, with nothing written to
 `server.json` and nobody else's spawn touched. It is the first thing to reach
 for now; `testSpawn` is for the case where the tank has to *start* somewhere.
 
-**`/flag drop [player]` is the other half of it.** A tank already holding the
-wrong flag will not take the one it is parked on, and upstream has no way to take
-a flag off a single player -- its `/flag up` sends every superflag in the world
-away, which on this map empties the zone you are standing on. So `/mv` to the
-zone you want and `/flag drop`, and the tank takes what is there. A sticky flag
-is zapped rather than dropped, which is what dying with it does, so the command
-cannot be used to plant a bad flag on somebody.
+**`/flag give` is the short way to a flag.** `/flag give <player> <FlagAbbr>`
+hands one straight to a tank -- no zone, no drive, no waiting on the flight --
+and it resets whatever that tank was already carrying, so it is also how you
+swap. It finds a slot *holding* that type, which on this map is every zone
+flag, and a slot that `/flag up` emptied still counts. `/flag take <player>`
+is the other direction: the flag goes back to a spawn point.
 
-**A probe has admin, so the pair is the whole workflow: `/mv` to the zone you
-want, then `/flag drop` to shed whatever you are already holding.** This is
+**`/flag drop [player]` is the third one, and is not `take`.** `drop` throws
+the flag on the ground where the tank is standing, which is what you want when
+the tank is parked on the zone it should pick from: a tank already holding the
+wrong flag will not take the one it is standing on. A sticky flag is zapped
+rather than dropped, which is what dying with it does, so the command cannot be
+used to plant a bad flag on somebody.
+
+**A probe has admin, so all of this is available from the chat line.** This is
 `localAdmin` in `server.json` (`isLocalAdminRequest` in `server/sessions.cjs`):
 a connection from loopback with no `X-Forwarded-For` header is trusted as an
 operator without signing in, specifically so a headless probe or a raw
@@ -3402,15 +3419,17 @@ Three things about it that cost a probe time to rediscover:
   phasing tank *inside* a wall, move it onto the roof and let it sink through.
 - **The flag on a zone is not guaranteed to be there yet.** Read the flag back
   (`#playerName` ends in `/OO`) and poll rather than trusting the pickup. Real
-  players take flags, and both flag commands leave a gap: `/flag reset` does put
-  a required flag back in its own zone -- `resetFlag` picks the position from
+  players take flags, and `/flag reset` leaves a gap: it does put a required
+  flag back in its own zone -- `resetFlag` picks the position from
   `findFlagSpawnPosition` and re-adds it, because "required flags mustn't just
   disappear" -- but `addFlag` gives it a *flight*, so for a second or two it is
   in the air above the zone and a tank standing there has nothing to grab.
-  `/flag up` is the same wait, and longer. So sit on the zone and poll the label
-  instead of moving away and back. `/flag show` reports every flag's real
-  position, but its output overflows the chat history on a map carrying this
-  many flags.
+  `/flag up` never fills it back in at all: a required flag stays gone until a
+  reset, which is the point of the command. So sit on the zone and poll the
+  label instead of moving away and back -- or skip the zone entirely and
+  `/flag give` the probe what it needs. `/flag show` reports every flag's real
+  position and type, but its output overflows the chat history on a map
+  carrying this many flags.
 
 **Drive by the input module, not by events.** Synthetic `KeyboardEvent`s
 dispatched from `--eval` do **not** reach the game -- dispatch the fire key and

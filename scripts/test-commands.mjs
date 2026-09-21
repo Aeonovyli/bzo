@@ -30,6 +30,7 @@ const {
   bearingToRotation,
   rotationToBearingName,
   parseMoveCoordinates,
+  formatFlagInfo,
 } = require('../server/commands.cjs');
 
 // Two tiers, which is the whole permission model -- see docs/commands-plan.md
@@ -278,6 +279,52 @@ assert.equal(formatDuration('nonsense'), '');
   assert.equal(isMe('/mercy me'), false);
   assert.equal(isMe('/m'), false);
   assert.equal(isMe('me smiles'), false, 'without the slash it is just chat');
+}
+
+// FlagInfo::getTextualInfo (FlagInfo.cxx:284), which is what `/flag show`
+// prints. The columns are padded exactly as upstream's `%-3d`/`%-3s`/`%-2d` pad
+// them, so a stack of these lines up the way it does on a bzfs server.
+{
+  assert.equal(
+    formatFlagInfo({
+      index: 7,
+      type: 'GM',
+      player: 3,
+      required: false,
+      grabs: 4,
+      status: 2,
+      position: { x: -12.25, y: 0, z: 138.5 },
+    }),
+    '#7   i:GM  p:3   r:0  g:4  s:2  p:{-12.3, 0.0, 138.5}',
+  );
+  // A pool slot with nothing in it yet: no type, nobody holding it, and the
+  // status that says it is not in the world.
+  assert.equal(
+    formatFlagInfo({
+      index: 12,
+      type: null,
+      player: -1,
+      required: false,
+      grabs: 0,
+      status: 0,
+      position: { x: 0, y: 0, z: 0 },
+    }),
+    '#12  i:    p:-1  r:0  g:0  s:0  p:{0.0, 0.0, 0.0}',
+  );
+  // A team flag is a required slot upstream, and the columns still line up when
+  // the abbreviation is the wide one.
+  assert.equal(
+    formatFlagInfo({
+      index: 0,
+      type: 'R*',
+      player: -1,
+      required: true,
+      grabs: 0,
+      status: 1,
+      position: { x: 100, y: 10, z: -100 },
+    }),
+    '#0   i:R*  p:-1  r:1  g:0  s:1  p:{100.0, 10.0, -100.0}',
+  );
 }
 
 // parseServerCommand's last word (commands.cxx:3909). The slash is dropped and
