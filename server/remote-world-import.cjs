@@ -29,6 +29,16 @@ const DEFAULT_LIST_SERVER = 'https://my.bzflag.org/db/';
 // guard -- a runaway `node` process there is the user's own problem to Ctrl-C).
 const MAX_WORLD_DATABASE_BYTES = 64 * 1024 * 1024;
 
+function findPublicServer(servers, host, port) {
+  if (!Array.isArray(servers) || typeof host !== 'string' || host === ''
+    || !Number.isInteger(port)) return null;
+  const wantedHost = host.toLowerCase();
+  return servers.find((server) =>
+    typeof server?.host === 'string'
+    && server.host.toLowerCase() === wantedHost
+    && server.port === port) || null;
+}
+
 // ---------------------------------------------------------------------------
 // Wire-format reader: a cursor over a Buffer, matching nboUnpack* semantics
 // (big-endian, as bzflag's `nbo` -- network byte order -- helpers pack them).
@@ -1317,6 +1327,7 @@ module.exports = {
   GAME_STYLES,
   GAME_OPTION_BITS,
   decodePingHex,
+  findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
   decodeGameSettings,

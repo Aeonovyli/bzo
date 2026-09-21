@@ -17,6 +17,7 @@ const {
   DEFAULT_LIST_SERVER,
   PROTOCOL_VERSION: BZFS_PROTOCOL_VERSION,
   GAME_OPTION_BITS,
+  findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
   decodeGameSettings,
@@ -877,10 +878,13 @@ app.get('/api/ready', (req, res) => {
 // no websocket -- listing what /list's data sources already are: the
 // public BZFlag list server (`getRemoteServerList`, cached 5 minutes and
 // shared across every visitor) and bzo's own maps/ directory. Both viewing
-// and importing are open to anyone: importing costs this server one fetch
-// and one file (capped in remote-world-import.cjs), viewing costs only the
-// viewer's own client, so neither needs an operator -- only actually
-// switching the live match (`setMap`, from the game itself) does. Sorting
+// and importing are open to anyone, but an import target must be an exact
+// host:port in that public list -- a server that has left it can still be
+// viewed from a copy already here, never fetched again. Importing costs this
+// server one fetch and
+// one file (capped in remote-world-import.cjs), viewing costs only the viewer's
+// own client, so neither needs an operator -- only actually switching the live
+// match (`setMap`, from the game itself) does. Sorting
 // and filtering are a few lines of vanilla JS over the rows already in the
 // page -- there is no client-side framework anywhere else in bzo and two
 // short tables do not need one either.
@@ -1212,8 +1216,10 @@ app.post('/list/import', (req, res) => {
   }
   const { host, port } = target;
   log(`/list is importing a remote map from ${host}:${port}`);
-  performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
-    log(`Imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes) via /list`);
+  performRemoteMapImport(host, port).then(({ safeMapName, byteLength, reused }) => {
+    log(reused
+      ? `/list reused the cached copy of ${host}:${port}, ${safeMapName} (${byteLength} bytes)`
+      : `Imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes) via /list`);
     res.redirect(302, `/list?${new URLSearchParams({ imported: safeMapName })}`);
   }).catch((error) => {
     logError(`Remote map import from ${host}:${port} failed (via /list):`, error);
@@ -1500,7 +1506,8 @@ function remoteMapFileName(host, port) {
 // `import-<host>_<port>.bzw` name came from, so a shared link still says
 // which server to (re-)ask once bzo has let its cached copy go
 // (`IMPORT_REUSE_MS` below) or never fetched it in this process at all --
-// see `importMapForView`. Sanitizing the host is lossy (any character
+// see `importMapForView`. Re-asking needs that server to still be in the
+// public list; a copy already here does not (`reuseCachedImport`). Sanitizing the host is lossy (any character
 // outside [A-Za-z0-9._-] becomes '_'), so this only trusts a name that
 // reproduces itself exactly when run back through `remoteMapFileName`: a
 // real import's own name always does, and nothing else needs to.
@@ -1566,17 +1573,51 @@ function buildImportWarningOptionsBlock(warnedMessages) {
 // would produce, so a second caller joins the first's own promise instead of
 // starting a second one.
 const inFlightRemoteImports = new Map();
-function performRemoteMapImport(host, port) {
+
+// A copy this process already holds of a host:port it may no longer fetch.
+// Reaching out to an unlisted server is what the public-list check refuses;
+// a file already sitting in maps/ costs that server nothing, so a shared
+// `?viewmap=` link to one that has since dropped `-public` still opens
+// rather than dying on a check about a download it does not need to make.
+// `MAP_REGISTRY`, not the file alone: a map is viewable only once it has
+// been parsed and hashed (see `hashRemainingMapsInBackground`).
+function reuseCachedImport(host, port) {
   const safeMapName = remoteMapFileName(host, port);
+  if (!MAP_REGISTRY.has(safeMapName)) return null;
+  try {
+    const { size } = fs.statSync(path.join(RUNTIME_MAPS_DIR, safeMapName));
+    return { safeMapName, byteLength: size, reused: true };
+  } catch {
+    return null;
+  }
+}
+
+async function performRemoteMapImport(host, port) {
+  let publicServers;
+  try {
+    publicServers = await getRemoteServerList();
+  } catch (error) {
+    publicServers = remoteServerListCache.servers;
+    if (publicServers.length === 0) throw error;
+  }
+  const listedServer = findPublicServer(publicServers, host, port);
+  if (!listedServer) {
+    const cached = reuseCachedImport(host, port);
+    if (cached) return cached;
+    throw new Error('server is not in the public BZFlag server list');
+  }
+
+  const safeMapName = remoteMapFileName(listedServer.host, listedServer.port);
   const existing = inFlightRemoteImports.get(safeMapName);
   if (existing) return existing;
-  const promise = performRemoteMapImportNow(host, port, safeMapName)
+  const promise = performRemoteMapImportNow(listedServer, safeMapName)
     .finally(() => inFlightRemoteImports.delete(safeMapName));
   inFlightRemoteImports.set(safeMapName, promise);
   return promise;
 }
 
-async function performRemoteMapImportNow(host, port, safeMapName) {
+async function performRemoteMapImportNow(listedServer, safeMapName) {
+  const { host, port } = listedServer;
   const { worldDatabase, gameSettings, queryGame } = await fetchWorldFromServer(host, port, 15000);
   const tree = parseWorldDatabase(worldDatabase);
   if (gameSettings && gameSettings.length >= 30) tree.gameSettings = decodeGameSettings(gameSettings);
@@ -1584,14 +1625,13 @@ async function performRemoteMapImportNow(host, port, safeMapName) {
   if (tree.gameSettings) tree.worldSize = tree.gameSettings.worldSize;
   // Neither the title nor the per-team maximums travel over the direct
   // connection above -- both are the list server's own words about this
-  // host:port (`fetchServerList`), cached from whichever `/list` load or
-  // background refresh last populated it. A server an operator names by
-  // hand rather than picking from that list simply has no cache entry, and
-  // both fall back to nothing, the same as any other field this import
-  // cannot discover.
-  const cachedEntry = remoteServerListCache.servers.find((s) => s.host === host && s.port === port);
+  // host:port (`fetchServerList`), carried in on the very record
+  // `performRemoteMapImport` matched this target against. Read off that
+  // record rather than looked up again here: the fetch above can take up to
+  // 15 seconds, and the shared list cache can have expired and been
+  // refreshed without this server on it by the time it returns.
   const text = buildBZWText(
-    { host, port, title: cachedEntry?.title || '', listInfo: cachedEntry?.info || null },
+    { host, port, title: listedServer.title || '', listInfo: listedServer.info || null },
     tree,
     new Date().toISOString(),
   );
@@ -15232,8 +15272,9 @@ wss.on('connection', (ws, req) => {
 
         // Downloads a live BZFlag server's world over the real wire protocol
         // (see server/remote-world-import.cjs) and saves it as an ordinary
-        // .bzw -- one step, same as `uploadMap`. Open to every player: it
-        // costs this server one fetch and one file (capped by
+        // .bzw -- one step, same as `uploadMap`. Open to every player, but
+        // `performRemoteMapImport` fetches only from an exact host:port in
+        // the public list. It costs this server one fetch and one file (capped by
         // MAX_WORLD_DATABASE_BYTES in remote-world-import.cjs), not the live
         // match, so there is nothing here that needs an operator. It does not
         // touch the live match or select the new file anywhere -- switching
@@ -15249,11 +15290,15 @@ wss.on('connection', (ws, req) => {
           }
           const { host, port } = target;
           log(`"${player.name}" is importing a remote map from ${host}:${port}`);
-          performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
-            log(`"${player.name}" imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes)`);
+          performRemoteMapImport(host, port).then(({ safeMapName, byteLength, reused }) => {
+            log(reused
+              ? `"${player.name}" reused the cached copy of ${host}:${port}, ${safeMapName} (${byteLength} bytes)`
+              : `"${player.name}" imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes)`);
             ws.send(JSON.stringify({ type: 'importMapResult', success: true, file: safeMapName }));
-            replyToPlayer(player, `Imported ${safeMapName} from ${host}:${port} (${byteLength} bytes). `
-              + 'It is ready to View now.');
+            replyToPlayer(player, reused
+              ? `${host}:${port} is no longer in the public list, so ${safeMapName} is the copy already `
+                + `here (${byteLength} bytes). It is ready to View now.`
+              : `Imported ${safeMapName} from ${host}:${port} (${byteLength} bytes). It is ready to View now.`);
             sendMapList(ws);
           }).catch((error) => {
             logError(`Remote map import from ${host}:${port} failed:`, error);
@@ -15269,8 +15314,10 @@ wss.on('connection', (ws, req) => {
         // process at all. Reused rather than re-fetched inside
         // `IMPORT_REUSE_MS` of its last import -- the same server's world is
         // not worth downloading twice in the same sitting -- otherwise this
-        // is `performRemoteMapImport` again, same as an operator's own
-        // Import button, just triggered by a link instead of a click.
+        // is `performRemoteMapImport` again, including its public-list check
+        // -- which an unlisted server's own already-cached file satisfies,
+        // so a link outlives the target leaving the list, not just bzo's
+        // reuse window -- just triggered by a link instead of a click.
         case 'importMapForView': {
           const file = typeof message.file === 'string' ? message.file : '';
           // `reason`, not `error`: a bare top-level `error` string is the
@@ -15294,8 +15341,10 @@ wss.on('connection', (ws, req) => {
             break;
           }
           log(`A viewmap link is importing a remote map from ${host}:${port}`);
-          performRemoteMapImport(host, port).then(({ safeMapName, byteLength }) => {
-            log(`Viewmap link imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes)`);
+          performRemoteMapImport(host, port).then(({ safeMapName, byteLength, reused }) => {
+            log(reused
+              ? `Viewmap link reused the cached copy of ${host}:${port}, ${safeMapName} (${byteLength} bytes)`
+              : `Viewmap link imported remote map ${host}:${port} as ${safeMapName} (${byteLength} bytes)`);
             reply(true, { viewableMaps: getViewableMapsList() });
           }).catch((error) => {
             logError(`Remote map import from ${host}:${port} for a viewmap link failed:`, error);
