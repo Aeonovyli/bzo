@@ -2379,7 +2379,18 @@ class RenderManager {
       // patch on a desktop, and in a session, where the world group carries the
       // player's own heading, a shadow that appears stuck to the view. It comes
       // back when the tank does.
-      this._projectShadowForMesh(tank, projection, tank.visible !== false);
+      //
+      // A Burrow tank sinks below ground (`position.y < 0`) and the ground
+      // already hides its mesh the ordinary way, by depth. The flatten matrix
+      // has no such test: it offsets every vertex by its own y, so a caster
+      // below the plane shifts the other way along the light instead of
+      // disappearing, and the result is the tank's full standing-height
+      // silhouette drawn over the hole it is hiding in. Stop casting once the
+      // tank is at or below ground rather than shrinking the shadow with it,
+      // matching the mesh, which the ground occludes outright the moment it
+      // dips under rather than fading it.
+      const burrowed = tank.position.y < 0;
+      this._projectShadowForMesh(tank, projection, tank.visible !== false && !burrowed);
     }
   }
 
