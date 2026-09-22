@@ -95,6 +95,12 @@ export const DEFAULT_MUZZLE_HEIGHT = 1.57;
 const MUZZLE_TIP_EPSILON = 0.03;
 const BZFlag_DEFAULT_HORIZONTAL_FOV = 60;
 
+// Tank units of belt per tile of the tread image. Measured off bzflag.obj,
+// whose authored tread runs u 0..1.6 around a loop of roughly 10.3 units, so a
+// model that arrives without texture coordinates gets tread links the size the
+// stock tank's are rather than a size of its own.
+const TREAD_UNITS_PER_TILE = 6.4;
+
 const TANK_WHEEL_OUTWARD_NUDGE = 0.02;
 const MOUNTAIN_TEXTURE_PATHS = [
   '/textures/mountain1.png',
@@ -5701,6 +5707,151 @@ class RenderManager {
     return this.clouds;
   }
 
+  // An OBJ is not required to carry texture coordinates, and a model that
+  // leaves them out draws every fragment from one texel: the tank comes out
+  // flat team colour with none of the skin on it, which reads as a plastic toy
+  // rather than armour. Upstream never has to answer this -- its one tank
+  // carries hand-written texcoords in C++ -- but bzo draws whatever OBJ a
+  // contributor names, so a model without UVs is given them here, once, when
+  // its template loads rather than per tank built from it.
+  //
+  // A model that ships its own UVs keeps them: this only fills a gap.
+  _generateMissingTankUVs(root) {
+    const treadNames = new Set([
+      ...TANK_PART_ALIASES.leftTreadMiddle, ...TANK_PART_ALIASES.rightTreadMiddle,
+      ...TANK_PART_ALIASES.leftTreadFrontCap, ...TANK_PART_ALIASES.rightTreadFrontCap,
+      ...TANK_PART_ALIASES.leftTreadRearCap, ...TANK_PART_ALIASES.rightTreadRearCap,
+    ]);
+
+    // The sphere is struck from the middle of the assembled tank, so every
+    // part has to be measured where it actually sits.
+    root.updateMatrixWorld(true);
+    const center = new THREE.Box3().setFromObject(root).getCenter(new THREE.Vector3());
+
+    root.traverse((child) => {
+      const geometry = child.isMesh ? child.geometry : null;
+      if (!geometry || geometry.attributes.uv || !geometry.attributes.position) return;
+      // Both projections read a triangle as three consecutive vertices, which
+      // is what OBJLoader builds. An indexed geometry is left alone rather
+      // than mapped wrongly.
+      if (geometry.index) return;
+
+      if (treadNames.has(child.name || '')) this._projectTankUVsAroundBelt(geometry);
+      else this._projectTankUVsOnSphere(geometry, child.matrixWorld, center);
+    });
+  }
+
+  // A `u` that runs once around the loop wraps from 1 back to 0 somewhere, and
+  // the triangle that straddles the join would otherwise stretch the whole
+  // texture backwards across itself. Carrying the low corners of that triangle
+  // past 1 keeps it continuous, which RepeatWrapping then resolves.
+  _healTankUVWrap(uv, vertexCount) {
+    for (let triangle = 0; triangle < vertexCount; triangle += 3) {
+      const u0 = uv[triangle * 2];
+      const u1 = uv[(triangle + 1) * 2];
+      const u2 = uv[(triangle + 2) * 2];
+      const highest = Math.max(u0, u1, u2);
+      if (highest - Math.min(u0, u1, u2) <= 0.5) continue;
+      for (let corner = 0; corner < 3; corner += 1) {
+        const slot = (triangle + corner) * 2;
+        if (highest - uv[slot] > 0.5) uv[slot] += 1;
+      }
+    }
+  }
+
+  // Spherical, about the centre of the whole tank rather than of each part, so
+  // the skin is one continuous wrap across hull, turret and barrel instead of
+  // three mappings that meet at nothing. Vertices are lifted into the model's
+  // own space first: a part may sit at an offset of its own, and projecting
+  // from its local origin would slide its share of the skin off centre.
+  //
+  // A sphere stretches where the surface does not face outward from the
+  // centre, most of all near the poles. On a camo skin that reads as the
+  // pattern drifting rather than as a seam, which is the trade for having no
+  // seam at all except the one meridian the wrap heals.
+  _projectTankUVsOnSphere(geometry, matrix, center) {
+    const position = geometry.attributes.position;
+    const uv = new Float32Array(position.count * 2);
+    const point = new THREE.Vector3();
+
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      point.fromBufferAttribute(position, vertex).applyMatrix4(matrix).sub(center);
+      const radius = point.length() || 1;
+      uv[vertex * 2] = (Math.atan2(point.z, point.x) + Math.PI) / (Math.PI * 2);
+      uv[vertex * 2 + 1] = 1 - (Math.acos(Math.min(1, Math.max(-1, point.y / radius))) / Math.PI);
+    }
+    this._healTankUVWrap(uv, position.count);
+
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  }
+
+  // A track is a loop, and the animation scrolls `offset.x` to run the pattern
+  // along it -- the same thing upstream does by translating the texture matrix.
+  // So `u` has to advance once around the belt and `v` across its width. The
+  // narrowest axis of the mesh is that width; the belt turns in the plane of
+  // the other two.
+  //
+  // The angle is taken after dividing each loop axis by its own half extent. A
+  // track is a long flat oval, and an angle measured on it raw would spend most
+  // of its range rounding the two ends and hardly any along the straights,
+  // bunching the tread pattern where the wheels are. Normalising first makes
+  // the loop roughly circular, which spreads the pattern close to evenly.
+  _projectTankUVsAroundBelt(geometry) {
+    const position = geometry.attributes.position;
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox;
+    const size = new THREE.Vector3();
+    box.getSize(size);
+
+    const extents = [size.x, size.y, size.z];
+    const mins = [box.min.x, box.min.y, box.min.z];
+    const centers = [
+      (box.min.x + box.max.x) * 0.5,
+      (box.min.y + box.max.y) * 0.5,
+      (box.min.z + box.max.z) * 0.5,
+    ];
+    const readers = [
+      (vertex) => position.getX(vertex),
+      (vertex) => position.getY(vertex),
+      (vertex) => position.getZ(vertex),
+    ];
+
+    let widthAxis = 0;
+    if (extents[1] < extents[widthAxis]) widthAxis = 1;
+    if (extents[2] < extents[widthAxis]) widthAxis = 2;
+    // The longer of the remaining two leads, so the angle sweeps along the
+    // track rather than across it.
+    const loopAxes = [0, 1, 2].filter((axis) => axis !== widthAxis)
+      .sort((left, right) => extents[right] - extents[left]);
+    const halfAlong = (extents[loopAxes[0]] * 0.5) || 1;
+    const halfAcross = (extents[loopAxes[1]] * 0.5) || 1;
+    const widthSpan = extents[widthAxis] || 1;
+
+    // How many times the tread image goes round. One turn of the loop would
+    // stretch a single tread pattern over the whole track, so the count comes
+    // from the belt's own size: a longer track carries more links, each the
+    // size the stock model's are, rather than the same few stretched further.
+    const perimeter = Math.PI * ((3 * (halfAlong + halfAcross))
+      - Math.sqrt(((3 * halfAlong) + halfAcross) * (halfAlong + (3 * halfAcross))));
+    const tiles = Math.max(1, Math.round(perimeter / TREAD_UNITS_PER_TILE));
+
+    const uv = new Float32Array(position.count * 2);
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      const along = (readers[loopAxes[0]](vertex) - centers[loopAxes[0]]) / halfAlong;
+      const across = (readers[loopAxes[1]](vertex) - centers[loopAxes[1]]) / halfAcross;
+      uv[vertex * 2] = (Math.atan2(across, along) + Math.PI) / (Math.PI * 2);
+      uv[vertex * 2 + 1] = (readers[widthAxis](vertex) - mins[widthAxis]) / widthSpan;
+    }
+    // Healed while `u` is still one turn, so the seam test can recognise the
+    // wrap; the repeats are laid on after, and scale the mended values with it.
+    this._healTankUVWrap(uv, position.count);
+    if (tiles > 1) {
+      for (let vertex = 0; vertex < position.count; vertex += 1) uv[vertex * 2] *= tiles;
+    }
+
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  }
+
   _preloadTankModel(modelPath = this._tankModelPath) {
     const loadPath = modelPath || '/obj/bzflag.obj';
     if (this._tankTemplateByPath.has(loadPath) || this._tankModelLoadsInFlight.has(loadPath)) {
@@ -5710,6 +5861,7 @@ class RenderManager {
     const loader = new OBJLoader();
     this._tankModelLoadsInFlight.add(loadPath);
     const onLoad = (obj) => {
+      this._generateMissingTankUVs(obj);
       const cache = {};
       obj.traverse((child) => {
         if (child.isMesh) cache[child.name] = child.geometry;
