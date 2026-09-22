@@ -66,7 +66,7 @@ jobs:
       - name: Checkout base branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       # The contributor's code goes in a subdirectory, which is what the
@@ -78,11 +78,23 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
           path: pr-head
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
           # Gated by the "safe to review" label: a maintainer has read the
           # diff, no git credentials are persisted, and this job cannot write.
           allow-unsafe-pr-checkout: true
+
+      # Separate clones of separate repositories share no history, so give
+      # pr-head the base repository as a remote and work out the real diff
+      # here. The review agent cannot run git itself.
+      - name: Compute the pull request diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git -C pr-head remote add base "https://github.com/${{ github.repository }}.git"
+          git -C pr-head fetch --no-tags --quiet base "$BASE_REF"
+          git -C pr-head diff --merge-base "base/$BASE_REF" HEAD > pr.diff
+          echo "diff is $(wc -l < pr.diff) lines"
 
       - name: Run Claude Code Review
         id: claude-review
@@ -98,8 +110,13 @@ jobs:
           prompt: |
             Review pull request #${{ github.event.pull_request.number }} of ${{ github.repository }}.
 
-            The contributor's code is checked out at ${{ github.workspace }}/pr-head.
-            The base branch is the working directory. Read both to understand the change.
+            The contributor's code is checked out at ${{ github.workspace }}/pr-head,
+            with full history and the base branch fetched as the remote "base".
+            The base branch itself is the working directory.
+
+            ${{ github.workspace }}/pr.diff already holds the merge-base diff
+            for this pull request. Start there, then read whole files under
+            pr-head for the context around each hunk.
 
             Run /code-review:code-review over that pull request and write the
             report as markdown to ${{ github.workspace }}/pr-review.md.
