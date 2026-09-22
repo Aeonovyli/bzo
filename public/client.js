@@ -3429,6 +3429,11 @@ const TANK_PREVIEW_FALLBACK_COLOR = 0x4caf50;
 // takes -z to -x, which from the camera is the left: a side-on profile, and the
 // silhouette that tells two hulls apart.
 const TANK_PREVIEW_START_ROTATION = Math.PI / 2;
+// The turntable's spin, in radians of yaw per frame.
+const TANK_PREVIEW_SPIN_PER_FRAME = 0.015;
+// The longest step the treads will take from one preview frame to the next.
+const TANK_PREVIEW_MAX_STEP = 0.1;
+let tankPreviewLastFrameAt = 0;
 let tankPreviewRafId = null;
 
 function getDefaultTankModel() {
@@ -3779,9 +3784,32 @@ async function fetchTankModels() {
 
 function animateTankPreviews() {
   if (!tankPreviewAnimating) return;
+  const now = performance.now();
+  // A dialog that was closed, or a tab left in the background, comes back with
+  // a gap no tread should cover in one step. The first frame of a run has no
+  // previous one to measure from and simply does not move the treads.
+  const deltaTime = tankPreviewLastFrameAt
+    ? Math.min(TANK_PREVIEW_MAX_STEP, (now - tankPreviewLastFrameAt) / 1000)
+    : 0;
+  tankPreviewLastFrameAt = now;
+
   if (tankPreviewCard) {
     if (tankPreviewCard.modelRoot) {
-      tankPreviewCard.modelRoot.rotation.y += 0.015;
+      tankPreviewCard.modelRoot.rotation.y += TANK_PREVIEW_SPIN_PER_FRAME;
+    }
+    // The preview tank is not driving anywhere, it is turning on the spot, so
+    // its treads run the way a tank spinning in place runs them: one forward,
+    // one back, at the speed the turntable is actually going. The renderer's
+    // own tread update does the work rather than the textures being scrolled
+    // here, which keeps one account of how fast a tread runs and turns a
+    // wheeled model's wheels for free.
+    const previewTank = tankPreviewCard.modelInner;
+    if (previewTank && deltaTime > 0 && renderManager) {
+      const tankRotationSpeed = gameConfig ? gameConfig.TANK_ROTATION_SPEED : 2;
+      previewTank.userData.forwardSpeed = 0;
+      previewTank.userData.rotationSpeed = TANK_PREVIEW_SPIN_PER_FRAME
+        / (tankRotationSpeed * deltaTime);
+      renderManager.updateTreads([previewTank], deltaTime, gameConfig);
     }
     tankPreviewCard.renderer.render(tankPreviewCard.scene, tankPreviewCard.camera);
   }
@@ -3791,6 +3819,7 @@ function animateTankPreviews() {
 function startTankPreviewAnimation() {
   if (tankPreviewAnimating) return;
   tankPreviewAnimating = true;
+  tankPreviewLastFrameAt = 0;
   animateTankPreviews();
 }
 
