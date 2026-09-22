@@ -5821,6 +5821,10 @@ class RenderManager {
         const ac = new THREE.Vector3();
         const normal = new THREE.Vector3();
 
+        // Which of the six materials each triangle wants, by the axis its
+        // normal leans on: a face pointing up or down is the belt the tread
+        // runs on, anything else is the side of it.
+        const triangleMaterials = new Uint8Array(triangleCount);
         for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
           const base = triangleIndex * 3;
           const ia = index ? index[base] : base;
@@ -5840,8 +5844,43 @@ class RenderManager {
             materialIndex = normal.y >= 0 ? 2 : 3;
           }
 
-          geometry.addGroup(base, 3, materialIndex);
+          triangleMaterials[triangleIndex] = materialIndex;
         }
+
+        // Three.js draws a group per call, so the triangles are gathered by
+        // the material they picked and each material gets one group. A group
+        // per triangle is what this did before, and it cost a draw call per
+        // triangle -- nothing on a twelve-triangle tread, thousands on a
+        // detailed one, and the frame rate went with it.
+        //
+        // The order lives in an index buffer rather than in the attributes:
+        // the vertices do not move, only the order they are read in, and the
+        // geometry here is the clone above so the template keeps its own.
+        const materialCount = material.length;
+        const runStarts = new Uint32Array(materialCount + 1);
+        for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
+          runStarts[triangleMaterials[triangleIndex] + 1] += 1;
+        }
+        for (let materialIndex = 0; materialIndex < materialCount; materialIndex += 1) {
+          const runLength = runStarts[materialIndex + 1];
+          runStarts[materialIndex + 1] = runStarts[materialIndex] + runLength;
+          if (runLength > 0) geometry.addGroup(runStarts[materialIndex] * 3, runLength * 3, materialIndex);
+        }
+
+        const vertexCount = position.count;
+        const ordered = vertexCount > 65535
+          ? new Uint32Array(triangleCount * 3)
+          : new Uint16Array(triangleCount * 3);
+        const cursors = runStarts.slice(0, materialCount);
+        for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
+          const base = triangleIndex * 3;
+          const slot = cursors[triangleMaterials[triangleIndex]] * 3;
+          cursors[triangleMaterials[triangleIndex]] += 1;
+          ordered[slot] = index ? index[base] : base;
+          ordered[slot + 1] = index ? index[base + 1] : base + 1;
+          ordered[slot + 2] = index ? index[base + 2] : base + 2;
+        }
+        geometry.setIndex(new THREE.BufferAttribute(ordered, 1));
       } else {
         resolvedMaterial = material[0];
       }
