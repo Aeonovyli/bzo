@@ -3443,16 +3443,30 @@ function getTankModelById(modelId) {
   return TANK_MODELS.find((model) => model.id === normalized) || null;
 }
 
+// What an id means, without asking whether the server is offering it. The
+// spelling is settled here; whether the model exists is a separate question,
+// and one that cannot be answered until the model list has been fetched.
+function canonicalTankModelId(modelId) {
+  const normalized = typeof modelId === 'string' ? modelId.trim().toLowerCase() : '';
+  if (normalized === 'default') return DEFAULT_TANK_MODEL_ID;
+  if (normalized === 'bzflag-tank') return 'bzflag';
+  if (normalized === 'tank') return DEFAULT_TANK_MODEL_ID;
+  return normalized;
+}
+
+// The same, and then held against what the server actually offers: an id for a
+// model this server does not have falls back to the default.
 function normalizeTankModelId(modelId) {
-  let normalized = typeof modelId === 'string' ? modelId.trim().toLowerCase() : '';
-  if (normalized === 'default') normalized = DEFAULT_TANK_MODEL_ID;
-  if (normalized === 'bzflag-tank') normalized = 'bzflag';
-  if (normalized === 'tank') normalized = DEFAULT_TANK_MODEL_ID;
-  const selected = getTankModelById(normalized);
+  const selected = getTankModelById(canonicalTankModelId(modelId));
   return selected ? selected.id : getDefaultTankModel().id;
 }
 
-selectedTankModelId = normalizeTankModelId(selectedTankModelId);
+// Canonical only, deliberately. `TANK_MODELS` is still the built-in list at
+// this point -- the server's is fetched -- so asking whether the stored model
+// exists would answer "no" for every model the built-in list does not happen
+// to name, and a player who chose one of those would find themselves back in
+// the default tank on every reload. The availability test waits for the fetch.
+selectedTankModelId = canonicalTankModelId(selectedTankModelId);
 
 function getTankModelPathById(modelId) {
   const normalizedId = normalizeTankModelId(modelId);
@@ -3526,12 +3540,40 @@ function setSelectedTankModel(modelId) {
   updateSelectedTankOptionUI();
 }
 
+// The model a player is looking at, and the ones a single step either side of
+// it, because those are the only ones the carousel can reach next.
+//
+// Every model was fetched up front once, which cost every client the whole
+// catalogue whether or not they ever wore any of it: a megabyte and change on
+// the wire, and most of a second of OBJ parsing on the main thread -- several
+// seconds on a slow one -- before the entry dialog could be used. That price
+// grew with each model added, which is the wrong way round for a list meant to
+// keep growing. A model nobody has looked at is loaded when somebody does: the
+// renderer already fetches a template it does not hold and builds the tank when
+// it lands, which is the same path another player's unfamiliar tank takes.
+function preloadTankModelsAround(modelId) {
+  if (!renderManager || typeof renderManager.preloadTankModel !== 'function') return;
+  if (!Array.isArray(TANK_MODELS) || TANK_MODELS.length === 0) return;
+  const currentIndex = TANK_MODELS.findIndex((model) => model.id === modelId);
+  const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+  const count = TANK_MODELS.length;
+  // Centre first: it is the one being drawn, and the neighbours are only a
+  // guess at where the player goes next.
+  for (const step of [0, 1, -1]) {
+    const model = TANK_MODELS[(safeIndex + step + count) % count];
+    if (model && model.path) renderManager.preloadTankModel(model.path);
+  }
+}
+
 function cycleTankModel(step) {
   if (!Array.isArray(TANK_MODELS) || TANK_MODELS.length === 0) return;
   const currentIndex = TANK_MODELS.findIndex((model) => model.id === selectedTankModelId);
   const safeIndex = currentIndex >= 0 ? currentIndex : 0;
   const nextIndex = (safeIndex + step + TANK_MODELS.length) % TANK_MODELS.length;
   setSelectedTankModel(TANK_MODELS[nextIndex].id);
+  // Now that the carousel has moved, the model beyond the new one is the next
+  // it could reach.
+  preloadTankModelsAround(TANK_MODELS[nextIndex].id);
 }
 
 // The preview is built by the same `createTank` the world uses, so what the
@@ -3728,13 +3770,7 @@ async function fetchTankModels() {
         localStorage.setItem('tankModelId', normalizedSelectedTankModelId);
       }
       selectedTankModelId = normalizedSelectedTankModelId;
-      if (renderManager && typeof renderManager.preloadTankModel === 'function') {
-        TANK_MODELS.forEach((model) => {
-          if (model && model.path) {
-            renderManager.preloadTankModel(model.path);
-          }
-        });
-      }
+      preloadTankModelsAround(selectedTankModelId);
     }
   } catch (error) {
     console.warn('Failed to fetch tank model list:', error);
