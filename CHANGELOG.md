@@ -6,6 +6,46 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.52] - 2026-09-22
+
+### Added
+- Two tank models, `bzfourtank` and a rebuilt `bzship`, contributed by
+  @Aeonovyli. Thanks. Closes #114.
+- A model that arrives with no texture coordinates is wrapped when it loads
+  rather than drawing flat: treads around their own belt loop, so the tread
+  texture runs along the track, and every other surface on a sphere struck
+  from the middle of the tank. A model that ships its own coordinates keeps
+  them -- this rescues one that does not, and is no substitute for unwrapping
+  a model properly.
+- The tank in the entry dialog runs its treads as it turns, and a wheeled
+  model turns its wheels.
+
+### Changed
+- Models load as they are wanted -- the selected one and the one either side
+  of it in the carousel -- instead of the whole catalogue up front. A client
+  was fetching 1.3MB and spending 710ms parsing models it might never wear,
+  several seconds of it on a slow machine, and each model added made that
+  worse for everybody.
+- The README says what is expected of an asset's licence. The code is AGPLv3;
+  models, textures, sounds and maps come from several places and do not
+  inherit that by sitting in the repository. Not everything already here meets
+  the bar, and the section says so.
+
+### Fixed
+- A tank part drawn with a material array cost a draw call per triangle. On
+  the stock model that was twelve and nobody noticed; on a detailed one it was
+  4,735 and it halved the frame rate of every client that could see the tank.
+  Closes #121.
+- The tank a player picked is kept across a reload. The stored choice was
+  being held against the built-in model list before the server's list arrived,
+  so choosing any model outside that list and reloading put you back in a
+  bzflag tank -- and overwrote the choice.
+- The bzfourtank gun draws as a gun: its casing was named into `body` and took
+  the camouflage skin, leaving a black bore inside a patterned tube.
+- Editing a model in development restarts the server, so the brotli sidecar is
+  rebuilt. An edited model used to keep serving its previous version however
+  hard the browser was reloaded.
+
 ## [1.2.51] - 2026-09-22
 
 ### Added
