@@ -81,8 +81,9 @@ This supports 3-wheel, 4-wheel, and other tracked layouts without model-specific
 
 ## Material Role Intent
 
-Object names are the hard contract. Material names are advisory and may be used
-to improve role inference in the future.
+Object names are the hard contract. Material names are advisory: the renderer
+picks materials by object name, and a `usemtl` in the file is documentation for
+the next person rather than something the renderer reads.
 
 Recommended material role names:
 
@@ -108,10 +109,59 @@ pipeline include:
 ## Renderer Behavior
 
 - `body` and `turret` use the tintable BZFlag-derived body texture
+- `barrel` is flat dark, and carries no texture at all
 - tread belt surfaces use the animated tread texture
 - tread caps use darker mechanical tread-cap materials
 - wheel meshes are animated by side based on discovered wheel object names
 - if only `ltread` and `rtread` exist, the renderer still works in fallback mode
+
+A part gets the material of the object it is named into, so geometry belongs in
+the object whose *role* it wants rather than the one it sits next to. A gun's
+bore in `barrel` and its casing in `body` draws a camouflaged tube around a
+black hole: both are doing exactly what their object asked for. Split by what a
+piece should look like, and the renderer does the rest.
+
+## Texture Coordinates
+
+**Author them.** A model is expected to arrive unwrapped, and an unwrapped model
+always looks better than anything the renderer can work out for itself.
+
+A model that has no `vt` lines at all is rescued rather than left broken, since
+one without texture coordinates draws every fragment from a single texel and
+comes out flat team colour with no skin on it -- a plastic toy rather than a
+tank. The renderer projects coordinates for it once, when the model loads:
+
+- treads are wrapped around their own belt loop, so the scrolling tread texture
+  runs along the track. The narrowest axis of the mesh is taken as the width of
+  the track, and the number of times the tread image repeats comes from the
+  belt's own size, so links come out the size the stock tank's are
+- every other surface is wrapped on a sphere struck from the middle of the
+  assembled tank, so one skin runs across hull, turret and barrel continuously
+
+This is a rescue and not a substitute for unwrapping. A sphere stretches
+wherever a surface does not face outward from the centre, and no projection
+knows what the model meant. A model that ships its own coordinates keeps them
+untouched.
+
+## Loading
+
+Models are loaded as they are needed, not all at once: the one a player has
+selected, and the one either side of it in the carousel, because those are the
+only ones the carousel can reach next. Anything else arrives when somebody
+looks at it or when another player turns up wearing it.
+
+This matters for what a model costs everyone else. A model is parsed on the
+main thread of every client that loads it, and a large one is expensive enough
+to be felt on a slow machine -- a 160,000-triangle model takes most of a second
+there. Keeping a model small is a courtesy to every player who scrolls past it,
+and the catalogue can grow without taxing people who never wear any of it.
+
+## Licensing
+
+A model is a separate work from the code that draws it, and the two do not
+share a licence by sitting in the same repository. See **Bundled assets and
+licensing** in [the README](../README.md) for what is expected of a model
+before it ships.
 
 ## Unbuildable Models
 

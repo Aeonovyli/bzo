@@ -441,6 +441,34 @@ it already carries the section for the version that failed.
 against the tag by `scripts/check-release.mjs`. Do not edit it by hand, and do
 not reintroduce a hardcoded client version string elsewhere.
 
+## Bundled assets and licensing
+
+The code is AGPLv3. The assets are not all the same story.
+
+bzo ships models, textures, sounds and maps from several places: some are the
+BZFlag project's, used under its licence; some were made for bzo; some arrived
+with a contribution. A file does not inherit the repository's licence by
+sitting in it, and an asset whose origin nobody recorded is a question left for
+whoever asks next.
+
+What is expected of anything added here:
+
+- say where it came from, and under what terms, in the pull request
+- prefer terms compatible with AGPLv3 distribution
+- a header saying a file was exported by some tool is not a grant of anything,
+  and neither is a note that the author did not look into it
+
+Not every asset already in the tree meets that bar. Some predate the
+expectation and some arrived with a contribution that was worth taking on its
+own merits, and the intent is to reach clear, recorded licensing for every one
+of them rather than to pretend it is already done. If you know the provenance
+of something here, or you are the author of it, please say so in an issue --
+that is the cheapest way this gets finished.
+
+Maps are the same question in a different shape: a map downloaded from a
+server, or saved out by a client, carries no grant with it. See
+[docs/bzw.md](docs/bzw.md) for the map format itself.
+
 ## AGPL source availability
 
 This project is licensed under the GNU Affero General Public License v3.0.
