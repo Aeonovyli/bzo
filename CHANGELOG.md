@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.51] - 2026-09-22
+
+### Added
+- The flag you are carrying says what it does, under the targeting box, for a
+  minute after it changed hands -- upstream's own flag help, from the same
+  strings the help panel is built from. In a headset it goes on the HUD plane
+  just below the gaze axis, between the notices above and the chat below. The
+  text cannot change while a flag is held, so the XR panel is painted when the
+  help changes and left alone every other frame. Closes #112.
+
+### Fixed
+- A burrowed tank casts no shadow. The planar shadow matrix offsets every
+  caster vertex along the light by its own height and never collapses that to
+  nothing, so a tank under the ground drew its full standing silhouette on the
+  surface that was hiding it. Closes #115.
+
 ## [1.2.50] - 2026-09-21
 
 ### Added

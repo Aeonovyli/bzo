@@ -77,6 +77,15 @@ only thing to change if the HUD sits wrong; nothing else encodes a position.
 - With a keyboard attached, switch tabs with the digit keys and confirm the
   caption follows. Let a message arrive on another tab and confirm the caption
   row reports it as unread on the right.
+- Pick up a flag and confirm the help for it appears just below the gaze axis,
+  clear of the crosshair above and the chat panel below, and that it goes on its
+  own after a minute. Pick up Phantom Zone, the longest help in the table, and
+  confirm every line of it is on the panel.
+- Drop the flag and confirm the help goes with it rather than serving out its
+  minute.
+- With the help showing, confirm the render level's `hud` figure is what it was
+  without it: the panel is painted when the text changes and left alone every
+  other frame, so a minute of help should cost nothing per frame.
 
 ## Controller mapping
 

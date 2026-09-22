@@ -116,6 +116,31 @@ export function fitText(context, text, maxWidth) {
   return `${result}...`;
 }
 
+// Break `text` into lines no wider than `maxWidth` in the context's current
+// font, at spaces, which is how makeHelpString wraps the flag help
+// (HUDRenderer.cxx:581). Runs of whitespace collapse to one space -- upstream's
+// wrap does the same with the double spaces its help strings put between
+// sentences. A word wider than the line keeps its own long line rather than
+// being cut: a reader is better served by a line that overhangs than by half a
+// word, and nothing in the flag table has one.
+export function wrapText(context, text, maxWidth) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const lines = [];
+  let line = words[0];
+  for (let index = 1; index < words.length; index++) {
+    const candidate = `${line} ${words[index]}`;
+    if (context.measureText(candidate).width <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+    lines.push(line);
+    line = words[index];
+  }
+  lines.push(line);
+  return lines;
+}
+
 export function colorToCSS(color) {
   if (typeof color === 'string') return color;
   if (typeof color === 'number') return `#${color.toString(16).padStart(6, '0')}`;
@@ -284,6 +309,56 @@ export function updateAlertHud(now = performance.now()) {
     }
     alertHudElement.appendChild(line);
   });
+}
+
+// HUDRenderer::setFlagHelp and the flag help block of HUDRenderer::render
+// (HUDRenderer.cxx:478, :1782): what the flag you are carrying does, said under
+// the targeting box for a minute after it changed hands. Upstream sets this
+// from updateFlag (playing.cxx:1459), which runs on every change of the local
+// tank's flag -- putting one down included, and there it is Flags::Null's empty
+// help string that clears the text rather than any separate call.
+//
+// Kept beside the alerts because it is the same kind of thing: one piece of
+// text with a clock, read by the DOM HUD and by the XR panel, so the two can
+// never disagree about what is showing or for how long.
+export const FLAG_HELP_SECONDS = 60;
+let flagHelp = null;
+
+export function setFlagHelp(text, durationSeconds = FLAG_HELP_SECONDS) {
+  if (!text) {
+    flagHelp = null;
+    return;
+  }
+  flagHelp = {
+    text: String(text),
+    expiresAt: performance.now() + durationSeconds * 1000,
+  };
+}
+
+export function getActiveFlagHelp(now = performance.now()) {
+  if (!flagHelp) return '';
+  if (flagHelp.expiresAt <= now) {
+    flagHelp = null;
+    return '';
+  }
+  return flagHelp.text;
+}
+
+let flagHelpElement;
+let lastFlagHelpText = '';
+
+// The browser wraps this one: the element is 75% of the viewport wide, which is
+// the width makeHelpString measures against, so the lines break where upstream
+// breaks them without measuring anything here. Writing it only when the text
+// changes keeps a minute of the same sentence from touching the DOM every
+// frame.
+export function updateFlagHelpHud(now = performance.now()) {
+  if (flagHelpElement === undefined) flagHelpElement = document.getElementById('flagHelp');
+  if (!flagHelpElement) return;
+  const text = getActiveFlagHelp(now);
+  if (text === lastFlagHelpText) return;
+  lastFlagHelpText = text;
+  flagHelpElement.textContent = text;
 }
 
 // Update HUD button states

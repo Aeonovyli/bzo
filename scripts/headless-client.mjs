@@ -15,6 +15,7 @@
 //   node scripts/headless-client.mjs --eval 'document.getElementById("playerName").textContent'
 //   node scripts/headless-client.mjs --window 320,240   # ~60fps instead of ~8
 //   node scripts/headless-client.mjs --mv "280,15,-280 sw" --drive 20 --steer center
+//   node scripts/headless-client.mjs --chat "/flag give headless GM"
 //
 // It renders through SwiftShader, so it answers "does this draw without
 // throwing, and what does it look like" and never "how fast is this". The frame
@@ -24,7 +25,9 @@
 // runs near 60fps, which is where those bugs live. `--drive` holds forward for
 // that many seconds (real key events, same as a player pressing W), polling
 // /api/players once a second to log where the tank actually went; `--steer
-// center` taps A/D between polls to keep it pointed at the map origin.
+// center` taps A/D between polls to keep it pointed at the map origin. `--chat`
+// types chat lines (newline-separated) into the chat box before the drive,
+// which is how a probe reaches anything that only a command can set up.
 
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -168,23 +171,36 @@ const fetchSelf = async () => {
   return players.find((player) => player.name === playerName);
 };
 
-// `/mv` is bzo's own chat command for teleporting a tank -- see server/commands.cjs
-// -- and there is no REST equivalent, so this types it into the chat box exactly
-// like a player would rather than calling anything over HTTP.
-const mvArgs = args.get('mv') || '';
-if (mvArgs && joined.startsWith('joined')) {
-  // The entry dialog closing is not the tank existing -- gameConfig, the
-  // world, and the tank itself all still have to arrive before chat is a
-  // real gameplay context rather than the dialog's own leftover one.
-  await sleep(2000);
+// A chat line, typed into the chat box exactly as a player would type it
+// rather than called over HTTP -- the commands worth driving this probe with
+// are `/mv` and `/flag`, and neither has a REST equivalent.
+const sendChat = async (line) => {
   // No sleep between these: an unfocused headless window keeps clearing
   // whatever the page just focused, so this only sticks long enough to be
   // read back if focus, typing and Enter all land in the same tick.
   await evaluate('document.getElementById("chatInput")?.focus()');
-  await send('Input.insertText', { text: `/mv ${mvArgs}` });
+  await send('Input.insertText', { text: line });
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', code: 'Enter', key: 'Enter' });
   await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Enter', key: 'Enter' });
   await sleep(500);
+};
+
+// `/mv` is bzo's own chat command for teleporting a tank, and keeps its own
+// option because placing the tank is what most probes want. `--chat` is the
+// same path for anything else; both run before the drive, `--mv` first.
+const mvArgs = args.get('mv') || '';
+const chatLine = args.get('chat') || '';
+if ((mvArgs || chatLine) && joined.startsWith('joined')) {
+  // The entry dialog closing is not the tank existing -- gameConfig, the
+  // world, and the tank itself all still have to arrive before chat is a
+  // real gameplay context rather than the dialog's own leftover one.
+  await sleep(2000);
+  if (mvArgs) await sendChat(`/mv ${mvArgs}`);
+  // Newline-separated, so a probe that needs a sequence -- give a flag, look at
+  // it, put it down -- is one option rather than one run each.
+  for (const line of chatLine.split('\n').map((text) => text.trim()).filter(Boolean)) {
+    await sendChat(line);
+  }
 }
 
 const driveLog = [];

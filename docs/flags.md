@@ -48,7 +48,11 @@ so the request carries nothing to validate.
 **The `FLAG_TYPES` table is the list of what bzo has.** A row is what puts a flag
 in `superFlags.allowed`'s default and in the help panel, which `buildFlagHelp`
 generates from the same table, so a row with no behaviour behind it would be a
-flag in the world that lies about what it does.
+flag in the world that lies about what it does. A row's `help` is read twice
+more: it is what the HUD says under the targeting box for a minute after the
+flag changes hands, on a monitor and in a headset both, so it has to read as a
+sentence to somebody who just picked the flag up rather than as a catalogue
+entry.
 
 **Where a flag's rule is enforced follows one test:** server-side wherever a
 modified client could gain by lying, client-side wherever it only changes what

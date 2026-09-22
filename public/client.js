@@ -126,6 +126,10 @@ import {
   getHudAlertColor,
   setHudAlert,
   updateAlertHud,
+  FLAG_HELP_SECONDS,
+  getActiveFlagHelp,
+  setFlagHelp,
+  updateFlagHelpHud,
   updateScoreboard,
   updateAltimeter,
   updateDegreeBar,
@@ -133,7 +137,8 @@ import {
   roundedRect,
   readStoredFlag,
   bindToggleButton,
-  fitText
+  fitText,
+  wrapText
 } from './hud.js';
 import {
   renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
@@ -484,7 +489,16 @@ const xrScoreboardPanel = {
   paintedVersion: 0, paintedRows: 0,
 };
 const xrAlertPanel = { canvas: null, texture: null, mesh: null, planeWidth: 0, planeHeight: 0 };
-const XR_HUD_PANELS = [xrRadarPanel, xrChatPanel, xrShotStatusPanel, xrScoreboardPanel, xrAlertPanel];
+const xrFlagHelpPanel = {
+  canvas: null, texture: null, mesh: null, planeWidth: 0, planeHeight: 0,
+  // Which help is on the canvas. The text is fixed for as long as the flag is
+  // held, so this is what keeps a minute of the same three sentences from being
+  // painted and uploaded every frame.
+  paintedText: null,
+};
+const XR_HUD_PANELS = [
+  xrRadarPanel, xrChatPanel, xrShotStatusPanel, xrScoreboardPanel, xrAlertPanel, xrFlagHelpPanel,
+];
 const XR_HUD_PLANE_Z = -0.85;
 // --hud-edge is what keeps every DOM panel the same distance from the edge of
 // the viewport. An immersive session has no viewport edge to measure from: the
@@ -506,8 +520,9 @@ const XR_HUD_ANGLE_DOWN = 24;
 function xrHudEdge(degrees) {
   return Math.abs(XR_HUD_PLANE_Z) * Math.tan((degrees * Math.PI) / 180);
 }
-// messageColor, matching #roamStatus in the DOM column.
-const XR_ROAM_STATUS_COLOR = '#cfd8e6';
+// messageColor. The roaming status line wears it, as #roamStatus does in the
+// DOM column, and so does the flag help -- upstream draws both in it.
+const XR_MESSAGE_COLOR = '#cfd8e6';
 // The radar's side on the HUD plane. It takes the box's top-right corner, and
 // this is the size that keeps the corner nearest the gunsight where it has
 // always been while the far corner comes inside the box -- a radar large enough
@@ -524,6 +539,27 @@ const XR_CHAT_CAPTION_PX = 22;
 const XR_CHAT_LINE_PX = 22;
 const XR_CHAT_LINE_HEIGHT_PX = 26;
 const XR_CHAT_CANVAS_HEIGHT = 204;
+// The flag help panel. A headset has no targeting box to hang this under, so
+// it takes the band between the notice column above and the chat below, its top
+// edge just under the gaze axis -- which is where the text lands on a monitor
+// too, the box there being the same few degrees across.
+//
+// The canvas is a fixed size and the text is painted from the top of it, so the
+// plane never changes shape and the texture is allocated once: a two-line help
+// leaves the bottom of the canvas transparent rather than making a shorter
+// panel. Five lines is the room, and the longest string in the flag table
+// (Phantom Zone, at 185 characters) wraps to three.
+const XR_FLAG_HELP_CANVAS_WIDTH = 1024;
+const XR_FLAG_HELP_LINE_PX = 26;
+const XR_FLAG_HELP_LINE_HEIGHT_PX = 32;
+const XR_FLAG_HELP_MARGIN_PX = 32;
+const XR_FLAG_HELP_MAX_LINES = 5;
+const XR_FLAG_HELP_CANVAS_HEIGHT = 168;
+const XR_FLAG_HELP_PLANE_WIDTH = 0.8;
+// How far below the gaze axis the first line starts. Clear of the crosshair,
+// and far enough above the chat panel that a five-line help still does not
+// reach it.
+const XR_FLAG_HELP_TOP = -0.05;
 // BZFlag fires with Enter or the left mouse button and keeps the space bar for
 // dropping a flag (ActionBinding.cxx:92-95).
 const FIRE_KEY = 'Enter';
@@ -3312,6 +3348,23 @@ function updateDeathCameraHudVisibility() {
   if (!controlBox) return;
   const inDeathCamera = cameraMode === 'overview' && !!deathFollowTarget;
   controlBox.style.display = inDeathCamera ? 'none' : '';
+}
+
+// updateFlag (playing.cxx:1444), which upstream calls on every change of the
+// local tank's flag and which restarts the flag help clock each time. bzo asks
+// rather than being told: a flag leaves a tank down a good many paths -- put
+// down, shaken off, stolen, lost to a death, replaced by the next grab -- and
+// a poll cannot miss one of them the way a call added to four of the five
+// would. It costs a string compare a frame.
+//
+// Carrying nothing clears the text, which is what upstream gets out of
+// Flags::Null having no help string of its own.
+let lastFlagHelpType = null;
+function updateFlagHelp() {
+  const flagType = getMyFlag()?.type ?? null;
+  if (flagType === lastFlagHelpType) return;
+  lastFlagHelpType = flagType;
+  setFlagHelp(getFlagType(flagType)?.help || '', FLAG_HELP_SECONDS);
 }
 
 // Mouse control
@@ -12046,6 +12099,7 @@ function updateXRHudOverlays() {
   ensureXRChatOverlay();
   ensureXRScoreboardOverlay();
   ensureXRNoticeOverlay();
+  ensureXRFlagHelpOverlay();
   ensureXRSettingsMenu();
 }
 
@@ -12056,7 +12110,7 @@ function ensureXRNoticeOverlay() {
   const alerts = getActiveHudAlerts();
   const status = isObserver() ? getRoamLabel() : '';
   const lines = [];
-  if (status) lines.push({ text: status, color: XR_ROAM_STATUS_COLOR });
+  if (status) lines.push({ text: status, color: XR_MESSAGE_COLOR });
   alerts.forEach((alert) => lines.push({
     text: alert.text,
     color: getHudAlertColor(alert.warning),
@@ -12118,6 +12172,81 @@ function ensureXRNoticeOverlay() {
 
   placeXRHudPanel(xrAlertPanel, { width: 0.86, height: 0.176, x: 0, y: 0.3 });
   xrAlertPanel.texture.needsUpdate = true;
+}
+
+// What the flag you are carrying does, on the surface a session has. The DOM
+// copy of this is one element the browser wraps; here the wrap is measured
+// against the canvas, and the same stroke the notice column uses stands in for
+// its text-shadow because the panel is transparent and the world behind it is
+// whatever the player happens to be looking at.
+//
+// The scoreboard's rule, and it matters more here than there: this panel is up
+// for a minute at a time and its text cannot change while it is, so the canvas
+// is painted when the help changes and left alone every other frame. Repainting
+// it at frame rate would spend a megabyte of texture upload and five stroked
+// lines of layout on words that never move.
+function ensureXRFlagHelpOverlay() {
+  const text = getActiveFlagHelp();
+  if (!text) {
+    if (xrFlagHelpPanel.mesh) xrFlagHelpPanel.mesh.visible = false;
+    xrFlagHelpPanel.paintedText = null;
+    return;
+  }
+  if (!ensureXRHudPanel(xrFlagHelpPanel, {
+    canvasWidth: XR_FLAG_HELP_CANVAS_WIDTH,
+    canvasHeight: XR_FLAG_HELP_CANVAS_HEIGHT,
+  })) return;
+
+  if (text !== xrFlagHelpPanel.paintedText) {
+    const canvas = xrFlagHelpPanel.canvas;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      xrFlagHelpPanel.mesh.visible = false;
+      return;
+    }
+    const w = canvas.width;
+    ctx.clearRect(0, 0, w, canvas.height);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = `${XR_FLAG_HELP_LINE_PX}px sans-serif`;
+    // Wrapped against the canvas, as makeHelpString wraps against 75% of the
+    // window width. Nothing in the flag table reaches the panel's last line
+    // today -- Phantom Zone, the longest, takes three of the five.
+    const maxWidth = w - (2 * XR_FLAG_HELP_MARGIN_PX);
+    const lines = wrapText(ctx, text, maxWidth);
+    if (lines.length > XR_FLAG_HELP_MAX_LINES) {
+      const last = XR_FLAG_HELP_MAX_LINES - 1;
+      // A longer one is cut rather than dropped, so it says there is more
+      // instead of ending mid-sentence as if that were all of it. The overflow
+      // is rejoined first because it is wider than a line by construction,
+      // which is what gives fitText something to cut.
+      const overflow = lines.slice(last).join(' ');
+      lines.length = XR_FLAG_HELP_MAX_LINES;
+      lines[last] = fitText(ctx, overflow, maxWidth);
+    }
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.fillStyle = XR_MESSAGE_COLOR;
+    lines.forEach((line, index) => {
+      const y = XR_FLAG_HELP_LINE_PX + (index * XR_FLAG_HELP_LINE_HEIGHT_PX);
+      ctx.strokeText(line, w / 2, y);
+      ctx.fillText(line, w / 2, y);
+    });
+    xrFlagHelpPanel.paintedText = text;
+    xrFlagHelpPanel.texture.needsUpdate = true;
+  }
+
+  const height = XR_FLAG_HELP_PLANE_WIDTH
+    * (XR_FLAG_HELP_CANVAS_HEIGHT / XR_FLAG_HELP_CANVAS_WIDTH);
+  placeXRHudPanel(xrFlagHelpPanel, {
+    width: XR_FLAG_HELP_PLANE_WIDTH,
+    height,
+    x: 0,
+    // Placed by its top edge: the first line has to land the same distance
+    // below the gaze axis whatever the help says, and the canvas is painted
+    // from the top for the same reason.
+    y: XR_FLAG_HELP_TOP - (height / 2),
+  });
 }
 
 function ensureXRRadarTexture() {
@@ -14379,6 +14508,8 @@ function animate(frameTime) {
     renderManager.deathFollowTarget = null;
   }
   updateAlertHud();
+  updateFlagHelp();
+  updateFlagHelpHud();
   updateDeathCameraHudVisibility();
   updateObserverHudVisibility();
   // An observer cannot leave roaming, which is upstream's rule: Roaming::setMode
