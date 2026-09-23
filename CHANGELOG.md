@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.54] - 2026-09-23
+
+### Added
+- Tanks carry upstream's three turret navigation lights: white astern, red to
+  port, green to starboard, read the way an aircraft's are, so which way a
+  tank is pointing resolves before its silhouette does. Upstream fixes them at
+  one height above the stock tank's turret, which is inside the turret of half
+  the models bzo offers, so each model places its own three as single-vertex
+  `p` objects (`lightRear`, `lightPort`, `lightStarboard`) resting just over
+  the surface beneath them; a model that names none falls back to upstream's
+  coordinates. Each is one round, fogged, anti-aliased point, drawn from a
+  three-vertex `THREE.Points` that costs one call per tank, and sized as a
+  share of the drawing buffer's height rather than as upstream's flat two
+  pixels -- which is only a size on the display it was chosen for, a quarter
+  of its intended share of a 4K window and several times it on a phone. They
+  follow the distance by its square root rather than by upstream's flat size
+  or solid geometry's exact one, so closing on a tank grows its lights slower
+  than it grows the tank: a far tank's lights are the largest thing about it,
+  a near tank's are a detail on a hull already unmistakable. On a 1080p window
+  that is two pixels across the map, four at ten tank lengths, nine at the
+  chase camera, and twelve within a tank length.
+
 ## [1.2.53] - 2026-09-23
 
 ### Added

@@ -8683,3 +8683,15 @@ f 2314/2314/2314 2313/2313/2313 2293/2293/2293
 f 2315/2315/2315 2314/2314/2314 2294/2294/2294
 f 2316/2316/2316 2315/2315/2315 2295/2295/2295
 f 2317/2317/2317 2316/2316/2316 2296/2296/2296
+
+# Navigation lights. One `p` vertex each, read by the renderer for its
+# position only; see docs/tank-model-format.md.
+o lightRear
+v 0.000000 1.800000 1.100000
+p -1
+o lightPort
+v -1.000000 1.910000 -0.100000
+p -1
+o lightStarboard
+v 1.000000 1.910000 -0.100000
+p -1

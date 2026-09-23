@@ -79,6 +79,46 @@ Additional accepted aliases:
 The renderer animates however many indexed wheels it finds on each side, in numeric order.
 This supports 3-wheel, 4-wheel, and other tracked layouts without model-specific code.
 
+## Navigation Light Object Names
+
+Upstream BZFlag draws three navigation lights above the turret, read the way an
+aircraft's are: white astern, red to port, green to starboard, so which way a
+tank is pointing resolves before its silhouette does. A model places its own:
+
+- `lightRear` -- white
+- `lightPort` -- red, on the tank's left
+- `lightStarboard` -- green, on the tank's right
+
+Each is a single-vertex point object, not geometry:
+
+```
+o lightRear
+v 0.000000 2.100000 1.530000
+p -1
+```
+
+The renderer reads the vertex for its position and nothing else. The colours
+are fixed, because the three colours are the convention the lights are read by
+and not a model's choice; an object built out of faces instead of a `p` works
+too, and is read at its own centre.
+
+Rest each one on the surface directly beneath it, a couple of centimetres
+clear -- not on the top of the whole tank. A light beside a tall turret belongs
+on the deck it is over: sunk into the hull it is depth-tested away and never
+appears, and held up at the turret's height it visibly floats in mid-air.
+`scripts/test-tank-models.mjs` measures the surface in each light's own column
+and holds every model to that band.
+
+Upstream can hard-code one height for all three because it has one tank, and
+that height sits *inside* the turret of three of the models `bzo` ships. A
+model that names none of the three falls back to upstream's coordinates for the
+stock tank, which is right for a tank shaped like the stock one and wrong for
+anything else.
+
+These objects carry a `p` command, so `readObjObjectNames` leaves them out of
+the names it reports and the renderer's part lookup -- which wants meshes --
+never sees them. Adding them cannot affect whether a model builds.
+
 ## Material Role Intent
 
 Object names are the hard contract. Material names are advisory: the renderer
@@ -114,6 +154,12 @@ pipeline include:
 - tread caps use darker mechanical tread-cap materials
 - wheel meshes are animated by side based on discovered wheel object names
 - if only `ltread` and `rtread` exist, the renderer still works in fallback mode
+- navigation lights draw as screen-space points on the turret: they follow it,
+  cast no shadow, and are absent from the explosion debris. Their size is a
+  share of the drawing buffer's height rather than a count of pixels -- of
+  whichever buffer is being drawn into, so the tank preview's small canvas
+  gets small lights -- and follows the distance by its square root, so it
+  grows slower than the tank does
 
 A part gets the material of the object it is named into, so geometry belongs in
 the object whose *role* it wants rather than the one it sits next to. A gun's
@@ -209,6 +255,9 @@ A more detailed tracked vehicle may provide:
 - `rightWheel1`
 - `rightWheel2`
 - `rightWheel3`
+- `lightRear`
+- `lightPort`
+- `lightStarboard`
 
 ## Notes
 

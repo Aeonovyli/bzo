@@ -9,7 +9,9 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { AnaglyphEffect } from './anaglyph.js';
 import { xrState } from './webxr.js';
 import { markFramePhase, noteProgramCount } from './perf.js';
-import { TANK_PART_ALIASES, TANK_WHEEL_PREFIX_ALIASES, missingTankParts } from './tank-parts.mjs';
+import {
+  TANK_PART_ALIASES, TANK_LIGHT_ALIASES, TANK_WHEEL_PREFIX_ALIASES, missingTankParts,
+} from './tank-parts.mjs';
 import {
   collectDeviceHints,
   detectRenderCapabilities,
@@ -100,6 +102,137 @@ const BZFlag_DEFAULT_HORIZONTAL_FOV = 60;
 // model that arrives without texture coordinates gets tread links the size the
 // stock tank's are rather than a size of its own.
 const TREAD_UNITS_PER_TILE = 6.4;
+
+// `TankSceneNode::TankRenderNode::renderLights` (TankSceneNode.cxx:1391).
+// Aircraft-style navigation lights on the turret: white astern, red to port,
+// green to starboard, so which way a tank is pointing reads at a range where
+// its silhouette does not yet. Upstream's tank-space coordinates in bzo's
+// axes -- bzo's tank faces -Z and stands on +Y where upstream's faces +X and
+// stands on +Z, so upstream's forward x becomes -z and its portward y becomes
+// -x.
+//
+// These are the fallback. Upstream can hard-code one height because it has
+// one tank; 2.1 clears bzflag.obj's turret by 0.02 and is buried inside the
+// turret of bzfourtank, bzship and modern. Every model bzo offers names its
+// own three lights, and these serve a model that does not.
+const TANK_NAV_LIGHTS = [
+  { role: 'rear', color: 0xffffff, position: [0, 2.1, 1.53] },
+  { role: 'port', color: 0xff0000, position: [-0.75, 2.1, -0.1] },
+  { role: 'starboard', color: 0x00ff00, position: [0.75, 2.1, -0.1] },
+];
+// `glPointSize(2.0f)`, and not scaled by distance: a nav light that shrank
+// with range would stop being readable at exactly the range it is there for.
+//
+// Upstream's 2 is a count of pixels, which is only a size on the display it
+// was chosen for. The same two pixels are a quarter of their intended share of
+// a 4K window and several times it on a small phone -- and a tank at a given
+// range subtends the same angle on both, so the light that marks it should
+// cover the same part of that angle. Two pixels of a 1080-tall buffer is the
+// share upstream means; every other buffer gets the same fraction of its own
+// height, floored where a point stops being drawable at all and capped before
+// a headset's very tall buffer turns a nav light into a lamp.
+// A light is a lamp of a fixed size, so it grows as you close on a tank the
+// way everything else in the scene does -- and stops shrinking at the far end,
+// which is where upstream's flat `glPointSize` holds it for the whole range
+// the lights are actually read at. Both ends are the one clamp: the floor is
+// the far-field size and the ceiling is how big a light gets point-blank.
+//
+// The far-field size, as a share of the buffer's height rather than a count of
+// pixels -- two pixels is only a size on the display it was chosen for, a
+// quarter of its intended share of a 4K window and several times it on a
+// phone. The reference is the buffer a 1080p browser window actually draws
+// into, which is the display these two pixels were judged on and some way
+// short of 1080 once the window's own furniture is out of it.
+const TANK_NAV_LIGHT_PIXELS = 2;
+const TANK_NAV_LIGHT_REFERENCE_HEIGHT = 800;
+// A round dot has nothing to be round in under two pixels. This floors the
+// finished size rather than the share it is worked out from: floor the share
+// and a buffer far shorter than the reference -- the tank preview's canvas is
+// one -- keeps the reference's whole curve, ceiling and all, in a fraction of
+// the pixels to spend it in.
+const TANK_NAV_LIGHT_SIZE_MIN = 2;
+// Where the size settles to the far-field one: closer in it grows, further out
+// it holds. This has to be far enough out that the ranges a tank is actually
+// seen at land high on the curve. A point is drawn in whole pixels, so a
+// difference the curve is proud of can still rasterise to the same 2x2 block
+// and be no difference at all -- at five tank lengths the chase camera came
+// out at 2.4 pixels against the far field's 2.0 and looked identical to it.
+// Forty tank lengths puts the chase camera's twelve units at four and a half
+// times the far-field size, which is four pixels of difference rather than
+// none.
+const TANK_NAV_LIGHT_HOLD = 40 * BZFLAG_TANK_LENGTH;
+// How hard the size follows the distance. Solid geometry follows it exactly --
+// an exponent of 1, half the distance and twice the size -- and a light should
+// not, because what a light is worth at range is out of all proportion to how
+// much of the sky it covers. A square root puts the lights between the two:
+// closing on a tank they grow, but slower than the tank does, so a far tank's
+// lights are the largest thing about it and a near tank's are a detail on a
+// hull that is already unmistakable.
+//
+// Fixed-function OpenGL had this as `GL_POINT_DISTANCE_ATTENUATION`, a
+// quadratic whose coefficients chose the same curve. GLES2 dropped
+// `glPointParameter` and WebGL never had it, so `gl_PointSize` in the vertex
+// shader is the whole of the feature now -- and Three's own `sizeAttenuation`
+// is only the one coefficient that gives solid geometry's exponent of 1.
+const TANK_NAV_LIGHT_FALLOFF = 0.5;
+// The ceiling, as a multiple of the far-field size: how big a light gets when
+// you are on top of it. The only dial for that, and it has to clear what the
+// chase camera asks for or the view a player spends most of its time in is
+// the flat top of the curve.
+const TANK_NAV_LIGHT_GROWTH = 6;
+// The outer fraction of the dot's radius that fades out. At the two-pixel
+// floor every pixel of the point is still inside the solid core, so the light
+// reads exactly as bright as `GL_POINTS` draws it; the rim only starts doing
+// anything once there are pixels to spend on it.
+const TANK_NAV_LIGHT_EDGE = 0.7;
+
+// `gl_PointSize` from the distance to the point and the height of the buffer
+// being drawn into. The clamp is the shader's own, so the only thing JS writes
+// is the height.
+const TANK_NAV_LIGHT_VERTEX_SHADER = `
+uniform float bufferHeight;
+attribute vec3 color;
+varying vec3 vColor;
+#include <common>
+#include <fog_pars_vertex>
+void main() {
+  vColor = color;
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mvPosition;
+  float held = ${TANK_NAV_LIGHT_PIXELS.toFixed(1)} * bufferHeight / ${TANK_NAV_LIGHT_REFERENCE_HEIGHT.toFixed(1)};
+  gl_PointSize = max(${TANK_NAV_LIGHT_SIZE_MIN.toFixed(1)}, clamp(
+    held * pow(
+      ${TANK_NAV_LIGHT_HOLD.toFixed(1)} / max(-mvPosition.z, 0.001),
+      ${TANK_NAV_LIGHT_FALLOFF.toFixed(2)}
+    ),
+    held,
+    ${TANK_NAV_LIGHT_GROWTH.toFixed(1)} * held
+  ));
+  #include <fog_vertex>
+}
+`;
+
+// A round dot rather than the hard square a point sprite is by default, and
+// fogged, because upstream draws its lights inside the same `GL_FOG` as
+// everything else and a light that stayed bright through the haze would mark a
+// tank the tank itself is hidden by.
+const TANK_NAV_LIGHT_FRAGMENT_SHADER = `
+varying vec3 vColor;
+#include <common>
+#include <fog_pars_fragment>
+void main() {
+  float dist = length(gl_PointCoord - vec2(0.5)) * 2.0;
+  float alpha = 1.0 - smoothstep(${TANK_NAV_LIGHT_EDGE.toFixed(2)}, 1.0, dist);
+  if (alpha <= 0.0) discard;
+  gl_FragColor = vec4(vColor, alpha);
+  #include <fog_fragment>
+}
+`;
+// One name for the whole set, so the places that walk a tank's own nodes can
+// find them: the two that deep-clone a tank -- the explosion debris and the
+// server-position ghost -- drop them, and client.js's cloaking fade leaves
+// their material alone.
+export const TANK_NAV_LIGHTS_NAME = 'navLights';
 
 const TANK_WHEEL_OUTWARD_NUDGE = 0.02;
 const MOUNTAIN_TEXTURE_PATHS = [
@@ -5982,6 +6115,107 @@ class RenderManager {
     return null;
   }
 
+  // The part lookups above want a mesh, because a part that is not a mesh
+  // cannot be drawn. A navigation light is the opposite case: it is a `p`
+  // object, so OBJLoader builds it as `THREE.Points` and `isMesh` never sees
+  // it. All that is wanted of it is where it sits, so any node carrying
+  // vertices answers -- a single `p` vertex, or a marker the modeller built
+  // out of faces, averaged to its own centre either way.
+  _findTankTemplatePoint(names, modelPath = this._tankModelPath) {
+    const template = this._tankTemplateByPath.get(modelPath);
+    if (!template) return null;
+    for (const name of names) {
+      let found = null;
+      template.traverse((child) => {
+        if (!found && child.name === name && child.geometry?.attributes?.position?.count) {
+          found = child.geometry.attributes.position;
+        }
+      });
+      if (!found) continue;
+      const centre = new THREE.Vector3();
+      const vertex = new THREE.Vector3();
+      for (let i = 0; i < found.count; i += 1) {
+        centre.add(vertex.fromBufferAttribute(found, i));
+      }
+      return centre.divideScalar(found.count);
+    }
+    return null;
+  }
+
+  // One material for every tank on the map: the colours ride on the geometry,
+  // so three points per tank cost one draw and nothing else.
+  _getTankNavLightMaterial() {
+    if (!this._tankNavLightMaterial) {
+      this._tankNavLightMaterial = new THREE.ShaderMaterial({
+        uniforms: THREE.UniformsUtils.merge([
+          THREE.UniformsLib.fog,
+          { bufferHeight: { value: TANK_NAV_LIGHT_REFERENCE_HEIGHT } },
+        ]),
+        vertexShader: TANK_NAV_LIGHT_VERTEX_SHADER,
+        fragmentShader: TANK_NAV_LIGHT_FRAGMENT_SHADER,
+        // The soft rim needs blending, and a dot this small has no depth worth
+        // writing -- what matters is that the turret it sits on still hides it
+        // from behind, which is depth *testing* and stays on.
+        transparent: true,
+        depthWrite: false,
+        fog: true,
+      });
+    }
+    return this._tankNavLightMaterial;
+  }
+
+  // The buffer a given renderer is drawing into: in a session the headset's
+  // own rather than the canvas Three was sized against, and for the tank
+  // preview its small canvas rather than the game's. Both are property reads,
+  // which is what lets this be asked per draw instead of cached.
+  _getNavLightBufferHeight(renderer) {
+    const layer = renderer?.xr?.getSession?.()?.renderState?.baseLayer;
+    if (layer?.framebufferHeight) return layer.framebufferHeight;
+    return renderer?.getContext?.()?.drawingBufferHeight || TANK_NAV_LIGHT_REFERENCE_HEIGHT;
+  }
+
+  _buildTankNavLights(modelPath) {
+    const positions = [];
+    const colors = [];
+    const colour = new THREE.Color();
+
+    TANK_NAV_LIGHTS.forEach((light) => {
+      const declared = this._findTankTemplatePoint(TANK_LIGHT_ALIASES[light.role], modelPath);
+      if (declared) positions.push(declared.x, declared.y, declared.z);
+      else positions.push(...light.position);
+      colour.setHex(light.color);
+      colors.push(colour.r, colour.g, colour.b);
+    });
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+    const lights = new THREE.Points(geometry, this._getTankNavLightMaterial());
+    lights.name = TANK_NAV_LIGHTS_NAME;
+    // One material is shared by every tank, and the tank preview draws its own
+    // tank with a second `WebGLRenderer` on a canvas a fraction of the game's.
+    // A height written once a frame would be whichever renderer wrote last, so
+    // the point that is two pixels in the game came out the same two pixels in
+    // a preview a quarter the size. Three calls this immediately before the
+    // draw and hands over the renderer doing it, which is the only place that
+    // knows.
+    lights.onBeforeRender = (renderer) => {
+      this._tankNavLightMaterial.uniforms.bufferHeight.value = this._getNavLightBufferHeight(renderer);
+    };
+    return lights;
+  }
+
+  // Upstream draws the lights with the turret and skips them in the shadow
+  // pass and while a tank is exploding. A child of the turret gets the first
+  // two for free -- it follows the turret wherever the turret goes, and
+  // `THREE.Points` casts no shadow -- and the two places that deep-clone a
+  // tank drop it, which gets the third.
+  _stripTankNavLights(object) {
+    const lights = object?.getObjectByName?.(TANK_NAV_LIGHTS_NAME);
+    if (lights) lights.removeFromParent();
+  }
+
   _cloneTemplateMesh(templateMesh, material) {
     let geometry = templateMesh.geometry;
     let resolvedMaterial = material;
@@ -6345,6 +6579,10 @@ class RenderManager {
     tankGroup.add(turret);
     tankGroup.userData.turret = turret;
 
+    const navLights = this._buildTankNavLights(modelPath);
+    turret.add(navLights);
+    tankGroup.userData.navLights = navLights;
+
     const barrelMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
     const barrel = this._cloneTemplateMesh(templateParts.barrel, barrelMaterial);
     tankGroup.add(barrel);
@@ -6380,6 +6618,7 @@ class RenderManager {
   createGhostMesh(tank) {
     // Create a semi-transparent ghost version of a tank for showing server-confirmed position
     const ghostTank = tank.clone(true); // Deep clone the tank
+    this._stripTankNavLights(ghostTank);
 
     // A clone carries the original's userData, so without this a ghost counts
     // as a tank and debug geometry silently doubles what the tanks appear to
@@ -7691,6 +7930,7 @@ class RenderManager {
         if (!sourcePart) return;
 
         const part = sourcePart.clone(true);
+        this._stripTankNavLights(part);
         part.traverse((node) => {
           if (node.isMesh && node.material) {
             node.material = Array.isArray(node.material)

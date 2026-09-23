@@ -4194,3 +4194,15 @@ f 1153/1153/1153 1152/1152/1152 1128/1128/1128
 f 1154/1154/1154 1153/1153/1153 1129/1129/1129
 f 1155/1155/1155 1154/1154/1154 1130/1130/1130
 f 1156/1156/1156 1155/1155/1155 1131/1131/1131
+
+# Navigation lights. One `p` vertex each, read by the renderer for its
+# position only; see docs/tank-model-format.md.
+o lightRear
+v 0.000000 1.820000 1.000000
+p -1
+o lightPort
+v -0.700000 1.650000 -0.100000
+p -1
+o lightStarboard
+v 0.700000 1.650000 -0.100000
+p -1

@@ -142,7 +142,7 @@ import {
 } from './hud.js';
 import {
   renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
-  reportAlphaWithoutThreshold,
+  reportAlphaWithoutThreshold, TANK_NAV_LIGHTS_NAME,
 } from './render.js';
 import { describeMeasurements, describeRenderCapabilities } from './capabilities.mjs';
 import {
@@ -8434,6 +8434,13 @@ function applyTankAlpha(tank, alpha) {
   // dimension scaling are separate; this is only the opacity.
   const fade = (root, scale) => root.traverse((child) => {
     if (!child.material) return;
+    // The navigation lights are one material shared by every tank on the map,
+    // so writing this tank's alpha into it writes it into all of them -- and
+    // turning its transparency off drops it out of the transparent pass, where
+    // being drawn after the turret is the only thing keeping the turret from
+    // painting over it. They go with the tank when it is hidden outright,
+    // which is the only fading upstream's own lights do.
+    if (child.name === TANK_NAV_LIGHTS_NAME) return;
     const materials = Array.isArray(child.material) ? child.material : [child.material];
     for (const material of materials) {
       material.transparent = !opaque || scale < 1;

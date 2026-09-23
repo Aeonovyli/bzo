@@ -30,6 +30,22 @@ export const TANK_PART_ALIASES = {
   rightTreadRearCap: ['rightTreadRearCap', 'tread_cap_right_rear', 'rightTrack', 'rtread'],
 };
 
+// The three navigation lights, which a model places itself. Upstream fixes
+// them at one point above the stock tank's turret, and that point is inside
+// the turret of half of bzo's models -- so each model names its own, as a
+// single-vertex `p` object, and a model that names none falls back to
+// upstream's coordinates.
+//
+// A `p` object is invisible to `readObjObjectNames` below and to the
+// renderer's `child.isMesh` part lookup, which is what makes these safe to
+// add: nothing that builds a tank out of parts can pick one up by accident.
+// Only the light builder, which reads their vertices directly, sees them.
+export const TANK_LIGHT_ALIASES = {
+  rear: ['lightRear'],
+  port: ['lightPort'],
+  starboard: ['lightStarboard'],
+};
+
 export const TANK_WHEEL_PREFIX_ALIASES = {
   left: ['leftWheel', 'wheel_left'],
   right: ['rightWheel', 'wheel_right'],
