@@ -6,6 +6,41 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.53] - 2026-09-23
+
+### Added
+- A material's `alphathresh` is read and used as the alpha test the way
+  upstream does. Where a map states none, bzo keeps its own low default --
+  without any test a foliage cutout's transparent pixels still write depth and
+  block what is behind them -- but now says so, naming the texture that proved
+  transparent, so the map can state one and render the same way on both
+  clients.
+- Every keyword and server option a map states that no part of bzo reads is
+  counted, named in the server log, and written into the map's own `-srvmsg`
+  lines. A map asking for something bzo has not implemented used to be dropped
+  in silence: `alphathresh` appeared 753 times across 25 of the maps in
+  `maps/` without ever being mentioned.
+
+### Changed
+- `maps/bzo.bzw`'s billboard bush states the material settings every other map
+  using that same picture states -- `alphathresh 0.7` and the flags that go
+  with it. Ours was the one map in a survey of live servers without them.
+- `scripts/survey-live-maps.mjs` imports through a running bzo and reports
+  what that bzo said it could not read, instead of judging from a list of
+  bzo's features kept in the script. That list had gone stale: it still called
+  mesh, arc, cone, sphere, tetra, group, materials, physics drivers and
+  texture matrices unsupported long after the parser read every one of them,
+  and reported 60% of real map content as undrawable.
+- `docs/bzw.md` says what bzo does with a material's alpha, and that the
+  properties it drops are not yet implemented rather than deliberately
+  declined. Two of them -- `notexalpha` and `noculling` -- are cases where bzo
+  does the opposite of what a map asked rather than merely ignoring it.
+
+### Fixed
+- Editing a map or a model in development reloads it. nodemon watched those
+  directories but not those file types, so an edited file kept being served
+  from the copy the server read at startup, however hard the browser reloaded.
+
 ## [1.2.52] - 2026-09-22
 
 ### Added
