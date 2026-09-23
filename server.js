@@ -15304,11 +15304,12 @@ wss.on('connection', (ws, req) => {
           player.lag.resetUpdateGap();
           player.deaths = 0;
           player.kills = 0;
-          if (message.isMobile) {
-            log(`Player ${player.id} joining as "${joinName}" [${player.team.toUpperCase()}] [MOBILE]`);
-          } else {
-            log(`Player ${player.id} joining as "${joinName}" [${player.team.toUpperCase()}]`);
-          }
+          // The tank is named here as well as on a later change, so a join
+          // line says what a player is driving without the log having to be
+          // read backwards for a change that may never have happened.
+          const joinTags = [`[${player.team.toUpperCase()}]`, `[${player.tankModel}]`];
+          if (message.isMobile) joinTags.push('[MOBILE]');
+          log(`Player ${player.id} joining as "${joinName}" ${joinTags.join(' ')}`);
 
           // broadcast join to all (full player info)
           // bzfs.cxx:2478 and :2966: a team's flag follows its population. The
@@ -15349,7 +15350,15 @@ wss.on('connection', (ws, req) => {
           }
 
           if (player.tankModel !== requestedTankModel) {
+            const previousTankModel = player.tankModel;
             player.tankModel = requestedTankModel;
+            // What a client is drawing is the first thing wanted of a report
+            // that it is drawing slowly, and a model is the one part of that
+            // no client-side stats line can carry: every tank in the scene may
+            // be a different one, so the answer is per player and belongs
+            // here, where every player's is in the same log.
+            log(`Player ${player.id} "${player.name}" tank model`
+              + ` ${previousTankModel} -> ${requestedTankModel}`);
             // Same rule as sendPlayerUpdate: nobody hears about a player who is
             // not in the game. A tank picked in the entry dialog before joining
             // travels with the join itself.
