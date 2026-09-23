@@ -6,190 +6,91 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
-// Asks the public BZFlag list server (my.bzflag.org) which servers are
-// running right now, downloads the map each one is actually playing over the
-// real BZFS wire protocol, and reports which BZW features those maps use --
-// so the answer to "does bzo support what's out there" comes from live
-// servers instead of guesswork. With --export-dir it also writes out a
-// reconstructed .bzw per server, the same thing BZFlag's own "Save World"
-// menu item does (SaveWorldMenu.cxx -> World::writeWorld) -- for
-// side-by-side comparison against bzo's own maps/ directory.
+// Asks the public BZFlag list server which servers are running right now, has
+// a local bzo import the map each one is actually playing, and reports what
+// that bzo said it could not read -- so "does bzo support what is out there"
+// is answered by bzo rather than by this file.
 //
-// The protocol work and the binary world-database parser live in
-// server/remote-world-import.cjs, shared with the Operator panel's "Import
-// Remote Map" (server.js's `importMap`/`listRemoteServers`) so there is one
-// implementation of the wire format rather than two that could drift apart.
-// This script is the CLI-only wrapper: fetching/picking servers, the
-// feature-usage report, and writing files to --export-dir.
+// It used to answer the question itself, from a list of what bzo supported
+// written into the source here. That list went stale: it still called mesh,
+// arc, cone, sphere, tetra, group, materials, physics drivers and texture
+// matrices unsupported long after the parser read every one of them, and
+// reported 60% of real-world map content as undrawable. A second opinion about
+// bzo's own capabilities has nowhere to be kept accurate, so there is no longer
+// one here.
+//
+// The import is the server's ordinary one -- the same `POST /list/import` the
+// Map Viewer's own button uses -- so the file lands in `maps/` exactly where a
+// map imported any other way does, is parsed by the real parser, and carries
+// the parser's own warnings as `-srvmsg` lines in its options block. This
+// script reads those back.
 //
 //   node scripts/survey-live-maps.mjs
 //   node scripts/survey-live-maps.mjs --count 12
 //   node scripts/survey-live-maps.mjs --server bzflag.example.org:5154
-//   node scripts/survey-live-maps.mjs --count 8 --export-dir /tmp/live-maps
+//   node scripts/survey-live-maps.mjs --base-url http://localhost:3000
 
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  PROTOCOL_VERSION,
-  DEFAULT_LIST_SERVER,
-  OBSTACLE_ORDER,
-  GAME_STYLES,
-  GAME_OPTION_BITS,
-  fetchServerList,
-  fetchWorldFromServer,
-  decodeGameSettings,
-  decodeQueryGame,
-  parseWorldDatabase,
-  buildBZWText,
-} from '../server/remote-world-import.cjs';
+import { URLSearchParams } from 'node:url';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { DEFAULT_LIST_SERVER, PROTOCOL_VERSION, fetchServerList } =
+  require('../server/remote-world-import.cjs');
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) {
   args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1]);
 }
-const serverCount = Number(args.get('count') || 6);
-const timeoutMs = Number(args.get('timeout') || 15000);
+const serverCount = parseInt(args.get('count') || '10', 10);
+const singleServer = args.get('server') || null;
 const listServerUrl = args.get('list-server') || DEFAULT_LIST_SERVER;
-const singleServer = args.get('server') || '';
-const exportDir = args.get('export-dir') || '';
+const baseUrl = (args.get('base-url') || 'http://localhost:3000').replace(/\/$/, '');
+const mapsDir = args.get('maps-dir') || process.env.MAPS_PATH || 'maps';
 
-// ---------------------------------------------------------------------------
-// Feature-usage summary, walked from the parsed tree -- bzo's own obstacle
-// vocabulary (docs/bzw.md) is box/pyramid/base/teleporter -- everything else
-// here is geometry or material state a live map may use that bzo currently
-// drops or ignores on import.
-// ---------------------------------------------------------------------------
+// The name the server gives an imported map, shared with `remoteMapFileName`
+// in server.js. Kept in step by the file it names: if this is ever wrong the
+// read below finds nothing and says so, rather than reporting a clean map.
+const importFileName = (host, port) =>
+  `import-${host}_${port}`.replace(/[^A-Za-z0-9._-]/g, '_') + '.bzw';
 
-const BZO_SUPPORTED_OBSTACLES = new Set(['box', 'pyr', 'base', 'tele']);
-
-function summarize(tree) {
-  const stats = {
-    obstacles: Object.fromEntries(OBSTACLE_ORDER.map((k) => [k, 0])),
-    flatTopPyramids: 0,
-    meshFaces: 0,
-    facesWithPhydrv: 0,
-    facesWithMaterial: 0,
-    curvedWithPhydrv: 0,
-    groupDefs: tree.groupDefs.length,
-    groupInstances: 0,
-    dynamicColors: tree.managers.dynamicColors.length,
-    textureMatrices: tree.managers.textureMatrices.length,
-    materials: tree.managers.materials.length,
-    materialsWithTexture: tree.managers.materials.filter((m) => m.textures.length > 0).length,
-    materialsWithShader: tree.managers.materials.filter((m) => m.shaders.length > 0).length,
-    physicsDrivers: tree.managers.physicsDrivers.length,
-    teleporterLinks: tree.links.length,
-    waterLevel: tree.waterLevel,
-    weapons: tree.weapons.length,
-    entryZones: tree.zones.length,
-  };
-
-  const walk = (def) => {
-    for (const kind of OBSTACLE_ORDER) {
-      const list = def.obstacles[kind];
-      stats.obstacles[kind] += list.length;
-      if (kind === 'pyr') stats.flatTopPyramids += list.filter((o) => o.flipZ).length;
-      if (kind === 'mesh') {
-        for (const m of list) {
-          stats.meshFaces += m.faces.length;
-          for (const f of m.faces) {
-            if (f.phydrv >= 0) stats.facesWithPhydrv++;
-            if (f.matindex >= 0) stats.facesWithMaterial++;
-          }
-        }
-      }
-      if (kind === 'arc' || kind === 'cone' || kind === 'sphere') {
-        stats.curvedWithPhydrv += list.filter((o) => o.phydrv >= 0).length;
-      }
-    }
-    stats.groupInstances += def.groupInstances.length;
-  };
-  walk(tree.world);
-  for (const def of tree.groupDefs) walk(def);
-
-  return stats;
-}
-
-function printReport(server, stats, tree) {
-  if (tree.gameSettings) {
-    const gs = tree.gameSettings;
-    const has = (bit) => (gs.gameOptionsBits & bit) !== 0;
-    const style = tree.queryGame ? (GAME_STYLES[tree.queryGame.style] || `type${tree.queryGame.style}`) : null;
-    const on = Object.keys(GAME_OPTION_BITS).filter((k) => has(GAME_OPTION_BITS[k]));
-    console.log(`  game settings: ${style ? `${style}, ` : ''}maxShots=${gs.maxShots}, superflags=${gs.numFlags}${on.length ? `, ${on.join('/')}` : ''}`);
+// What the parser wrote into the map about its own limits. `-srvmsg` is how
+// bzo tells a player what it dropped, and the import path appends one per
+// warning, so the file is the report.
+function readServerVerdict(host, port) {
+  const file = path.join(mapsDir, importFileName(host, port));
+  if (!fs.existsSync(file)) return null;
+  const notes = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const match = line.trim().match(/^-srvmsg\s+"(.*)"$/);
+    if (match) notes.push(match[1]);
   }
-
-  const total = OBSTACLE_ORDER.reduce((sum, k) => sum + stats.obstacles[k], 0) - stats.obstacles.wall;
-  const unsupported = OBSTACLE_ORDER
-    .filter((k) => k !== 'wall' && !BZO_SUPPORTED_OBSTACLES.has(k))
-    .reduce((sum, k) => sum + stats.obstacles[k], 0);
-
-  console.log(`  obstacles: ${total} total (${unsupported} on shapes bzo does not read: mesh/arc/cone/sphere/tetra/group)`);
-  const shapeBreakdown = OBSTACLE_ORDER
-    .filter((k) => k !== 'wall' && stats.obstacles[k] > 0)
-    .map((k) => `${k}=${stats.obstacles[k]}`)
-    .join(' ');
-  if (shapeBreakdown) console.log(`    ${shapeBreakdown}`);
-  if (stats.groupDefs > 0 || stats.groupInstances > 0) {
-    console.log(`    group definitions=${stats.groupDefs} instances=${stats.groupInstances} (bzo does not read \`define\`/\`group\`)`);
-  }
-  if (stats.meshFaces > 0) {
-    console.log(`    mesh faces=${stats.meshFaces}, ${stats.facesWithPhydrv} tied to a physics driver, ${stats.facesWithMaterial} tied to a material`);
-  }
-  if (stats.flatTopPyramids > 0) console.log(`    flat-topped pyramids (flipz)=${stats.flatTopPyramids} (bzo reads this)`);
-
-  const otherFeatures = [];
-  if (stats.materials > 0) otherFeatures.push(`materials=${stats.materials} (${stats.materialsWithTexture} textured, ${stats.materialsWithShader} shaded)`);
-  if (stats.physicsDrivers > 0 || stats.curvedWithPhydrv > 0) otherFeatures.push(`physics drivers=${stats.physicsDrivers}`);
-  if (stats.dynamicColors > 0) otherFeatures.push(`dynamic colors=${stats.dynamicColors}`);
-  if (stats.textureMatrices > 0) otherFeatures.push(`texture matrices=${stats.textureMatrices}`);
-  if (stats.waterLevel >= 0) otherFeatures.push(`water level=${stats.waterLevel.toFixed(1)}`);
-  if (otherFeatures.length) console.log(`  material/animation features bzo does not read: ${otherFeatures.join(', ')}`);
-
-  console.log(`  bzo already reads: teleporter links=${stats.teleporterLinks}, world weapons=${stats.weapons}, entry zones=${stats.entryZones}`);
+  return { file, notes, bytes: fs.statSync(file).size };
 }
 
-function mergeAggregate(agg, stats) {
-  agg.servers++;
-  for (const k of OBSTACLE_ORDER) agg.obstacles[k] += stats.obstacles[k];
-  agg.groupDefs += stats.groupDefs;
-  agg.groupInstances += stats.groupInstances;
-  agg.materials += stats.materials;
-  agg.physicsDrivers += stats.physicsDrivers;
-  agg.dynamicColors += stats.dynamicColors;
-  agg.textureMatrices += stats.textureMatrices;
-  agg.meshFaces += stats.meshFaces;
-  if (stats.waterLevel >= 0) agg.mapsWithWater++;
-  if (stats.obstacles.mesh + stats.obstacles.arc + stats.obstacles.cone + stats.obstacles.sphere + stats.obstacles.tetra + stats.groupDefs + stats.groupInstances > 0) {
-    agg.mapsUsingUnsupportedShapes++;
-  }
+async function importThroughServer(host, port) {
+  const res = await fetch(`${baseUrl}/list/import`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ host, port: String(port) }),
+  });
+  const location = res.headers.get('location') || '';
+  if (location.includes('imported=')) return { ok: true };
+  const error = decodeURIComponent((location.split('error=')[1] || '').replace(/\+/g, ' '));
+  return { ok: false, error: error || `unexpected reply ${res.status}` };
 }
-
-function printAggregate(agg) {
-  console.log(`\n=== summary across ${agg.servers} downloaded map(s) ===`);
-  const total = OBSTACLE_ORDER.reduce((sum, k) => sum + agg.obstacles[k], 0) - agg.obstacles.wall;
-  const unsupported = OBSTACLE_ORDER
-    .filter((k) => k !== 'wall' && !BZO_SUPPORTED_OBSTACLES.has(k))
-    .reduce((sum, k) => sum + agg.obstacles[k], 0);
-  console.log(`obstacles across all maps: ${total}, ${unsupported} (${total ? ((100 * unsupported) / total).toFixed(1) : '0'}%) on shapes bzo does not read`);
-  console.log(`maps using at least one unsupported shape or group: ${agg.mapsUsingUnsupportedShapes}/${agg.servers}`);
-  console.log(`maps using materials: ${agg.materials > 0 ? 'yes' : 'no'} (${agg.materials} total), physics drivers: ${agg.physicsDrivers}, dynamic colors: ${agg.dynamicColors}, texture matrices: ${agg.textureMatrices}, maps with water: ${agg.mapsWithWater}`);
-}
-
-function exportFilename(server) {
-  const safe = `${server.host}_${server.port}`.replace(/[^A-Za-z0-9._-]/g, '_');
-  return `${safe}.bzw`;
-}
-
-// ---------------------------------------------------------------------------
 
 async function main() {
   let servers;
   if (singleServer) {
     const idx = singleServer.lastIndexOf(':');
-    const host = idx === -1 ? singleServer : singleServer.slice(0, idx);
-    const port = idx === -1 ? 5154 : parseInt(singleServer.slice(idx + 1), 10);
-    servers = [{ host, port, title: '(manual)' }];
+    servers = [{
+      host: idx === -1 ? singleServer : singleServer.slice(0, idx),
+      port: idx === -1 ? 5154 : parseInt(singleServer.slice(idx + 1), 10),
+      title: '(manual)',
+    }];
   } else {
     console.log(`Fetching running server list from ${listServerUrl} ...`);
     const all = await fetchServerList(listServerUrl, PROTOCOL_VERSION);
@@ -201,51 +102,58 @@ async function main() {
       seen.add(key);
       servers.push(s);
     }
-    console.log(`${servers.length} server(s) advertising protocol ${PROTOCOL_VERSION}; trying the first ${Math.min(serverCount, servers.length)}.`);
+    console.log(`${servers.length} server(s) on protocol ${PROTOCOL_VERSION}; trying the first ${Math.min(serverCount, servers.length)}.`);
     servers = servers.slice(0, serverCount);
   }
 
-  if (exportDir) fs.mkdirSync(exportDir, { recursive: true });
+  try {
+    await fetch(`${baseUrl}/api/tank-models`);
+  } catch {
+    console.error(`No bzo answering at ${baseUrl}. Start one (npm run dev) or pass --base-url.`);
+    process.exit(1);
+  }
 
-  const agg = {
-    servers: 0,
-    obstacles: Object.fromEntries(OBSTACLE_ORDER.map((k) => [k, 0])),
-    groupDefs: 0,
-    groupInstances: 0,
-    materials: 0,
-    physicsDrivers: 0,
-    dynamicColors: 0,
-    textureMatrices: 0,
-    meshFaces: 0,
-    mapsWithWater: 0,
-    mapsUsingUnsupportedShapes: 0,
-  };
+  const noteCounts = new Map();
+  let imported = 0;
+  let quiet = 0;
 
   for (const server of servers) {
-    console.log(`\n=== ${server.host}:${server.port}${server.title ? ` -- ${server.title}` : ''} ===`);
-    try {
-      const { worldDatabase, gameSettings, queryGame } = await fetchWorldFromServer(server.host, server.port, timeoutMs);
-      console.log(`  downloaded ${worldDatabase.length} bytes`);
-      const tree = parseWorldDatabase(worldDatabase);
-      if (gameSettings && gameSettings.length >= 30) tree.gameSettings = decodeGameSettings(gameSettings);
-      if (queryGame && queryGame.length >= 44) tree.queryGame = decodeQueryGame(queryGame);
-      if (tree.gameSettings) tree.worldSize = tree.gameSettings.worldSize;
-      const stats = summarize(tree);
-      printReport(server, stats, tree);
-      mergeAggregate(agg, stats);
-
-      if (exportDir) {
-        const text = buildBZWText(server, tree, new Date().toISOString());
-        const outPath = path.join(exportDir, exportFilename(server));
-        fs.writeFileSync(outPath, text);
-        console.log(`  wrote ${outPath}`);
-      }
-    } catch (err) {
-      console.log(`  skip: ${err.message}`);
+    const label = `${server.host}:${server.port}${server.title ? ` -- ${server.title}` : ''}`;
+    console.log(`\n=== ${label} ===`);
+    const result = await importThroughServer(server.host, server.port);
+    if (!result.ok) {
+      console.log(`  skip: ${result.error}`);
+      continue;
+    }
+    imported += 1;
+    const verdict = readServerVerdict(server.host, server.port);
+    if (!verdict) {
+      console.log('  imported, but no file found to read back');
+      continue;
+    }
+    console.log(`  imported ${(verdict.bytes / 1024).toFixed(0)} KB -> ${verdict.file}`);
+    if (verdict.notes.length === 0) {
+      quiet += 1;
+      console.log('  bzo reported nothing it could not read');
+      continue;
+    }
+    for (const note of verdict.notes) {
+      console.log(`  ! ${note}`);
+      // Grouped by the sentence rather than the map, since the map's own name
+      // is inside it: the aggregate below wants the shape of the complaint.
+      const shape = note.replace(/\bimport-[^\s]+\.bzw\b/g, '<map>');
+      noteCounts.set(shape, (noteCounts.get(shape) || 0) + 1);
     }
   }
 
-  if (agg.servers > 0) printAggregate(agg);
+  console.log(`\n=== across ${imported} imported map(s) ===`);
+  console.log(`${quiet} had nothing to report.`);
+  if (noteCounts.size > 0) {
+    console.log('\nWhat bzo said it could not read, most common first:');
+    for (const [shape, count] of [...noteCounts.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${String(count).padStart(3)}x  ${shape}`);
+    }
+  }
 }
 
 main().catch((err) => {

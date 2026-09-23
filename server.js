@@ -3685,6 +3685,9 @@ function parseBZWServerOptions(lines) {
   // is the exception because `-f` may appear any number of times, and an empty
   // list says the same thing as no list.
   const options = {
+    // Server options in the map's own `options` block that no test above
+    // claims, by option, so a map says which of its settings bzo ignored.
+    unreadOptions: new Map(),
     forbiddenFlags: [], unreadBZDBVars: [], serverMessages: [], adMessages: [],
   };
 
@@ -3700,44 +3703,53 @@ function parseBZWServerOptions(lines) {
       continue;
     }
     const [option, value, setValue] = line.split(/\s+/);
+    // Each option below is tested through this, so an option no test claims
+    // is an option bzo does not read -- recorded rather than passed over, the
+    // same as `unreadBZDBVars` already does for a `-set` variable.
+    let optionRead = false;
+    const readOption = (name) => {
+      if (option !== name) return false;
+      optionRead = true;
+      return true;
+    };
     // -fb: superflags may come to rest on buildings, and may spawn on them.
-    if (option === '-fb') options.flagsOnBuildings = true;
+    if (readOption('-fb')) options.flagsOnBuildings = true;
     // -j: tanks may jump. bzo already defaults this on, so the switch only
     // matters on a server whose config has turned jumping off.
-    if (option === '-j') options.jumping = true;
+    if (readOption('-j')) options.jumping = true;
     // +r: every shot ricochets, whatever flag fired it.
-    if (option === '+r') options.ricochet = true;
+    if (readOption('+r')) options.ricochet = true;
     // -st <seconds>: how long a bad flag sticks before it shakes off, and -sw
     // <kills>: how many wins shake one off. Both take a value.
-    if (option === '-st') options.flagShakeTimeout = normalizeShakeTimeout(value);
-    if (option === '-sw') options.flagShakeWins = normalizeShakeWins(value);
+    if (readOption('-st')) options.flagShakeTimeout = normalizeShakeTimeout(value);
+    if (readOption('-sw')) options.flagShakeWins = normalizeShakeWins(value);
     // -sa: put an antidote flag in the world for whoever is carrying a bad one.
-    if (option === '-sa') options.antidoteFlags = true;
+    if (readOption('-sa')) options.antidoteFlags = true;
     // -time <seconds>: the match clock. Upstream also reads an `h:mm:ss`
     // clock-time form; bzo does not.
-    if (option === '-time') {
+    if (readOption('-time')) {
       const seconds = Number(value);
       if (Number.isFinite(seconds) && seconds > 0) options.timeLimit = seconds;
     }
     // -timemanual: the clock above waits for /countdown rather than starting
     // on its own.
-    if (option === '-timemanual') options.timeManualStart = true;
+    if (readOption('-timemanual')) options.timeManualStart = true;
     // -mps <score>: ends the match the moment any player's wins minus losses
     // reaches it.
-    if (option === '-mps') {
+    if (readOption('-mps')) {
       const score = Number(value);
       if (Number.isFinite(score) && score > 0) options.maxPlayerScore = score;
     }
     // -mts <score>: ends the match the moment any colour team's wins minus
     // losses reaches it.
-    if (option === '-mts') {
+    if (readOption('-mts')) {
       const score = Number(value);
       if (Number.isFinite(score) && score > 0) options.maxTeamScore = score;
     }
     // -a <vel> <rot>: the world's acceleration limit, upstream's inertia switch.
     // The only option here that takes two values, which is why it reads
     // `setValue` as well.
-    if (option === '-a') {
+    if (readOption('-a')) {
       const linear = Number(value);
       const angular = Number(setValue);
       if (Number.isFinite(linear)) options.linearAcceleration = Math.max(0, linear);
@@ -3747,19 +3759,19 @@ function parseBZWServerOptions(lines) {
     // Rogue is excepted." Friendly fire off, which upstream enforces on each
     // client in LocalPlayer::checkHit; bzo's server decides every hit, so it
     // enforces it in the one place instead.
-    if (option === '-noTeamKills') options.noTeamKills = true;
+    if (readOption('-noTeamKills')) options.noTeamKills = true;
     // -tk: "player does not die when killing a teammate". Note which way round
     // this runs -- upstream kills a team killer *by default*, and the switch is
     // what turns that off, so `-tk` is the lenient setting rather than the
     // strict one.
-    if (option === '-tk') options.teamKillerDies = false;
+    if (readOption('-tk')) options.teamKillerDies = false;
     // -ms <count>: how many shots a tank may have in the air at once. Unlike the
     // switches above this carries a value, and upstream parses a map's options
     // where `-world` sits on the command line, so the map's number simply
     // replaces whatever came before it rather than only ever raising it.
     // A count of 0 means "tanks cannot shoot" upstream; bzo has no such mode, so
     // normalizeShotSlotCount clamps it to one shot as it clamps the config.
-    if (option === '-ms') {
+    if (readOption('-ms')) {
       const requestedShots = Number(value);
       if (Number.isFinite(requestedShots)) {
         options.shotMaxActive = normalizeShotSlotCount(Math.round(requestedShots));
@@ -3775,7 +3787,7 @@ function parseBZWServerOptions(lines) {
     // them in the world at all times where `-s` lets a slot sit empty between
     // insertions. bzo has only the one behaviour -- a slot refills on the
     // insertion schedule -- so both spellings land in the same place.
-    if (option === '-s' || option === '+s') {
+    if (readOption('-s') || readOption('+s')) {
       const requestedFlags = Math.round(Number(value));
       options.superFlagCount = Number.isFinite(requestedFlags) && requestedFlags > 0
         ? requestedFlags
@@ -3786,7 +3798,7 @@ function parseBZWServerOptions(lines) {
     // puts one back, so this is a switch like the rest even though it names its
     // target. `WA`, the one type bzo does not carry, is already absent from the
     // pool, so naming it is not an error -- it asks for nothing that was there.
-    if (option === '-f' && value) {
+    if (readOption('-f') && value) {
       const disallowed = value.trim().toUpperCase();
       const disallowedQuality = disallowed === 'GOOD' || disallowed === 'BAD'
         ? disallowed === 'BAD'
@@ -3811,13 +3823,13 @@ function parseBZWServerOptions(lines) {
     // the same name a mapper can write an explicit `material` block under
     // instead (resolved against `materialsByName` once the whole file is
     // read; see the `groundMaterial` build below).
-    if (option === '-gndtex' && value) options.groundTexture = value;
+    if (readOption('-gndtex') && value) options.groundTexture = value;
     // -srvmsg <text>: a line said to each player as they join. Upstream
     // accumulates every occurrence into one string separated by a literal `\n`
     // and splits it again on the way out (bzfs.cxx:2507), so a map may write
     // several lines either way -- one option each, or one option carrying `\n`.
     // The quotes a map wraps the text in are the option parser's, not the text's.
-    if (option === '-srvmsg') {
+    if (readOption('-srvmsg')) {
       // Taken off the raw line rather than from the split tokens, because the
       // text's own spacing is part of it -- upstream's parseWorldOptions reads a
       // quoted argument as one token and never touches what is inside it.
@@ -3832,7 +3844,7 @@ function parseBZWServerOptions(lines) {
     // Upstream also takes a file-backed multi-line form (`-helpmsg`'s sibling
     // in `textChunker`); bzo has only the inline-text form, the same limit
     // `docs/bzw.md` already notes for `-helpmsg` itself.
-    if (option === '-admsg') {
+    if (readOption('-admsg')) {
       const rest = line.replace(/^\S+\s*/, '');
       const quoted = rest.match(/^"([\s\S]*)"$/);
       const text = quoted ? quoted[1] : rest;
@@ -3843,7 +3855,7 @@ function parseBZWServerOptions(lines) {
     // configurable copy of. Every other name is collected and reported, because
     // a map that sets `_tankSpeed` and is quietly played at bzo's is worse than
     // a map that says so on load.
-    if (option === '-set' && value) {
+    if (readOption('-set') && value) {
       if (value === '_maxFlagGrabs') {
         const grabs = Number(setValue);
         if (Number.isFinite(grabs)) options.maxFlagGrabs = normalizeFlagGrabs(grabs);
@@ -3896,6 +3908,10 @@ function parseBZWServerOptions(lines) {
       } else {
         options.unreadBZDBVars.push(value);
       }
+    }
+
+    if (!optionRead) {
+      options.unreadOptions.set(option, (options.unreadOptions.get(option) || 0) + 1);
     }
   }
 
@@ -4265,6 +4281,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // (with `serverOptions.serverMessages`, i.e. -srvmsg) this function's
   // `messages` return value.
   const unsupportedCounts = new Map();
+  // Keywords no branch of the parser recognises, by keyword. Separate from
+  // `unsupportedCounts` above, which counts whole blocks bzo deliberately
+  // declines: these are words nobody has taught it, and the difference
+  // matters to whoever reads the warning.
+  const unreadKeywordCounts = new Map();
 
   function getTeleporterEndpointName(teleporter, face) {
     return `${teleporter.linkName}:${face === 0 ? 'f' : 'b'}`;
@@ -4649,6 +4670,12 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     return false;
   }
 
+  // The `options` block and the `world` block are each read by a pass of their
+  // own -- the map options parser, and the lookahead in the `world` branch
+  // below -- and this loop walks their lines again on the way past. Naming the
+  // block being skipped keeps a keyword another pass already read out of the
+  // unread tally, where it would otherwise look like a gap that is not there.
+  let consumedBlock = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith('#')) {
@@ -4923,7 +4950,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       // Everything else a material block can say -- ambient (read and
       // dropped; see `applyBzwMaterialToken` above), shader/addshader/
       // noshaders, alphathresh, noculling, nosorting, occluder, groupAlpha,
-      // spheremap, notexalpha, notexcolor, resetmat -- is read and dropped.
+      // spheremap, notexalpha, notexcolor, resetmat -- is dropped, and
+      // counted on the way out. A material keyword bzo does not read changes
+      // what a map looks like, so the map should say which ones it wanted
+      // rather than leaving it to be discovered by surveying the tree.
+      unreadKeywordCounts.set(token, (unreadKeywordCounts.get(token) || 0) + 1);
       continue;
     }
 
@@ -5204,6 +5235,15 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       continue;
     }
 
+    if (consumedBlock) {
+      if (token === 'end') consumedBlock = null;
+      continue;
+    }
+    if (token === 'options') {
+      consumedBlock = 'options';
+      continue;
+    }
+
     // `define <name>` / `enddef` (CustomGroup's template registry). Upstream
     // refuses to nest one define inside another (BZWReader.cxx warns and skips
     // it), so a `define` seen while one is already open is dropped the same way.
@@ -5252,6 +5292,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     }
 
     if (token === 'world') {
+      consumedBlock = 'world';
       // Look ahead through the block for every field bzo reads on it, rather
       // than stopping at the first one found -- a map may state `size` after
       // `noWalls`, and upstream's own `WorldFileLocation::read` has no
@@ -6132,6 +6173,13 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     } else if (!current && !currentLink && !currentZone && !currentWeapon
       && UNSUPPORTED_TOP_LEVEL_KEYWORDS.has(token)) {
       unsupportedCounts.set(token, (unsupportedCounts.get(token) || 0) + 1);
+    } else {
+      // Nothing above claimed this line. Every branch that reads a keyword is
+      // one of the arms this falls off the end of, so reaching here means bzo
+      // has no handling for the word at all -- which is worth counting rather
+      // than dropping in silence. `alphathresh` went unread in 26 of the maps
+      // in `maps/` without any of them ever saying so.
+      unreadKeywordCounts.set(token, (unreadKeywordCounts.get(token) || 0) + 1);
     }
   }
 
@@ -6838,6 +6886,22 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       .map(([keyword, count]) => `${count} ${keyword}`)
       .join(', ');
     warn(`${mapLabel} ignored: ${dropped} unsupported block${dropped === 1 ? '' : 's'} (${droppedList})`);
+  }
+
+  if (serverOptions.unreadOptions && serverOptions.unreadOptions.size > 0) {
+    const unreadOptionList = Array.from(serverOptions.unreadOptions.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([option, count]) => (count > 1 ? `${option} x${count}` : option))
+      .join(', ');
+    warn(`Server options bzo does not read in ${mapLabel}: ${unreadOptionList}`);
+  }
+
+  if (unreadKeywordCounts.size > 0) {
+    const unreadList = Array.from(unreadKeywordCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([keyword, count]) => `${keyword} x${count}`)
+      .join(', ');
+    warn(`Keywords bzo does not read in ${mapLabel}: ${unreadList}`);
   }
 
   // What a player actually sees when they view or join this map -- not just
