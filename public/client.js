@@ -142,6 +142,7 @@ import {
 } from './hud.js';
 import {
   renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
+  reportAlphaWithoutThreshold,
 } from './render.js';
 import { describeMeasurements, describeRenderCapabilities } from './capabilities.mjs';
 import {
@@ -2948,6 +2949,17 @@ function getDebugSenderName() {
 // only client.js can send down the socket. Assigned once, here, beside the
 // function itself so the two cannot drift apart.
 renderManager.debugLog = (message, source) => debugLog(message, source);
+
+// A map whose texture turned out to be transparent while its material stated
+// no `alphathresh`. bzo draws it correctly on its own default, so nothing is
+// broken here -- but upstream runs no alpha test without one, so the same map
+// renders differently there, and the mapper is the only one who can close
+// that gap. Said once per texture, to the server, so it reaches whoever owns
+// the map rather than only the browser console of whoever happened to load it.
+reportAlphaWithoutThreshold((textureName) => {
+  debugLog(`Texture "${textureName}" has transparency but its material states no alphathresh;`
+    + ` bzo is using its own ${'0.05'} default. Upstream would run no alpha test at all.`, 'map');
+});
 
 function debugLog(message, source = '') {
   const text = source ? `[${source}] ${String(message)}` : String(message);

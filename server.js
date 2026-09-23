@@ -3679,6 +3679,12 @@ const WEATHER_RAIN_NUMERIC_VARS = new Map([
   ['_rainRoofs', 'roofs'],
 ]);
 
+// Options in a map's `options` block that `parseBZWTeamMode`
+// (server/teams.cjs) reads rather than `parseBZWServerOptions` below. Kept so
+// the unread-option tally does not report an option bzo does in fact act on;
+// `test-team-mode.mjs` holds it to what that parser really claims.
+const TEAM_MODE_OPTIONS = new Set(['-c', '-offa', '-rabbit', '-autoTeam', '-mp']);
+
 function parseBZWServerOptions(lines) {
   let inOptions = false;
   // Every other field is left absent unless the map names it. `forbiddenFlags`
@@ -3910,7 +3916,12 @@ function parseBZWServerOptions(lines) {
       }
     }
 
-    if (!optionRead) {
+    // `parseBZWTeamMode` (server/teams.cjs) is the other reader of this same
+    // block, and it owns everything about who plays on which side. An option
+    // it claims is read by bzo even though nothing here claimed it, so it is
+    // not a gap -- naming that list here is the price of the block having two
+    // readers, and the tests hold the two in step.
+    if (!optionRead && !TEAM_MODE_OPTIONS.has(option)) {
       options.unreadOptions.set(option, (options.unreadOptions.get(option) || 0) + 1);
     }
   }
@@ -4541,6 +4552,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         target.specular = referenced.specular;
         target.emission = referenced.emission;
         target.shininess = referenced.shininess;
+        target.alphaThreshold = referenced.alphaThreshold;
       } else if (rawRef) {
         unresolvedMaterialRefs.add(rawRef.toLowerCase());
       }
@@ -4640,6 +4652,16 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     }
     if (token === 'noshadow') {
       target.noShadow = true;
+      return true;
+    }
+    if (token === 'alphathresh') {
+      // `BzMaterial::reset` defaults this to 0, and upstream reads 0 as "no
+      // alpha test at all" rather than as a threshold of zero
+      // (`MeshSceneNode.cxx:525`: `if (alphaThreshold != 0.0f)`). Kept the
+      // same way here so a map that states 0 explicitly means what upstream
+      // means by it, and `render.js` can tell "stated" from "not stated".
+      const value = Number(words[1]);
+      target.alphaThreshold = Number.isFinite(value) ? value : 0;
       return true;
     }
     if (token === 'specular' || token === 'emission' || token === 'shininess') {
@@ -4900,7 +4922,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       currentMaterial = {
         name: null, texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
         dynamicColor: null, textureMatrix: null,
-        specular: null, emission: null, shininess: null,
+        specular: null, emission: null, shininess: null, alphaThreshold: null,
       };
       continue;
     }
@@ -5701,7 +5723,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         phydrv: null, noclusters: false, smoothBounce: false, decorative: false,
         driveThrough: false, shootThrough: false, ricochet: false,
         texture: 'mesh', textureUrl: null, color: null, noRadar: false, noLighting: false,
-        specular: null, emission: null, shininess: null,
+        specular: null, emission: null, shininess: null, alphaThreshold: null,
         // `MeshDrawInfo`'s own `angvel` (#88, degrees/sec) -- upstream states
         // it inside an unrelated render-optimization sub-block bzo does not
         // otherwise read (`drawInfo { ... }`, see `server/remote-world-
@@ -5809,6 +5831,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
           texture: current.texture, textureUrl: current.textureUrl,
           color: current.color, noRadar: current.noRadar, noLighting: current.noLighting,
           specular: current.specular, emission: current.emission, shininess: current.shininess,
+          alphaThreshold: current.alphaThreshold,
         };
       } else if (BZW_PASSABILITY_KEYWORDS.has(token)) {
         Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
@@ -5937,7 +5960,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       current.materialOverride ??= {
         texture: null, textureUrl: null, color: null, noRadar: false, noLighting: false,
         dynamicColor: null, textureMatrix: null,
-        specular: null, emission: null, shininess: null,
+        specular: null, emission: null, shininess: null, alphaThreshold: null,
       };
       applyBzwMaterialToken(current.materialOverride, token, line.split(/\s+/));
     } else if (current && (BZW_FACE_GROUPS.has(token) || token === 'color' || token === 'diffuse'
@@ -6223,6 +6246,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
           next.specular = request.materialOverride.specular;
           next.emission = request.materialOverride.emission;
           next.shininess = request.materialOverride.shininess;
+          next.alphaThreshold = request.materialOverride.alphaThreshold;
         }
         return next;
       }),

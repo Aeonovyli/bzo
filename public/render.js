@@ -614,7 +614,38 @@ function resolveObstacleTextureFactory(stockName, url, fallbackPath, fallbackFac
 // would send a uniform-alpha texture entirely one way or the other).
 const FOLIAGE_ALPHA_TEST = 0.05;
 
-function applyTextureAlpha(material, hasAlpha) {
+// Materials whose texture turned out to have real transparency while the map
+// said nothing about a threshold, by the texture that proved it. A map like
+// that renders correctly on bzo's own default, so this is not an error -- it
+// is the one thing a mapper can fix that would make the map render the same
+// way on upstream, which reads no threshold at all unless one is stated.
+// Reported once per texture rather than once per material: a map builds one
+// material per surface and a shrub is placed a hundred times.
+const alphaWithoutThreshold = new Set();
+let onAlphaWithoutThreshold = null;
+
+export function reportAlphaWithoutThreshold(callback) {
+  onAlphaWithoutThreshold = callback;
+}
+
+// `alphathresh` from the map (`BzMaterial::getAlphaThreshold`), or bzo's own
+// default where the map states none. Upstream runs no alpha test at all
+// without one (`MeshSceneNode.cxx:525`: `if (alphaThreshold != 0.0f)`); bzo
+// keeps a low one, which is the deliberate difference documented in
+// docs/bzw.md -- a foliage cutout's fully-transparent pixels would otherwise
+// still write depth and block what is behind them.
+function resolveAlphaTest(material, textureName) {
+  const stated = material?.userData?.alphaThreshold;
+  if (Number.isFinite(stated) && stated !== 0) return stated;
+  const key = textureName || '(unnamed texture)';
+  if (!alphaWithoutThreshold.has(key)) {
+    alphaWithoutThreshold.add(key);
+    if (onAlphaWithoutThreshold) onAlphaWithoutThreshold(key);
+  }
+  return FOLIAGE_ALPHA_TEST;
+}
+
+function applyTextureAlpha(material, hasAlpha, textureName = null) {
   if (!hasAlpha) return;
   material.transparent = true;
   // A pixel this discards never reaches the depth test at all, so it can
@@ -627,7 +658,7 @@ function applyTextureAlpha(material, hasAlpha) {
   // instead, at a low enough threshold that it only ever catches the
   // pixels upstream's own default (no threshold at all) would have shown
   // as fully invisible anyway.
-  material.alphaTest = FOLIAGE_ALPHA_TEST;
+  material.alphaTest = resolveAlphaTest(material, textureName);
   // Upstream renders every alpha-blended material in a separate ordered
   // pass with `glDepthMask(GL_FALSE)` (`SceneRenderer.cxx:1069-1074`), so
   // overlapping transparent geometry (crossed-quad foliage billboards,
@@ -2794,12 +2825,12 @@ class RenderManager {
     let sideMaterial;
     let capMaterial;
     sideMaterial = new SideClass({
-      map: sideTextureFactory((hasAlpha) => applyTextureAlpha(sideMaterial, hasAlpha)),
+      map: sideTextureFactory((hasAlpha) => applyTextureAlpha(sideMaterial, hasAlpha, key)),
       ...options,
       ...(unlit.side ? {} : buildLightingMaterialOptions(lighting.wallSpecular, lighting.wallShininess, lighting.wallEmission)),
     });
     capMaterial = new CapClass({
-      map: topTextureFactory((hasAlpha) => applyTextureAlpha(capMaterial, hasAlpha)),
+      map: topTextureFactory((hasAlpha) => applyTextureAlpha(capMaterial, hasAlpha, key)),
       ...options,
       ...(unlit.cap ? {} : buildLightingMaterialOptions(lighting.capSpecular, lighting.capShininess, lighting.capEmission)),
     });
@@ -4436,11 +4467,17 @@ class RenderManager {
           // callback never actually fires until this statement (and `let`)
           // has finished, even when the answer was already known.
           material = new LitClass({
-            map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha)),
+            map: textureFactory((hasAlpha) => applyTextureAlpha(material, hasAlpha, face.texture || face.textureUrl)),
             ...lightingOptions,
           });
         } else {
           material = new LitClass(lightingOptions);
+        }
+        // What the map's own material asked for, kept on the material so the
+        // alpha callback can tell a stated threshold from bzo's default -- the
+        // callback fires once the image decodes, long after this returns.
+        if (Number.isFinite(face.alphaThreshold)) {
+          material.userData.alphaThreshold = face.alphaThreshold;
         }
         if (face.color) {
           material.color.setRGB(face.color[0] ?? 1, face.color[1] ?? 1, face.color[2] ?? 1);

@@ -494,13 +494,53 @@ Not yet read:
   in (8 units per tile on a box's or a pyramid's walls, 2 on a box's caps --
   see **Colour** and `_prepareBoxGeometry`) rather than at a size or an offset
   the map may have asked for.
-- **`shader`/`addshader`/`noshaders`, `alphathresh`, `noculling`,
-  `nosorting`, `occluder`, `groupAlpha`, `spheremap`, `notexalpha`,
-  `notexcolor`, `resetmat`.** Read and dropped, the same as any other
-  property this section does not act on.
+- **`alphathresh`.** Read, and used as the material's alpha test the way
+  upstream does (`MeshSceneNode.cxx:525`). See **Alpha threshold** below for
+  what happens when a map states none.
+- **`shader`/`addshader`/`noshaders`, `noculling`, `nosorting`, `occluder`,
+  `groupAlpha`, `spheremap`, `notexalpha`, `notexcolor`, `resetmat`.** Read
+  and dropped -- not yet implemented rather than deliberately declined. Each
+  is counted as it is dropped and named in the server log and in the map's
+  own `-srvmsg` lines, so a map says which of them it asked for. Two are
+  worth singling out, because bzo does not merely ignore them:
+
+  - `notexalpha` asks for a texture's alpha channel to be ignored. bzo turns
+    blending on for any texture with real alpha (see **Texture alpha**), so a
+    map stating this gets the opposite of what it asked for.
+  - `noculling` asks for a surface to be drawn from both sides. bzo uses
+    `DoubleSide` in a number of places, but each is bzo's own decision about
+    a particular feature; a map cannot ask for it.
 - **`noshadow`.** Read and kept on the material (see **Materials**), but
   nothing yet skips building a caster's projected shadow for one that asks
   for none -- every solid obstacle casts one regardless.
+
+### Alpha threshold
+
+Upstream runs an alpha test only where a material states `alphathresh`:
+`BzMaterial::reset` defaults it to 0 and `MeshSceneNode.cxx:525` reads 0 as
+"no alpha test at all" rather than as a threshold of zero. A map that states
+one gets exactly that value here.
+
+**Where a map states none, bzo does not match upstream, on purpose.** A
+texture with real transparency gets an alpha test of 0.05 anyway. Without it a
+foliage cutout's fully transparent pixels still write depth and block whatever
+is behind them -- which is a visible fault, not a stylistic difference, and
+was blocking teleporter effects through the gaps in a shrub before this
+existed. 0.05 is low enough to catch only the pixels upstream's own default
+would have drawn as fully invisible regardless.
+
+That difference is a map's to close, not bzo's: a material carrying a
+transparent texture and no `alphathresh` renders one way here and another way
+upstream, and only the map can say which it meant. So bzo says so, once per
+texture, as a `[DBG]` line to the server -- naming the texture and the default
+it fell back to. `maps/bzo.bzw`'s own billboard bush is in exactly this state
+and reports itself.
+
+Two real textures explain why the fallback is 0.05 and not something higher:
+a telelink overlay at a uniform 80% alpha and a glass texture at a uniform
+20%, both from live maps, both of which have to keep blending and keep
+occluding normally. A 0.5 threshold would send a uniform-alpha texture
+entirely one way or the other -- vanished or solid.
 
 ## Teleporters and links
 
@@ -1214,8 +1254,19 @@ way, permanently rather than provisionally.
 
 ## What is ignored
 
-Anything not listed above is skipped without comment, which means a map using it
-loads and plays with that part of it missing. The notable absences:
+Anything not listed above is skipped, which means a map using it loads and
+plays with that part of it missing. None of it is declined on purpose: each is
+something bzo does not do *yet*, and where upstream's behaviour is known, the
+intent is to match it and to say here where bzo deliberately does not.
+
+Not skipped silently, though. Every keyword and every server option a map
+states that no part of bzo reads is counted as it is dropped, named in the
+server log, and written into the map's own `-srvmsg` lines so a player sees
+what the map asked for and did not get. `scripts/survey-live-maps.mjs` imports
+live maps through a running bzo and reports what that bzo said, rather than
+holding an opinion of its own about what is supported.
+
+The notable absences:
 
 - **`texsize`/`texoffset` on a `material` block or a `matref`.** See
   **Materials** above for what a material *does* read now (`addtexture`/
