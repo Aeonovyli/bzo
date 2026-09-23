@@ -1221,6 +1221,19 @@ define billboard_bush_quad
     texcoord 1 1
     texcoord 0 1
     texture http://images.bzflag.org/bz_legacy/trepan/tiles/shrub.png
+    # The settings every other map using this exact picture states for it --
+    # six of the seven found in a survey of live public servers agree on all
+    # of it, so this is the mapper community's own recipe for a billboard
+    # cutout rather than a guess. `alphathresh 0.7` is the one that matters:
+    # with no threshold stated bzo falls back to its own 0.05 and upstream
+    # runs no alpha test at all, so the same quad renders two ways. The rest
+    # bzo does not read yet and says so on load, which is why they are here.
+    alphathresh 0.7
+    noculling
+    nosorting
+    noradar
+    noshadow
+    nolighting
     passable
     face
       vertices 0 1 2 3
@@ -1249,6 +1262,13 @@ define billboard_bush_quad_mirrored
     texcoord 0 1
     texcoord 1 1
     texture http://images.bzflag.org/bz_legacy/trepan/tiles/shrub.png
+    # Same material settings as the quad above.
+    alphathresh 0.7
+    noculling
+    nosorting
+    noradar
+    noshadow
+    nolighting
     passable
     face
       vertices 0 1 2 3

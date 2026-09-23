@@ -10,7 +10,7 @@
     "server.log",
     "node_modules/"
   ],
-  "ext": "js,mjs,cjs,json,css,html,obj,mtl,svg",
+  "ext": "js,mjs,cjs,json,css,html,obj,mtl,svg,bzw",
   "delay": 0,
   "exitcrash": false
 }

@@ -5839,12 +5839,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         const [, ...nameParts] = words;
         const name = nameParts.join(' ').replace(/"/g, '').trim();
         if (name) current.name = name;
-      } else {
+      } else if (!applyBzwMaterialToken(current, token, words)) {
         // `lod`, `drawInfo`, and a mesh's own position/size/rotation (its
         // transform -- not read yet, see docs/bzw-plan.md) all fall here,
-        // read and dropped like any other property this parser does not
-        // act on yet.
-        applyBzwMaterialToken(current, token, words);
+        // along with any material property a mesh states inline that bzo has
+        // no handling for. Counted rather than dropped in silence: a mesh is
+        // where a map states `noculling` or `nosorting` on a billboard, and
+        // those change what the map looks like.
+        unreadKeywordCounts.set(token, (unreadKeywordCounts.get(token) || 0) + 1);
       }
     } else if (current && current.type === 'group' && (token === 'size' || token === 'scale')) {
       // A group's `size` is CustomGroup's own name for what WorldFileLocation
