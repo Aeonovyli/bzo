@@ -7305,6 +7305,14 @@ function sweepStaleImports() {
   let removed = 0;
   for (const fileName of listAvailableMapFiles()) {
     if (!parseImportMapFileName(fileName)) continue;
+    // Never the map being played. An import ages out on mtime alone, and
+    // nothing about hosting one touches the file, so a server left running on
+    // an imported map for two hours would delete the map out from under
+    // itself. The match survives on the obstacles it already holds, which is
+    // what makes this quiet: the damage lands on the next restart, where
+    // `resolveMapFilePath` finds nothing and the server comes back on a
+    // random map instead.
+    if (fileName === MAP_SOURCE) continue;
     const filePath = path.join(RUNTIME_MAPS_DIR, fileName);
     let stats;
     try {
