@@ -81,6 +81,14 @@ differs. bzo pays a little: a flag it knows to be bad wears `BAD_FLAG_COLOR`
 wherever it appears -- in the world, on the radar and on the scoreboards -- so a
 slot that has been identified looks different from one that has not.
 
+Identify is asked for rather than pushed. The client sweeps for the nearest
+flag with `findNearestGroundFlag` from the flags pair, names it from its own
+record when it can, and sends a `nearFlag` only for one it cannot name; the
+server answers by making the same sweep against its own copy of that tank's
+position. Upstream sends the answer off every position update instead, which is
+a packet per flag per pass along a row of them for answers the client already
+has.
+
 CTF is on when team mode is on **and** the map has bases, which is upstream's
 `ClassicCTF`. Team flags occupy the first slots of the flag array so a team's
 index does not move when the superflag count changes, and the two kinds differ in
@@ -88,6 +96,15 @@ ways worth knowing before touching either: a team flag never vanishes, appears a
 its base instead of flying in, comes to rest on buildings, and leaves the world
 with its team, while a superflag flies in, expires after `_maxFlagGrabs` pickups,
 and may only come to rest on the ground.
+
+`flagsOnBuildings` reaches the two paths differently. It gates the `maxZ` that
+`resetFlag` passes, so it decides whether a flag may *spawn* off the ground;
+`dropFlag` always casts the full downward ray, so a *dropped* flag finds the
+surface under the tank either way and the setting only decides whether a
+superflag may stay there. With it off, a superflag dropped on a roof rises out
+of the world from the roof rather than falling to the floor. bzo takes it from
+a map's `options` block as upstream's `-fb`, or from `flagsOnBuildings` in
+`server.json`; `maps/hix.bzw` turns it on. Team flags ignore it.
 
 ## Intentional differences from BZFlag
 
@@ -311,3 +328,8 @@ What that means in practice, all of it already true because a flag with no
 
 A map written for BZFlag therefore loads and plays; it is short one flag, and the
 server says which one.
+
+**Binoculars are absent for the same reason.** Upstream binds `B` to `viewZoom
+toggle`, which edits `displayFOV` -- the same axis `WA` moves, and the same
+axis the headset runtime owns. A zoom key would work on a monitor and do
+nothing in a headset, so bzo has none.

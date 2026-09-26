@@ -35,27 +35,11 @@ and updating.
 
 ## Flags
 
-bzo carries every flag BZFlag has except one. `WA` Wide Angle is **not
-implemented and will not be**: it widens the field of view, which is one camera
-value on a flat screen but belongs to the headset runtime in VR, where the
-runtime sets it from the device's optics and a client that overrode it would
-either be ignored or make people ill. A flag that is a real penalty in a browser
-and does nothing in VR is worse than an absent one, because it looks like it
-works and the player cannot tell. No acceptable XR answer was found, and keeping
-VR honest matters more than carrying the flag.
+bzo carries every flag BZFlag has except `WA` Wide Angle, which is deliberately
+absent: it widens the field of view, and in VR the headset owns the projection.
+A `zoneflag WA` is ignored and `WA` never spawns.
 
-So on a bzo server:
-
-- **`WA` is never spawned.** It is not in the pool a superflag slot draws from.
-- **A `zoneflag WA` in a map is ignored.** The zone keeps everything else it
-  declares, the `WA` count is dropped, and the skipped type is named once in the
-  server log at load, so a map written for BZFlag loads and plays with nothing
-  silently lost.
-- **The in-game help does not list it.**
-
-Everything else is there: the four team flags and forty-one superflags. See
-[docs/flags.md](docs/flags.md) for how the flag system works and where bzo's
-flags deliberately differ from BZFlag's.
+[docs/flags.md](docs/flags.md) has the rest, including why.
 
 ## Changelog and release notes
 

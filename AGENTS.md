@@ -140,23 +140,22 @@ These are deliberate. Do not "fix" them without being asked.
   scale, matching what a box's own two caps wear instead. Deliberate, not a
   parity gap -- do not "fix" the base cap to match upstream's `pyrwall`
   again; see `PYRAMID_ROOF_TEXTURE_SCALE` in `public/render.js`.
-- **Tanks are selectable OBJ models, not one compiled-in model.** BZFlag ships a
-  single tank in `src/geometry/models/tank/` at three LODs, varied only by the
-  `animatedTreads` and `treadStyle` settings. bzo loads several models from
+- **Tanks are selectable OBJ models, not one compiled-in model.** BZFlag draws
+  one tank, compiled in at three LODs from `src/geometry/models/tank/` and
+  varied only by `animatedTreads` and `treadStyle`. It also ships
+  `misc/tank.obj`, which nothing loads -- `misc/Makefile.am` packages it and no
+  code reads it. bzo loads several models from
   `public/obj/` and lets the player choose; `docs/tank-model-format.md` defines
   the part-naming contract, which keeps upstream's `body`/`turret`/`barrel`/
   `ltread`/`rtread` names. The death explosion throws the tank's own parts, so
   it differs from upstream's as a consequence. Accepted for now -- do not report
   the model set or the explosion as parity gaps.
 
-  **A tank comes from an OBJ file or it does not exist.** There is no generic
-  tank to fall back on when a model will not build: a stand-in reports a broken
-  model as working and leaves the fault to be found in play, where an unfamiliar
-  tank shape is the last thing anyone reads as a broken asset. A model missing
-  its parts is kept out of the picker by the server as it lists `public/obj/`,
-  and reaching `createTank` with one is an error on the console. Do not add a
-  procedural tank, and do not substitute another model for one that failed --
-  the same rule the audio has.
+  **A tank comes from an OBJ file.** A stand-in would report a broken model as
+  working and leave the fault to be found in play. A model missing its parts
+  is kept out of the picker as the server lists `public/obj/`, and reaching
+  `createTank` with one is a console error. Do not add a procedural tank or
+  substitute another model for one that failed -- the rule the audio has.
 
 - **The sky follows a Minecraft clock, not real astronomy.** BZFlag computes
   where the sun and moon actually are: `SceneRenderer::setTimeOfDay` takes a
@@ -1050,74 +1049,23 @@ a partly transparent overlap does not darken at the seam.
 
 ## Flags
 
-`docs/flags.md` documents the flag system: where each part of it lives, and every
-place bzo's flags deliberately differ from BZFlag's. Read it before changing
-flags. Per-flag mechanics are not repeated there -- they are in comments beside
-the code, each citing the upstream file and line, where they cannot drift.
+`docs/flags.md` is the flag system: where each part lives, how the server and
+client split the work, and every place bzo deliberately differs from BZFlag.
+Read it before changing flags. Per-flag mechanics are not there either -- they
+are in comments beside the code, each citing the upstream file and line.
 
-bzo carries every flag BZFlag has except `WA` Wide Angle, which is deliberately
-absent and will stay absent: the headset owns the projection, so a field-of-view
-flag is a real penalty in a browser and a no-op in VR, and keeping XR honest
-matters more than carrying the flag. A `zoneflag WA` is ignored and `WA` is never
-spawned, which the server says once at load.
+Two rules that decide new work rather than describe old:
 
-**A flag needs an answer in XR.** bzo ships one client for desktop, mobile and
-the headset, so an effect that is a desktop-camera or 2D-HUD trick is not enough:
-a flag that quietly does nothing in VR looks like it works and the player cannot
-tell.
+**A flag needs an answer in XR.** One client serves desktop, mobile and the
+headset, so a desktop-camera or 2D-HUD trick is not enough: a flag that
+quietly does nothing in VR looks like it works and the player cannot tell.
+The headset runtime owns the projection, so anything that moves the field of
+view is out on those grounds -- `WA` Wide Angle, and upstream's binoculars
+key with it.
 
-**The `FLAG_TYPES` table is the list of what bzo has.** A row is what puts a flag
-in `superFlags.allowed`'s default and in the help panel, which `buildFlagHelp`
-generates from the same table, so a row with no behaviour behind it would be a
-flag in the world that lies about what it does.
-
-The shape of it: the server owns every flag and sends the whole flight with the
-event that starts it, and the client integrates that arc locally, exactly as
-`FlagInfo::dropFlag` and `World::updateFlag` split the work upstream. There is no
-per-frame flag packet, and no clock sync -- the client advances `flightTime` by
-its own frame delta from the value the server sent.
-
-Flag ownership lives only in the server's `flags` array. Do not add a second
-copy on the player.
-
-A client's *knowledge* of a flag's identity lives in its own flag record, not
-beside it. bzfs reveals a superflag's type only while somebody is holding it, so
-an update for a dropped flag arrives with `type: null`; `keepFlagIdentity` in the
-flags pair is the rule that keeps what the record already learned across such an
-update, and the debug labels draw an identified flag's abbreviation over it. A
-record is a slot rather than a flag, so it forgets when its flag leaves the
-world.
-
-Identify is asked for rather than pushed. The client sweeps for the nearest flag
-with `findNearestGroundFlag` from the flags pair, names it from its own record
-when it can, and sends a `nearFlag` only for a flag it cannot name; the server
-answers by making the same sweep against its own copy of that tank's position.
-Upstream sends the answer off every position update instead, which is a packet
-per flag per pass along a row of them for answers the client already has.
-
-Where a flag's rule is enforced follows one test: server-side wherever a modified
-client could gain by lying, client-side wherever it only changes what its own
-player sees.
-
-Grab, drop and capture are client-initiated and server-validated, which is
-bzfs's own arrangement.
-
-CTF is on when team mode is on **and** the map has bases, which is upstream's
-`ClassicCTF`. Team flags occupy the first slots of the flag array so a team's
-flag index does not move when the superflag count changes, and the two kinds
-behave differently in ways worth knowing before touching either: a team flag
-never vanishes, appears at its base instead of flying in, comes to rest on
-buildings, and leaves the world with its team, while a superflag flies in,
-expires after `_maxFlagGrabs` pickups, and may only come to rest on the ground.
-
-Note how `flagsOnBuildings` reaches each path. It gates the `maxZ` that
-`resetFlag` passes, so it decides whether a flag may *spawn* off the ground;
-`dropFlag` always casts the full downward ray, so a *dropped* flag finds the
-surface under the tank either way and the setting only decides whether a
-superflag may stay there. With it off, a superflag dropped on a roof rises out of
-the world from the roof rather than falling to the floor. bzo takes it from a
-map's `options` block as upstream's `-fb`, or from `flagsOnBuildings` in
-`server.json`; `maps/hix.bzw` turns it on. Team flags ignore it.
+**Where a flag's rule is enforced follows one test:** server-side wherever a
+modified client could gain by lying, client-side wherever it only changes what
+its own player sees.
 
 ### The roster
 
@@ -3493,67 +3441,21 @@ standings.
 
 ## Audio
 
-Gameplay samples live in `public/audio/` and come from upstream BZFlag
-(`$HOME/bzflag/data/*.wav`), so bzo sounds like the game it mirrors;
-`docs/audio.md` lists which sample answers which `SFX_*` code. The
-manifest in `public/audio.js` maps each logical name to its file, its BZFlag
-`SFX_*` code, and its distance/volume; `render.js` plays everything through
-`playSound()` / `playLocalSound()` rather than bespoke per-sound methods.
+`docs/audio.md` is every sample, the name `playSound()` asks for it by, the
+BZFlag `SFX_*` code it answers, the event it plays for, and the four upstream
+ships that nothing triggers. The manifest in `public/audio.js` is the same
+mapping in code, with each sound's distance and volume; `render.js` plays
+everything through `playSound()` / `playLocalSound()` rather than bespoke
+per-sound methods.
 
 All samples are preloaded by `preloadGameplayAudio()` during map entry. **Both
 halves of the game ship from this repo, so the files are always present. Do not
 add fallbacks for missing audio** -- a failed load is a broken build and should
 surface as an error, not a silent degradation.
 
-| bzo name | file | BZFlag SFX | event |
-|---|---|---|---|
-| `fire` | `fire.wav` | `SFX_FIRE` | a shot is fired |
-| `shotBoom` | `boom.wav` | `SFX_SHOT_BOOM` | a shot expires or hits an obstacle |
-| `laser` | `laser.wav` | `SFX_LASER` | a laser is fired |
-| `shock` | `shock.wav` | `SFX_SHOCK` | a shock wave is fired |
-| `missile` | `missile.wav` | `SFX_MISSILE` | a guided missile is fired |
-| `thief` | `thief.wav` | `SFX_THIEF` | a Thief's beam is fired |
-| `lock` | `lock.wav` | `SFX_LOCK` | a guided missile has locked onto me |
-| `ricochet` | `ricochet.wav` | `SFX_RICOCHET` | a shot bounces off a building |
-| `messageTeam` | `message_team.wav` | `SFX_MESSAGE_TEAM` | a team message arrives from somebody else |
-| `messagePrivate` | `message_private.wav` | `SFX_MESSAGE_PRIVATE` | a direct message addressed to me arrives |
-| `messageAdmin` | `message_admin.wav` | `SFX_MESSAGE_ADMIN` | a message on the admin channel arrives |
-| `explosion` | `explosion.wav` | `SFX_EXPLOSION`, `SFX_DIE` | a tank is destroyed |
-| `runOver` | `steamroller.wav` | `SFX_RUNOVER` | a tank is run over by a Steamroller |
-| `jump` | `jump.wav` | `SFX_JUMP` | a tank jumps |
-| `flap` | `flap.wav` | `SFX_FLAP` | a tank flaps its Wings |
-| `land` | `land.wav` | `SFX_LAND` | a tank lands |
-| `bounce` | `bounce.wav` | `SFX_BOUNCE` | a tank stands on an upward physics driver |
-| `teleport` | `teleport.wav` | `SFX_TELEPORT` | a tank passes through a teleporter |
-| `burrow` | `burrow.wav` | `SFX_BURROW` | a Burrow tank digs in below ground level |
-| `phantom` | `phantom.wav` | `SFX_PHANTOM` | a Phantom Zone tank crosses a teleporter |
-| `pop` | `pop.wav` | `SFX_POP` | a tank appears (spawn) |
-| `flagGrab` | `flag_grab.wav` | `SFX_GRAB_FLAG`, `SFX_GRAB_BAD` | a flag is picked up |
-| `flagDrop` | `flag_drop.wav` | `SFX_DROP_FLAG` | a flag is dropped |
-| `flagWon` | `flag_won.wav` | `SFX_CAPTURE` | my team captured an enemy team's flag |
-| `flagLost` | `flag_lost.wav` | `SFX_LOSE` | my team's flag was captured |
-| `flagAlert` | `flag_alert.wav` | `SFX_ALERT` | an enemy picked up my team's flag |
-| `teamGrab` | `teamgrab.wav` | `SFX_TEAMGRAB` | a team mate picked up an enemy team's flag |
-| `killTeam` | `killteam.wav` | `SFX_KILL_TEAM` | I captured my own team’s flag |
-| `huntSelect` | `hunt_select.wav` | `SFX_HUNT_SELECT` | I have just been made the rabbit |
-
-**Levels mirror BZFlag exactly, and there is no per-sound volume.** BZFlag scales
-every sample only by distance and one global setting; the samples are pre-mixed
-relative to each other, so adding per-sound gain undoes that balance. Its
-attenuation, from `getWorldStuff()` in `src/bzflag/sound.cxx`, is
-`amplitude = d < 86.4 ? 1 : 86.4 / d`, where `86.4` is 20 BZFlag tank radii
-(`20 * 4.32`). That is the Web Audio `inverse` distance model with
-`refDistance = 86.4` and `rolloffFactor = 1`, which reproduces the curve exactly.
-The constant scales with the world, not the vehicle, so it stays `4.32` even
-though a bzo tank has radius 2. Tune `MASTER_VOLUME` in `public/audio.js`, not
-individual sounds.
-
-Every remaining BZFlag sound is gated on a feature bzo does not have yet:
-`bounce` needs a tank bouncing off a wall, `hunt`/`hunt_select` need hunting,
-`message_*` need per-kind chat sounds, and `burrow`/`phantom` need the superflags
-they belong to. When adding one of those features, take its sound from upstream
-at the same time. The BZFlag sound codes are in `src/bzflag/sound.h`, resolved
-through the `soundFiles[]` table in `src/bzflag/sound.cxx`.
+When adding a feature that upstream has a sound for, take the sound at the same
+time: the codes are in `src/bzflag/sound.h`, resolved through `soundFiles[]` in
+`src/bzflag/sound.cxx`.
 
 ### Voice comes from where the speaker is standing
 
