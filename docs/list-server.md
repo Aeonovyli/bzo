@@ -86,7 +86,9 @@ counts, `version`, the shot limit and game style (`maxShots`, `style` --
 (`computeLocalGameOptionsBits`, `server.js:10699`) -- the same fields `/list`
 already draws for a remote bzfs row's Shots/Style columns and option bits,
 read off this server's own resolved config instead of decoded off the wire.
-Also `voiceEnabled` (`VOICE_ICE_SERVERS.length > 0`) -- not whether the
+Also `map`, the world being played -- `mapFile`, or `random` for a generated
+one -- which is the `?viewmap=` name on that instance. And `voiceEnabled`
+(`VOICE_ICE_SERVERS.length > 0`) -- not whether the
 client feature exists (it always does), but whether at least one ICE
 server is configured, since a peer connection across anything but a LAN
 typically never completes without one.

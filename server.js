@@ -1172,6 +1172,7 @@ function renderListPage({
       + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
       + `<td>${s.voiceEnabled ? 'Yes' : ''}</td>`
+      + `<td>${escapeHtml(game.map || '')}</td>`
       + `<td>${escapeHtml(proxy ? (proxy.title || proxy.target) : s.title)}</td>`
       + `<td>${escapeHtml(s.version)}</td>`
       + `<td>${escapeHtml(s.url)}</td>`
@@ -1278,6 +1279,7 @@ click a row to enter that game.</p>
 <th title="Antidote flag">Anti</th><th title="Handicap">Hcap</th>
 <th title="No Team Kills (friendly fire off)">TK</th>
 <th title="Voice chat has at least one ICE server configured">Voice</th>
+<th title="The world being played. A proxied row names the copy bzo imported from that server">Map</th>
 <th>Title</th><th>Version</th><th>URL</th>
 <th title="The real BZFlag server this row leads to, through the bzo in the URL column">Proxy</th>
 </tr></thead>
@@ -2514,6 +2516,7 @@ function listPublicListServerRows() {
         gameOptionsBits: record.live.gameOptionsBits,
         maxShots: record.live.maxShots,
         style: record.live.style,
+        map: String(record.live.map || ''),
         voiceEnabled: record.live.voiceEnabled,
         // One entry per server this instance proxies, each describing that
         // target's own game rather than this instance's (`docs/proxy.md`).
@@ -2530,6 +2533,7 @@ function listPublicListServerRows() {
               maxPlayers: Number(proxy.maxPlayers) || 0,
               maxShots: Number(proxy.maxShots) || 0,
               style: String(proxy.style || '').slice(0, 32),
+              map: String(proxy.map || '').slice(0, 128),
               gameOptionsBits: Number(proxy.gameOptionsBits) || 0,
             }))
           : [],
@@ -12451,6 +12455,10 @@ function computeProxyRows() {
     const listed = findPublicServer(remoteServerListCache.servers, target.displayHost, target.displayPort);
     return {
       target: target.key,
+      // The world bzo imported from this target, which is the same file a
+      // `?viewmap=` link names and the only name anybody here has for it:
+      // bzfs sends a world, never what its operator called the file.
+      map: remoteMapFileName(target.displayHost, target.displayPort),
       title: listed?.title || '',
       players: status.players ?? 0,
       maxPlayers: status.maxPlayers ?? 0,
@@ -12466,6 +12474,9 @@ function computeProxyRows() {
 function computeListServerStatus() {
   return {
     proxies: computeProxyRows(),
+    // Which world this is, which a row had no way to say. `random` for a
+    // generated one, as `MAP_SOURCE` itself spells it.
+    map: MAP_SOURCE,
     title: serverConfig.serverName || '',
     description: serverConfig.description || '',
     players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,

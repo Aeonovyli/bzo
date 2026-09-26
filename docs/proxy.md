@@ -120,7 +120,9 @@ for each target it carries.
 A proxied target is a whole game and its row says so -- player count, maximum,
 shot limit, style, and every option bit the table has a column for, read off
 that server rather than off the bzo carrying it, which is playing something
-else or nothing. There is nothing a native row shows that a proxied row leaves
+else or nothing. Its Map is the world bzo imported from it, which is the only
+name anybody here has for that world: bzfs sends a world, never what its
+operator called the file. There is nothing a native row shows that a proxied row leaves
 empty, and the reverse: the **Proxy** column names the target and is empty
 for a native row. The URL column names the instance either way, and the link
 goes to that instance's `?proxy=` for the target.
