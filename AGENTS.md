@@ -2589,7 +2589,7 @@ things:
   So `isLocalAdminRequest` in the `sessions` module wants a loopback peer **and**
   no `X-Forwarded-*` header at all. That second half is the one a remote client
   cannot forge: it can add a header but not remove one, and a proxy following the
-  deployment notes in the README sets `X-Forwarded-For` on every hop with
+  deployment notes in `docs/installation.md` set `X-Forwarded-For` on every hop with
   `RequestHeader set`, so a client's own copy never survives. A proxy that omits
   it entirely is the case this cannot see, which is exactly why an operator has
   to ask for this rather than get it by default. Every grant is logged.

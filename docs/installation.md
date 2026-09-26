@@ -1,0 +1,242 @@
+# Installing and running a bzo server
+
+Everything needed to put a bzo server on the internet: install it, configure
+it, put it behind a reverse proxy, list it, and point it at BZFlag servers you
+already run. `README.md` is what bzo *is*; this is how to run one.
+
+## Install with Docker
+
+### Quick start with docker compose
+
+Use [compose.yml](../compose.yml):
+
+```bash
+docker compose up -d
+```
+
+This starts the server on port 3000 and stores runtime config in `./data/server.json`.
+
+On first start, the server copies [example-server.json](../example-server.json) to the configured runtime path if no config exists.
+
+Naming update: this project now uses `compose.yml`, `server.json`, and
+`example-server.json` only.
+
+Then open:
+
+- `http://localhost:3000`
+
+The image is multi-arch (`linux/amd64` and `linux/arm64`), so Docker will pull the
+correct variant for your host by default.
+
+If you need to force an architecture, set `platform` in compose:
+
+```yaml
+services:
+  bzo:
+    image: ghcr.io/timriker/bzo:latest
+    platform: linux/amd64 # or linux/arm64
+    volumes:
+      - ./data:/data
+```
+
+### Direct docker run
+
+```bash
+docker run -d \
+  --name bzo \
+  -p 3000:3000 \
+  -v bzo-data:/data \
+  ghcr.io/timriker/bzo:latest
+```
+
+The image defaults to `SERVER_CONFIG_PATH=/data/server.json`.
+
+To force a specific architecture when running directly:
+
+```bash
+docker run -d \
+  --name bzo \
+  --platform linux/amd64 \
+  -p 3000:3000 \
+  -v bzo-data:/data \
+  ghcr.io/timriker/bzo:latest
+```
+
+Use `--platform linux/arm64` on ARM hosts if you want to pin that explicitly.
+
+### Docker data persistence
+
+- Persist server settings and runtime config by mounting `/data` (already done in
+  `compose.yml`).
+- `SERVER_CONFIG_PATH` defaults to `/data/server.json`.
+- The container runs as UID/GID `1000:1000`; for bind mounts, ensure the host
+  `./data` directory is writable by that user (for example `chown -R 1000:1000 ./data`).
+
+### Persisting custom maps (optional)
+
+Built-in maps ship inside the image at `/app/maps`.
+
+Runtime map uploads and operator-managed custom maps are stored in a writable
+runtime maps directory that defaults to `$(dirname $SERVER_CONFIG_PATH)/maps`.
+With the default Docker settings, this is `/data/maps`, which is already
+persisted by the existing `./data:/data` volume.
+
+No extra volume is required for operator uploads to persist across restarts.
+
+If you want to override the runtime map directory, set `MAPS_PATH`:
+
+```yaml
+services:
+  bzo:
+    image: ghcr.io/timriker/bzo:latest
+    environment:
+      SERVER_CONFIG_PATH: /data/server.json
+      MAPS_PATH: /data/maps
+    volumes:
+      - ./data:/data
+```
+
+You can still provide static read-only maps in the image path, but uploaded maps
+should go to the runtime directory.
+
+## Install from source
+
+### Prerequisites
+
+- Node.js 18.19.1 or Node.js 24.19.0
+- npm
+
+### Setup
+
+```bash
+npm install
+```
+
+If `server.json` does not exist, the server will create it from [example-server.json](../example-server.json) on first start.
+
+### Run
+
+Production:
+
+```bash
+npm start
+```
+
+Development:
+
+```bash
+npm run dev
+```
+
+Then open:
+
+- `http://localhost:3000`
+
+## Configuration
+
+Runtime configuration lives in `server.json` by default.
+
+You can override the path with:
+
+```bash
+SERVER_CONFIG_PATH=/path/to/server.json npm start
+```
+
+See [example-server.json](../example-server.json) for the supported shape.
+
+
+## Behind a reverse proxy
+
+Terminate TLS at the proxy and serve the game over `https://`; the client uses
+`wss://` for its WebSocket whenever the page is HTTPS. WebXR needs a secure
+context, so this is not optional for headsets.
+
+Apache's `mod_proxy` sends `X-Forwarded-For`, `X-Forwarded-Host` and
+`X-Forwarded-Server` on its own, but **not** `X-Forwarded-Proto` or
+`X-Forwarded-Port`. Add them in the HTTPS vhost, with `mod_headers` enabled, or
+the server logs every connection as plain HTTP:
+
+```apache
+RequestHeader set X-Forwarded-Proto "https"
+RequestHeader set X-Forwarded-Port  "443"
+# mod_proxy appends to X-Forwarded-For, so pin it to the real peer rather than
+# letting a client prepend an address of its choosing.
+RequestHeader set X-Forwarded-For   "expr=%{REMOTE_ADDR}"
+```
+
+`set` rather than `add`, so a header a client sent cannot survive the hop.
+
+## Listing your server
+
+A bzo server is listed by registering one key with the designated bzo list
+server -- `bz.rikers.org` unless you have changed `listServerUrl` -- and
+pasting that key into this server's Operator panel.
+
+1. Set `publicUrl` in `server.json` to this server's own `https://` URL. The
+   list server calls it back, so it has to be reachable.
+2. Open `https://bz.rikers.org/list#keys`, log in with your bzflag.org forum
+   account, and register a key for that same URL.
+3. In bzo, open the Operator panel and paste it into the List Server Key row.
+   It takes effect at once; no restart.
+
+Your row appears on every bzo instance's `/list`. A `bzfs` server's key is a
+different key from <https://my.bzflag.org/listkeys/> and does not go here.
+
+`docs/list-server.md` has the protocol, the validation callback, key lifetime
+and what a row carries.
+
+## Proxying BZFlag servers
+
+A bzo instance can carry a browser into an ordinary `bzfs` game. Name each
+server in `proxies`, from the name players see to the address bzo dials:
+
+```json
+"proxies": {
+  "example.org:5154": "127.0.0.1:5154",
+  "my-test:5155":     "192.168.12.20:5155"
+}
+```
+
+The key is the identity -- for a listed server, exactly the `host:port` the
+public BZFlag list carries. The value is private on purpose: a forwarded
+global login only verifies when bzfs sees the connection arrive from
+127/8, 10/8, 172.16/12 or 192.168/16, so **bzo has to run inside its target's
+network**, which in practice means on the same host. Each target gets a row
+on `/list` and a link of its own:
+
+```
+https://your-bzo.example.com/?proxy=example.org_5154
+```
+
+`docs/proxy.md` has what a proxied player gets, what they do not, and why.
+
+## Updating
+
+### Source installs
+
+There is no built-in self-update path for source installs.
+
+To update, download a newer release or pull newer source, then run:
+
+```bash
+npm install
+```
+
+### Docker installs
+
+Docker is the recommended update path.
+
+Manual update:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+or:
+
+```bash
+docker pull ghcr.io/timriker/bzo:latest
+```
+
+If you want automatic container updates, use your preferred container update manager. That is not built into the game itself.

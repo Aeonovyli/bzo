@@ -4,22 +4,8 @@ Battlezone Online is a real-time multiplayer tank game built with Node.js, WebSo
 
 ## Try it
 
-Two public test servers, both usually up:
-
-- <https://bz.rikers.org> — development, running whatever is current
-- <https://orin-bzo.rikers.org> — the `linux/arm64` Docker image, updated nightly
-
-Neither is a stable deployment, so expect either to be restarting or ahead of the
-latest release.
-
-## What users can install
-
-There are two supported ways to run the game:
-
-1. Docker image from GitHub Container Registry
-2. Source release tarball or git checkout
-
-For most users, Docker is the best install and update path.
+<https://bz.rikers.org/list> lists the public bzo servers, and the BZFlag
+servers any of them proxies. Click a row to enter that game.
 
 ## Release contents
 
@@ -38,145 +24,14 @@ published. Ubuntu 26.04 images use the pinned Node.js `24.19.0` runtime.
 Docker images are built on Ubuntu 26.04 with pinned Node.js `24.19.0`.
 Runtime compatibility is validated in CI on Node.js `18.19.1` and `24.19.0`.
 
-## Install with Docker
+## Install and run a server
 
-### Quick start with docker compose
+A Docker image from GitHub Container Registry, or a source tarball or git
+checkout. Docker is the better install and update path for most people.
 
-Use [compose.yml](compose.yml):
-
-```bash
-docker compose up -d
-```
-
-This starts the server on port 3000 and stores runtime config in `./data/server.json`.
-
-On first start, the server copies [example-server.json](example-server.json) to the configured runtime path if no config exists.
-
-Naming update: this project now uses `compose.yml`, `server.json`, and
-`example-server.json` only.
-
-Then open:
-
-- `http://localhost:3000`
-
-The image is multi-arch (`linux/amd64` and `linux/arm64`), so Docker will pull the
-correct variant for your host by default.
-
-If you need to force an architecture, set `platform` in compose:
-
-```yaml
-services:
-  bzo:
-    image: ghcr.io/timriker/bzo:latest
-    platform: linux/amd64 # or linux/arm64
-    volumes:
-      - ./data:/data
-```
-
-### Direct docker run
-
-```bash
-docker run -d \
-  --name bzo \
-  -p 3000:3000 \
-  -v bzo-data:/data \
-  ghcr.io/timriker/bzo:latest
-```
-
-The image defaults to `SERVER_CONFIG_PATH=/data/server.json`.
-
-To force a specific architecture when running directly:
-
-```bash
-docker run -d \
-  --name bzo \
-  --platform linux/amd64 \
-  -p 3000:3000 \
-  -v bzo-data:/data \
-  ghcr.io/timriker/bzo:latest
-```
-
-Use `--platform linux/arm64` on ARM hosts if you want to pin that explicitly.
-
-### Docker data persistence
-
-- Persist server settings and runtime config by mounting `/data` (already done in
-  `compose.yml`).
-- `SERVER_CONFIG_PATH` defaults to `/data/server.json`.
-- The container runs as UID/GID `1000:1000`; for bind mounts, ensure the host
-  `./data` directory is writable by that user (for example `chown -R 1000:1000 ./data`).
-
-### Persisting custom maps (optional)
-
-Built-in maps ship inside the image at `/app/maps`.
-
-Runtime map uploads and operator-managed custom maps are stored in a writable
-runtime maps directory that defaults to `$(dirname $SERVER_CONFIG_PATH)/maps`.
-With the default Docker settings, this is `/data/maps`, which is already
-persisted by the existing `./data:/data` volume.
-
-No extra volume is required for operator uploads to persist across restarts.
-
-If you want to override the runtime map directory, set `MAPS_PATH`:
-
-```yaml
-services:
-  bzo:
-    image: ghcr.io/timriker/bzo:latest
-    environment:
-      SERVER_CONFIG_PATH: /data/server.json
-      MAPS_PATH: /data/maps
-    volumes:
-      - ./data:/data
-```
-
-You can still provide static read-only maps in the image path, but uploaded maps
-should go to the runtime directory.
-
-## Install from source
-
-### Prerequisites
-
-- Node.js 18.19.1 or Node.js 24.19.0
-- npm
-
-### Setup
-
-```bash
-npm install
-```
-
-If `server.json` does not exist, the server will create it from [example-server.json](example-server.json) on first start.
-
-### Run
-
-Production:
-
-```bash
-npm start
-```
-
-Development:
-
-```bash
-npm run dev
-```
-
-Then open:
-
-- `http://localhost:3000`
-
-## Configuration
-
-Runtime configuration lives in `server.json` by default.
-
-You can override the path with:
-
-```bash
-SERVER_CONFIG_PATH=/path/to/server.json npm start
-```
-
-See [example-server.json](example-server.json) for the supported shape.
+[docs/installation.md](docs/installation.md) covers both, plus configuration,
+running behind a reverse proxy, listing your server, proxying BZFlag servers,
+and updating.
 
 ## Flags
 
@@ -201,37 +56,6 @@ So on a bzo server:
 Everything else is there: the four team flags and forty-one superflags. See
 [docs/flags.md](docs/flags.md) for how the flag system works and where bzo's
 flags deliberately differ from BZFlag's.
-
-## Updating
-
-### Source installs
-
-There is no built-in self-update path for source installs.
-
-To update, download a newer release or pull newer source, then run:
-
-```bash
-npm install
-```
-
-### Docker installs
-
-Docker is the recommended update path.
-
-Manual update:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-or:
-
-```bash
-docker pull ghcr.io/timriker/bzo:latest
-```
-
-If you want automatic container updates, use your preferred container update manager. That is not built into the game itself.
 
 ## Changelog and release notes
 
@@ -358,22 +182,8 @@ through Cardboard; VR Mode stays in the Settings menu there.
 If the deployment sets a restrictive `Permissions-Policy` header, allow
 `xr-spatial-tracking=(self)`. The Node.js server does not terminate TLS itself,
 so HTTPS and the corresponding WebSocket proxy configuration are deployment
-responsibilities.
-
-Apache's `mod_proxy` sends `X-Forwarded-For`, `X-Forwarded-Host` and
-`X-Forwarded-Server` on its own, but **not** `X-Forwarded-Proto` or
-`X-Forwarded-Port`. Add them in the HTTPS vhost, with `mod_headers` enabled, or
-the server logs every connection as plain HTTP:
-
-```apache
-RequestHeader set X-Forwarded-Proto "https"
-RequestHeader set X-Forwarded-Port  "443"
-# mod_proxy appends to X-Forwarded-For, so pin it to the real peer rather than
-# letting a client prepend an address of its choosing.
-RequestHeader set X-Forwarded-For   "expr=%{REMOTE_ADDR}"
-```
-
-`set` rather than `add`, so a header a client sent cannot survive the hop.
+responsibilities -- see
+[docs/installation.md](docs/installation.md#behind-a-reverse-proxy).
 
 Use the [WebXR validation checklist](docs/webxr-validation.md) when checking a
 new browser, headset, or deployment. WebGPU rendering is outside the scope of
