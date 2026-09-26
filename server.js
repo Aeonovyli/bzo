@@ -1270,7 +1270,7 @@ ${navBlock}
 <p class="muted">From the designated list server, ${LIST_SERVER_URL
     ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
     : 'disabled on this instance'} --
-click a row to go there; see "keys" above to manage a key.</p>
+click a row to go there.</p>
 <input id="bzoServerFilter" type="text" placeholder="Filter…">
 <table id="bzoServerTable">
 <thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
