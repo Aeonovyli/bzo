@@ -13,6 +13,7 @@
     "127.0.0.0/8",
     "::1"
   ],
+  "proxies": {},
   "publicUrl": "",
   "listServerUrl": "https://bz.rikers.org",
   "listServerKey": "",

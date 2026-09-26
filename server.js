@@ -172,6 +172,7 @@ const {
   teamScoreMovesOnKill,
   areFoes,
 } = require('./server/teams.cjs');
+const { parseProxies } = require('./server/proxies.cjs');
 const {
   ALL_PLAYERS,
   SERVER_PLAYER,
@@ -575,25 +576,6 @@ function parseGlobalTokenReply(body) {
 // be an open redirect.
 const LOGIN_RETURN_PATHS = Object.freeze({ list: '/list' });
 
-// The bzfs servers this instance may proxy, and the one thing a `/login` path
-// segment may name besides a return page. docs/proxy.md: the key is the
-// target's public `host_port`, the way a list-server row names it and the way
-// the world it imports is already filed; `host`/`port` is the private address
-// the proxy dials instead. That address is the point rather than a shortcut --
-// a forwarded token only verifies when bzfs sees the connection arrive from
-// 127/8 or a private LAN, so a proxy runs inside its target's network or not
-// at all. Allowlisted for the same reason `LOGIN_RETURN_PATHS` is: an
-// unrecognised segment would otherwise let any caller aim bzo at any host.
-//
-// Hardcoded until step 4 of the plan makes it configuration.
-const PROXY_TARGETS = Object.freeze({
-  'bz.rikers.org_5154': Object.freeze({
-    host: '127.0.0.1',
-    port: 5154,
-    publicHost: 'bz.rikers.org',
-    publicPort: 5154,
-  }),
-});
 
 // bzfs's own sentences come back over the wire, so they are read as data: only
 // what a terminal-safe line can hold, and only as much of it as a verdict
@@ -1776,6 +1758,39 @@ function reuseCachedImport(host, port) {
   }
 }
 
+// A proxy's own import, authorized by the operator's `proxies` map rather than
+// by the public list: name from the key, address from the value, permission
+// from the config. `performRemoteMapImport` below stays exactly as strict as
+// it was -- the address there comes from a client-supplied `?viewmap=` name,
+// and its public-list check is what stands between that name and an arbitrary
+// outbound connection. This is a second caller of the same fetch, authorized
+// differently, not a loosening of the first.
+async function importProxyWorld(target) {
+  const safeMapName = remoteMapFileName(target.displayHost, target.displayPort);
+  // A copy this process already holds and has not let go stale. Same window as
+  // a `?viewmap=` import: following two links to the same target in a sitting
+  // should not fetch its world twice.
+  const registered = MAP_REGISTRY.get(safeMapName);
+  if (registered && Date.now() - registered.registeredAt < IMPORT_REUSE_MS) {
+    return { safeMapName, reused: true };
+  }
+  const existing = inFlightRemoteImports.get(safeMapName);
+  if (existing) return existing;
+  const promise = performRemoteMapImportNow({
+    host: target.displayHost,
+    port: target.displayPort,
+    dialHost: target.host,
+    dialPort: target.port,
+    // The list server's words about a public name, when it happens to have
+    // any: a proxied target need not be listed at all, and its own title
+    // arrives with the world either way.
+    title: '',
+    info: null,
+  }, safeMapName).finally(() => inFlightRemoteImports.delete(safeMapName));
+  inFlightRemoteImports.set(safeMapName, promise);
+  return promise;
+}
+
 async function performRemoteMapImport(host, port) {
   let publicServers;
   try {
@@ -1800,10 +1815,15 @@ async function performRemoteMapImport(host, port) {
   return promise;
 }
 
+// `dialHost`/`dialPort` are where the world is fetched from; `host`/`port` are
+// who it is *from*, which is what the file is named after and what the bzw
+// header records. They are the same address for an import off the public list,
+// and different for a proxied target, where the name a player sees is public
+// and the address bzo reaches it on is private (`docs/proxy.md`).
 async function performRemoteMapImportNow(listedServer, safeMapName) {
-  const { host, port } = listedServer;
+  const { host, port, dialHost = host, dialPort = port } = listedServer;
   const { worldDatabase, gameSettings, queryGame, variables } =
-    await fetchWorldFromServer(host, port, 15000);
+    await fetchWorldFromServer(dialHost, dialPort, 15000);
   const tree = parseWorldDatabase(worldDatabase);
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
@@ -1989,6 +2009,24 @@ if (refusedAdminGroups.length > 0) {
   log(`Admin groups refused (a group name may not contain a colon or a newline):`
     + ` ${refusedAdminGroups.map((group) => JSON.stringify(group)).join(', ')}`);
 }
+
+// The bzfs servers this instance may proxy, from `proxies` in `server.json`
+// (`server/proxies.cjs`). The map is the allowlist: a target not named there
+// cannot be proxied, linked to, or logged in to, which is what keeps `?proxy=`
+// from being an invitation to dial anywhere -- the same reason
+// `LOGIN_RETURN_PATHS` is one.
+const { targets: PROXY_TARGETS, refused: refusedProxies, warnings: proxyWarnings } =
+  parseProxies(serverConfig.proxies);
+for (const target of Object.values(PROXY_TARGETS)) {
+  log(`Proxy: "${target.key}" reached at ${target.host}:${target.port}`);
+}
+for (const { key, reason } of proxyWarnings) {
+  log(`Proxy: "${key}" -- ${reason}`);
+}
+for (const { key, reason } of refusedProxies) {
+  logError(`Proxy: "${key}" refused -- ${reason}`);
+}
+if (Object.keys(PROXY_TARGETS).length === 0) log('Proxy: no servers configured');
 
 // `adminWhitelist` in server.json: addresses beyond loopback that `localAdmin`
 // should also cover, e.g. an operator's home network. Entries are addresses or
@@ -16013,7 +16051,7 @@ async function handleProxyConnection(ws, req, key, target) {
     // The world first, because it is the slow half and because an `init` needs
     // it. This is the same import Map Viewer serves and the same cache: a
     // target imported within the hour costs nothing to proxy.
-    const { safeMapName } = await performRemoteMapImport(target.publicHost, target.publicPort);
+    const { safeMapName } = await importProxyWorld(target);
     const mapEntry = MAP_REGISTRY.get(safeMapName);
     if (!mapEntry) throw new Error(`imported ${safeMapName} is not registered`);
     if (ws.readyState !== ws.OPEN) return;
@@ -16417,11 +16455,18 @@ wss.on('connection', (ws, req) => {
   const proxied = resolveProxyTarget(req.url);
   if (proxied) {
     if (!proxied.target) {
-      // Not echoed back: the client chose this string, and bzo's own sentence
-      // is the one worth putting in front of whoever reads it. The log has the
-      // value.
+      // The name the client asked for is not echoed back -- it chose that
+      // string, and bzo's own sentence is the one worth putting in front of
+      // whoever reads it; the log has the value. What the instance *does*
+      // proxy is the operator's own configuration, so naming it turns a dead
+      // end into a signpost, which matters most when a link has gone stale.
       log(`[PROXY] refused an unknown target "${proxied.key}"`);
-      ws.send(JSON.stringify({ error: 'This server does not proxy that server.' }));
+      const offered = Object.keys(PROXY_TARGETS);
+      ws.send(JSON.stringify({
+        error: offered.length > 0
+          ? `This server does not proxy that server. It proxies: ${offered.join(', ')}`
+          : 'This server does not proxy any servers.',
+      }));
       ws.close();
       return;
     }

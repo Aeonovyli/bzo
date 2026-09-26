@@ -8,18 +8,16 @@ still unbuilt, playing above all. Upstream references are paths under
 
 ## The link
 
-`?proxy=<host_port>` points the ordinary client at a proxied server:
+`?proxy=<host:port>` points the ordinary client at a proxied server:
 
 ```
-https://bz.rikers.org/?proxy=bz.rikers.org_5154
+https://<this bzo>/?proxy=example.org:5154
 ```
 
-The key is the target's public `host:port` as the BZFlag list server
-publishes it, with the separator a URL can hold -- the same name its imported
-world is already filed under (`remoteMapFileName`). It is a GET parameter
-because the whole value of such a link is that it can be sent to somebody, and
-it names the *match* rather than the wire: which address bzo dials to reach it
-is the operator's business and appears nowhere a player can see.
+The name is a key of the `proxies` map below. It is a GET parameter because
+the whole value of such a link is that it can be sent to somebody, and it
+names the *match* rather than the wire: which address bzo dials to reach it is
+the operator's business and appears nowhere a player can see.
 
 A target bzo does not proxy is refused on the WebSocket with one sentence, not
 quietly joined to this server's own game. The page itself is the ordinary
@@ -30,6 +28,44 @@ rather than a path: the page is one file of relative asset references, and a
 `?view=` and `?follow=` work on a proxy link as they do anywhere
 (AGENTS.md, "`?follow=leader` is the link to hand somebody who wants to
 watch"), and both survive a login.
+
+## Which servers an instance may proxy
+
+`proxies` in `server.json`, from the name a player sees to the address bzo
+dials:
+
+```json
+"proxies": {
+  "example.org:5154": "127.0.0.1:5154",
+  "my-test:5155":     "192.168.12.20:5155"
+}
+```
+
+Both are needed because they are different addresses. The key is the
+identity: for a publicized target it is exactly the `host:port` the public
+BZFlag list carries -- its own `-publicaddr` -- so the bzo row and the bzflag
+row read the same string and a player comparing them sees one server. It is
+also what the world is filed under (`import-<host>_<port>.bzw`), so a shared
+`?viewmap=` link names something another bzo could re-ask; a dial address
+would not, since every proxy's is `127.0.0.1` and names nothing. A target with
+no published identity -- a second loopback port, a LAN address -- has no
+`-publicaddr` to borrow, so its key is whatever label the operator wants
+shown, and its title and settings still come from the target itself.
+
+The map is the allowlist, and the only thing that makes a target nameable:
+`?proxy=`, `/login/<name>` and `/logout/<name>` all refuse a name that is not
+a key, so a client cannot aim this instance at a host the operator did not
+choose. An entry whose name or address is not `<host>:<port>` is refused at
+boot and logged; an entry whose dial address is not private is kept and
+warned about, since a target that is not publicized never checks a token
+anyway.
+
+The import a proxy makes is authorized by this map rather than by the public
+BZFlag list: the name comes from the key, the address from the value, and the
+permission from the config. Map Viewer's own `?viewmap=` import is unchanged
+and still refuses a host the public list does not carry -- that address comes
+from a client, and the check is what stands between it and an arbitrary
+outbound connection.
 
 ## A proxy runs inside its target's network
 
@@ -65,6 +101,23 @@ Three consequences, and they are the shape of the feature rather than details:
 Where the check fails it is not a kick. The player loses their global identity
 and plays unverified, which on a registered callsign also earns bzfs's "This
 callsign is registered. You must use global authentication."
+
+## What a target operator sees
+
+Every proxied player arrives from the same private address, so a target
+operator cannot tell them apart by address at all: `/kick` and `/mute` are
+per-`PlayerId` and still reach one player, but `/ban` reaches all of them or
+none. `/idban`, `/idunban` and `/idbanlist` (`BanCommands.cxx:209-213`) ban by
+BZID and survive a callsign change, which is the per-player lever -- and it
+works precisely because a co-located proxy is where a forwarded token
+verifies. A proxy that admitted only verified players would therefore make
+every one of them individually accountable, which is a stronger guarantee than
+a native client gives, since bzfs otherwise admits unregistered players.
+
+`MsgEnter` carries a client version string (`getAppVersion()`,
+`ServerLink.cxx:690`), and a proxy puts its own there, so who arrived by bzo
+is visible without anybody inventing a mechanism. The motto beside the
+callsign says which bzo they came through.
 
 ## What a proxy connection is
 
@@ -223,8 +276,9 @@ prints it as plain text without creating a session.
   which a registered callsign earns bzfs's "You must use global
   authentication" for. Holding the bzfs connection across a browser reconnect
   is what fixes it, and it is in `docs/proxy-plan.md` with the rest of play.
-- **More than one target, chosen anywhere but the URL.** The allowlist is
-  `PROXY_TARGETS` in `server.js`, hardcoded, with no picker and no list row.
+- **Choosing a target anywhere but in the URL.** The `proxies` map may name
+  as many as an operator likes, but a player reaches one by link: there is no
+  picker in the entry dialog and no row on `/list`.
 - **An operator surface that knows it is proxied.** A proxied admin is shown
   bzo's own operator panel because the target says they are an admin. It is
   display only -- those messages are dropped -- but it should not be offered.

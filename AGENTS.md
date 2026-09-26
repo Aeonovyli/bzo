@@ -652,6 +652,16 @@ in `players` at all -- and its `init` is synthesized from what its target says
 to a joining player. `docs/proxy.md` is what it supports and
 `docs/proxy-plan.md` what it does not; issue #82.
 
+**`node --check` parses; it does not boot.** A module-level `const` that reads
+something initialized further down the file passes every static check and
+throws `ReferenceError: Cannot access 'x' before initialization` on the first
+real start -- which on a dev machine is nodemon's, the instant the file is
+saved, and which drops every connected client without the auto-reconnect a
+clean restart gives them. `npm run check:boot` starts the server on port 0
+with a throwaway config and waits for it to come up, so that mistake is caught
+by `npm run check` rather than by the people playing. Config-derived constants
+belong after `serverConfig` is read, beside `ADMIN_GROUPS` and the rest.
+
 ### Where the server answers
 
 `listen` in `server.json` carries a host and a port together, the way a proxy's

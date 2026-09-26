@@ -73,118 +73,6 @@ bzfs connection open across a browser reconnect, keyed on the session, rather
 than tearing it down and re-entering. This is a design constraint, not a
 refinement.
 
-## Which servers an instance may proxy
-
-**A map in `server.json`, from display name to dial target** -- not a list of
-hosts, because those are two different addresses and both are needed:
-
-```json
-"proxies": {
-  "bz.rikers.org:5154": "127.0.0.1:5154",
-  "bz-test:5155":       "127.0.0.1:5155",
-  "bz-lan:5154":         "192.168.12.20:5154"
-}
-```
-
-The key is the identity a player sees. For a publicized target it is exactly
-the host:port the public bzflag list carries -- the target's own
-`-publicaddr` -- so the bzo row and the bzflag row read the same string and a
-player comparing them sees one server. The value is what
-the proxy dials, and it is private because a forwarded login only verifies
-from a private address (`docs/proxy.md`). The key cannot be the dial target:
-every proxy's is `127.0.0.1:5154`, which names nothing and collides across
-instances. Never a
-`host:port` a client supplies -- the map is also the login-return allowlist, so
-an entry is the only thing that makes a target nameable at all.
-
-A target with no published identity -- a test bzfs on a second loopback port,
-or one on `192.168.12.x` -- has no `-publicaddr` to borrow, so its key is
-whatever name the operator wants shown. The key only has to be unique within
-the map and usable as a URL path segment, which a `host:port` already is
-(`:` is legal in a path). The row's title and settings come from the target
-itself either way, so a made-up key costs nothing in what a player sees.
-
-**A target that is not publicized needs no token at all.** A bzfs with none of
-`-publictitle`, `-publicaddr` or `-publickey` never checks a token
-(`bzfs.cxx:4737`), so one an operator runs unlisted is the easy case rather
-than an excluded one: it can be proxied with no global login in the path.
-Requiring one is then the proxy's own policy, not bzfs's. An operator mixing a
-public target with a private test one therefore gets global logins on the first
-and not the second, without configuring either.
-
-**A proxied player is on `bz.rikers.org:5154`.** That is the host:port the
-public bzflag list publishes, it is what the bzo row says, and it is the whole
-of the player's model of where they are. The dial target is how the proxy
-reaches it, and operator configuration is all it ever is: it names nothing a
-visitor can act on, it means something different on every host, and passed
-through it would outlive the session in artifacts. Three places it would arrive
-today if the value were used where the key belongs:
-
-- **The cached map's name**, which is the one thing here a player really does
-  handle. `remoteMapFileName` builds `import-<host>_<port>.bzw`
-  (`server.js:1506`), and that name is the `?viewmap=` parameter in a URL a
-  player can share and the row `/list` shows under local maps. Key it on the
-  map's key, so the target's world caches as
-  `import-bz.rikers.org_5154.bzw` whatever was dialled to fetch it.
-- **Anything a player is told went wrong.** "could not reach
-  bz.rikers.org:5154", never the loopback address. `server.log` may say
-  either; its reader is the operator.
-
-The `.bzw` itself is not in that set. `/maps` serves `MAP_CACHE_DIR`, the
-hashed JSON (`server.js:415`); the `.bzw` lives in `RUNTIME_MAPS_DIR` and is
-never served, so a player references the file by name and receives the JSON.
-`buildBZWText`'s `# downloaded by bzo ... from <host>:<port>` header
-(`remote-world-import.cjs:1412`) is therefore an operator-visible artifact
-rather than a leak. It should still carry the display name, for provenance:
-a cached world whose header disagrees with its own filename is confusing, and
-an operator reading it wants to know which target it came from, not the
-loopback address they configured themselves.
-
-Keying on the display name is not only the discreet choice, it is the working
-one. `parseImportMapFileName` recovers a host:port from the name so a shared
-`?viewmap=` link outlives the cache, and `bz.rikers.org:5154` is re-askable by
-any bzo, while `import-127.0.0.1_5154.bzw` would send somebody else's instance
-at its own loopback.
-
-**The import needs its own entry point, not a relaxed guard.**
-`performRemoteMapImport` deliberately refuses a host:port that is not in the
-public bzfs list, falling back to a cached copy or throwing
-(`server.js:1608`) -- the address there comes from a client-supplied
-`?viewmap=` name, so the check is the thing standing between that name and an
-arbitrary outbound connection. It stays exactly as it is. A proxy's own import
-is authorized by the operator's `proxies` map instead: name from the key,
-address from the value, permission from the config. A second caller of the same
-fetch, authorized differently, rather than a loosening of the first.
-
-The map is an operator assertion bzo cannot verify: get it wrong and players
-see one server's name over another server's game. Where the key is a real
-public address, that is checkable -- the importer already dials a target and
-reads its title and world hash, so comparing the private target's reply against
-the public name's at boot catches a mismatched entry for one round trip. Where
-the key is a made-up label there is nothing to compare it against, and nothing
-to get wrong either.
-
-**Every proxied player arrives from the same private address**, so the target
-operator cannot tell them apart by address at all: `/kick` and `/mute` are
-per-`PlayerId` and still reach one player, but `/ban` reaches all of them or
-none. `/idban`, `/idunban` and `/idbanlist`
-(`src/bzfs/BanCommands.cxx:209-213`) ban by BZID and survive a callsign change,
-which is the per-player lever -- and it works precisely because a co-located
-proxy is where the forwarded token verifies. A proxy that refuses an unverified
-player therefore makes every proxied player individually accountable, a
-stronger guarantee than a native client gives, since bzfs otherwise admits
-unregistered players.
-
-The token is single use and is spent at `MsgEnter`, cleared on both sides the
-moment it is used, so one weblogin buys one bzfs join and a browser reconnect
-cannot silently re-authenticate. That is a second reason the bzfs connection
-has to be held across a browser reconnect rather than re-entered, alongside the
-rejoin cooldown above.
-
-`MsgEnter` also carries a client version string (`getAppVersion()`,
-`ServerLink.cxx:690`). A proxy puts its own there, so an operator can see who
-arrived by bzo without anybody inventing a mechanism.
-
 ## A way in that is not a link
 
 A `?proxy=` link is the way in today (`docs/proxy.md`), and it is the only
@@ -375,27 +263,21 @@ first, it needs both ends of a bzo pair updated before a row appears, and
 every step before it is cheaper against one hardcoded loopback target than
 against a registry.
 
-1. **Replace the hardcoded target with the `proxies` map**, plus its
-   `/login/<target>` allowlist. Several targets first exist here, so this is
-   also where voice gains its same-target precondition and the synthesized
-   `init` starts naming a per-connection world hash, and where the entry
-   dialog's picker gets a list to show.
-
-2. **Add play.** The client's second authority mode (`killed`, `shotEnd`,
+1. **Add play.** The client's second authority mode (`killed`, `shotEnd`,
    `alive`, and grab/drop/capture/teleport as notifications), the
    dead-and-waiting state, the rejoin cooldown, holding the bzfs connection
    across a browser reconnect -- which also keeps a reconnecting player
    verified, since a token is answered once -- and the cheating decision,
    which wants settling before this lands rather than after.
 
-3. **Trace a forwarded shot on the client.** A shot's path is client-side work
+2. **Trace a forwarded shot on the client.** A shot's path is client-side work
    upstream and bzo's client does not do it, so a proxied shot passes through
    a wall and a Laser arrives without its beam. This is the client learning to
    fly a shot it was given, not the proxy simulating one.
 
-4. **Advertise to the list server.** Per-target report blocks, the bzo table's
+3. **Advertise to the list server.** Per-target report blocks, the bzo table's
    rows and its Proxied column, per-target liveness.
 
-5. **Multi-world only if something wants two local maps on one host** -- never
+4. **Multi-world only if something wants two local maps on one host** -- never
    a prerequisite for any of the above, since several proxied targets are not
    multi-world.
