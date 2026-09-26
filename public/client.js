@@ -9477,24 +9477,24 @@ function isFireHeld() {
   return keys[FIRE_KEY] || (usesVirtualInput() && virtualInput.fire);
 }
 
-// Every tank that can be roamed to: alive, joined, and not an observer, which is
-// the same set `ScoreboardRenderer::getPlayerList` walks.
+// Every tank that can be roamed to, which is exactly the set
+// `ScoreboardRenderer::getPlayerList` walks and hands `Roaming::changePlayer`:
+// every player who is not an observer. Nothing else is asked of them.
+//
+// Not what they are carrying: a cloaked or stealthed tank is still somebody an
+// observer may watch, and upstream lets you ride along with one. Those rules
+// belong to `ID` Identify, which is a tank locking on to another tank, and
+// they live where that decision is made (`identifyRoamTarget`).
+//
+// Not whether they are alive, either. A followed tank that dies is still the
+// tank being followed upstream, and the view picks them up again when they
+// spawn rather than dropping to free roam the moment they are shot.
 function getRoamCandidates() {
   const candidates = [];
   tanks.forEach((tank, id) => {
     const state = tank.userData.playerState;
     if (!state || id === myPlayerId) return;
-    if (isObserverTeam(state.team) || !state.alive) return;
-    // shouldTarget (playing.cxx:4239): blindness refuses every target, and a
-    // stealthed or cloaked tank can only be locked onto with Seer. Both halves
-    // matter to `ID` Identify, which is the one thing in bzo that locks on --
-    // hiding from the eye and the radar would mean little if the flag that names
-    // a tank could still find one.
-    if (isViewBlinded()) return;
-    if (!isSeer()) {
-      const theirFlag = getPlayerFlagType(id);
-      if (hidesFromRadar(theirFlag) || cloaksTheTank(theirFlag)) return;
-    }
+    if (isObserverTeam(state.team)) return;
     candidates.push({
       id,
       x: tank.position.x,
@@ -9513,12 +9513,12 @@ function getRoamCandidates() {
   return candidates;
 }
 
-// getRoamCandidates() walks every tank and re-derives visibility (blindness,
-// cloak, Seer) each time, which is wasted work run once a frame when the
-// answer only ever changes on the events that already invalidate the
-// scoreboard model -- a join, a leave, a kill, a flag change. So this is kept
-// in step with that model instead of the render loop: cached per
-// scoreboardVersion, and rebuilt the first time that version is asked for.
+// getRoamCandidates() walks every tank and builds a record for each, which is
+// wasted work run once a frame when the answer only ever changes on the events
+// that already invalidate the scoreboard model -- a join, a leave, a team
+// change. So this is kept in step with that model instead of the render loop:
+// cached per scoreboardVersion, and rebuilt the first time that version is
+// asked for.
 let roamCandidatesCacheVersion = -1;
 let roamCandidatesCache = [];
 function getCachedRoamCandidates() {
@@ -9622,7 +9622,17 @@ function identifyRoamTarget() {
     x: framing.look.x - framing.eye.x,
     z: framing.look.z - framing.eye.z,
   };
-  const picked = pickTargetInSights(framing.eye, forward, getRoamCandidates(), TARGETING_ANGLE);
+  // shouldTarget (playing.cxx:4239), and only here: blindness refuses every
+  // target, and a stealthed or cloaked tank can only be locked onto with Seer.
+  // Hiding from the eye and the radar would mean little if the flag that names
+  // a tank could still find one. Watching one is a different question, which is
+  // why `getRoamCandidates` does not ask this.
+  const targetable = isViewBlinded() ? [] : getRoamCandidates().filter((candidate) => {
+    if (isSeer()) return true;
+    const theirFlag = getPlayerFlagType(candidate.id);
+    return !hidesFromRadar(theirFlag) && !cloaksTheTank(theirFlag);
+  });
+  const picked = pickTargetInSights(framing.eye, forward, targetable, TARGETING_ANGLE);
   if (picked === null) {
     setHudAlert(1, 'Looking at nothing', IDENTIFY_ALERT_SECONDS, false);
     return;

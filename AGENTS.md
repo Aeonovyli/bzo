@@ -1275,6 +1275,13 @@ frame to the rabbit, else `ScoreboardRenderer::getLeader()`, which prefixes
 target that leaves the game drops you back there because `changePlayer()` clears
 a target it cannot find in the scoreboard list.
 
+**Who can be roamed to is `ScoreboardRenderer::getPlayerList`: every player who
+is not an observer, and nothing else.** Not alive -- a followed tank that dies
+is still the one being followed, and the view picks them up when they spawn --
+and not by flag, because a cloaked or stealthed tank is somebody an observer
+may watch. `shouldTarget`'s blindness and Seer rules are about `ID` Identify,
+which is one tank locking on to another, and they belong only there.
+
 **The roam camera eats the tank's own two axes.** `setupRoamingCamera()`
 (`playing.cxx:6666`) reads `myTank->getSpeed()` and `getRotation()` and remaps
 which camera axis each feeds with Ctrl/Alt/Shift. Rates, with bzo's
