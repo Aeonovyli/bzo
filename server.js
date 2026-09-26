@@ -1267,10 +1267,10 @@ function renderListPage({
 <body>
 ${navBlock}
 <h1 id="bzo">Public bzo servers</h1>
-<p class="muted">From the designated list server, ${LIST_SERVER_URL
+<p class="muted">From the designated bzo list server, ${LIST_SERVER_URL
     ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
     : 'disabled on this instance'} --
-click a row to go there.</p>
+click a row to enter that game.</p>
 <input id="bzoServerFilter" type="text" placeholder="Filter…">
 <table id="bzoServerTable">
 <thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
@@ -1288,7 +1288,7 @@ ${bzoServerRows}
 
 <h1 id="bzflag">Public BZFlag servers</h1>
 <p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
-<a href="/list">refresh</a>. Click a row to view that map; it does not join the game.</p>
+<a href="/list">refresh</a>. Click a row to view that map; it does not enter that game.</p>
 ${flash}
 <input id="serverFilter" type="text" placeholder="Filter…">
 <table id="serverTable">
@@ -2272,7 +2272,7 @@ if (IS_DESIGNATED_LIST_SERVER) {
   } catch (error) {
     logError(`Could not read list server keys from ${LIST_SERVER_KEYS_PATH}, starting empty:`, error);
   }
-  log(`[LISTSERVER] this instance is the designated list server (${PUBLIC_URL})`);
+  log(`[LISTSERVER] this instance is the designated bzo list server (${PUBLIC_URL})`);
 } else if (LIST_SERVER_URL) {
   log(`[LISTSERVER] reporting to ${LIST_SERVER_URL}`
     + (LIST_SERVER_KEY ? '' : ' (no listServerKey configured yet -- reports will not be sent)'));
@@ -2304,7 +2304,7 @@ const listServerRateLimit = rateLimit({
 // non-designated instance links out rather than duplicating either.
 function requireDesignatedListServer(req, res) {
   if (IS_DESIGNATED_LIST_SERVER) return true;
-  res.status(404).type('text/plain').send('This instance is not the designated list server.\n');
+  res.status(404).type('text/plain').send('This instance is not the designated bzo list server.\n');
   return false;
 }
 
@@ -2637,7 +2637,7 @@ function renderListServerKeyAdminSection({ session, admin }) {
   if (!IS_DESIGNATED_LIST_SERVER) {
     return `<h1 id="keys">List server key</h1>
 ${LIST_SERVER_URL
-    ? `<p class="muted">This instance is not the designated list server. Manage this server's key at `
+    ? `<p class="muted">This instance is not the designated bzo list server. Manage this server's key at `
       + `<a href="${escapeHtml(LIST_SERVER_URL)}/list#keys">${escapeHtml(LIST_SERVER_URL)}/list</a>.</p>`
     : `<p class="muted">The list server is disabled on this instance (<code>listServerUrl</code> is empty).</p>`}`;
   }
@@ -2652,7 +2652,7 @@ trusts one a report claims for itself.</p>
 <div id="newKeyFlash"></div>`
     : `<p class="muted">Log in above to register a server and generate a key.</p>`;
   return `<h1 id="keys">${admin ? 'All registered keys' : 'Your keys'}</h1>
-<p class="muted">This instance (<code>${escapeHtml(PUBLIC_URL)}</code>) is the designated list server --
+<p class="muted">This instance (<code>${escapeHtml(PUBLIC_URL)}</code>) is the designated bzo list server --
 every other bzo instance reports here, so its own <code>/list</code> can show the bzo servers
 table above. A <code>bzfs</code> server's key is a different one, from
 <a href="https://my.bzflag.org/listkeys/">my.bzflag.org/listkeys</a>.</p>
