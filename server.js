@@ -1288,7 +1288,7 @@ ${bzoServerRows}
 
 <h1 id="bzflag">Public BZFlag servers</h1>
 <p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
-<a href="/list">refresh</a>. Click a column heading to sort.</p>
+<a href="/list">refresh</a>. Click a row to view that map; it does not join the game.</p>
 ${flash}
 <input id="serverFilter" type="text" placeholder="Filter…">
 <table id="serverTable">
@@ -1383,7 +1383,7 @@ app.get('/list', async (req, res) => {
       imported: typeof req.query.imported === 'string' ? req.query.imported : null,
       importError: typeof req.query.error === 'string' ? req.query.error : null,
       session,
-      admin: session ? isAdminSession(session, ADMIN_GROUPS) : false,
+      admin: isLocalAdminHttp(req) || (session ? isAdminSession(session, ADMIN_GROUPS) : false),
     }));
   } catch (error) {
     logError('/list failed to reach the list server:', error);
@@ -2317,6 +2317,20 @@ function sessionFromRequest(req) {
   return sessionId ? sessions.get(sessionId) : undefined;
 }
 
+// An operator reaching this instance from an address `adminWhitelist` covers
+// (`localAdmin`, `docs/list-server.md`), which is the same test the WebSocket
+// join already makes for a player. It stands in for a bzflag.org login when
+// *reading* or *revoking* a key: those are the operator's own housekeeping on
+// a server they demonstrably run. Creating one still needs a login, because a
+// key is attributed to a BZID and an address is not one.
+function isLocalAdminHttp(req) {
+  return isLocalAdminRequest(req.socket.remoteAddress, req.headers, {
+    enabled: LOCAL_ADMIN,
+    whitelist: ADMIN_WHITELIST,
+    forwardedForPolicy,
+  });
+}
+
 // What `GET /api/list-server/keys` hands back. The key rides in full --
 // `/api/list-server/keys` only ever returns a caller's own rows (`listForBzid`)
 // or, for an admin, every row (`listAll`), and either caller is exactly who
@@ -2439,7 +2453,8 @@ app.post('/api/list-server/keys', listServerRateLimit, (req, res) => {
 app.delete('/api/list-server/keys/:id', listServerRateLimit, (req, res) => {
   if (!requireDesignatedListServer(req, res)) return;
   const session = sessionFromRequest(req);
-  if (!session) {
+  const admin = isLocalAdminHttp(req) || (session ? isAdminSession(session, ADMIN_GROUPS) : false);
+  if (!session && !admin) {
     res.status(401).json({ error: 'Log in at /login first' });
     return;
   }
@@ -2448,14 +2463,14 @@ app.delete('/api/list-server/keys/:id', listServerRateLimit, (req, res) => {
     res.status(404).json({ error: 'No such key' });
     return;
   }
-  const admin = isAdminSession(session, ADMIN_GROUPS);
-  if (record.bzid !== session.bzid && !admin) {
+  if (!admin && record.bzid !== session.bzid) {
     res.status(403).json({ error: 'Not your key' });
     return;
   }
   listServerKeys.revoke(record.id);
-  log(`[LISTSERVER] "${session.callsign}" revoked the key for ${record.url}`
-    + (record.bzid !== session.bzid ? ' (admin revoking another operator\'s key)' : ''));
+  const who = session ? `"${session.callsign}"` : `${req.socket.remoteAddress} (localAdmin)`;
+  log(`[LISTSERVER] ${who} revoked the key for ${record.url}`
+    + (session && record.bzid === session.bzid ? '' : ' (another operator\'s key)'));
   res.json({ success: true });
 });
 
@@ -2463,11 +2478,11 @@ app.get('/api/list-server/keys', (req, res) => {
   if (!requireDesignatedListServer(req, res)) return;
   res.set('Cache-Control', 'no-store');
   const session = sessionFromRequest(req);
-  if (!session) {
+  const admin = isLocalAdminHttp(req) || (session ? isAdminSession(session, ADMIN_GROUPS) : false);
+  if (!session && !admin) {
     res.status(401).json({ error: 'Log in at /login first' });
     return;
   }
-  const admin = isAdminSession(session, ADMIN_GROUPS);
   const rows = admin ? listServerKeys.listAll() : listServerKeys.listForBzid(session.bzid);
   res.json({ admin, keys: rows.map(describeListServerKeyRow) });
 });
@@ -2639,7 +2654,8 @@ trusts one a report claims for itself.</p>
   return `<h1 id="keys">${admin ? 'All registered keys' : 'Your keys'}</h1>
 <p class="muted">This instance (<code>${escapeHtml(PUBLIC_URL)}</code>) is the designated list server --
 every other bzo instance reports here, so its own <code>/list</code> can show the bzo servers
-table above.</p>
+table above. A <code>bzfs</code> server's key is a different one, from
+<a href="https://my.bzflag.org/listkeys/">my.bzflag.org/listkeys</a>.</p>
 <input id="keyFilter" type="text" placeholder="Filter…">
 <table id="keyTable">
 <thead><tr><th>URL</th>${admin ? '<th>Owner</th>' : ''}<th>Key</th><th>Requested</th><th>Last checked</th>

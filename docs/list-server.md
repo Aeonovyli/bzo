@@ -43,7 +43,7 @@ page revokes by; `key` is the 48-character lowercase-hex bearer credential
 unlike base64url's `-`/`_`).
 
 `GET /api/list-server/keys` (`server.js:2106`) hands the key back **in
-full**, not masked, to its own owner and to a local admin (`adminGroups`) --
+full**, not masked, to its own owner and to an admin --
 otherwise an owner who didn't copy it from the one-time creation flash would
 have no way to retrieve it, and an admin who can already revoke any row is
 already trusted with what it is. The row's URL links to itself; a real
@@ -58,6 +58,13 @@ it as `listServer.keyConfigured` (a boolean, never the key itself) behind
 `player.admin` (`server.js:14014`). Applying it needs no restart and no new
 auth surface -- gated by the same `refuseNonOperator` check as every other
 operator action.
+
+An admin here is either a bzflag.org session in a group `adminGroups` names,
+or a request from an address `adminWhitelist` covers with `localAdmin` on --
+the same test a player's join already makes. The whitelist stands in for a
+login when *reading* or *revoking* a key, which is an operator's housekeeping
+on a server they demonstrably run; creating one still needs the login,
+because a key is attributed to a BZID and an address is not one.
 
 Revoking a key (`DELETE /api/list-server/keys/:id`) drops only that row; an
 operator running several bzo instances holds several keys, one per server.
@@ -87,11 +94,12 @@ typically never completes without one.
 And `proxies`: one entry per real BZFlag server this instance carries a
 browser to (`docs/proxy.md`), each carrying that target's own counts, shot
 limit, style, option bits, title and reachability -- everything a native row
-carries about its own game, because a proxied target is a whole game too. The instance dials each target
-directly for them -- `MsgQueryGame` and `MsgWantSettings` on a connection
-that never enters the game -- on the report's own cadence rather than per
-join or part. Registration is unchanged: one key per instance however many
-targets it carries, and one challenge callback proves them all.
+carries about its own game, because a proxied target is a whole game too.
+The instance dials each target directly for them -- `MsgQueryGame` and
+`MsgWantSettings` on a connection that never enters the game -- on the
+report's own cadence rather than per join or part. Registration is
+unchanged: one key per instance however many targets it carries, and one
+challenge callback proves them all.
 
 The designated instance never reports to itself over HTTP: it writes
 straight into its own registry (still keyed by URL, so a restart finds the
@@ -167,15 +175,14 @@ new key is the occasional case.
 
 Clicking a bzo-server row navigates the browser there directly
 (`location.href`), unlike a bzfs row's Import button -- each row is its own
-origin and its own websocket, not something to import a map from. An instance that proxies contributes a
-row per target as well as its own, so the table is one row per *game* rather
-than per instance; the **Proxy** column names the target and is empty
-otherwise, and such a row's link goes to that instance's `?proxy=` for it. A
-bzo
-row's columns match a bzfs row's exactly (players/max, shots, style, the
-option columns, title) plus the two a bzfs row doesn't carry -- version and
-the URL itself -- so a visitor can see at a glance whether a listed server
-is running something current.
+origin and its own websocket, not something to import a map from. An
+instance that proxies contributes a row per target as well as its own, so
+the table is one row per *game* rather than per instance; the **Proxy**
+column names the target and is empty otherwise, and such a row's link goes
+to that instance's `?proxy=` for it. A bzo row's columns match a bzfs row's
+exactly (players/max, shots, style, the option columns, title) plus the two
+a bzfs row doesn't carry -- version and the URL itself -- so a visitor can
+see at a glance whether a listed server is running something current.
 
 Key admin only exists on the designated instance (`app.get('/list', ...)`,
 `server.js:1171`); a non-designated instance's own `/list` shows a short
