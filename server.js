@@ -626,18 +626,19 @@ function resolveLoginReturnPath(segment, view) {
   return `/?proxy=${encodeURIComponent(segment)}${watching}`;
 }
 
-// A login made on a proxied server's behalf, waiting for the WebSocket that
-// will spend it. The token is never checked here: `CHECKTOKENS` is answered
-// once, so asking would spend the very thing the target needs, and bzfs is
-// the one that should be verifying a player who is about to play there.
+// The token half of a login made on a proxied server's behalf, waiting for
+// the WebSocket that will spend it. It is never checked here: `CHECKTOKENS`
+// is answered once, so asking would spend the very thing the target needs,
+// and bzfs is the one that should be verifying a player about to play there.
 //
-// Deliberately in memory and deliberately not in `sessions`. A session is
-// written to `sessions.json`, and a live credential does not belong in a
-// file; and a session means "bzo verified this callsign", which is exactly
-// what a proxy login is not -- the verifying is the target's.
+// The token is deliberately in memory and deliberately not in `sessions`: a
+// session is written to `sessions.json`, and a live credential does not
+// belong in a file. The *callsign* is a session, because it is not a
+// credential -- it is what this browser is called over there, and it should
+// survive a reconnect and a restart even though the verification cannot.
 //
 // One use. bzflag.org answers a token once, so the first `MsgEnter` that
-// carries it is the only one that can be verified by it.
+// carries it is the only one it can verify.
 const PROXY_LOGIN_COOKIE = 'bzo_proxy_login';
 const PROXY_LOGIN_TTL_MS = 5 * 60 * 1000;
 const pendingProxyLogins = new Map();
@@ -658,7 +659,7 @@ function stashProxyLogin(target, callsign, token, now = Date.now()) {
 
 // Takes it, rather than reads it: whatever happens to the join, this token is
 // spent.
-function takeProxyLogin(id, target, now = Date.now()) {
+function takeProxyToken(id, target, now = Date.now()) {
   const pending = typeof id === 'string' ? pendingProxyLogins.get(id) : undefined;
   if (!pending) return null;
   pendingProxyLogins.delete(id);
@@ -786,6 +787,10 @@ app.get('/login/:returnPage?/:returnView?', loginRateLimit, async (req, res) => 
   // does not -- in the chat the player is already reading.
   if (probeTarget === undefined && PROXY_TARGETS[req.params.returnPage]) {
     const id = stashProxyLogin(req.params.returnPage, callsign, token);
+    // And a session for the callsign alone, with no BZID, because bzo checked
+    // nothing: it is what keeps the name across a reconnect or a restart,
+    // once the token that could only be answered once is gone.
+    const sessionId = sessions.create({ bzid: null, callsign, groups: [] });
     log(`[PROXY] ${req.params.returnPage}: holding a login for "${callsign}"`);
     res.cookie(PROXY_LOGIN_COOKIE, id, {
       httpOnly: true,
@@ -794,7 +799,7 @@ app.get('/login/:returnPage?/:returnView?', loginRateLimit, async (req, res) => 
       path: '/',
       maxAge: PROXY_LOGIN_TTL_MS,
     });
-    res.redirect(302, returnPath);
+    finishLogin(res, sessionId, returnPath);
     return;
   }
 
@@ -13098,12 +13103,17 @@ function captureFlag(player, baseColorIndex) {
   // reaches the client before the capture that explains it and before any client
   // respawns on the base it now sits on.
   resetFlag(flag);
+  // `MsgCaptureFlag`'s own three fields, and its own meaning for the third:
+  // the team whose *territory* the flag was carried into. Which team lost it
+  // is read off the flag at `index`, by bzo's client as by upstream's
+  // (`playing.cxx:2767`) -- a team flag keeps its type through the reset
+  // above, so the answer is there either way, and a proxied capture can be
+  // passed straight through rather than translated.
   broadcastAll({
     type: 'captureFlag',
     playerId: player.id,
     index: flag.index,
-    flagTeam: cappedIndex,
-    baseTeam: baseColorIndex,
+    team: baseColorIndex,
   });
   recordTeamScoreForCapture(ownGoal ? null : player.team, cappedTeam);
 
@@ -15973,14 +15983,16 @@ async function handleProxyConnection(ws, req, key, target) {
   const cookies = parseCookies(req.headers.cookie);
   // A login held for this target, if the browser has just been through one.
   // Taken rather than read: the token is answered once whatever happens next.
-  const pendingLogin = takeProxyLogin(cookies[PROXY_LOGIN_COOKIE], key);
+  const pendingLogin = takeProxyToken(cookies[PROXY_LOGIN_COOKIE], key);
   const loginSession = sessions.get(cookies[SESSION_COOKIE_NAME]);
   const viewer = {
     key,
     // In order: the callsign the weblogin just named, which is the only one
-    // that goes with the token; then a bzo session's, for a player signed in
-    // here but not for this target; then a numbered one. Never the client's
-    // own choosing, at any step (docs/proxy.md).
+    // that goes with the token; then the session's, which is that same name
+    // on every connection after the first, since a token cannot be answered
+    // twice but a name costs nothing to keep; then a numbered one for a
+    // browser that has never signed in. Never the client's own choosing, at
+    // any step (docs/proxy.md).
     callsign: pendingLogin
       ? pendingLogin.callsign
       : (loginSession ? loginSession.callsign : `bzo-view-${nextProxyViewerNumber++}`),
@@ -16203,22 +16215,10 @@ async function handleProxyConnection(ws, req, key, target) {
       });
     });
 
+    // The same three fields with the same meanings on both wires, so there is
+    // nothing to translate.
     session.on('capture', ({ id, index, team }) => {
-      // `MsgCaptureFlag`'s team is the territory the flag was carried *into*,
-      // not the team that lost it -- upstream's own client reads the loser off
-      // the flag at that index and uses the message's team only for "took my
-      // flag into <team> territory" (`playing.cxx:2767`, :2779). bzo names the
-      // two separately, so the loser comes from the flag as well. The flag
-      // still stands here: bzfs resets it in the `MsgFlagUpdate` after this.
-      const flag = session.state.flags[index];
-      const flagTeam = flag ? (getFlagType(flag.type)?.team ?? null) : null;
-      send({
-        type: 'captureFlag',
-        playerId: String(id),
-        index,
-        flagTeam: flagTeam === null ? team : flagTeam,
-        baseTeam: team,
-      });
+      send({ type: 'captureFlag', playerId: String(id), index, team });
     });
 
     // Where a shot was and how fast, for two things neither wire carries.
@@ -16506,7 +16506,10 @@ wss.on('connection', (ws, req) => {
   // can invalidate it. It is deliberately *not* sent to the client.
   player.sessionId = cookies[SESSION_COOKIE_NAME] || null;
   const session = sessions.get(player.sessionId);
-  if (session) {
+  // A session with no BZID is one bzo did not verify -- a proxy login, whose
+  // token went to the target instead (`docs/proxy.md`). It names a callsign
+  // and grants nothing here.
+  if (session && session.bzid) {
     player.verified = true;
     player.bzid = session.bzid;
     player.globalCallsign = session.callsign;

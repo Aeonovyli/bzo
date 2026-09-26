@@ -12295,19 +12295,25 @@ function checkNearFlag() {
 
 // MsgCaptureFlag on the client. The server sends a killed for each tank on
 // the losing team, so the explosions come through the usual death path.
+// The message says who capped, which flag slot, and whose territory it went
+// into -- `MsgCaptureFlag`'s own three fields. Which team *lost* the flag is
+// read off the flag itself, as upstream reads it (`playing.cxx:2767`): a team
+// flag keeps its type through the reset that sent it home, so the slot still
+// answers for it.
 function handleFlagCaptured(message) {
   const capturer = tanks.get(message.playerId);
   const capturerTeamIndex = message.playerId === myPlayerId
     ? getMyTeamColorIndex()
     : getTeamColorIndex(capturer?.userData?.playerState?.team);
   const myTeamIndex = getMyTeamColorIndex();
-  const ownGoal = capturerTeamIndex === message.flagTeam;
+  const capturedTeamIndex = getFlagTeamIndex(flags.get(message.index)?.type);
+  const ownGoal = capturedTeamIndex !== null && capturerTeamIndex === capturedTeamIndex;
 
   if (ownGoal) {
     noticeAbout(
       null,
       [describePlayer(message.playerId, { flag: null }), ' took their own flag into ',
-        describeTeamForNotice(message.baseTeam), ' territory'],
+        describeTeamForNotice(message.team), ' territory'],
       0,
       false,
     );
@@ -12319,14 +12325,14 @@ function handleFlagCaptured(message) {
     noticeAbout(
       null,
       [describePlayer(message.playerId, { flag: null }), ' captured the ',
-        describeTeamForNotice(message.flagTeam), ' flag'],
+        describeTeamForNotice(capturedTeamIndex), ' flag'],
       0,
       false,
     );
   }
 
   // My team lost its flag, or my team is the one that took somebody else's.
-  if (message.flagTeam === myTeamIndex) {
+  if (capturedTeamIndex === myTeamIndex) {
     renderManager.playLocalSound('flagLost');
   } else if (capturerTeamIndex === myTeamIndex) {
     renderManager.playLocalSound('flagWon');

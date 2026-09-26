@@ -79,9 +79,14 @@ function isAdminSession(session, adminGroups, now = Date.now()) {
 
 // A record holds no secret. The bzflag.org token is spent at `/login` and
 // discarded, so nothing here would help anybody who read the file.
-function createSessionRecord({ bzid, callsign, groups = [] }, now = Date.now(), ttlMs = SESSION_TTL_MS) {
+// `bzid` is null for a login bzo did not verify itself: a proxied server's,
+// where the token was forwarded to the target unspent and the target is what
+// checked it (`docs/proxy.md`). Such a session carries a callsign and nothing
+// else, so this server's own game treats it as anonymous -- the name is a
+// convenience, not an identity, and only a BZID is an identity here.
+function createSessionRecord({ bzid = null, callsign, groups = [] }, now = Date.now(), ttlMs = SESSION_TTL_MS) {
   return {
-    bzid: String(bzid),
+    bzid: bzid === null || bzid === undefined ? null : String(bzid),
     callsign: String(callsign),
     groups: groups.map((group) => String(group)),
     createdAt: now,

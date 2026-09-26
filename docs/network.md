@@ -138,7 +138,7 @@ omitted rather than sent null.
 | `flagUpdate` | `flags` | the whole flag array |
 | `grabFlag` / `dropFlag` | `playerId`, `flag` | one flag changed hands |
 | `transferFlag` | `fromId`, `toId`, `flag` | Steal |
-| `captureFlag` | `playerId`, `index`, `flagTeam`, `baseTeam` | a capture |
+| `captureFlag` | `playerId`, `index`, `team` | a capture. `team` is whose territory it went into, as `MsgCaptureFlag`'s own third field is; which team lost the flag is read off the flag at `index` |
 | `nearFlag` | `index`, `flagType`, `position` | the flag underfoot |
 | `antidoteFlag` | `position` | where the antidote appeared |
 | `teamUpdate` | `teams` | team scores and sizes |

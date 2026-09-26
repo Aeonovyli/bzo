@@ -742,6 +742,23 @@ class BzfsSession {
   // list (`ServerLink::send`): the ones sent constantly, plus the link
   // messages themselves. Everything else goes over TCP, where order and
   // delivery are the point.
+  // MsgGrabFlag and MsgCaptureFlag as a client sends them: a flag index, and
+  // the team whose base the tank is standing on (`ServerLink.cxx:735`, :742).
+  // Both are declarations -- bzfs checks them and relays, it does not decide
+  // them -- which is the authority inversion a proxied player will have to
+  // live inside (docs/proxy-plan.md).
+  sendGrabFlag(index) {
+    const payload = Buffer.alloc(2);
+    payload.writeUInt16BE(index, 0);
+    this.send('gf', payload);
+  }
+
+  sendCaptureFlag(team) {
+    const payload = Buffer.alloc(2);
+    payload.writeUInt16BE(team, 0);
+    this.send('cf', payload);
+  }
+
   // MsgShotBegin: `FiringInfo::pack`, the declaration upstream lets a client
   // make for itself. The shot id is the slot in its low byte and a counter in
   // its high one, so that reusing a slot is a different shot.

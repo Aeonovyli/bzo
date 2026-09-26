@@ -86,10 +86,11 @@ same player on both.
 serves, so a target imported within the hour costs a second viewer nothing.
 
 **The callsign is never the client's to choose.** In order: the one the
-weblogin callback named, for a browser that has just signed in; then a bzo
-session's; then a numbered `bzo-view-N`. The motto the target's player list
-shows is `via https://<this bzo>`, which is the one thing the operator on the
-other end cannot work out for themselves.
+weblogin callback named, for a browser that has just signed in; then the
+session's, which is that same name on every connection after the first; then
+a numbered `bzo-view-N` for a browser that has never signed in. The motto the
+target's player list shows is `via https://<this bzo>`, which is the one thing
+the operator on the other end cannot work out for themselves.
 
 ## What crosses
 
@@ -177,11 +178,15 @@ next WebSocket to that target carries it into `MsgEnter`, and bzfs verifies it
 with the list server. The verdict arrives as a chat message the player is
 already reading.
 
-It is deliberately not a bzo session. Sessions are written to `sessions.json`,
-and a live credential does not belong in a file; and a session means bzo
-verified a callsign, which is exactly what a proxy login is not -- the
-verifying is the target's. For the same reason the `-`/`+`/`@` marks come from
-the target's `MsgPlayerInfo` rather than from bzo assuming its token worked.
+The token is deliberately not in a bzo session: sessions are written to
+`sessions.json`, and a live credential does not belong in a file. The
+**callsign** is a session, with no BZID on it, because a name is not a
+credential -- it is what this browser is called over there, and it should
+survive a reconnect and a restart even though the verification cannot. A
+session with no BZID grants nothing in bzo's own game, which is the whole
+point: bzo checked nothing, so bzo claims nothing. For the same reason the
+`-`/`+`/`@` marks come from the target's `MsgPlayerInfo` rather than from bzo
+assuming its token worked.
 
 `/login/<host_port>[/<view>]` and `/logout/<host_port>[/<view>]` return to the
 match being watched rather than to this server's own game, carrying the roam
@@ -201,7 +206,10 @@ prints it as plain text without creating a session.
   a wall it should have stopped at, and a Laser arrives without the segments
   bzo draws a beam from.
 - **A reconnect stays verified.** bzflag.org answers a token once, so the
-  browser's next connection rejoins unverified.
+  browser's next connection rejoins under the same callsign but unverified --
+  which a registered callsign earns bzfs's "You must use global
+  authentication" for. Holding the bzfs connection across a browser reconnect
+  is what fixes it, and it is in `docs/proxy-plan.md` with the rest of play.
 - **More than one target, chosen anywhere but the URL.** The allowlist is
   `PROXY_TARGETS` in `server.js`, hardcoded, with no picker and no list row.
 - **An operator surface that knows it is proxied.** A proxied admin is shown
