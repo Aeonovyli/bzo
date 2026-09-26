@@ -304,6 +304,27 @@ function decodePlayerInfo(payload) {
   return info;
 }
 
+// What a bzfs will accept in a chat line, which is printable ASCII and
+// nothing else. `isSpamOrGarbage` walks the message a **byte** at a time and
+// asks `TextUtils::isVisible` of each (`bzfs.cxx:4474`, `TextUtils.h:218`),
+// and those character classes stop at 126 -- so every byte of a UTF-8 `á` is
+// a disallowed character, and one accent is enough to be kicked for "a
+// garbage message". An upstream client never meets this because its own text
+// input cannot produce one; a browser can type anything.
+//
+// So the accents come off rather than the player: NFD splits a letter from
+// its marks, the marks go, and `á` arrives as `a`. What has no ASCII spelling
+// at all -- CJK, emoji -- is dropped, since sending it would cost the player
+// their connection. The caller compares the result with what it was given and
+// says so once, because a line that quietly changed is worse than one that
+// changed out loud.
+function toBzfsChatText(text) {
+  return String(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\x20-\x7e]/g, '');
+}
+
 // A live connection to one bzfs. `connect()` resolves with the state bzfs
 // describes to a joining player; after that the events carry what changes.
 // Nothing here simulates: a session holds what it was told and nothing more.
@@ -651,7 +672,7 @@ class BzfsSession {
     payload.writeUInt8(dst, 0);
     // One byte short of the field, so the NUL upstream reads for is always
     // there. Node stops at the last whole character rather than splitting one.
-    payload.write(String(text), 1, MESSAGE_LEN - 1, 'utf8');
+    payload.write(toBzfsChatText(text), 1, MESSAGE_LEN - 1, 'ascii');
     this.send('mg', payload);
   }
 
@@ -821,6 +842,7 @@ class BzfsSession {
 
 module.exports = {
   BzfsSession,
+  toBzfsChatText,
   CTF_TEAMS,
   PLAYER_STATUS,
   MESSAGE_LEN,

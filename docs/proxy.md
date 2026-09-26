@@ -114,6 +114,16 @@ server's own greeting -- rather than from anything bzo holds.
 The browser sends only chat. Everything else a client can say is about
 playing, and is dropped rather than answered.
 
+**Chat out is converted to ASCII.** bzfs reads a message a byte at a time and
+asks `TextUtils::isVisible` of each (`isSpamOrGarbage`, `bzfs.cxx:4474`),
+whose character classes stop at 126 -- so a single accent is enough to be
+kicked for "a garbage message". A native client never meets this because its
+own text input cannot produce one; a browser can type anything. So accents are
+folded to their letters (`está` leaves as `esta`) and anything with no ASCII
+spelling is dropped, and the player is told once per connection rather than
+disconnected. bzo's own chat is untouched by this: it is JSON over a
+WebSocket, and it carries whatever you type.
+
 ## The two conversions
 
 **Coordinates.** bzfs is right-handed with +Y north and +Z up; bzo is

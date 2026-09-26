@@ -28,6 +28,7 @@ const {
 } = require('./server/remote-world-import.cjs');
 const {
   BzfsSession,
+  toBzfsChatText,
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
 } = require('./server/bzfs-session.cjs');
 const {
@@ -16335,6 +16336,10 @@ async function handleProxyConnection(ws, req, key, target) {
     return;
   }
 
+  // Said once: a player typing in a language with accents would otherwise be
+  // told on every line.
+  let warnedAboutChatText = false;
+
   ws.on('message', (data) => {
     let message;
     try {
@@ -16364,7 +16369,24 @@ async function handleProxyConnection(ws, req, key, target) {
     // also how an upstream client sends them -- an ordinary chat line that
     // bzfs reads as a command.
     if (message.type === 'message') {
-      const text = typeof message.text === 'string' ? message.text.trim() : '';
+      const typed = typeof message.text === 'string' ? message.text.trim() : '';
+      if (typed.length === 0) return;
+      // bzfs reads a chat line byte by byte and kicks for anything its own
+      // character classes do not recognise, which is everything above ASCII
+      // (`toBzfsChatText`). So the line is converted rather than the player
+      // disconnected, and they are told once that it happens here.
+      const text = toBzfsChatText(typed);
+      if (text !== typed && !warnedAboutChatText) {
+        warnedAboutChatText = true;
+        send({
+          type: 'message',
+          src: SERVER_PLAYER,
+          dst: ALL_PLAYERS,
+          msgType: 'server',
+          text: `${key} takes plain ASCII chat only, so accents are stripped on the way out.`,
+          ts: Date.now(),
+        });
+      }
       if (text.length === 0) return;
       const self = session.state.players.get(session.playerId);
       const target = message.dst ?? message.to ?? 0;
