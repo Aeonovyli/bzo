@@ -2652,9 +2652,10 @@ trusts one a report claims for itself.</p>
 <div id="newKeyFlash"></div>`
     : `<p class="muted">Log in above to register a server and generate a key.</p>`;
   return `<h1 id="keys">${admin ? 'All registered keys' : 'Your keys'}</h1>
-<p class="muted">This instance (<code>${escapeHtml(PUBLIC_URL)}</code>) is the designated bzo list server --
-every other bzo instance reports here, so its own <code>/list</code> can show the bzo servers
-table above. A <code>bzfs</code> server's key is a different one, from
+<p class="muted">This instance (<a href="${escapeHtml(PUBLIC_URL)}"><code>${escapeHtml(PUBLIC_URL)}</code></a>)
+is the designated bzo list server -- every other bzo instance reports here, so its own
+<code>/list</code> can show the <a href="#bzo">bzo servers table</a> above.
+A <code>bzfs</code> server's key is a different one, from
 <a href="https://my.bzflag.org/listkeys/">my.bzflag.org/listkeys</a>.</p>
 <input id="keyFilter" type="text" placeholder="Filter…">
 <table id="keyTable">
