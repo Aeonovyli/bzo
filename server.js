@@ -20,6 +20,7 @@ const {
   findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
+  queryServerStatus,
   probeGlobalToken,
   decodeGameSettings,
   decodeQueryGame,
@@ -1143,19 +1144,43 @@ function renderListPage({
   // way a bzfs row above is. Clicking a row navigates the browser there
   // directly (`location.href`) -- each one is its own origin and its own
   // websocket, not something to import a map from.
-  const bzoServerRows = bzoServers.map((s) => {
-    const hasOption = (bit) => ((s.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
-    const status = s.stale
-      ? `<span class="stale" title="${escapeHtml(s.staleReason || '')}">stale</span>`
-      : 'up';
-    return `<tr class="clickable" data-href="${escapeHtml(s.url)}"><td>${s.players}</td><td>${s.maxPlayers}</td>`
-      + `<td>${s.maxShots}</td><td>${escapeHtml(s.style)}</td>`
+  // One row per game, which for an instance that proxies means one per target
+  // as well as one for itself. A proxied target is a whole game and the row
+  // says so: its own player count, shot limit, style and every option bit,
+  // read off that server rather than off the bzo carrying it, which has a
+  // different game of its own or none at all. The columns are the same
+  // columns -- there is nothing a native row shows that a proxied row leaves
+  // empty except the Proxied column's opposite.
+  //
+  // The URL column names the instance either way and the link goes to its
+  // `?proxy=` for the target, so two instances carrying the same target read
+  // as two ways into one match rather than as two servers (`docs/proxy.md`).
+  const bzoRow = (s, proxy) => {
+    const game = proxy || s;
+    const hasOption = (bit) => ((game.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
+    const href = proxy ? `${s.url}/?proxy=${encodeURIComponent(proxy.target)}` : s.url;
+    const status = proxy && !proxy.reachable
+      ? '<span class="stale" title="the proxy could not reach this server">down</span>'
+      : s.stale
+        ? `<span class="stale" title="${escapeHtml(s.staleReason || '')}">stale</span>`
+        : 'up';
+    return `<tr class="clickable" data-href="${escapeHtml(href)}"><td>${game.players}</td><td>${game.maxPlayers}</td>`
+      + `<td>${game.maxShots}</td><td>${escapeHtml(game.style)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
+      + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
       + `<td>${s.voiceEnabled ? 'Yes' : ''}</td>`
-      + `<td>${escapeHtml(s.title)}</td><td>${escapeHtml(s.version)}</td>`
-      + `<td>${escapeHtml(s.url)}</td><td>${status}</td></tr>`;
+      + `<td>${escapeHtml(proxy ? (proxy.title || proxy.target) : s.title)}</td>`
+      + `<td>${escapeHtml(s.version)}</td>`
+      + `<td>${escapeHtml(s.url)}</td><td>${escapeHtml(proxy ? proxy.target : '')}</td>`
+      + `<td>${status}</td></tr>`;
+  };
+  const bzoServerRows = bzoServers.flatMap((s) => {
+    const proxies = Array.isArray(s.proxies) ? s.proxies : [];
+    // An instance that proxies and hosts its own game shows both: the game is
+    // real and so are the targets.
+    return [bzoRow(s, null), ...proxies.map((proxy) => bzoRow(s, proxy))];
   }).join('\n');
 
   const mapRows = localMaps.map((m) => {
@@ -1249,9 +1274,12 @@ click a row to go there; see "keys" above to manage a key.</p>
 <table id="bzoServerTable">
 <thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
 <th title="Jumping">Jump</th><th title="Superflags">Flag</th><th title="Ricochet">Rico</th>
-<th title="Antidote flag">Anti</th><th title="No Team Kills (friendly fire off)">TK</th>
+<th title="Antidote flag">Anti</th><th title="Handicap">Hcap</th>
+<th title="No Team Kills (friendly fire off)">TK</th>
 <th title="Voice chat has at least one ICE server configured">Voice</th>
-<th>Title</th><th>Version</th><th>URL</th><th>Status</th></tr></thead>
+<th>Title</th><th>Version</th><th>URL</th>
+<th title="The real BZFlag server this row leads to, through the bzo in the URL column">Proxied</th>
+<th>Status</th></tr></thead>
 <tbody>
 ${bzoServerRows}
 </tbody>
@@ -1612,21 +1640,7 @@ async function getBzoServerList() {
   // it either: unlike the fetch below, reading the registry costs nothing,
   // and caching it would only add a window where a fresher report already
   // landed but `/list` still shows the stale snapshot.
-  if (IS_DESIGNATED_LIST_SERVER) {
-    return listServerKeys.listAll()
-      .filter((record) => record.live !== null)
-      .map((record) => {
-        const stale = isListServerKeyStale(record);
-        return {
-          url: record.url, title: record.live.title, description: record.live.description,
-          players: record.live.players, maxPlayers: record.live.maxPlayers,
-          version: record.live.version, gameOptionsBits: record.live.gameOptionsBits,
-          maxShots: record.live.maxShots, style: record.live.style,
-          voiceEnabled: record.live.voiceEnabled,
-          stale, staleReason: stale ? (record.lastError || 'no response') : null,
-        };
-      });
-  }
+  if (IS_DESIGNATED_LIST_SERVER) return listPublicListServerRows();
   if (Date.now() - bzoServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
     return bzoServerListCache.servers;
   }
@@ -2449,10 +2463,59 @@ app.get('/api/list-server/keys', (req, res) => {
   res.json({ admin, keys: rows.map(describeListServerKeyRow) });
 });
 
+// Every live row, exactly as a visitor sees it -- read by `/api/list-server/list`
+// for other instances and by this instance's own `/list`, which reads the
+// registry in process rather than round-tripping HTTPS to itself. One shaping
+// function, because two copies of it is how one of them quietly stops
+// carrying a field the other added.
+//
+// An instance reports what it likes, so everything here is read defensively:
+// an older one reports no proxies at all.
+function listPublicListServerRows() {
+  return listServerKeys.listAll()
+    .filter((record) => record.live !== null)
+    .map((record) => {
+      const stale = isListServerKeyStale(record);
+      return {
+        url: record.url,
+        title: record.live.title,
+        description: record.live.description,
+        players: record.live.players,
+        maxPlayers: record.live.maxPlayers,
+        version: record.live.version,
+        gameOptionsBits: record.live.gameOptionsBits,
+        maxShots: record.live.maxShots,
+        style: record.live.style,
+        voiceEnabled: record.live.voiceEnabled,
+        // One entry per server this instance proxies, each describing that
+        // target's own game rather than this instance's (`docs/proxy.md`).
+        proxies: Array.isArray(record.live.proxies)
+          ? record.live.proxies.slice(0, MAX_REPORTED_PROXIES).map((proxy) => ({
+            target: String(proxy.target || '').slice(0, 128),
+            title: String(proxy.title || '').slice(0, 128),
+            players: Number(proxy.players) || 0,
+            maxPlayers: Number(proxy.maxPlayers) || 0,
+            maxShots: Number(proxy.maxShots) || 0,
+            style: String(proxy.style || '').slice(0, 32),
+            gameOptionsBits: Number(proxy.gameOptionsBits) || 0,
+            reachable: proxy.reachable === true,
+          }))
+          : [],
+        stale,
+        staleReason: stale ? (record.lastError || 'no response') : null,
+      };
+    });
+}
+
 // The reasons a report may name. `join`/`part` only update the live counts
 // below; only `boot`/`periodic` also trigger the validation callback -- "an
 // active game should not cost an outbound HTTPS round trip per player."
 const LIST_SERVER_REPORT_REASONS = new Set(['boot', 'periodic', 'join', 'part', 'shutdown']);
+
+// How many proxied targets one instance's row may contribute. An operator
+// with more servers than this is not a case bzo has met; the cap is here so a
+// report cannot grow the table without bound.
+const MAX_REPORTED_PROXIES = 32;
 
 // The ADD/REMOVE-equivalent every other bzo instance posts here. JSON, not
 // bzfs's form-encoded body -- both ends are bzo, so there is no reason to
@@ -2490,26 +2553,7 @@ app.post('/api/list-server/report', listServerRateLimit, (req, res) => {
 app.get('/api/list-server/list', (req, res) => {
   if (!requireDesignatedListServer(req, res)) return;
   res.set('Cache-Control', 'no-store');
-  const servers = listServerKeys.listAll()
-    .filter((record) => record.live !== null)
-    .map((record) => {
-      const stale = isListServerKeyStale(record);
-      return {
-        url: record.url,
-        title: record.live.title,
-        description: record.live.description,
-        players: record.live.players,
-        maxPlayers: record.live.maxPlayers,
-        version: record.live.version,
-        gameOptionsBits: record.live.gameOptionsBits,
-        maxShots: record.live.maxShots,
-        style: record.live.style,
-        voiceEnabled: record.live.voiceEnabled,
-        stale,
-        staleReason: stale ? (record.lastError || 'no response') : null,
-      };
-    });
-  res.json({ servers });
+  res.json({ servers: listPublicListServerRows() });
 });
 
 // The signed-challenge target every instance (designated or not) answers on,
@@ -12331,8 +12375,65 @@ function computeLocalGameOptionsBits() {
 // validation poll that already has to reach this server for its signature
 // might as well come back with what a report would have said too. See
 // "Speeding up a restart" in docs/list-server.md.
+// What each proxied target is playing, as of the last dial. Refreshed on the
+// same cadence as the report rather than per join or part: a report fires on
+// every one of those for live counts, and dialling every target each time
+// would turn one player's arrival into a round trip per target.
+//
+// One row per target, not one per instance: a proxy holds no game of its own,
+// so its own counts and options describe nothing, while the target's describe
+// the match a player is deciding whether to join (`docs/proxy.md`).
+const proxyStatuses = new Map();
+
+async function refreshProxyStatuses() {
+  const targets = Object.values(PROXY_TARGETS);
+  if (targets.length === 0) return;
+  // The public list's word about any of these that are on it, for the row's
+  // title -- the one thing a direct dial cannot ask for. Shared and cached
+  // with `/list`'s own use of it, and a failure here costs the rows nothing
+  // but a name they already have a fallback for.
+  await getRemoteServerList().catch(() => {});
+  await Promise.all(targets.map(async (target) => {
+    try {
+      const status = await queryServerStatus(target.host, target.port);
+      proxyStatuses.set(target.key, { ...status, reachable: true, error: null, at: Date.now() });
+    } catch (error) {
+      // A proxy can be up with one of its targets down, so the row goes stale
+      // on its own rather than taking the instance's with it.
+      proxyStatuses.set(target.key, {
+        reachable: false,
+        error: error.message || String(error),
+        at: Date.now(),
+      });
+      log(`Proxy: "${target.key}" did not answer: ${error.message || error}`);
+    }
+  }));
+}
+
+// The list rows for this instance's targets. The title is the public BZFlag
+// list's word about a target that is on it; a target that is not listed shows
+// under its own configured name, which is all anybody has for it.
+function computeProxyRows() {
+  return Object.values(PROXY_TARGETS).map((target) => {
+    const status = proxyStatuses.get(target.key) || { reachable: false, error: 'not yet dialled' };
+    const listed = findPublicServer(remoteServerListCache.servers, target.displayHost, target.displayPort);
+    return {
+      target: target.key,
+      title: listed?.title || '',
+      players: status.players ?? 0,
+      maxPlayers: status.maxPlayers ?? 0,
+      maxShots: status.maxShots ?? 0,
+      style: status.style || '',
+      gameOptionsBits: status.gameOptionsBits ?? 0,
+      reachable: status.reachable === true,
+      error: status.reachable ? null : (status.error || 'no response'),
+    };
+  });
+}
+
 function computeListServerStatus() {
   return {
+    proxies: computeProxyRows(),
     title: serverConfig.serverName || '',
     description: serverConfig.description || '',
     players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,
@@ -12408,8 +12509,13 @@ function reportToListServer(reason) {
   });
 }
 // `ListServerReAddTime` upstream, bzfs.cxx:84 -- ~15 minutes, for live counts
-// even when nobody has joined or left.
-setInterval(() => reportToListServer('periodic'), 15 * 60 * 1000).unref?.();
+// even when nobody has joined or left. The targets are dialled first, so the
+// report carries counts from this pass rather than the last one.
+setInterval(() => {
+  refreshProxyStatuses().finally(() => reportToListServer('periodic'));
+}, 15 * 60 * 1000).unref?.();
+// And once at boot, so the first report is not a row of zeroes.
+refreshProxyStatuses().finally(() => reportToListServer('periodic'));
 
 // DropGeometry::dropFlag tests a tank-radius cylinder _flagHeight tall, so a
 // spawning flag never appears somewhere a tank could not drive to reach it.

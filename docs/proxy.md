@@ -102,6 +102,46 @@ Where the check fails it is not a kick. The player loses their global identity
 and plays unverified, which on a registered callsign also earns bzfs's "This
 callsign is registered. You must use global authentication."
 
+## Being listed
+
+An instance reports its proxied targets to bzo's own list server
+(`docs/list-server.md`) as a `proxies` block on its ordinary report, and
+`/list`'s bzo table draws **one row per game**: the instance's own, and one
+for each target it carries.
+
+A proxied target is a whole game and its row says so -- player count, maximum,
+shot limit, style, and every option bit the table has a column for, read off
+that server rather than off the bzo carrying it, which is playing something
+else or nothing. There is nothing a native row shows that a proxied row leaves
+empty, and the reverse: the **Proxied** column names the target and is empty
+for a native row. The URL column names the instance either way, and the link
+goes to that instance's `?proxy=` for the target.
+
+The numbers are the proxy's own, from `MsgQueryGame` and `MsgWantSettings` on
+a connection that never enters the game -- so they cost the target nothing,
+show in nobody's chat, cannot disagree with what a joining player will meet,
+and work for a target that is on no public list at all. Only the title comes
+from elsewhere: a direct dial cannot ask for one, so it is the public BZFlag
+list's word where the target is listed, and the configured name otherwise.
+
+The targets are dialled on the report's own cadence, not per join or part: a
+report fires on every one of those for live counts, and dialling each target
+each time would turn one player's arrival into a round trip per target.
+
+**Liveness is per target.** A proxy can be up with one of its targets down, so
+each row carries that target's own reachability from the last dial and goes
+`down` on its own; the instance's row stays up. Registration is unchanged --
+one key per instance, however many targets it carries, and one challenge
+callback proves them all.
+
+**Two instances may carry the same target**, and nothing coordinates them:
+they are two registrations with two keys, and both rows list. The identity a
+player sees is the same across both while the dial address is local to each,
+so the two rows agree about which match they lead to and differ only in the
+way in. Their player counts are identical by construction rather than
+additive -- one match seen twice -- which is the Proxied column earning its
+place.
+
 ## What a target operator sees
 
 Every proxied player arrives from the same private address, so a target

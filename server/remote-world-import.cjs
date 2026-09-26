@@ -416,6 +416,91 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
   });
 }
 
+// What a server is playing right now, without joining it or downloading its
+// world: the handshake, `MsgQueryGame` and `MsgWantSettings`, then hang up.
+// bzfs answers both to a connection that has not entered (the
+// `!isCompletelyAdded()` switch in `handleCommand`), so this costs the target
+// nothing and shows in nobody's chat -- which is what makes it cheap enough
+// to run on a schedule for every proxied target (`docs/proxy.md`).
+//
+// The counts are the target's own rather than the list server's: they cannot
+// disagree with what a joining player will meet, and they work for a target
+// that is not on any public list at all.
+function queryServerStatus(host, port, timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port, family: 4 });
+    const { readExact, readFrame } = createFrameReader(socket);
+    let settled = false;
+
+    const watchdog = setTimeout(() => fail(new Error('timed out')), timeout);
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      socket.destroy();
+      reject(err);
+    }
+    function succeed(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      socket.destroy();
+      resolve(value);
+    }
+
+    socket.on('error', fail);
+    socket.on('close', () => fail(new Error('connection closed')));
+
+    socket.on('connect', async () => {
+      try {
+        socket.write('BZFLAG\r\n\r\n');
+        const version = (await readExact(8)).toString('ascii');
+        const playerId = (await readExact(1)).readUInt8(0);
+        if (version !== PROTOCOL_VERSION) {
+          throw new Error(`protocol ${version} (bzo speaks ${PROTOCOL_VERSION})`);
+        }
+        // 0xff is "no slot for you" -- full, banned or closed. The server is
+        // up and answering, and that is what this asks, so the query goes on:
+        // a full server is exactly the sort a list row should still show.
+        sendFrame(socket, 'qg');
+        let queryGame = null;
+        for (;;) {
+          const { code, payload } = await readFrame();
+          if (code === 'qg') { queryGame = payload; break; }
+          if (code === 'sk' || code === 'rj') throw new Error(`server sent ${code} querying game`);
+        }
+        sendFrame(socket, 'ws');
+        let gameSettings = null;
+        for (;;) {
+          const { code, payload } = await readFrame();
+          if (code === 'gs') { gameSettings = payload; break; }
+          if (code === 'sk' || code === 'rj') throw new Error(`server sent ${code} requesting settings`);
+        }
+        const game = decodeQueryGame(queryGame);
+        const settings = gameSettings.length >= 30 ? decodeGameSettings(gameSettings) : null;
+        succeed({
+          full: playerId === 0xff,
+          // Observers are the sixth team and are not playing, which is the
+          // same line `maxPlayers` draws (CmdLineOptions.cxx:458).
+          players: game.teamSizes.slice(0, 5).reduce((sum, size) => sum + size, 0),
+          observers: game.teamSizes[5],
+          maxPlayers: game.maxPlayers,
+          maxShots: settings ? settings.maxShots : game.maxShots,
+          // `GAME_STYLES` by index either way: `MsgGameSettings` names the
+          // game type and `MsgQueryGame` repeats it, both as the number.
+          style: GAME_STYLES[settings ? settings.gameType : game.style] || '',
+          gameOptionsBits: settings ? settings.gameOptionsBits : game.gameOptionsBits,
+          maxPlayerScore: game.maxPlayerScore,
+          maxTeamScore: game.maxTeamScore,
+          maxTime: game.maxTime,
+        });
+      } catch (err) {
+        fail(err);
+      }
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // The global-login probe: one MsgEnter carrying a token my.bzflag.org just
 // issued to a browser, sent by something that is not that browser. Whether
@@ -596,16 +681,17 @@ function decodeGameSettings(buf) {
 function decodeQueryGame(buf) {
   const r = new Reader(buf);
   const style = r.u16();
-  r.u16(); // options (duplicate of MsgGameSettings' bitmask)
-  r.u16(); // maxPlayers (duplicate of decodePingHex's own, and just the sum
-  // of teamMaximums below plus its own observer slot -- CmdLineOptions.cxx:458)
-  r.u16(); // maxShots (duplicate)
-  for (let i = 0; i < 6; i++) r.u16(); // per-team current sizes -- live player
-  // counts at the moment of the query, not a map property, so left unread
-  // the same way a snapshot of who is playing right now always is.
-  // Rogue, red, green, blue, purple, observer, in that order -- the same
+  const gameOptionsBits = r.u16(); // duplicate of MsgGameSettings' bitmask
+  const maxPlayers = r.u16(); // duplicate of decodePingHex's own, and just the
+  // sum of teamMaximums below plus its own observer slot
+  // (CmdLineOptions.cxx:458)
+  const maxShots = r.u16(); // duplicate
+  // Per-team current sizes: who is playing at the moment of the query rather
+  // than a map property, which is what a list row wants and a map import does
+  // not. Rogue, red, green, blue, purple, observer, in that order -- the same
   // order `-mp a,b,c,d,e,f` already takes (`BZFLAG_MP_TEAM_ORDER`,
-  // server/teams.cjs), so this can be written back out unchanged.
+  // server/teams.cjs), so either can be written back out unchanged.
+  const teamSizes = Array.from({ length: 6 }, () => r.u16());
   const teamMaximums = Array.from({ length: 6 }, () => r.u16());
   r.u16(); // shakeWins (duplicate)
   r.u16(); // shakeTimeout (duplicate)
@@ -614,6 +700,7 @@ function decodeQueryGame(buf) {
   const maxTime = r.u16();
   return {
     style, maxPlayerScore, maxTeamScore, maxTime, teamMaximums,
+    gameOptionsBits, maxPlayers, maxShots, teamSizes,
   };
 }
 
@@ -1677,6 +1764,7 @@ module.exports = {
   findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
+  queryServerStatus,
   probeGlobalToken,
   collectNonDefaultVariables,
   decodeGameSettings,

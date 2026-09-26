@@ -95,81 +95,16 @@ keys: `?proxy=example.org_5154`, `_5155`, `_5156`, `_5157`. Nothing about that
 needs multi-world (below) -- the worlds are the targets', fetched and hashed
 separately, and bzo hosts no game of its own.
 
-## Advertising a proxy
+## A proxy-only instance
 
-bzo's own list server (`docs/list-server.md`) is bzo on both ends over
-HTTPS/JSON, so these fields are ours to add; nothing here needs anything from
-`my.bzflag.org`.
-
-**One row per proxied target, not one per instance.** A proxy holds no game of
-its own, so its own player count, shot limit, style and option bits describe
-nothing, while the target's describe the match a player is deciding whether to
-join. A row therefore carries the target's counts, options and title, the
-proxy's URL as where clicking goes, and the target `host:port` in a new
-**Proxied** column, empty for a native bzo row. `gus.rikers.org` offering
-three local bzfs hosts is three rows, each with its own settings, not one row
-summarising them.
-
-**bzo instances are the only source, and the bzo table the only place it
-shows.** A proxy's targets are known to that proxy and to nobody else -- the
-bzflag list cannot say which of its rows somebody is willing to carry, and a
-proxied target need not be on that list at all. So the report gains a
-per-target block, the designated instance holds them, and `/list`'s bzo table
-gains the rows. The bzflag table is untouched: it stays what it is, a directory
-of real servers to import a map from.
-
-**The row's numbers come from the proxy's own dial, not from
-`my.bzflag.org`.** The proxy already talks to the target over loopback, so
-`MsgQueryGame` gives it live counts, shot limit, style, option bits and title
-first-hand -- which also works for an unlisted target, and cannot disagree with
-what a joining player will actually meet.
-
-**A key is per instance; a row is per instance and target.** Registration
-stays one key per URL (`docs/list-server.md`), so `gus.rikers.org` offering
-three local bzfs hosts holds one key and produces three rows, and one challenge
-callback proves all three at once. A row is identified by the pair, not by
-either half. The **Proxied** column names the target and the existing URL
-column names the bzo instance carrying it, which is also the whole of what
-"local" and "remote" mean here -- a row for this instance's own proxy arrives
-by the same path as anyone else's, since the designated instance already writes
-its own report straight into its registry rather than special-casing itself.
-
-**Two instances may carry the same target, and nothing coordinates them.**
-`bz.rikers.org` reaching `bz.rikers.org:5154` on `127.0.0.1:5154` and
-`orin-bzo` reaching it on `192.168.12.5:5154` are two independent registrations
-with two keys, and both rows list. This is where separating the map's key from
-its value pays: the identity a player sees stays the same across proxies while
-the dial target is local to each, so the two rows agree about which match they
-lead to and differ only in the way in. Nothing needed building to allow it --
-it is a consequence of keys being per instance, and it is unlikely to be
-common.
-
-The honest reading of those two rows is that **they show one match twice**, so
-their player counts are identical by construction rather than additive. That is
-the Proxied column earning its place: same target means same game, and a
-visitor who reads the column cannot mistake two ways in for two servers.
-
-**Liveness is per target too.** A proxy can be up with one of its targets
-down, so each block carries that target's own reachability from the last dial
-and the row goes stale on its own. The key-level staleness rule
-(`STALE_FAIL_THRESHOLD`) still governs whether the *instance* is answering at
-all; it cannot speak for a bzfs behind it.
-
-**The rows are the chooser; no client setting on top.** Picking between two
-rows for one target is a real choice and `/list` already offers it. A stored
-preference for one proxy over another would add nothing on top: both sit inside
-the target's network, so they differ in who runs them and in the browser's own
-route to each, neither of which a settings dialog could decide better than the
-player clicking a row.
-
-**A proxy-only instance is the cheaper install, not a restricted one.**
 Proxy mode already deletes server-side game state, so an instance with
-`proxies` set and no `mapFile` has no map, no tick and no anti-cheat to
-configure. That is the distribution story for #82: a bzfs
-operator installs bzo beside the servers they already run, adds a map entry
-per server, points `listServerUrl` at the designated instance and registers one
-key. bzo spreads as an add-on to bzfs servers rather than needing anyone to run
-a bzo game.
+`proxies` set and no `mapFile` would have no map, no tick and no anti-cheat to
+configure -- but bzo still requires a map and still runs a game loop, so that
+install does not exist yet. It is the distribution story for #82: a bzfs
+operator installs bzo beside the servers they already run, adds an entry per
+server, points `listServerUrl` at the designated instance and registers one
+key. bzo spreads as an add-on to bzfs servers rather than needing anyone to
+run a bzo game.
 
 ## Voice
 
@@ -275,9 +210,6 @@ against a registry.
    a wall and a Laser arrives without its beam. This is the client learning to
    fly a shot it was given, not the proxy simulating one.
 
-3. **Advertise to the list server.** Per-target report blocks, the bzo table's
-   rows and its Proxied column, per-target liveness.
-
-4. **Multi-world only if something wants two local maps on one host** -- never
+3. **Multi-world only if something wants two local maps on one host** -- never
    a prerequisite for any of the above, since several proxied targets are not
    multi-world.

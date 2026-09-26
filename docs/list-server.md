@@ -84,6 +84,15 @@ client feature exists (it always does), but whether at least one ICE
 server is configured, since a peer connection across anything but a LAN
 typically never completes without one.
 
+And `proxies`: one entry per real BZFlag server this instance carries a
+browser to (`docs/proxy.md`), each carrying that target's own counts, shot
+limit, style, option bits, title and reachability -- everything a native row
+carries about its own game, because a proxied target is a whole game too. The instance dials each target
+directly for them -- `MsgQueryGame` and `MsgWantSettings` on a connection
+that never enters the game -- on the report's own cadence rather than per
+join or part. Registration is unchanged: one key per instance however many
+targets it carries, and one challenge callback proves them all.
+
 The designated instance never reports to itself over HTTP: it writes
 straight into its own registry (still keyed by URL, so a restart finds the
 same row rather than creating a new one) and is attributed to
@@ -155,7 +164,11 @@ new key is the occasional case.
 
 Clicking a bzo-server row navigates the browser there directly
 (`location.href`), unlike a bzfs row's Import button -- each row is its own
-origin and its own websocket, not something to import a map from. A bzo
+origin and its own websocket, not something to import a map from. An instance that proxies contributes a
+row per target as well as its own, so the table is one row per *game* rather
+than per instance; the **Proxied** column names the target and is empty
+otherwise, and such a row's link goes to that instance's `?proxy=` for it. A
+bzo
 row's columns match a bzfs row's exactly (players/max, shots, style, the
 option columns, title) plus the two a bzfs row doesn't carry -- version and
 the URL itself -- so a visitor can see at a glance whether a listed server
