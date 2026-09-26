@@ -356,36 +356,9 @@ These are deliberate. Do not "fix" them without being asked.
   cloth is billboarded and the wind angle is never read. Implementing the
   default variant therefore means no wind, and it saves per-flag work per frame.
 
-- **The capture cheat check only logs.** Every `removePlayer` call in bzfs's
-  `captureFlag` is commented out upstream, and bzo keeps that: a quantized
-  position and a legitimate capture are hard to tell apart, and refusing an
-  honest capture is worse than trusting a modified client about a base it still
-  had to drive to. The mismatch is logged as `[ANTICHEAT:...] CAPTURE CLAIMED`.
-
-- **Superflags are off until asked for, as upstream has them.** bzfs needs `-s`
-  before a world has any superflags at all (`numExtraFlags(0)`,
-  `CmdLineOptions.h:69`) and so does bzo: a config that never mentions
-  `superFlags` carries none, so a map written without flags is played without
-  them. A `superFlags` block naming no usable count is upstream's bare `-s`,
-  which means sixteen, and a map's own `-s`/`+s` replaces whatever the config
-  said. `allowed` defaults to every superflag in the shared `flags` table, which
-  is why `example-server.json` names only `count`: an enumerated list in a
-  tracked file goes stale every time a flag is added, and this one had -- it
-  named 13 of the 41 flags bzo now carries. See "The world carries the
-  gameplay".
-
-- **A bad flag is shed by dying unless one of the three switches says
-  otherwise.** Upstream's `-st`, `-sw` and `-sa` are all off by default and so
-  are bzo's `flagShakeTimeout`, `flagShakeWins` and `antidoteFlags`; each is
-  also reachable from a map's `options` block, and the more generous of the two
-  settings wins. The timeout is client-counted and server-validated through
-  `canShakeFlag`, because a modified client would otherwise shed a bad flag on
-  contact. Shake wins is counted entirely on the server, since the server is
-  what decides a kill happened. **The antidote's spot is picked by the server**,
-  which upstream's client picks: a client-placed antidote would mean accepting
-  every sticky drop on a server with `-sa` on, which would undo the timeout's
-  validation. It travels to its owner alone as `antidoteFlag`, and arrival is
-  detected off position updates the way Identify's sweep is.
+- **The antidote's spot is picked by the server**, where upstream's client
+  picks it. A client-placed antidote would mean accepting every sticky drop on
+  a server with `-sa` on, which would undo the shake timeout's validation.
 
 - **`A` Agility triggers on a change of stick, not on upstream's clamped
   previous speed.** Upstream compares against the previous `desiredSpeed`
@@ -411,12 +384,6 @@ These are deliberate. Do not "fix" them without being asked.
   draw, and a flag the new style forbids is zapped where it stands. Shots
   already in flight keep the behaviour they were fired with, which is what every
   client was told when they began.
-
-- **A bouncing shot does not bounce off a teleporter frame.** Frames are decided
-  by the teleporter trace, which the client does not run for shots -- it has no
-  frame hit to react to -- so bouncing them on the server alone would put the two
-  copies of the shot on different paths. A frame stops a shot however it was
-  fired. Doing it properly means moving the frame test into the shared pair.
 
 - **The one-tap VR button on the HUD is hidden on phones.** Chrome on Android
   reports `immersive-vr` support on any phone, through Cardboard, so support
@@ -1851,6 +1818,12 @@ is the case that catches this, since it stops being drawn where it stood and it
 still holds its flag on this client until the server's drop arrives.
 
 ## Anti-cheat modes
+
+**The capture check only logs, as upstream's does.** Every `removePlayer` call
+in bzfs's `captureFlag` is commented out, and bzo keeps that: a quantized
+position and a legitimate capture are hard to tell apart, and refusing an
+honest one is worse than trusting a modified client about a base it had to
+drive to. The mismatch logs as `[ANTICHEAT:...] CAPTURE CLAIMED`.
 
 `antiCheat.mode` in `server.json` is `strict`, `warning`, or `disabled`, and it
 decides what happens to a packet the server believes an unmodified client could

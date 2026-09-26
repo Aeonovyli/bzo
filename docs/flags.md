@@ -106,6 +106,27 @@ of the world from the roof rather than falling to the floor. bzo takes it from
 a map's `options` block as upstream's `-fb`, or from `flagsOnBuildings` in
 `server.json`; `maps/hix.bzw` turns it on. Team flags ignore it.
 
+## Switching them on
+
+Superflags are off until asked for, as upstream has them: bzfs needs `-s`
+before a world carries any (`numExtraFlags(0)`, `CmdLineOptions.h:69`), and a
+bzo config that never mentions `superFlags` carries none. A `superFlags` block
+naming no usable count is upstream's bare `-s`, which means sixteen, and a
+map's own `-s`/`+s` replaces whatever the config said. `allowed` defaults to
+every superflag in this table, which is why `example-server.json` names only
+`count`: an enumerated list in a tracked file goes stale every time a flag is
+added, and that one had -- it named 13 of the 41.
+
+A bad flag is shed by dying unless one of three switches says otherwise.
+Upstream's `-st`, `-sw` and `-sa` are all off by default and so are bzo's
+`flagShakeTimeout`, `flagShakeWins` and `antidoteFlags`; each is also reachable
+from a map's `options` block, and the more generous of the two wins. The
+timeout is client-counted and server-validated through `canShakeFlag`, because
+a modified client would otherwise shed a bad flag on contact. Shake wins is
+counted on the server alone, since the server is what decides a kill happened.
+The antidote travels to its owner as `antidoteFlag`, and arrival is detected
+off position updates the way Identify's sweep is.
+
 ## Intentional differences from BZFlag
 
 Each of these is deliberate. Do not "fix" one without being asked.
