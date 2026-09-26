@@ -1271,9 +1271,24 @@ refuses every other mode for a player. There are five views (`Roaming.h:36`):
 **"Track the leader" is not a view, it is the null target of one.**
 `targetManual == -1` means auto, and `buildRoamingLabel()` re-resolves it every
 frame to the rabbit, else `ScoreboardRenderer::getLeader()`, which prefixes
-`"Leader "` to the callsign. Cycling past either end returns to auto, and a
-target that leaves the game drops you back there because `changePlayer()` clears
-a target it cannot find in the scoreboard list.
+`"Leader "` to the callsign. Cycling past either end returns to auto.
+
+**A target who leaves is where bzo and upstream part, on purpose.** Upstream
+pins a *slot*, and nothing re-checks it: when Alice disconnects,
+`world->getPlayer(targetWinner)` returns NULL, so the label reverts to
+"Roaming" and the eye falls back to the free-roam camera where it stood, while
+the view is still nominally Follow or FP. The target is only reconsidered when
+you next press the cycle key, and `changePlayer()` then finds no current
+player and jumps to one end of the scoreboard rather than to Alice's
+neighbour. Worse, the pin is an index: a player who later joins into Alice's
+slot is silently the one being followed.
+
+bzo resolves the target against the live roster every time it is asked, so a
+target who leaves becomes the null target -- auto -- and the camera moves to
+the leader still playing. That is upstream's own stated intent in
+`changePlayer()` ("a target that leaves the game"), evaluated when it happens
+rather than when a key is next pressed, and it is what closes the reused-slot
+hole: bzo reuses slot numbers exactly as upstream does.
 
 **Who can be roamed to is `ScoreboardRenderer::getPlayerList`: every player who
 is not an observer, and nothing else.** Not alive -- a followed tank that dies
