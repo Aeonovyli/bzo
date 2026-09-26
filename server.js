@@ -7,7 +7,11 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const logPath = require('path').join(__dirname, 'server.log');
+// `SERVER_LOG_PATH` moves the log, which is what `npm run check:boot` uses:
+// booting a second copy of the server in this same directory would otherwise
+// truncate the running one's log, since the next line clears it.
+const logPath = process.env.SERVER_LOG_PATH
+  || require('path').join(__dirname, 'server.log');
 // Clear server.log on restart
 require('fs').writeFileSync(logPath, '');
 const http = require('http');
@@ -173,7 +177,7 @@ const {
   teamScoreMovesOnKill,
   areFoes,
 } = require('./server/teams.cjs');
-const { parseProxies } = require('./server/proxies.cjs');
+const { parseProxies, proxyUrlKey } = require('./server/proxies.cjs');
 const {
   ALL_PLAYERS,
   SERVER_PLAYER,
@@ -283,7 +287,7 @@ function log(...args) {
   // Write to console
   console.log(logMsg);
   // Append to server.log
-  fs.appendFileSync(path.join(__dirname, 'server.log'), logMsg + '\n');
+  fs.appendFileSync(logPath, logMsg + '\n');
 }
 
 function logError(...args) {
@@ -292,7 +296,7 @@ function logError(...args) {
   const msg = redactInstallPath(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
   const logMsg = `[${timestamp}] [ERROR] ${msg}`;
   console.error(logMsg);
-  fs.appendFileSync(path.join(__dirname, 'server.log'), logMsg + '\n');
+  fs.appendFileSync(logPath, logMsg + '\n');
 }
 
 const app = express();
@@ -603,7 +607,7 @@ const RETURN_VIEW_PATTERN = /^[a-z][a-z-]{1,11}$/;
 function resolveLoginReturnPath(segment, view) {
   if (segment === undefined) return '/';
   if (LOGIN_RETURN_PATHS[segment] !== undefined) return LOGIN_RETURN_PATHS[segment];
-  if (!PROXY_TARGETS[segment]) return undefined;
+  if (!PROXY_TARGETS_BY_URL[segment]) return undefined;
   const watching = typeof view === 'string' && RETURN_VIEW_PATTERN.test(view)
     ? `&view=${encodeURIComponent(view)}`
     : '';
@@ -659,7 +663,7 @@ function takeProxyToken(id, target, now = Date.now()) {
 function resolveProbeTarget(segment) {
   if (typeof segment !== 'string' || !segment.startsWith(PROXY_PROBE_PREFIX)) return null;
   const key = segment.slice(PROXY_PROBE_PREFIX.length);
-  const target = PROXY_TARGETS[key];
+  const target = PROXY_TARGETS_BY_URL[key];
   return target ? { key, target } : null;
 }
 
@@ -769,7 +773,7 @@ app.get('/login/:returnPage?/:returnView?', loginRateLimit, async (req, res) => 
   // back to the match, and the next WebSocket it opens to that target carries
   // the token into `MsgEnter`. bzfs answers "Global login approved!" -- or
   // does not -- in the chat the player is already reading.
-  if (probeTarget === undefined && PROXY_TARGETS[req.params.returnPage]) {
+  if (probeTarget === undefined && PROXY_TARGETS_BY_URL[req.params.returnPage]) {
     const id = stashProxyLogin(req.params.returnPage, callsign, token);
     // And a session for the callsign alone, with no BZID, because bzo checked
     // nothing: it is what keeps the name across a reconnect or a restart,
@@ -1150,7 +1154,7 @@ function renderListPage({
   // read off that server rather than off the bzo carrying it, which has a
   // different game of its own or none at all. The columns are the same
   // columns -- there is nothing a native row shows that a proxied row leaves
-  // empty except the Proxied column's opposite.
+  // empty except the Proxy column's opposite.
   //
   // The URL column names the instance either way and the link goes to its
   // `?proxy=` for the target, so two instances carrying the same target read
@@ -1158,12 +1162,9 @@ function renderListPage({
   const bzoRow = (s, proxy) => {
     const game = proxy || s;
     const hasOption = (bit) => ((game.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
-    const href = proxy ? `${s.url}/?proxy=${encodeURIComponent(proxy.target)}` : s.url;
-    const status = proxy && !proxy.reachable
-      ? '<span class="stale" title="the proxy could not reach this server">down</span>'
-      : s.stale
-        ? `<span class="stale" title="${escapeHtml(s.staleReason || '')}">stale</span>`
-        : 'up';
+    // The reported name is the identity (`host:port`); a link spells it the
+    // way a URL should, which is the one derivation between the two.
+    const href = proxy ? `${s.url}/?proxy=${encodeURIComponent(proxyUrlKey(proxy.target))}` : s.url;
     return `<tr class="clickable" data-href="${escapeHtml(href)}"><td>${game.players}</td><td>${game.maxPlayers}</td>`
       + `<td>${game.maxShots}</td><td>${escapeHtml(game.style)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
@@ -1173,8 +1174,8 @@ function renderListPage({
       + `<td>${s.voiceEnabled ? 'Yes' : ''}</td>`
       + `<td>${escapeHtml(proxy ? (proxy.title || proxy.target) : s.title)}</td>`
       + `<td>${escapeHtml(s.version)}</td>`
-      + `<td>${escapeHtml(s.url)}</td><td>${escapeHtml(proxy ? proxy.target : '')}</td>`
-      + `<td>${status}</td></tr>`;
+      + `<td>${escapeHtml(s.url)}</td>`
+      + `<td>${escapeHtml(proxy ? proxy.target : '')}</td></tr>`;
   };
   const bzoServerRows = bzoServers.flatMap((s) => {
     const proxies = Array.isArray(s.proxies) ? s.proxies : [];
@@ -1269,7 +1270,10 @@ ${navBlock}
 <p class="muted">From the designated list server, ${LIST_SERVER_URL
     ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
     : 'disabled on this instance'} --
-click a row to go there; see "keys" above to manage a key.</p>
+click a row to go there; see "keys" above to manage a key. Every row here is a
+game somebody can join right now -- an instance this list has stopped hearing
+from, and a proxied server its proxy could not reach, are both left out. A key
+of your own that is failing says so in the key table at the bottom.</p>
 <input id="bzoServerFilter" type="text" placeholder="Filter…">
 <table id="bzoServerTable">
 <thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
@@ -1278,8 +1282,8 @@ click a row to go there; see "keys" above to manage a key.</p>
 <th title="No Team Kills (friendly fire off)">TK</th>
 <th title="Voice chat has at least one ICE server configured">Voice</th>
 <th>Title</th><th>Version</th><th>URL</th>
-<th title="The real BZFlag server this row leads to, through the bzo in the URL column">Proxied</th>
-<th>Status</th></tr></thead>
+<th title="The real BZFlag server this row leads to, through the bzo in the URL column">Proxy</th>
+</tr></thead>
 <tbody>
 ${bzoServerRows}
 </tbody>
@@ -2029,10 +2033,18 @@ if (refusedAdminGroups.length > 0) {
 // cannot be proxied, linked to, or logged in to, which is what keeps `?proxy=`
 // from being an invitation to dial anywhere -- the same reason
 // `LOGIN_RETURN_PATHS` is one.
-const { targets: PROXY_TARGETS, refused: refusedProxies, warnings: proxyWarnings } =
-  parseProxies(serverConfig.proxies);
+const {
+  targets: PROXY_TARGETS,
+  // The same targets under the spelling a URL carries -- `host_port`, since a
+  // `:` comes back as `%3A` in an address bar and a link is made to be
+  // shared. `host:port` stays the identity everywhere it is read by a person.
+  byUrlKey: PROXY_TARGETS_BY_URL,
+  refused: refusedProxies,
+  warnings: proxyWarnings,
+} = parseProxies(serverConfig.proxies);
 for (const target of Object.values(PROXY_TARGETS)) {
-  log(`Proxy: "${target.key}" reached at ${target.host}:${target.port}`);
+  log(`Proxy: "${target.key}" reached at ${target.host}:${target.port}`
+    + `, linked as ?proxy=${target.urlKey}`);
 }
 for (const { key, reason } of proxyWarnings) {
   log(`Proxy: "${key}" -- ${reason}`);
@@ -2473,9 +2485,13 @@ app.get('/api/list-server/keys', (req, res) => {
 // an older one reports no proxies at all.
 function listPublicListServerRows() {
   return listServerKeys.listAll()
-    .filter((record) => record.live !== null)
+    // Only what a visitor could join. A row is an invitation, and an
+    // instance bzo has stopped hearing from is not one -- the operator's own
+    // diagnosis lives in the key table at the bottom of `/list`, which shows
+    // every key's last check and last error to whoever owns it. Upstream
+    // drops a server that stops re-ADDing for the same reason.
+    .filter((record) => record.live !== null && !isListServerKeyStale(record))
     .map((record) => {
-      const stale = isListServerKeyStale(record);
       return {
         url: record.url,
         title: record.live.title,
@@ -2489,20 +2505,22 @@ function listPublicListServerRows() {
         voiceEnabled: record.live.voiceEnabled,
         // One entry per server this instance proxies, each describing that
         // target's own game rather than this instance's (`docs/proxy.md`).
+        // A target the proxy could not reach on its last dial is left out on
+        // the same rule as a stale instance: the row would lead nowhere.
         proxies: Array.isArray(record.live.proxies)
-          ? record.live.proxies.slice(0, MAX_REPORTED_PROXIES).map((proxy) => ({
-            target: String(proxy.target || '').slice(0, 128),
-            title: String(proxy.title || '').slice(0, 128),
-            players: Number(proxy.players) || 0,
-            maxPlayers: Number(proxy.maxPlayers) || 0,
-            maxShots: Number(proxy.maxShots) || 0,
-            style: String(proxy.style || '').slice(0, 32),
-            gameOptionsBits: Number(proxy.gameOptionsBits) || 0,
-            reachable: proxy.reachable === true,
-          }))
+          ? record.live.proxies
+            .filter((proxy) => proxy && proxy.reachable === true)
+            .slice(0, MAX_REPORTED_PROXIES)
+            .map((proxy) => ({
+              target: String(proxy.target || '').slice(0, 128),
+              title: String(proxy.title || '').slice(0, 128),
+              players: Number(proxy.players) || 0,
+              maxPlayers: Number(proxy.maxPlayers) || 0,
+              maxShots: Number(proxy.maxShots) || 0,
+              style: String(proxy.style || '').slice(0, 32),
+              gameOptionsBits: Number(proxy.gameOptionsBits) || 0,
+            }))
           : [],
-        stale,
-        staleReason: stale ? (record.lastError || 'no response') : null,
       };
     });
 }
@@ -15813,7 +15831,7 @@ function resolveProxyTarget(url) {
   // A target that is asked for and not allowlisted still answers here, with a
   // null target: a socket that said which server it wanted must not quietly
   // land in this server's own game instead.
-  return { key, target: PROXY_TARGETS[key] || null };
+  return { key, target: PROXY_TARGETS_BY_URL[key] || null };
 }
 
 // One of the target's players as a bzo roster record. Everything about where a
@@ -16567,7 +16585,8 @@ wss.on('connection', (ws, req) => {
       // proxy is the operator's own configuration, so naming it turns a dead
       // end into a signpost, which matters most when a link has gone stale.
       log(`[PROXY] refused an unknown target "${proxied.key}"`);
-      const offered = Object.keys(PROXY_TARGETS);
+      // The link spellings, since that is what the caller got wrong.
+      const offered = Object.values(PROXY_TARGETS).map((target) => target.urlKey);
       ws.send(JSON.stringify({
         error: offered.length > 0
           ? `This server does not proxy that server. It proxies: ${offered.join(', ')}`

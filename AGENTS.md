@@ -658,8 +658,10 @@ throws `ReferenceError: Cannot access 'x' before initialization` on the first
 real start -- which on a dev machine is nodemon's, the instant the file is
 saved, and which drops every connected client without the auto-reconnect a
 clean restart gives them. `npm run check:boot` starts the server on port 0
-with a throwaway config and waits for it to come up, so that mistake is caught
-by `npm run check` rather than by the people playing. Config-derived constants
+with a throwaway config and log (`SERVER_LOG_PATH`) and waits for it to come
+up, so that mistake is caught by `npm run check` rather than by the people
+playing -- and so a check never truncates the running server's own log, which
+`server.js` clears on every start. Config-derived constants
 belong after `serverConfig` is read, beside `ADMIN_GROUPS` and the rest.
 
 ### Where the server answers

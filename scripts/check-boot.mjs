@@ -15,8 +15,10 @@
 // nodemon's, the moment the file is saved, which drops every connected client
 // without the auto-reconnect a clean restart gives them.
 //
-// Port 0 so this never collides with a server already running, and a
-// throwaway config path so it cannot touch the operator's own.
+// Port 0 so this never collides with a server already running, and throwaway
+// config and log paths so it touches neither the operator's config nor the
+// log of the server that is already running in this directory -- which the
+// real one truncates on start.
 
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -31,7 +33,12 @@ const configPath = path.join(dir, 'server.json');
 writeFileSync(configPath, JSON.stringify({ serverName: 'boot check', listen: '127.0.0.1:0' }));
 
 const child = spawn(process.execPath, ['server.js'], {
-  env: { ...process.env, SERVER_CONFIG_PATH: configPath, LISTEN: '127.0.0.1:0' },
+  env: {
+    ...process.env,
+    SERVER_CONFIG_PATH: configPath,
+    SERVER_LOG_PATH: path.join(dir, 'server.log'),
+    LISTEN: '127.0.0.1:0',
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 

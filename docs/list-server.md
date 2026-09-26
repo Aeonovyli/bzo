@@ -113,11 +113,14 @@ for the same check, initiated by the list server itself as a backstop for a
 server that has gone quiet on the push side but is actually still
 reachable.
 
-A few consecutive failures (`STALE_FAIL_THRESHOLD = 3`), not one, flip a row
-to stale on `/list` -- a single missed push or poll is noise. A stale row
-says why (the last error, as a tooltip), the same way `/list` already
-reports "could not reach the list server" rather than going silent, rather
-than dropping from the table.
+A few consecutive failures (`STALE_FAIL_THRESHOLD = 3`), not one, mark a row
+stale -- a single missed push or poll is noise. A stale row leaves the
+servers table: every row there is a game somebody can join right now, and an
+instance this list has stopped hearing from is not one. It does not vanish
+without explanation, though. The key table at the bottom of the same page
+shows every key's last check and last error to whoever owns it, and to an
+admin, which is where an operator asking "why is my server not listed" should
+be looking anyway.
 
 ## Key lifetime
 
@@ -166,7 +169,7 @@ Clicking a bzo-server row navigates the browser there directly
 (`location.href`), unlike a bzfs row's Import button -- each row is its own
 origin and its own websocket, not something to import a map from. An instance that proxies contributes a
 row per target as well as its own, so the table is one row per *game* rather
-than per instance; the **Proxied** column names the target and is empty
+than per instance; the **Proxy** column names the target and is empty
 otherwise, and such a row's link goes to that instance's `?proxy=` for it. A
 bzo
 row's columns match a bzfs row's exactly (players/max, shots, style, the

@@ -8,16 +8,24 @@ still unbuilt, playing above all. Upstream references are paths under
 
 ## The link
 
-`?proxy=<host:port>` points the ordinary client at a proxied server:
+`?proxy=<host_port>` points the ordinary client at a proxied server:
 
 ```
-https://<this bzo>/?proxy=example.org:5154
+https://<this bzo>/?proxy=example.org_5154
 ```
 
-The name is a key of the `proxies` map below. It is a GET parameter because
-the whole value of such a link is that it can be sent to somebody, and it
-names the *match* rather than the wire: which address bzo dials to reach it is
-the operator's business and appears nowhere a player can see.
+The name is a key of the `proxies` map below, spelled the way a URL should
+spell it: `host:port` is the identity everywhere a person reads it -- the
+config, the list row, the Proxy column -- and the link writes the port after
+an underscore, because a `:` comes back from an address bar as `%3A` and a
+link is made to be shared. It is the same spelling the cached world already
+uses (`import-<host>_<port>.bzw`), so a link and a file read alike. One
+derivation, `proxyUrlKey`, sits between the two.
+
+It is a GET parameter because the whole value of such a link is that it can be
+sent to somebody, and it names the *match* rather than the wire: which address
+bzo dials to reach it is the operator's business and appears nowhere a player
+can see.
 
 A target bzo does not proxy is refused on the WebSocket with one sentence, not
 quietly joined to this server's own game. The page itself is the ordinary
@@ -54,8 +62,8 @@ shown, and its title and settings still come from the target itself.
 
 The map is the allowlist, and the only thing that makes a target nameable:
 `?proxy=`, `/login/<name>` and `/logout/<name>` all refuse a name that is not
-a key, so a client cannot aim this instance at a host the operator did not
-choose. An entry whose name or address is not `<host>:<port>` is refused at
+a key -- under its link spelling, and a refusal names the ones that are -- so
+a client cannot aim this instance at a host the operator did not choose. An entry whose name or address is not `<host>:<port>` is refused at
 boot and logged; an entry whose dial address is not private is kept and
 warned about, since a target that is not publicized never checks a token
 anyway.
@@ -113,7 +121,7 @@ A proxied target is a whole game and its row says so -- player count, maximum,
 shot limit, style, and every option bit the table has a column for, read off
 that server rather than off the bzo carrying it, which is playing something
 else or nothing. There is nothing a native row shows that a proxied row leaves
-empty, and the reverse: the **Proxied** column names the target and is empty
+empty, and the reverse: the **Proxy** column names the target and is empty
 for a native row. The URL column names the instance either way, and the link
 goes to that instance's `?proxy=` for the target.
 
@@ -129,17 +137,19 @@ report fires on every one of those for live counts, and dialling each target
 each time would turn one player's arrival into a round trip per target.
 
 **Liveness is per target.** A proxy can be up with one of its targets down, so
-each row carries that target's own reachability from the last dial and goes
-`down` on its own; the instance's row stays up. Registration is unchanged --
-one key per instance, however many targets it carries, and one challenge
-callback proves them all.
+each entry carries that target's own reachability from the last dial, and one
+that did not answer is left out of the table while the instance's own row
+stays -- the same rule a stale instance gets, for the same reason: a row is an
+invitation, and that one leads nowhere. Registration is unchanged: one key per
+instance, however many targets it carries, and one challenge callback proves
+them all.
 
 **Two instances may carry the same target**, and nothing coordinates them:
 they are two registrations with two keys, and both rows list. The identity a
 player sees is the same across both while the dial address is local to each,
 so the two rows agree about which match they lead to and differ only in the
 way in. Their player counts are identical by construction rather than
-additive -- one match seen twice -- which is the Proxied column earning its
+additive -- one match seen twice -- which is the Proxy column earning its
 place.
 
 ## What a target operator sees

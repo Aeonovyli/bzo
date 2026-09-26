@@ -49,6 +49,17 @@ function isPrivateAddress(host) {
   return a === 192 && b === 168;
 }
 
+// The same name as a URL carries it. A `:` is legal in a query value but
+// browsers show it back as `%3A`, which makes a link somebody was meant to
+// share look like an error; `_` survives a round trip through every address
+// bar untouched. It is also the spelling the cached world already uses
+// (`import-<host>_<port>.bzw`), so the link and the file read the same way,
+// while `host:port` stays the identity -- what `/list` shows, what the
+// operator configures, and what a bzflag list row says.
+function proxyUrlKey(name) {
+  return String(name).replace(/:(\d+)$/, '_$1');
+}
+
 function parseAddress(value) {
   const match = ADDRESS.exec(String(value || '').trim());
   if (!match) return null;
@@ -62,9 +73,12 @@ function parseAddress(value) {
 // wonder why a row is missing.
 function parseProxies(raw) {
   const targets = {};
+  const byUrlKey = {};
   const refused = [];
   const warnings = [];
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { targets, refused, warnings };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { targets, byUrlKey, refused, warnings };
+  }
   for (const [key, value] of Object.entries(raw)) {
     const name = parseAddress(key);
     if (!name) {
@@ -82,19 +96,33 @@ function parseProxies(raw) {
         reason: `${dial.host} is not a private address, so a forwarded global login will not verify`,
       });
     }
-    targets[key] = Object.freeze({
+    const urlKey = proxyUrlKey(key);
+    if (byUrlKey[urlKey]) {
+      refused.push({ key, reason: `its link would collide with "${byUrlKey[urlKey].key}"` });
+      continue;
+    }
+    const target = Object.freeze({
       key,
+      urlKey,
       displayHost: name.host,
       displayPort: name.port,
       host: dial.host,
       port: dial.port,
     });
+    targets[key] = target;
+    byUrlKey[urlKey] = target;
   }
-  return { targets: Object.freeze(targets), refused, warnings };
+  return {
+    targets: Object.freeze(targets),
+    byUrlKey: Object.freeze(byUrlKey),
+    refused,
+    warnings,
+  };
 }
 
 module.exports = {
   parseProxies,
+  proxyUrlKey,
   parseAddress,
   isPrivateAddress,
 };
