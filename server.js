@@ -1149,16 +1149,10 @@ function renderListPage({
   // directly (`location.href`) -- each one is its own origin and its own
   // websocket, not something to import a map from.
   // One row per game, which for an instance that proxies means one per target
-  // as well as one for itself. A proxied target is a whole game and the row
-  // says so: its own player count, shot limit, style and every option bit,
-  // read off that server rather than off the bzo carrying it, which has a
-  // different game of its own or none at all. The columns are the same
-  // columns -- there is nothing a native row shows that a proxied row leaves
-  // empty except the Proxy column's opposite.
-  //
-  // The URL column names the instance either way and the link goes to its
-  // `?proxy=` for the target, so two instances carrying the same target read
-  // as two ways into one match rather than as two servers (`docs/proxy.md`).
+  // as well as one for itself, carrying that target's own counts, options and
+  // style rather than this instance's. The URL is the instance either way and
+  // the link is its `?proxy=` for the target, so two instances carrying one
+  // target read as two ways in rather than two servers (`docs/proxy.md`).
   const bzoRow = (s, proxy) => {
     const game = proxy || s;
     const hasOption = (bit) => ((game.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
@@ -1172,11 +1166,13 @@ function renderListPage({
       + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td>`
       + `<td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
       + `<td>${s.voiceEnabled ? 'Yes' : ''}</td>`
-      + `<td>${escapeHtml(game.map || '')}</td>`
+      // One column, because a row is one thing or the other: a game bzo is
+      // running on a map of its own, or a real BZFlag server it is carrying.
+      // The extension is the report's business, not a reader's.
+      + `<td>${escapeHtml(proxy ? proxy.target : String(s.map || '').replace(/\.bzw$/, ''))}</td>`
       + `<td>${escapeHtml(proxy ? (proxy.title || proxy.target) : s.title)}</td>`
       + `<td>${escapeHtml(s.version)}</td>`
-      + `<td>${escapeHtml(s.url)}</td>`
-      + `<td>${escapeHtml(proxy ? proxy.target : '')}</td></tr>`;
+      + `<td>${escapeHtml(s.url)}</td></tr>`;
   };
   const bzoServerRows = bzoServers.flatMap((s) => {
     const proxies = Array.isArray(s.proxies) ? s.proxies : [];
@@ -1279,10 +1275,8 @@ click a row to enter that game.</p>
 <th title="Antidote flag">Anti</th><th title="Handicap">Hcap</th>
 <th title="No Team Kills (friendly fire off)">TK</th>
 <th title="Voice chat has at least one ICE server configured">Voice</th>
-<th title="The world being played. A proxied row names the copy bzo imported from that server">Map</th>
-<th>Title</th><th>Version</th><th>URL</th>
-<th title="The real BZFlag server this row leads to, through the bzo in the URL column">Proxy</th>
-</tr></thead>
+<th title="The map this game is on, or the BZFlag server it is proxying">Map</th>
+<th>Title</th><th>Version</th><th>URL</th></tr></thead>
 <tbody>
 ${bzoServerRows}
 </tbody>
@@ -2533,7 +2527,6 @@ function listPublicListServerRows() {
               maxPlayers: Number(proxy.maxPlayers) || 0,
               maxShots: Number(proxy.maxShots) || 0,
               style: String(proxy.style || '').slice(0, 32),
-              map: String(proxy.map || '').slice(0, 128),
               gameOptionsBits: Number(proxy.gameOptionsBits) || 0,
             }))
           : [],
@@ -12455,10 +12448,6 @@ function computeProxyRows() {
     const listed = findPublicServer(remoteServerListCache.servers, target.displayHost, target.displayPort);
     return {
       target: target.key,
-      // The world bzo imported from this target, which is the same file a
-      // `?viewmap=` link names and the only name anybody here has for it:
-      // bzfs sends a world, never what its operator called the file.
-      map: remoteMapFileName(target.displayHost, target.displayPort),
       title: listed?.title || '',
       players: status.players ?? 0,
       maxPlayers: status.maxPlayers ?? 0,

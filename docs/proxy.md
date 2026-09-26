@@ -16,7 +16,7 @@ https://<this bzo>/?proxy=example.org_5154
 
 The name is a key of the `proxies` map below, spelled the way a URL should
 spell it: `host:port` is the identity everywhere a person reads it -- the
-config, the list row, the Proxy column -- and the link writes the port after
+config, the list row, the Map column -- and the link writes the port after
 an underscore, because a `:` comes back from an address bar as `%3A` and a
 link is made to be shared. It is the same spelling the cached world already
 uses (`import-<host>_<port>.bzw`), so a link and a file read alike. One
@@ -63,10 +63,10 @@ shown, and its title and settings still come from the target itself.
 The map is the allowlist, and the only thing that makes a target nameable:
 `?proxy=`, `/login/<name>` and `/logout/<name>` all refuse a name that is not
 a key -- under its link spelling, and a refusal names the ones that are -- so
-a client cannot aim this instance at a host the operator did not choose. An entry whose name or address is not `<host>:<port>` is refused at
-boot and logged; an entry whose dial address is not private is kept and
-warned about, since a target that is not publicized never checks a token
-anyway.
+a client cannot aim this instance at a host the operator did not choose. An
+entry whose name or address is not `<host>:<port>` is refused at boot and
+logged; an entry whose dial address is not private is kept and warned about,
+since a target that is not publicized never checks a token anyway.
 
 The import a proxy makes is authorized by this map rather than by the public
 BZFlag list: the name comes from the key, the address from the value, and the
@@ -112,47 +112,31 @@ callsign is registered. You must use global authentication."
 
 ## Being listed
 
-An instance reports its proxied targets to bzo's own list server
-(`docs/list-server.md`) as a `proxies` block on its ordinary report, and
-`/list`'s bzo table draws **one row per game**: the instance's own, and one
-for each target it carries.
+An instance reports its targets to bzo's list server (`docs/list-server.md`)
+as a `proxies` block on its ordinary report, and `/list` draws one row per
+*game*: the instance's own, and one per target.
 
-A proxied target is a whole game and its row says so -- player count, maximum,
-shot limit, style, and every option bit the table has a column for, read off
-that server rather than off the bzo carrying it, which is playing something
-else or nothing. Its Map is the world bzo imported from it, which is the only
-name anybody here has for that world: bzfs sends a world, never what its
-operator called the file. There is nothing a native row shows that a proxied row leaves
-empty, and the reverse: the **Proxy** column names the target and is empty
-for a native row. The URL column names the instance either way, and the link
-goes to that instance's `?proxy=` for the target.
+A proxied row carries that target's whole game -- counts, shot limit, style,
+every option bit -- read off the target rather than off the bzo carrying it.
+The **Map** column is the one difference, and it is one column because a row
+is one thing or the other: the map a bzo runs, or the server it proxies. The
+URL is the instance either way, and the link is its `?proxy=` for the target.
 
-The numbers are the proxy's own, from `MsgQueryGame` and `MsgWantSettings` on
-a connection that never enters the game -- so they cost the target nothing,
-show in nobody's chat, cannot disagree with what a joining player will meet,
-and work for a target that is on no public list at all. Only the title comes
-from elsewhere: a direct dial cannot ask for one, so it is the public BZFlag
-list's word where the target is listed, and the configured name otherwise.
+The numbers come from `MsgQueryGame` and `MsgWantSettings` on a connection
+that never enters the game, so they cost the target nothing, show in nobody's
+chat, and work for a target on no public list. Only the title comes from
+elsewhere, since a dial cannot ask for one. Targets are dialled on the
+report's cadence, never per join or part -- that would be a round trip per
+target per arrival.
 
-The targets are dialled on the report's own cadence, not per join or part: a
-report fires on every one of those for live counts, and dialling each target
-each time would turn one player's arrival into a round trip per target.
+**Liveness is per target.** A target that did not answer the last dial leaves
+the table while its instance's row stays, on the same rule a stale instance
+gets: a row is an invitation, and that one leads nowhere. Registration is
+unchanged -- one key per instance, and one callback proves every target.
 
-**Liveness is per target.** A proxy can be up with one of its targets down, so
-each entry carries that target's own reachability from the last dial, and one
-that did not answer is left out of the table while the instance's own row
-stays -- the same rule a stale instance gets, for the same reason: a row is an
-invitation, and that one leads nowhere. Registration is unchanged: one key per
-instance, however many targets it carries, and one challenge callback proves
-them all.
-
-**Two instances may carry the same target**, and nothing coordinates them:
-they are two registrations with two keys, and both rows list. The identity a
-player sees is the same across both while the dial address is local to each,
-so the two rows agree about which match they lead to and differ only in the
-way in. Their player counts are identical by construction rather than
-additive -- one match seen twice -- which is the Proxy column earning its
-place.
+**Two instances may carry the same target.** Two registrations, two rows, one
+match: their counts are identical rather than additive, which is what the Map
+column stops anybody mistaking for two servers.
 
 ## What a target operator sees
 
