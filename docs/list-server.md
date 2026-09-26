@@ -87,7 +87,10 @@ counts, `version`, the shot limit and game style (`maxShots`, `style` --
 already draws for a remote bzfs row's Shots/Style columns and option bits,
 read off this server's own resolved config instead of decoded off the wire.
 Also `map`, the world being played -- `mapFile`, or `random` for a generated
-one -- which is the `?viewmap=` name on that instance. And `voiceEnabled`
+one -- which is the `?viewmap=` name on that instance. Changing the map is a
+restart today, so the row follows on the next boot; anything that changes it
+*without* one, a rotation on a timer say, has to report as well, or the
+column quietly starts lying. And `voiceEnabled`
 (`VOICE_ICE_SERVERS.length > 0`) -- not whether the
 client feature exists (it always does), but whether at least one ICE
 server is configured, since a peer connection across anything but a LAN
