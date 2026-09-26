@@ -152,7 +152,10 @@ than bzo's client needs to hear, and the proxy keeps the clock for it.
   the last carrier left it, so carried is read off the *status*, as upstream's
   own client reads it. The same test decides which superflags are
   unidentified: bzfs masks those as Phantom Zone for everybody, admin or not,
-  and bzo shows them as unidentified exactly as it does its own.
+  and bzo shows them as unidentified exactly as it does its own. What names
+  them is `/flag show`, whose reply is text and nothing else on both servers
+  -- and the client reads that text either way, so a proxied operator's map
+  fills in like anyone else's.
 
 ## Transport
 

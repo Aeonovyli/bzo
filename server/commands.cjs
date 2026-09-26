@@ -393,13 +393,6 @@ function parseMoveCoordinates(args) {
 //
 // The position keeps bzo's own axes, not upstream's: `y` is the height here, as
 // it is everywhere else in bzo and in what `/mv` takes back.
-function formatFlagInfo({ index, type, player, required, grabs, status, position }) {
-  const pad = (value, width) => String(value).padEnd(width);
-  return `#${pad(index, 3)} i:${pad(type || '', 3)} p:${pad(player, 3)}`
-    + ` r:${pad(required ? 1 : 0, 2)} g:${pad(grabs, 2)} s:${pad(status, 2)}`
-    + ` p:{${position.x.toFixed(1)}, ${position.y.toFixed(1)}, ${position.z.toFixed(1)}}`;
-}
-
 // parseServerCommand's last word (commands.cxx:3909), in upstream's own
 // brackets. The slash is dropped, which is why the text is quoted at all.
 function formatUnknownCommand(text) {
@@ -416,7 +409,6 @@ module.exports = {
   bearingToRotation,
   rotationToBearingName,
   parseMoveCoordinates,
-  formatFlagInfo,
   COMMAND_LIST_LINE_LENGTH,
   isCommandLine,
   parseCommandLine,

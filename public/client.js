@@ -284,6 +284,7 @@ import {
   normalizeShakeTimeout,
   normalizeShakeWins,
   keepFlagIdentity,
+  parseFlagInfo,
   findNearestGroundFlag,
   IDENTIFY_RANGE,
   shotRicochets,
@@ -6804,6 +6805,16 @@ function handleServerMessage(message) {
           renderManager.playLocalSound('messagePrivate');
         }
       }
+      // `/flag show`'s answer names every flag, and it is the only thing that
+      // ever names an unidentified superflag: both bzo and bzfs hide one from
+      // every flag update while nobody is carrying it. Reading the reply is
+      // what puts those identities on the field, and it is one reader for
+      // both -- bzo says this in upstream's own shape (`formatFlagInfo`), so
+      // a proxied server's reply lands here the same way.
+      //
+      // Only a line from the server counts. A player typing something that
+      // looks like one is a player talking.
+      if (srcId === CHAT_TARGET_SERVER) applyFlagInfoLine(message.text);
       const formatted = formatNetworkMessage(message);
       addChatEntry(formatted.tabs, formatted.text, formatted.kind, formatted.segments);
       updateChatWindow();
@@ -11628,6 +11639,17 @@ function clearFlags() {
   // The beacons stood over the flags that just went, and the next world's are
   // built from its own clouds.
   renderManager.clearSkyBeacons();
+}
+
+// One line of `/flag show`'s answer, applied to the slot it names. The rest of
+// the record is whatever this client already had: the line is about identity,
+// and where the flag is arrived in a flag update.
+function applyFlagInfoLine(text) {
+  const info = parseFlagInfo(text);
+  if (!info) return;
+  const flag = flags.get(info.index);
+  if (!flag || flag.type === info.type) return;
+  setFlagState({ ...flag, type: info.type });
 }
 
 function setFlagState(state) {

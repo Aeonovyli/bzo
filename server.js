@@ -100,6 +100,7 @@ const {
   getTankDimensionScale,
   getTankHitRadiusScale,
   getTeamFlagAbbreviation,
+  formatFlagInfo,
   isBadFlag,
   isTeamFlag,
   usesNarrowHitBox,
@@ -207,7 +208,6 @@ const {
   parsePlayerTarget,
   rotationToBearingName,
   parseMoveCoordinates,
-  formatFlagInfo,
   isCommandLine,
   parseCommandLine,
   parseHelpPrefix,
@@ -10098,17 +10098,12 @@ defineCommand('/flag', COMMAND_TIER.OPERATOR,
       // Every slot, including the empty ones: `s:0` is a slot waiting on the
       // insertion schedule, and which slots are waiting is half of what the
       // question is asking.
+      // The text is the whole answer, as it is upstream: no flag update goes
+      // with it. A superflag nobody is holding travels anonymous
+      // (`getFlagState`), and what puts the identities on the field is the
+      // client reading these same lines (`parseFlagInfo`) -- one reader, and
+      // it works on a proxied server's reply too.
       flags.forEach((flag) => replyToPlayer(player, formatFlagInfo(describeFlagForCommand(flag))));
-      // bzo's own half of the answer. A superflag nobody is holding travels
-      // anonymous (`getFlagState`) and a client remembers every identity it is
-      // ever told (`keepFlagIdentity`), so the same reply also sends this one
-      // operator the unhidden states: the text says what flag #7 is, and this
-      // says which of the flags on the field is #7.
-      const now = Date.now();
-      sendToPlayer(player, {
-        type: 'flagUpdate',
-        flags: flags.map((flag) => getFlagState(flag, now, { reveal: true })),
-      });
       return;
     }
     if (what === 'take') {
@@ -12451,11 +12446,12 @@ function getFlagOwner(flag) {
   return flag.owner === null ? null : players.get(flag.owner) || null;
 }
 
-// FlagInfo::pack. A superflag nobody is holding goes out without its type.
-// `reveal` is `pack`'s `hide` argument turned off, which only `/flag show`
-// passes: an operator asking what is on the field is told.
-function getFlagState(flag, now = Date.now(), { reveal = false } = {}) {
-  const hidden = !reveal && flag.owner === null && flag.team === null;
+// FlagInfo::pack. A superflag nobody is holding goes out without its type,
+// with no exception for an operator: upstream hides it from everybody in
+// every flag update, and what an operator asking `/flag show` gets is the
+// text reply, which their client reads (`parseFlagInfo`).
+function getFlagState(flag, now = Date.now()) {
+  const hidden = flag.owner === null && flag.team === null;
   const flightTime = flag.flightStartedAt === 0
     ? 0
     : Math.min(flag.flightEnd, (now - flag.flightStartedAt) / 1000);

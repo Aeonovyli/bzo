@@ -133,6 +133,21 @@ assert.equal(isAdminSession(createSessionRecord({ bzid: '1', callsign: 'x' }, 10
   assert.equal(later.size, 0);
 }
 
+// A login bzo did not verify itself -- a proxied server's, where the token
+// went to the target unspent -- has a callsign and a null BZID. It survives a
+// restart like any other, because the name is the whole point of keeping it.
+{
+  const store = createSessionStore({ ttlMs: 1000 });
+  const sessionId = store.create({ bzid: null, callsign: 'Proxied Player', groups: [] }, 5000);
+  assert.equal(store.get(sessionId, 5000).bzid, null);
+  const saved = JSON.parse(JSON.stringify(store.serialize(5000)));
+
+  const restored = createSessionStore({ ttlMs: 1000 });
+  assert.equal(restored.load(saved, 5000), 1);
+  assert.equal(restored.get(sessionId, 5000).callsign, 'Proxied Player');
+  assert.equal(restored.get(sessionId, 5000).bzid, null);
+}
+
 // Anything malformed is dropped rather than repaired: a session that cannot be
 // read is one login, and guessing at its contents would be guessing at an
 // identity.
@@ -142,7 +157,10 @@ assert.equal(isAdminSession(createSessionRecord({ bzid: '1', callsign: 'x' }, 10
   assert.equal(store.load({}), 0);
   assert.equal(store.load({ sessions: 'nope' }), 0);
   assert.equal(store.load({ sessions: { a: null } }), 0);
+  // A *missing* bzid is malformed, where an explicit null is a proxy login.
   assert.equal(store.load({ sessions: { a: { callsign: 'x' } } }), 0, 'no bzid');
+  assert.equal(store.load({ sessions: { a: { bzid: 7, callsign: 'x', expiresAt: 9e9 } } }), 0,
+    'bzid neither string nor null');
   assert.equal(store.load({ sessions: { a: { bzid: '1' } } }), 0, 'no callsign');
   assert.equal(store.load({ sessions: { a: { bzid: '1', callsign: 'x' } } }), 0, 'no expiry');
   assert.equal(store.size, 0);

@@ -177,7 +177,11 @@ function createSessionStore({
       if (!entries || typeof entries !== 'object') return 0;
       for (const [id, session] of Object.entries(entries)) {
         if (typeof id !== 'string' || !session || typeof session !== 'object') continue;
-        if (typeof session.callsign !== 'string' || typeof session.bzid !== 'string') continue;
+        if (typeof session.callsign !== 'string') continue;
+        // `null` is a real value here, not a missing one: a proxy login has a
+        // callsign and no BZID, and dropping it on load would lose the name a
+        // restart is supposed to keep. Anything else is malformed.
+        if (session.bzid !== null && typeof session.bzid !== 'string') continue;
         if (!Number.isFinite(session.expiresAt) || isExpired(session, now)) continue;
         sessions.set(id, {
           bzid: session.bzid,

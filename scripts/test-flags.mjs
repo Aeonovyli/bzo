@@ -163,6 +163,8 @@ import {
   SHIELD_FLIGHT,
   isTeamFlag,
   keepFlagIdentity,
+  formatFlagInfo,
+  parseFlagInfo,
 } from '../public/flags.mjs';
 
 const require = createRequire(import.meta.url);
@@ -1738,6 +1740,96 @@ for (const theirs of ['ST', 'CL', 'MQ', 'SE', null]) {
   assert.equal(serverFlags.getFiredShotFlag('PZ', false), getFiredShotFlag('PZ', false));
   assert.deepEqual(serverFlags.getShotEffects('PZ'), getShotEffects('PZ'));
   assert.deepEqual(serverFlags.FLAG_TYPES.PZ, FLAG_TYPES.PZ);
+}
+
+// FlagInfo::getTextualInfo (FlagInfo.cxx:284), which is what `/flag show`
+// prints. The columns are padded exactly as upstream's `%-3d`/`%-3s`/`%-2d` pad
+// them, so a stack of these lines up the way it does on a bzfs server.
+{
+  assert.equal(
+    formatFlagInfo({
+      index: 7,
+      type: 'GM',
+      player: 3,
+      required: false,
+      grabs: 4,
+      status: 2,
+      position: { x: -12.25, y: 0, z: 138.5 },
+    }),
+    '#7   i:GM  p:3   r:0  g:4  s:2  p:{-12.3, 0.0, 138.5}',
+  );
+  // A pool slot with nothing in it yet: no type, nobody holding it, and the
+  // status that says it is not in the world.
+  assert.equal(
+    formatFlagInfo({
+      index: 12,
+      type: null,
+      player: -1,
+      required: false,
+      grabs: 0,
+      status: 0,
+      position: { x: 0, y: 0, z: 0 },
+    }),
+    '#12  i:    p:-1  r:0  g:0  s:0  p:{0.0, 0.0, 0.0}',
+  );
+  // A team flag is a required slot upstream, and the columns still line up when
+  // the abbreviation is the wide one.
+  assert.equal(
+    formatFlagInfo({
+      index: 0,
+      type: 'R*',
+      player: -1,
+      required: true,
+      grabs: 0,
+      status: 1,
+      position: { x: 100, y: 10, z: -100 },
+    }),
+    '#0   i:R*  p:-1  r:1  g:0  s:1  p:{100.0, 10.0, -100.0}',
+  );
+}
+
+// The same line read back, which is how a proxied operator's `/flag show`
+// reaches the field: upstream answers that command with this text and no flag
+// update, so the text is the only place an unidentified superflag is named.
+{
+  const line = formatFlagInfo({
+    index: 7,
+    type: 'GM',
+    player: 3,
+    required: false,
+    grabs: 2,
+    status: 2,
+    position: { x: 1.25, y: 0, z: -2.5 },
+  });
+  assert.deepEqual(parseFlagInfo(line), {
+    index: 7, type: 'GM', player: 3, required: false, grabs: 2, status: 2,
+  });
+  assert.deepEqual(parseFlagInfo(formatFlagInfo({
+    index: 0, type: 'R*', player: -1, required: true, grabs: 0, status: 1,
+    position: { x: 100, y: 10, z: -100 },
+  })), { index: 0, type: 'R*', player: -1, required: true, grabs: 0, status: 1 });
+  // A slot with no flag in it names no type, so there is nothing to reveal.
+  assert.equal(parseFlagInfo(formatFlagInfo({
+    index: 3, type: null, player: -1, required: false, grabs: 0, status: 0,
+    position: { x: 0, y: 0, z: 0 },
+  })), null);
+  // And a chat line that merely looks like one is left alone.
+  assert.equal(parseFlagInfo('look at #7 i:GM p:3 r:0 g:2 s:2'), null);
+  assert.equal(parseFlagInfo(''), null);
+}
+
+// And the pair agrees about both, since the client is what reads a reply the
+// server wrote.
+{
+  const description = {
+    index: 9, type: 'ST', player: -1, required: false, grabs: 1, status: 1,
+    position: { x: 3.5, y: 0, z: -4.25 },
+  };
+  assert.equal(serverFlags.formatFlagInfo(description), formatFlagInfo(description));
+  assert.deepEqual(
+    serverFlags.parseFlagInfo(formatFlagInfo(description)),
+    parseFlagInfo(formatFlagInfo(description)),
+  );
 }
 
 console.log('Flag flight and type tests passed');

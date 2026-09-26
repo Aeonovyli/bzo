@@ -1711,6 +1711,39 @@ export function isBadFlag(abbreviation) {
   return getFlagType(abbreviation)?.quality === FLAG_QUALITY.BAD;
 }
 
+// `/flag show`'s line, and its inverse. Upstream answers that command with one
+// of these per flag and nothing else (`FlagInfo::getTextualInfo`, and
+// `commands.cxx` sends no flag update beside it), so the text is the only
+// place the identity of an unidentified superflag is ever spoken -- every
+// `MsgFlagUpdate` masks one as Phantom Zone, for an operator as much as for
+// anybody. bzo says the same thing in the same shape, and the client learns
+// the identities by reading the reply, whether it came from bzo or from a
+// proxied bzfs.
+export function formatFlagInfo({ index, type, player, required, grabs, status, position }) {
+  const pad = (value, width) => String(value).padEnd(width);
+  return `#${pad(index, 3)} i:${pad(type || '', 3)} p:${pad(player, 3)}`
+    + ` r:${pad(required ? 1 : 0, 2)} g:${pad(grabs, 2)} s:${pad(status, 2)}`
+    + ` p:{${position.x.toFixed(1)}, ${position.y.toFixed(1)}, ${position.z.toFixed(1)}}`;
+}
+
+// Strict: anything that is not exactly this shape is a chat line that merely
+// looks like one, and is left alone. A slot with no flag in it names no type,
+// so there is nothing to learn from it either.
+const FLAG_INFO_LINE = /^#(\d+)\s+i:(\S{1,2})\s+p:(-?\d+)\s+r:(\d+)\s+g:(\d+)\s+s:(\d+)/;
+
+export function parseFlagInfo(line) {
+  const match = FLAG_INFO_LINE.exec(String(line).trim());
+  if (!match) return null;
+  return {
+    index: Number(match[1]),
+    type: match[2],
+    player: Number(match[3]),
+    required: match[4] === '1',
+    grabs: Number(match[5]),
+    status: Number(match[6]),
+  };
+}
+
 export function getTeamFlagAbbreviation(colorIndex) {
   for (const type of Object.values(FLAG_TYPES)) {
     if (type.team === colorIndex) return type.abbreviation;
