@@ -16204,16 +16204,20 @@ async function handleProxyConnection(ws, req, key, target) {
     });
 
     session.on('capture', ({ id, index, team }) => {
-      const player = session.state.players.get(id);
+      // `MsgCaptureFlag`'s team is the territory the flag was carried *into*,
+      // not the team that lost it -- upstream's own client reads the loser off
+      // the flag at that index and uses the message's team only for "took my
+      // flag into <team> territory" (`playing.cxx:2767`, :2779). bzo names the
+      // two separately, so the loser comes from the flag as well. The flag
+      // still stands here: bzfs resets it in the `MsgFlagUpdate` after this.
+      const flag = session.state.flags[index];
+      const flagTeam = flag ? (getFlagType(flag.type)?.team ?? null) : null;
       send({
         type: 'captureFlag',
         playerId: String(id),
         index,
-        // The team that lost the flag, and the base it was taken to -- which
-        // is the capper's own, since that is the only base a capture counts
-        // on. bzfs sends only the first; the second is who did it.
-        flagTeam: team,
-        baseTeam: player ? player.team : team,
+        flagTeam: flagTeam === null ? team : flagTeam,
+        baseTeam: team,
       });
     });
 
