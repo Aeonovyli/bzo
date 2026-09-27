@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.78] - 2026-09-27
+
 ### Added
 - A chevron beside the gear hides the scoreboard and the chat window together,
   leaving the name row in the corner and the chat tabs along the bottom edge.
