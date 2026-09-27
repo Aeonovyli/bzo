@@ -1435,41 +1435,10 @@ takes over the view.
 - **A click over the click-through chat panel steps the selection**, because the
   left button fires and fire steps. Accepted rather than special-cased.
 
-### TODO
+### What is not built
 
-- **Switching teams on the live connection.** Any team to any team, including in
-  and out of observer and rogue, without reconnecting. Stock BZFlag has no team
-  switch at all -- `JoinMenu` runs before the connection exists -- but a page
-  reload is a much worse price than a menu.
-
-  Most of it exists: `joinGame` handles a second arrival on the same connection,
-  reading `previousTeam`, resetting and retiring team flags either side of the
-  move, resetting the score, and refreshing the voice roster.
-  `applyXRJoinSelection()` already re-sends it, so the XR Player Options screen
-  is wired for it today. What is missing is the 2D path, which never re-sends:
-  `maybeSendPendingJoinRequest()` returns early once `gameplayJoinConfirmed` is
-  set.
-
-  **A join always respawns and zeroes the score, even onto the same team.** That
-  matches a rejoin upstream, but Player Options carries name, team and tank on
-  one screen and re-sends all three, so a *tank-only* change costs the player
-  their position and score. The carried flag already survives it, because the
-  flag drop keys off `previousTeam !== assignedTeam` rather than off the join.
-  The fix is for Player Options to route an unchanged team through
-  `setTankModel`, which touches neither flags nor position.
-
-  Also unsettled: switching to observer while alive must not become a way to
-  dodge an incoming shot. Upstream's answer is the rejoin wait, which bzo has no
-  equivalent of; losing the score may be disincentive enough.
-- Observers keep upstream's scoreboard order (`obsLast`) but the XR menu panel
-  has no target list, so in XR the cycle and `identify` are the only pickers.
-- `follow` does not reuse the death camera rig (`render.js`), which is the same
-  look-at-a-moving-target shape.
-- `XR_HELP_ITEMS` is one flat frozen list, so it cannot show the observer
-  meanings of grip and A. That wants observer-conditional rows, which is what
-  issue #27 is for.
-- Whether continuous stick yaw is comfortable in XR roam. It matches what bzo
-  already ships when driving; a comfort option is a measurement, not a guess.
+`docs/observer-plan.md`: switching teams on a live connection, the XR target
+list, and the smaller gaps.
 
 ## Map Viewer
 
