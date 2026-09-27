@@ -221,6 +221,129 @@ export function bindToggleButton(btn, {
   return refresh;
 }
 
+// Upstream gives the score sheet and the message console a key each -- `S` for
+// `toggle displayScore` and `W` for `toggleConsole` (ActionBinding.cxx:105,
+// :113). Both letters drive a tank here, so bzo puts the pair behind one
+// chevron in the scoreboard's own button row instead: on a small screen the
+// roster and the chat folder between them cover most of the battlefield, and
+// what a player wants back is the view, not one panel of the two.
+//
+// The state is still upstream's two flags rather than one, because the panels
+// do come apart: typing opens the folder without bringing the roster back, and
+// the hunt cursor opens the roster without the folder.
+const HUD_COLLAPSE_STORAGE_KEY = 'hudCollapsed';
+
+// A first visit with nothing stored starts collapsed on a phone and open
+// anywhere else. 600px is the scoreboard's own NARROW cutoff (SCOREBOARD_TIER):
+// the width at which the panel is already giving up columns to fit.
+const HUD_COLLAPSE_AUTO_WIDTH = 600;
+
+let scoreboardCollapsed = false;
+let consoleCollapsed = false;
+
+// A panel opened by the thing that needs it -- chat entry, the hunt cursor --
+// is borrowed rather than reopened, and goes back to the corner when that
+// thing is done. Only a deliberate open keeps it: the chevron, or a tap on a
+// chat tab. Upstream force-opens its score sheet for the hunt cursor and
+// leaves it open (ScoreboardRenderer.cxx:310), but upstream is answering "is
+// the sheet on", not "is the HUD out of the way", which is what someone on a
+// phone asked for.
+let scoreboardBorrowed = false;
+let consoleBorrowed = false;
+
+// The chevron points the way the panels will move: up into the corner while
+// they are showing, back down over the screen while they are away.
+function applyHudCollapse() {
+  document.body.classList.toggle('scoreboard-collapsed', scoreboardCollapsed);
+  document.body.classList.toggle('chat-collapsed', consoleCollapsed);
+  const btn = document.getElementById('hudCollapseBtn');
+  if (!btn) return;
+  const collapsed = isHudCollapsed();
+  const glyph = btn.querySelector('.settingsIcon');
+  if (glyph) glyph.textContent = collapsed ? '▼' : '▲';
+  btn.title = collapsed ? 'Show the scoreboard and chat' : 'Hide the scoreboard and chat';
+  btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+// Collapsed means both are away: with either one showing the chevron's job is
+// to put it back, so a folder opened for typing does not leave the control
+// pointing at nothing to do.
+export function isHudCollapsed() {
+  return scoreboardCollapsed && consoleCollapsed;
+}
+
+export function setHudCollapsed(collapsed) {
+  scoreboardCollapsed = Boolean(collapsed);
+  consoleCollapsed = Boolean(collapsed);
+  scoreboardBorrowed = false;
+  consoleBorrowed = false;
+  localStorage.setItem(HUD_COLLAPSE_STORAGE_KEY, scoreboardCollapsed.toString());
+  applyHudCollapse();
+}
+
+export function toggleHudCollapsed() {
+  setHudCollapsed(!isHudCollapsed());
+}
+
+// Opening one panel on its own is a step in something else -- reading a tab,
+// typing a message, picking a hunt target -- rather than an answer to "should
+// the HUD be showing", so none of these writes the stored preference. A reload
+// comes back to whatever the chevron last said.
+export function setChatCollapsed(collapsed) {
+  consoleCollapsed = Boolean(collapsed);
+  consoleBorrowed = false;
+  applyHudCollapse();
+}
+
+export function setScoreboardCollapsed(collapsed) {
+  scoreboardCollapsed = Boolean(collapsed);
+  scoreboardBorrowed = false;
+  applyHudCollapse();
+}
+
+// Borrow a collapsed panel for the length of an action. A panel already
+// showing is left alone, and is not handed back afterwards: nothing was
+// borrowed.
+export function borrowChat() {
+  if (!consoleCollapsed) return;
+  consoleBorrowed = true;
+  consoleCollapsed = false;
+  applyHudCollapse();
+}
+
+export function returnChat() {
+  if (!consoleBorrowed) return;
+  consoleBorrowed = false;
+  consoleCollapsed = true;
+  applyHudCollapse();
+}
+
+export function borrowScoreboard() {
+  if (!scoreboardCollapsed) return;
+  scoreboardBorrowed = true;
+  scoreboardCollapsed = false;
+  applyHudCollapse();
+}
+
+export function returnScoreboard() {
+  if (!scoreboardBorrowed) return;
+  scoreboardBorrowed = false;
+  scoreboardCollapsed = true;
+  applyHudCollapse();
+}
+
+export function initHudCollapse() {
+  const stored = localStorage.getItem(HUD_COLLAPSE_STORAGE_KEY);
+  const collapsed = stored === null
+    ? window.innerWidth <= HUD_COLLAPSE_AUTO_WIDTH
+    : stored === 'true';
+  scoreboardCollapsed = collapsed;
+  consoleCollapsed = collapsed;
+  scoreboardBorrowed = false;
+  consoleBorrowed = false;
+  applyHudCollapse();
+}
+
 // HUDRenderer::setAlert and renderAlerts (HUDRenderer.cxx:398, :767). Three
 // slots, each with its own clock, drawn large and centred near the top of the
 // screen with slot 0 highest. A warning takes the warning colour. Upstream lets

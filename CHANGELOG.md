@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- A chevron beside the gear hides the scoreboard and the chat window together,
+  leaving the name row in the corner and the chat tabs along the bottom edge.
+  BZFlag gives the two a key each -- `S` for the score sheet and `W` for the
+  console -- and both letters drive a tank here, so the pair sits behind one
+  control that a finger can reach. What needs a panel borrows it and gives it
+  back: typing a message opens the chat window until the caret leaves it, and
+  `U` or `7` opens the roster until the hunt cursor closes -- upstream
+  force-opens its score sheet for the cursor too, and leaves it open, having no
+  collapsed state to return to. Tapping a chat tab opens chat for good, since
+  reading a tab is not an action that ends. The chevron's own state is
+  remembered; a screen narrower than 600px starts collapsed, where the two
+  panels otherwise cover most of the battlefield. Closes #145.
+
 ## [1.2.77] - 2026-09-27
 
 ### Added

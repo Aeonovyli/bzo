@@ -345,6 +345,33 @@ canvas {
   color: var(--chat-tab-unread);
 }
 
+/* The folder shuts and the tabs stay: an unread mark is the one thing chat
+   still owes a player who is not reading it, and the tab carrying the mark is
+   also what opens the folder again. With nothing behind them to stand on they
+   close up into buttons rather than tabs -- all four corners rounded, and the
+   bottom edge they lend to the body when it is open drawn back in. */
+body.chat-collapsed #chatBody {
+  display: none;
+}
+
+body.chat-collapsed .chat-tabs {
+  margin-bottom: 0;
+  padding-bottom: var(--hud-pad);
+}
+
+body.chat-collapsed .chat-tab {
+  border-bottom: 1px solid #777;
+  border-radius: 6px;
+}
+
+body.chat-collapsed .chat-tab.active {
+  border-bottom-color: var(--chat-tab-active);
+}
+
+body.chat-collapsed .chat-tab.unread {
+  border-bottom-color: #c62828;
+}
+
 #chatWindow .chat-input-row {
   display: flex;
   align-items: center;
@@ -728,6 +755,23 @@ body {
 #scoreboard {
   border-top: 1px solid #444;
   padding-top: 1vw;
+}
+
+/* Collapsed by the chevron in the button row above (issue #145). What stays is
+   the row itself -- the name, the gear and the chevron -- so Settings is still
+   one tap away and the control that put the roster away is where it was. The
+   width clamp has to go with it, or the strip would keep the 35vw a phone
+   reserves for a roster that is no longer there. */
+body.scoreboard-collapsed #scoreboard {
+  display: none;
+}
+
+body.scoreboard-collapsed #stats {
+  margin-bottom: 0;
+}
+
+body.scoreboard-collapsed #mainhud {
+  width: auto;
 }
 
 #matchClock {

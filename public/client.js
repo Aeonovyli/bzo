@@ -145,7 +145,12 @@ import {
   readStoredFlag,
   bindToggleButton,
   fitText,
-  wrapText
+  wrapText,
+  setChatCollapsed,
+  borrowChat,
+  returnChat,
+  borrowScoreboard,
+  returnScoreboard
 } from './hud.js';
 import {
   renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
@@ -2783,6 +2788,10 @@ function announceServerTextIfChanged() {
 }
 
 function focusChatWithTarget(targetId, { clearInput = true } = {}) {
+  // A `focus()` on a hidden input does nothing at all, so anything that puts
+  // the caret in the box opens the folder first (issue #145). Borrowed, not
+  // reopened: it shuts again when the caret leaves.
+  borrowChat();
   const chatTarget = document.getElementById('chatTarget');
   const nextTarget = normalizeMessageEndpoint(targetId, CHAT_TARGET_ALL);
   if (chatTarget) {
@@ -2805,6 +2814,9 @@ function focusChatWithTarget(targetId, { clearInput = true } = {}) {
 // everything routes through focus/blur rather than tracking a flag of its own.
 function setChatEntryActive(active) {
   chatActive = active;
+  // Typing is what a folder is borrowed for, so the end of it is when one goes
+  // back. A folder opened from its tabs was never borrowed and stays.
+  if (!active) returnChat();
   document.body.classList.toggle('chat-active', active);
   if (sendBtn) {
     sendBtn.classList.toggle('active', active);
@@ -3161,6 +3173,7 @@ function toggleChatEntry() {
     chatInput.blur();
     return;
   }
+  borrowChat();
   chatInput.focus();
 }
 
@@ -5857,6 +5870,9 @@ function init() {
       if (!target) return;
       const tabId = target.getAttribute('data-chat-tab');
       if (tabId) {
+        // The tabs are all that is left of a collapsed folder, so the tap that
+        // picks a page is also the one that opens it again.
+        setChatCollapsed(false);
         setActiveChatTab(tabId);
       }
     });
@@ -7988,7 +8004,18 @@ function getScoreboardModel() {
 // DOM list is rebuilt now; the headset's panel is painted from the render loop
 // and picks the new model up on its next frame, which is also what keeps it
 // from repainting a canvas that has not changed.
+// The cursor is drawn on the roster, so a collapsed roster is borrowed for as
+// long as a hunt is being aimed and handed back once it is committed or backed
+// out of. Every path that opens or closes the cursor -- `U`, `7`, the fire key,
+// the Hunt row in Settings, a marked player leaving -- repaints the board, so
+// asking here covers all of them rather than each remembering to.
+function syncHuntScoreboard() {
+  if (huntState.isSelecting()) borrowScoreboard();
+  else returnScoreboard();
+}
+
 function refreshScoreboards() {
+  syncHuntScoreboard();
   scoreboardModel = null;
   updateScoreboard(getScoreboardModel());
   // The Hunt row reads the same roster and the same marks, so a board repaint
@@ -10146,8 +10173,9 @@ function releaseHuntSelectionKeys() {
 // running, whether the key reopens the cursor or turns hunting off.
 //
 // Upstream force-opens the scoreboard here if `displayScore` is off
-// (ScoreboardRenderer.cxx:310). bzo's board cannot be hidden, so there is
-// nothing to open.
+// (ScoreboardRenderer.cxx:310), and so does bzo: the cursor the key opens is
+// drawn on the roster, and a hunt aimed at a collapsed one would be invisible.
+// Where the two part is afterwards -- see `syncHuntScoreboard`.
 function pressHuntKey(isAdd) {
   const sound = huntState.pressHuntKey(isAdd, getHuntCandidates());
   if (sound) renderManager.playLocalSound(sound);

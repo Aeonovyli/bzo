@@ -12,6 +12,7 @@ import { getXRControllerInput, xrState } from './webxr.js';
 import { focusDialogCloseControl, focusFirstDialogControl, getMenuClickDirection, getMenuClickZone, getVisibleDialogRoot, handleDialogControllerInput, handleDialogKeydown, hideDialog, showDialog } from './menus.js';
 import { initSettingsMenu } from './settings.js';
 import { INPUT_CONTEXT, InputContextManager } from './input-context.mjs';
+import { initHudCollapse, toggleHudCollapsed } from './hud.js';
 
 // Shared virtual input state exposed to the game loop.
 export let virtualInput = { forward: 0, turn: 0, fire: false, jump: false, drop: false, identify: false };
@@ -1529,6 +1530,18 @@ function bindHudElements() {
       setWireframeMode(!wireframeEnabled);
     });
   }
+
+  // The chevron beside the gear: the roster above it and the chat folder at the
+  // foot of the screen go away together, and come back together.
+  domRefs.hudCollapseBtn = document.getElementById('hudCollapseBtn');
+  if (domRefs.hudCollapseBtn) {
+    domRefs.hudCollapseBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleHudCollapsed();
+    });
+  }
+  initHudCollapse();
 
   if (domRefs.virtualControlsBtn) {
     domRefs.virtualControlsBtn.addEventListener('click', (e) => {

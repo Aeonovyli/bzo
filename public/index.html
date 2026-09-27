@@ -199,6 +199,9 @@
       <div class="hudButtons">
         <button id="settingsBtn" title="Settings"><span class="settingsIcon">&#9881;</span></button>
         <button id="xrQuickBtn" title="Enter WebXR VR Mode"><span class="settingsIcon">&#129405;</span></button>
+        <!-- Hides the roster below it and the chat folder at the foot of the
+             screen together, leaving this row and the chat tabs behind. -->
+        <button id="hudCollapseBtn" type="button" aria-expanded="true" title="Hide the scoreboard and chat"><span class="settingsIcon">&#9650;</span></button>
       </div>
     </div>
     <div id="scoreboard">
@@ -424,6 +427,11 @@
         <li><strong>C</strong> — <b>Camera View</b> (or click the Camera button)</li>
         <li><strong>O</strong> — <b>Operator Panel</b> (or click the Operator button)</li>
         <li><strong>/</strong> or <strong>?</strong> — <b>Show/Hide Help</b> (or click the Help button)</li>
+        <li><strong>&#9650;</strong> beside the gear — <b>Hide the scoreboard and chat</b>, leaving the
+          name row and the chat tabs; <strong>&#9660;</strong> brings them back. Typing a message borrows
+          the chat window until you are done with it, and <strong>U</strong> or <strong>7</strong> borrows
+          the scoreboard until the hunt cursor closes; tapping a chat tab opens chat for good. Small
+          screens start collapsed.</li>
       </ul>
 
       <h2>Movement & Actions</h2>
