@@ -3733,7 +3733,7 @@ What is here is only what a maintainer reading the README does not need:
 
 ## Testing
 
-Three things to reach for, in the order they cost:
+Things to reach for, in the order they cost:
 
 - **`npx eslint`** over what you changed, and `node --check server.js`. The
   pre-commit hook runs eslint with `--max-warnings=0` over staged JS, so a commit
@@ -3753,7 +3753,11 @@ Three things to reach for, in the order they cost:
   ```
   node scripts/headless-client.mjs --shot /tmp/bzo.png
   node scripts/headless-client.mjs --eval 'document.getElementById("playerName").textContent'
+  node scripts/headless-client.mjs --team red
   ```
+
+  `--team` joins as that team rather than taking whatever Automatic hands out,
+  for a test that has to look like one.
 
   It renders through SwiftShader, so it answers **does this draw without
   throwing, and what does it look like** and never **how fast is this**: a
@@ -3770,6 +3774,46 @@ Three things to reach for, in the order they cost:
   to one**: `/flag give <probe name> <FlagAbbr>` typed into the chat line puts
   that flag in its hands at once and resets whatever it was holding. See
   **Testing a flag with `maps/bzo.bzw`** below for the whole set.
+
+- **`node scripts/crowd-client.mjs`**, which fills the server with parked tanks
+  to look at. It joins over the wire and runs no browser, so it answers **what
+  does a change look like across every team at once** and **what does the server
+  do with a roster this size** -- the two questions one headless Chrome cannot
+  answer, because a second one costs another GL context and about 1.6GB, and a
+  dozen will take the machine down before they tell you anything.
+
+  ```
+  node scripts/crowd-client.mjs --teams red,green,blue,purple,rogue --each 3
+  node scripts/crowd-client.mjs --spin 1 --rate 3
+  node scripts/crowd-client.mjs --url wss://bz.rikers.org/
+  ```
+
+  It parks one team per row with `/mv`, which is OPERATOR and which a loopback
+  connection gets from `localAdmin`. It reconnects after a close, because the
+  dev server reloads on every save and a fleet that had to be restarted by hand
+  each time would not survive an afternoon. It follows the server on anything
+  that moves a tank without asking -- a spawn, a respawn, an operator's `/mv` --
+  since a tank that kept reporting where it used to be would drag itself back
+  there and read as one that teleports.
+
+  `--spin` is what makes it a load test rather than a row of ornaments. A tank
+  holding still sends almost nothing: `client.js` puts a packet on the wire when
+  a speed crosses `VELOCITY_THRESHOLD`, and otherwise once per
+  `MAX_UPDATE_INTERVAL`, so a parked fleet is a fleet of idle sockets. Spinning
+  changes a speed a few times a second, which is what a player working the keys
+  does -- `--rate` sets how many, and the tanks turn on the spot rather than
+  drive so that they never disagree with the server about where they are.
+
+  What it does **not** exercise is a renderer, a collision or a shot. It is
+  packet validation, the roster and the broadcast fan-out; reach for
+  `headless-client.mjs` for anything a client has to draw.
+
+  Point `--url` at `wss://bz.rikers.org/` to go through the reverse proxy
+  rather than straight at the port, which is the route real players take --
+  see **Behind a reverse proxy** in
+  [docs/installation.md](docs/installation.md). The server costs the same
+  either way; what the proxy adds is a TLS handshake on connect and its own
+  CPU, neither of which shows up on a run against `localhost`.
 
 ### Testing a flag with `maps/bzo.bzw`
 

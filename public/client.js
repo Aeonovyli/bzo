@@ -151,6 +151,7 @@ import {
   renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
   reportAlphaWithoutThreshold, TANK_NAV_LIGHTS_NAME,
 } from './render.js';
+import { CAMO_SOURCE_TEXTURE } from './camo.mjs';
 import { describeMeasurements, describeRenderCapabilities } from './capabilities.mjs';
 import {
   describeGrowth,
@@ -1294,7 +1295,8 @@ function rebuildTankColor(playerId) {
   const tank = tanks.get(playerId);
   const state = tank?.userData?.playerState;
   if (!tank || !state) return;
-  if (getEffectiveTankColor(playerId, state.color) === tank.userData.builtColor) return;
+  if (getEffectiveTankColor(playerId, state.color) === tank.userData.builtColor
+    && getTankCamoOptions(playerId).rogue === tank.userData.builtRogue) return;
   // The live mesh position rather than the one the last roster message carried:
   // the local tank's stored state is only refreshed on a join, so rebuilding
   // from it would stand the tank back where it was then for a frame.
@@ -2363,7 +2365,7 @@ async function prepareInitialRender(message, sequenceId) {
     '/textures/boxwall.png',
     '/textures/roof.png',
     '/textures/pyrwall.png',
-    '/textures/green_tank.png',
+    CAMO_SOURCE_TEXTURE,
     '/textures/green_bolt.png',
     '/textures/shot_tail.png',
     '/textures/explode1.png',
@@ -3980,6 +3982,22 @@ function getPreviewTankColor() {
   return TANK_PREVIEW_FALLBACK_COLOR;
 }
 
+// The camo options that go with that preview colour, by the same staging rule.
+// A rogue's tank is grey wherever Rogue names a team (see getTankCamoOptions),
+// so a preview that showed the scoreboard's yellow would be promising a tank
+// the player is not about to get.
+//
+// Automatic stages nothing here, for the reason it stages no colour above: the
+// team is the server's to choose, so there is no answer yet to show. It falls
+// through to the player's own tank, or to TANK_PREVIEW_FALLBACK_COLOR's green
+// before there is one, and a rogue is not what either of those is.
+function getPreviewTankCamoOptions() {
+  const team = getSelectedPlayerTeam();
+  return {
+    rogue: team === PLAYER_TEAM.ROGUE && availablePlayerTeams.some(isColorTeam),
+  };
+}
+
 // Fill the canvas rather than a fixed 2.7 units: the frame is what the player
 // sees, and a model is only as big as its own bounding box says. The visible
 // extent is measured at the model's own distance, so the fit holds for any
@@ -4086,7 +4104,8 @@ function loadTankPreviewModel(modelPath) {
       tankPreviewCard.modelMeasure = null;
     }
 
-    const tank = renderManager.createTank(getPreviewTankColor(), '', modelPath);
+    const tank = renderManager.createTank(
+      getPreviewTankColor(), '', modelPath, getPreviewTankCamoOptions());
     if (!tank) return;
     // Two groups: the inner tank is centred and scaled to the frame, and the
     // outer one only turns. Rotating the group that carries the centring offset
@@ -6927,14 +6946,17 @@ function addPlayer(player) {
   // texture and the name label are both generated from it, so there is nothing
   // cheaper to tweak in place.
   const effectiveColor = getEffectiveTankColor(player.id, player.color);
-  const tankColorChanged = tank?.userData?.builtColor !== effectiveColor;
+  const camoOptions = getTankCamoOptions(player.id);
+  const tankColorChanged = tank?.userData?.builtColor !== effectiveColor
+    || tank?.userData?.builtRogue !== camoOptions.rogue;
   if (tank && tank.userData && (tank.userData.tankModel !== playerTankModelId || tankColorChanged)) {
     discardTank(tank, player.id);
     tank = null;
   }
 
   if (!tank) {
-    tank = renderManager.createTank(effectiveColor, player.name, playerTankModelPath);
+    tank = renderManager.createTank(
+      effectiveColor, player.name, playerTankModelPath, camoOptions);
     // No tank rather than a stand-in one: the renderer has already said on the
     // console which model it could not build, and the server does not offer a
     // model that fails the same check, so this is a model that stopped loading
@@ -6942,6 +6964,7 @@ function addPlayer(player) {
     // tries again, since nothing was put in `tanks` to skip the build.
     if (!tank) return;
     tank.userData.builtColor = effectiveColor;
+    tank.userData.builtRogue = camoOptions.rogue;
     renderManager.getWorldGroup().add(tank);
     tanks.set(player.id, tank);
 
@@ -11976,7 +11999,8 @@ function refreshTankDisguises() {
     if (playerId === myPlayerId) continue;
     const state = tank?.userData?.playerState;
     if (!state) continue;
-    if (getEffectiveTankColor(playerId, state.color) !== tank.userData.builtColor) {
+    if (getEffectiveTankColor(playerId, state.color) !== tank.userData.builtColor
+      || getTankCamoOptions(playerId).rogue !== tank.userData.builtRogue) {
       // This rebuild is for the colour alone. `state` is the last full
       // `playerUpdated` snapshot, which the server only sends on join, rename or
       // tank-model change -- not on movement, which travels over the frequent
@@ -12066,6 +12090,52 @@ function getEffectiveTankColor(playerId, color) {
     if (Number.isFinite(mine)) return mine;
   }
   return color;
+}
+
+// Upstream's `visualTeam` (Player.cxx:790): the team a tank is *drawn* as,
+// which is not always the team it is on. Upstream needs it to choose which of
+// its seven team textures to load; bzo needs it for the one thing its generated
+// camo still varies by team, which is whether a tank is a rogue and so painted
+// nearly black -- see ROGUE_CAMO_SATURATION in render.js.
+//
+// This is getEffectiveTankColor's twin and has to keep its branches, in the
+// same order: every case there swaps a colour and a team together, so a tank
+// drawn in the rabbit's grey has to be drawn with the rabbit's team as well. A
+// masquerading rogue is the case that shows why -- it wears the viewer's own
+// colour, so painting it as a rogue would black out a tank that is pretending
+// to be a team mate and give the lie away.
+function getEffectiveTankTeam(playerId) {
+  if (playerId !== myPlayerId && isColorblind()) return PLAYER_TEAM.ROGUE;
+  const team = getPlayerTeamById(playerId);
+  if (isRabbitTeam(team)) return PLAYER_TEAM.RABBIT;
+  if (playerId === myPlayerId) return team;
+  if (
+    fakesTeamColor(getPlayerFlagType(playerId))
+    && !isSeer()
+    && !isObserver()
+  ) {
+    const mine = getPlayerTeamById(myPlayerId);
+    if (mine) return mine;
+  }
+  return team;
+}
+
+// The tank build options that follow from that team. An object per call, but
+// only on a rebuild -- the once-a-frame compare below reads the boolean.
+//
+// Gated on there being colour teams at all, for the reason getPreviewTankColor
+// gives above: the question is whether Rogue names a team, and on a world
+// without colour teams it does not. Every player on such a server is nominally
+// a rogue while wearing a colour picked from the whole wheel, because that
+// colour is the only thing telling them apart -- painting the lot of them
+// upstream's near-black would throw away the distinction bzo exists to draw.
+// Rogue is only a team, and only worth drawing as one, where there are other
+// teams for it not to be.
+function getTankCamoOptions(playerId) {
+  return {
+    rogue: availablePlayerTeams.some(isColorTeam)
+      && getEffectiveTankTeam(playerId) === PLAYER_TEAM.ROGUE,
+  };
 }
 
 // ScoreboardRenderer::drawPlayerScore names a team flag after the callsign and a

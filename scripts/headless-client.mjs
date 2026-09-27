@@ -42,6 +42,9 @@ for (let i = 2; i < process.argv.length; i += 2) {
 }
 const url = args.get('url') || 'http://localhost:3000';
 const playerName = args.get('name') || 'headless';
+// The team to join as, for a probe that has to look like a particular team
+// rather than whatever Automatic hands out.
+const playerTeam = args.get('team') || '';
 const shotPath = args.get('shot') || '';
 const evalExpression = args.get('eval') || '';
 const settleSeconds = Number(args.get('seconds') || 10);
@@ -155,8 +158,15 @@ for (let second = 0; second < 45; second += 1) {
   await evaluate('(() => { const input = document.getElementById("entryInput");'
     + ' input.value = ""; input.focus(); return input === document.activeElement; })()');
   await send('Input.insertText', { text: playerName });
+  // Set where the dialog itself keeps the choice (getDialogPlayerTeam reads
+  // `dataset.team`), rather than cycling the selector button a guessed number
+  // of times -- the offered list depends on the server's team mode.
+  if (playerTeam) {
+    await evaluate('(() => { const el = document.getElementById("entryTeamSelector");'
+      + ` if (el) el.dataset.team = ${JSON.stringify(playerTeam)}; return el?.dataset.team; })()`);
+  }
   await evaluate('document.getElementById("entryOkButton").click()');
-  joined = `joined as ${playerName}`;
+  joined = `joined as ${playerName}${playerTeam ? ` on ${playerTeam}` : ''}`;
   break;
 }
 // `code` alone is what input.js reads (`e.code`), so `key` here is cosmetic --

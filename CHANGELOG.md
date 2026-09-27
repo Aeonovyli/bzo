@@ -6,6 +6,37 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Changed
+- A tank's camo is retargeted in HSV rather than tinted, so it carries more than
+  one colour. BZFlag paints a finished texture per team and draws it
+  unmodulated, which is why its four patches differ in hue and saturation and
+  not only in brightness -- bzo has a colour per player rather than per team, so
+  the pattern is generated instead: a source camo's hue is rotated until its own
+  average lands on the player's, and each texel keeps the offset it was painted
+  at. Patches above the source hue stay above the player's and ones below stay
+  below, so they read as different shades of one colour. The source's own
+  saturation decides how far a texel follows the player at all, leaving the
+  areas an artist left grey grey on every tank, and the lit areas give some of
+  their colour back the way a real highlight does. A player's own shade scales
+  the finished pattern, so two players on a team still differ in the world and
+  not only on the scoreboard. Refs #139.
+- Rogue tanks are a plain dark grey in the world, as upstream's are. BZFlag
+  paints rogue_tank.png in greys with no hue anywhere in it and gives the team
+  its yellow only on the radar and the scoreboard, which is where a rogue is
+  picked out of a list rather than off the field. bzo keeps the yellow in both
+  of those places and takes it off the tank entirely -- not a trace of it, since
+  every rogue shade bzo assigns is a yellow one and any fraction of it reads as
+  a yellow tank. A rogue lands within a few counts of upstream's own (55,55,55).
+  Only where there are colour teams for Rogue to be one of: on a world without
+  them every player is nominally a rogue while wearing a colour of their own,
+  and blacking them all out would throw that away. Refs #139.
+
+### Added
+- `scripts/crowd-client.mjs` fills a server with parked tanks over the wire, no
+  browser each, for looking at a change across every team at once.
+- `scripts/headless-client.mjs` takes `--team`, to join as one rather than
+  taking whatever Automatic hands out.
+
 ## [1.2.73] - 2026-09-27
 
 ### Changed

@@ -38,6 +38,14 @@ import {
 } from './collision.mjs';
 import { createBuriedTriangleTest } from './face-trim.mjs';
 import {
+  CAMO_SOURCE_TEXTURE,
+  camoColor,
+  camoPaintColor,
+  referenceHue,
+  rgbToHsv,
+  wrapSignedTurns,
+} from './camo.mjs';
+import {
   TRACK_TREAD_LEFT,
   TRACK_TREAD_RIGHT,
   TREAD_INSIDE,
@@ -254,6 +262,7 @@ void main() {
 export const TANK_NAV_LIGHTS_NAME = 'navLights';
 
 const TANK_WHEEL_OUTWARD_NUDGE = 0.02;
+
 const MOUNTAIN_TEXTURE_PATHS = [
   '/textures/mountain1.png',
   '/textures/mountain2.png',
@@ -6838,7 +6847,7 @@ class RenderManager {
       + ' See docs/tank-model-format.md for the object names a model must carry.');
   }
 
-  _createTankFromTemplate(color = 0x4caf50, name = '', modelPath = this._tankModelPath) {
+  _createTankFromTemplate(color = 0x4caf50, name = '', modelPath = this._tankModelPath, options = {}) {
     const template = this._tankTemplateByPath.get(modelPath);
     if (!template) {
       this._preloadTankModel(modelPath);
@@ -6881,13 +6890,13 @@ class RenderManager {
       this.updateSpriteLabel(sprite, name, color);
     }
 
-    const bodyTexture = this._createTankTexture(color);
+    const bodyTexture = this._createTankTexture(color, options);
     const treadTexture = this._createTreadTexture();
     const treadTextureRotated = treadTexture.clone();
     treadTextureRotated.rotation = Math.PI / 2;
     treadTextureRotated.center.set(0.5, 0.5);
     treadTextureRotated.needsUpdate = true;
-    const treadCapTexture = this._createTreadCapTexture(color);
+    const treadCapTexture = this._createTreadCapTexture(color, options);
 
     const treadCapTextureSide = treadCapTexture.clone();
     treadCapTextureSide.repeat.set(3.0, 1.0);
@@ -6984,8 +6993,8 @@ class RenderManager {
   // reads as a broken asset. The server keeps an unbuildable model out of the
   // picker in the first place (`getAvailableTankModels`), so a null here is a
   // model that passed that check and then failed to load.
-  createTank(color = 0x4caf50, name = '', modelPath = this._tankModelPath) {
-    const tank = this._createTankFromTemplate(color, name, modelPath);
+  createTank(color = 0x4caf50, name = '', modelPath = this._tankModelPath, options = {}) {
+    const tank = this._createTankFromTemplate(color, name, modelPath, options);
     if (!tank) return null;
     tank.userData.modelPath = modelPath;
     return tank;
@@ -7218,7 +7227,78 @@ class RenderManager {
     return texture;
   }
 
-  _paintTintedBZFlagTankTexture(ctx, canvas, image, baseColor) {
+  // The camo source, read once and kept as a palette rather than as pixels.
+  //
+  // A tank is rebuilt whenever its effective colour changes -- picking up
+  // Masquerade or Colourblindness does it, and so does every join -- and the
+  // source is only ever 128x128 with well under 256 distinct colours in it,
+  // because it was painted as flat camo patches with antialiased edges. So the
+  // conversion runs over the palette and the pixels are filled by index: a
+  // rebuild costs one HSV round trip per distinct colour instead of one per
+  // texel. That matters on the low-powered clients bzo targets, where the main
+  // thread is the budget.
+  //
+  // `hue` is each entry's offset from the source's own average hue rather than
+  // its absolute hue, so painting only has to add the player's. The average is
+  // weighted by saturation: a grey texel has no hue worth averaging in, and
+  // letting it vote would drag the reference towards whatever rounding left
+  // behind in it.
+  _getCamoSource(path, image) {
+    if (!this._camoSources) this._camoSources = new Map();
+    const cached = this._camoSources.get(path);
+    if (cached) return cached;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth || image.width;
+    canvas.height = image.naturalHeight || image.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(image, 0, 0);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    const texels = canvas.width * canvas.height;
+    const indices = new Uint16Array(texels);
+    const byColor = new Map();
+    const hue = [];
+    const saturation = [];
+    const value = [];
+    // How many texels each palette entry covers, so the reference hue is the
+    // average of the picture rather than of its colour list -- a colour on one
+    // antialiased edge would otherwise weigh as much as the body of the tank.
+    const coverage = [];
+
+    for (let i = 0, texel = 0; texel < texels; i += 4, texel += 1) {
+      const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+      let index = byColor.get(key);
+      if (index === undefined) {
+        index = hue.length;
+        byColor.set(key, index);
+        const hsv = rgbToHsv(data[i] / 255, data[i + 1] / 255, data[i + 2] / 255);
+        hue.push(hsv.h);
+        saturation.push(hsv.s);
+        value.push(hsv.v);
+        coverage.push(0);
+      }
+      indices[texel] = index;
+      coverage[index] += 1;
+    }
+
+    const reference = referenceHue(hue, saturation, coverage);
+    const source = {
+      width: canvas.width,
+      height: canvas.height,
+      indices,
+      // Signed, so a patch painted above the reference hue stays above the
+      // player's and one painted below stays below.
+      hueOffset: Float32Array.from(hue, (h) => wrapSignedTurns(h - reference)),
+      saturation: Float32Array.from(saturation),
+      value: Float32Array.from(value),
+      rgb: new Uint8ClampedArray(hue.length * 3),
+    };
+    this._camoSources.set(path, source);
+    return source;
+  }
+
+  _paintCamoTankTexture(ctx, canvas, image, baseColor, options = {}) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (!image) {
@@ -7227,35 +7307,42 @@ class RenderManager {
       return;
     }
 
-    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-    const tint = new THREE.Color(baseColor);
-    const tintR = tint.r * 255;
-    const tintG = tint.g * 255;
-    const tintB = tint.b * 255;
+    const source = this._getCamoSource(CAMO_SOURCE_TEXTURE, image);
+    const base = new THREE.Color(baseColor);
+    const player = rgbToHsv(base.r, base.g, base.b);
 
-    for (let i = 0; i < data.length; i += 4) {
-      const alpha = data[i + 3];
-      if (alpha === 0) continue;
-
-      const luminance = (
-        (0.2126 * data[i]) +
-        (0.7152 * data[i + 1]) +
-        (0.0722 * data[i + 2])
-      ) / 255;
-      const shaded = 0.28 + (luminance * 0.92);
-      data[i] = Math.max(0, Math.min(255, tintR * shaded));
-      data[i + 1] = Math.max(0, Math.min(255, tintG * shaded));
-      data[i + 2] = Math.max(0, Math.min(255, tintB * shaded));
+    // A rogue is drained and darkened rather than given a pattern of its own,
+    // so its camo still falls in the same places as everyone else's.
+    const palette = source.rgb;
+    for (let i = 0; i < source.hueOffset.length; i += 1) {
+      const rgb = camoColor(
+        source.hueOffset[i], source.saturation[i], source.value[i], player, options.rogue,
+      );
+      palette[i * 3] = rgb.r * 255;
+      palette[(i * 3) + 1] = rgb.g * 255;
+      palette[(i * 3) + 2] = rgb.b * 255;
     }
 
+    const imageData = ctx.createImageData(canvas.width, canvas.height);
+    const out = imageData.data;
+    const { indices } = source;
+    for (let texel = 0, i = 0; texel < indices.length; texel += 1, i += 4) {
+      const entry = indices[texel] * 3;
+      out[i] = palette[entry];
+      out[i + 1] = palette[entry + 1];
+      out[i + 2] = palette[entry + 2];
+      out[i + 3] = 255;
+    }
     ctx.putImageData(imageData, 0, 0);
   }
 
-  _createTankTexture(baseColor) {
+  _createTankTexture(baseColor, options = {}) {
     return this._createTintedTexture(
-      '/textures/green_tank.png', 128, 128, this._paintTintedBZFlagTankTexture, baseColor,
+      CAMO_SOURCE_TEXTURE, 128, 128,
+      function paint(ctx, canvas, image, color) {
+        this._paintCamoTankTexture(ctx, canvas, image, color, options);
+      },
+      baseColor,
       { srgb: false });
   }
 
@@ -7706,13 +7793,17 @@ class RenderManager {
     return texture;
   }
 
-  _createTreadCapTexture(baseColor = 0x646464) {
+  _createTreadCapTexture(baseColor = 0x646464, options = {}) {
     const canvas = document.createElement('canvas');
     canvas.width = 128;
     canvas.height = 128;
     const ctx = canvas.getContext('2d');
 
-    const color = new THREE.Color(baseColor);
+    // Through the same rogue treatment the body's camo gets, or a rogue keeps
+    // yellow treads on a grey tank -- see camoPaintColor.
+    const source = new THREE.Color(baseColor);
+    const paint = camoPaintColor(rgbToHsv(source.r, source.g, source.b), options.rogue);
+    const color = new THREE.Color(paint.r, paint.g, paint.b);
     const darkened = color.clone().multiplyScalar(0.5);
     const r = Math.round(darkened.r * 255);
     const g = Math.round(darkened.g * 255);
