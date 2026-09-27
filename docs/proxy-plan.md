@@ -205,10 +205,22 @@ against a registry.
    verified, since a token is answered once -- and the cheating decision,
    which wants settling before this lands rather than after.
 
-2. **Trace a forwarded shot on the client.** A shot's path is client-side work
-   upstream and bzo's client does not do it, so a proxied shot passes through
-   a wall and a Laser arrives without its beam. This is the client learning to
-   fly a shot it was given, not the proxy simulating one.
+   What bzfs asks of a shot is worth having before that starts, because it
+   drops one that fails without a word (`shotFired`, bzfs.cxx:4075):
+   `FiringInfo::lifetime` has to be the world's `_reloadTime` within an
+   epsilon -- the reload, not the flag's own shot life -- the speed no more
+   than `_shotSpeed` plus the tank's, and the origin within
+   `_tankSpeed * _velocityAd + 2 * _muzzleFront` of the shooter's last state.
+   That last one is why upstream sends a player update immediately before
+   every shot (`LocalPlayer::fireShot`), and a proxied shot needs the same
+   pair. `_reloadTime` on a real target is the expression
+   `_shotRange / _shotSpeed`, so a BZDB value read for arithmetic has to be
+   evaluated rather than parsed.
+
+2. **Trace a forwarded shell on the client.** A shot's path is client-side
+   work upstream and bzo's client does it only for a beam, so a proxied shell
+   passes through a wall it should have stopped at. This is the client
+   learning to fly a shot it was given, not the proxy simulating one.
 
 3. **Multi-world only if something wants two local maps on one host** -- never
    a prerequisite for any of the above, since several proxied targets are not

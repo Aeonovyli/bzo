@@ -16020,22 +16020,6 @@ const PROXY_DEFAULT_SHOT_LIFETIME = 3.5;
 // How long until a shot crosses the world's boundary, in seconds, or Infinity
 // for one that never will. Only the two horizontal axes: a shot leaves
 // through a wall, and the world has no ceiling to leave through.
-function timeToLeaveWorld(message, shot, halfWidth) {
-  const speed = Math.hypot(shot.velocity[0], shot.velocity[1]);
-  if (!(speed > 0)) return Infinity;
-  let soonest = Infinity;
-  for (const [position, velocity] of [
-    [message.x, shot.velocity[0]],
-    [message.z, -shot.velocity[1]],
-  ]) {
-    if (velocity === 0) continue;
-    const edge = velocity > 0 ? halfWidth : -halfWidth;
-    const seconds = (edge - position) / velocity;
-    if (seconds >= 0 && seconds < soonest) soonest = seconds;
-  }
-  return soonest;
-}
-
 // The four team flags, by the abbreviations both bzo and BZFlag give them.
 const TEAM_FLAG_ABBREVIATIONS = new Set(['R*', 'G*', 'B*', 'P*']);
 
@@ -16090,6 +16074,13 @@ const PROXY_DEATH_REASONS = Object.freeze([
 
 // The one message an ordinary connection gets on open, built from a target's
 // answer to `MsgEnter` instead of from this server's own game.
+// `MsgGameSettings` as its option bits, or null before it has arrived.
+function proxyGameOptions(session) {
+  const settings = session.state.gameSettings;
+  if (!settings || settings.length < 30) return null;
+  return decodeGameSettings(settings).gameOptionsBits;
+}
+
 function buildProxyInit(session, mapEntry, viewer) {
   const players = [...session.state.players.values()]
     .map((player) => proxyPlayerRecord(player, session.state.motion.get(player.id)));
@@ -16120,9 +16111,22 @@ function buildProxyInit(session, mapEntry, viewer) {
     // This server's own physics, over which the client lays the imported map's
     // `gameplay` -- which is where the target's own `-set` lines already are,
     // carried in by the importer. A per-target config of its own is step 4.
-    config: Object.fromEntries(
-      Object.entries(GAME_CONFIG).filter(([key]) => key !== 'MAP_SIZE'),
-    ),
+    //
+    // Ricochet is the exception, read off the live connection rather than the
+    // import: a target's `-r` can be switched on without its world changing,
+    // so nothing would re-import, and the client decides with this whether a
+    // shot it is flying bounces.
+    config: {
+      ...Object.fromEntries(
+        Object.entries(GAME_CONFIG).filter(([key]) => key !== 'MAP_SIZE'),
+      ),
+      ALL_SHOTS_RICOCHET: proxyGameOptions(session) !== null
+        && (proxyGameOptions(session) & GAME_OPTION_BITS.ricochet) !== 0,
+    },
+    // Nothing here simulates a shot: upstream leaves a shot's path to each
+    // client and so does this connection, which is what the proxy cannot do
+    // for it -- the target never says where a shell stopped.
+    clientTracesShots: true,
     teamMode: resolveTeamMode(serverConfig.teamMode, mapEntry.teamMode, MAX_REAL_PLAYERS, null),
     teamScores: proxyTeamScores(session.state.teams),
     liveConfigKeys: [],
@@ -16238,9 +16242,7 @@ async function handleProxyConnection(ws, req, key, target) {
     const physics = proxyPhysics(mapEntry);
     // Which of upstream's switches the target has on (`MsgGameSettings`, asked
     // for on the way in). Ricochet is the one a forwarded shot needs.
-    const gameOptions = state.gameSettings && state.gameSettings.length >= 30
-      ? decodeGameSettings(state.gameSettings).gameOptionsBits
-      : 0;
+    const gameOptions = proxyGameOptions(session) ?? 0;
 
     // One batch a tick rather than a frame per update, which is what bzo's own
     // game loop does with the same messages (`flushMoveBroadcasts`) and at the
@@ -16299,11 +16301,10 @@ async function handleProxyConnection(ws, req, key, target) {
         type: 'killed',
         victimId: String(death.victim),
         shooterId: String(death.killer),
-        // The shot's own id is the killer's `MsgShotBegin` number, which is a
-        // per-player slot rather than the globally unique projectile id bzo
-        // draws with -- so the client is told which player, not which bolt,
-        // until shots themselves are forwarded.
-        projectileId: null,
+        // The killing bolt, by the same name the forwarded `shotBegin` gave
+        // it. Upstream packs the shot id signed and spends -1 on a death no
+        // shot caused, which is the one value that names nothing.
+        projectileId: death.shotId === -1 ? null : `${death.killer}-${death.shotId & 0xffff}`,
         reason: PROXY_DEATH_REASONS[death.reason] || 'shot',
         suicide: death.victim === death.killer,
         // What each tank was holding when it happened, which is why upstream
@@ -16425,20 +16426,11 @@ async function handleProxyConnection(ws, req, key, target) {
       });
     };
 
-    const worldHalfWidth = (mapEntry.mapSize || DEFAULT_MAP_SIZE) / 2;
-
     session.on('shotBegin', (shot) => {
       const message = proxyShot(shot, ricochetAll);
       // A lifetime of zero would be a shot that never ends; upstream's own
       // default stands in for a target that sends one.
-      const lifetime = Math.min(
-        shot.lifetime > 0 ? shot.lifetime : PROXY_DEFAULT_SHOT_LIFETIME,
-        // Or until it leaves the world, whichever comes first. Upstream has
-        // no message for this either -- a shot past the walls is one every
-        // client stops drawing on its own -- and a shot that flew its whole
-        // range would otherwise explode hundreds of units off the map.
-        timeToLeaveWorld(message, shot, worldHalfWidth),
-      );
+      const lifetime = shot.lifetime > 0 ? shot.lifetime : PROXY_DEFAULT_SHOT_LIFETIME;
       shotsInFlight.set(message.id, {
         x: message.x,
         y: message.y,
@@ -16447,12 +16439,10 @@ async function handleProxyConnection(ws, req, key, target) {
         vy: shot.velocity[2],
         vz: -shot.velocity[1],
         at: message.createdAt,
-        // Reason 1: it ran out, it did not hit anything. Both wires agree
-        // about this byte -- upstream ends a shot with `reason == 0` meaning
-        // "show the explosion" (`playing.cxx:2978`) and bzo's client draws an
-        // impact for exactly the same value -- so a shot that simply expired,
-        // a shock wave above all, fades rather than going off.
-        expiry: setTimeout(() => endShot(message.id, 1), lifetime * 1000),
+        // Only to forget it: a shot that runs out of life is retired by the
+        // client that flew it, at the life its flag really has rather than
+        // the reload time the wire carries.
+        expiry: setTimeout(() => shotsInFlight.delete(message.id), lifetime * 1000),
       });
       send(message);
     });

@@ -337,6 +337,8 @@ import {
   movingTankOverlapsHeight,
   pyramidIntersectsTank,
   reflectShotDirection,
+  findShotEmbeddedObstacle,
+  findShotSegmentImpact,
   testOrigRectCircle,
   testOrigRectTank,
   TANK_HALF_LENGTH,
@@ -6222,6 +6224,7 @@ function handleServerMessage(message) {
       matchTimeLeft = typeof message.timeLeft === 'number' ? message.timeLeft : null;
       matchTimeReceivedAt = sampleEpochClock();
       matchGameOver = Boolean(message.gameOver);
+      clientTracesShots = message.clientTracesShots === true;
       if (Array.isArray(message.liveConfigKeys)) liveConfigKeys = message.liveConfigKeys;
       if (message.operatorConfig && typeof message.operatorConfig === 'object') {
         serverOperatorConfig = message.operatorConfig;
@@ -7064,17 +7067,25 @@ function createProjectile(data) {
   if (isPreviewingAltWorld()) return;
   const effects = getShotEffects(data.flag ?? null);
 
-  // A beam was traced whole by the server and does not move, so there is no
+  // A beam is traced whole when it is fired and does not move, so there is no
   // local copy to re-anchor and nothing to integrate: it is drawn from the
-  // segments that arrived with it.
+  // segments it was given, or from the ones traced here when it arrived
+  // without any -- a proxied target leaves the path to each of its clients.
   if (effects.beam) {
     // A laser wears its shooter's colour; a thief's beam is cyan for everybody,
     // because `thiefNodes[i]->setColor(0, 1, 1)` never asks who fired it.
     const beamColor = effects.beamColor === null
       ? getPlayerShotColor(data.playerId)
       : new THREE.Color(effects.beamColor);
+    const segments = Array.isArray(data.segments) ? data.segments : traceBeamSegments(
+      { x: data.x, y: data.y, z: data.z },
+      { x: data.dirX, y: Number.isFinite(data.dirY) ? data.dirY : 0, z: data.dirZ },
+      getShotSpeed(data.flag ?? null) * getShotLifetimeSeconds(data.flag ?? null),
+      data.ricochet === true,
+    );
     const beam = renderManager.createShotBeam({
       ...data,
+      segments,
       color: beamColor.getHex(),
       fireSound: effects.fireSound,
       // The shooter fired the report and the flash itself, the moment it pulled
@@ -7087,7 +7098,8 @@ function createProjectile(data) {
     beam.userData.shotSlot = Number.isInteger(data.shotSlot) ? data.shotSlot : 0;
     beam.userData.radarColor = `#${beamColor.getHexString()}`;
     beam.userData.flag = data.flag ?? null;
-    beam.userData.segments = Array.isArray(data.segments) ? data.segments : [];
+    beam.userData.segments = segments;
+    beam.userData.lifetimeSeconds = getShotLifetimeSeconds(data.flag ?? null);
     beam.userData.lifeFactor = effects.lifeFactor;
     beam.userData.hiddenOnRadar = effects.hiddenOnRadar;
     projectiles.set(data.id, beam);
@@ -7955,6 +7967,10 @@ let currentMapFile = '';
 // Sent in `init`: the settings that can change without starting a new game.
 // Read rather than duplicated, so the confirm's label cannot promise something
 // the server will not do.
+// Whether this connection's shots are this client's to fly to their end. A
+// bzo server traces every shot and says where it stopped; a proxied target
+// leaves that to each client the way upstream always has.
+let clientTracesShots = false;
 let liveConfigKeys = ['serverName', 'motd', 'shotMaxActive', 'ricochet'];
 // Sent in `init` too: what every setting the panel offers is currently set to.
 // The three live ones are read from the live config below instead, since a
@@ -11589,6 +11605,149 @@ function traceShotThroughTeleporters(start, dir, travelDistance, reentryBlockTel
   };
 }
 
+// The first teleporter event on one segment: the portal a beam enters, or the
+// frame it hits. traceShotThroughTeleporters asks the same two questions over a
+// whole simulation step; a beam has to ask them a segment at a time, because
+// over a laser's range a wall stands between the muzzle and a portal far more
+// often than not.
+function findSegmentTeleporterEvent(from, to, blockedTeleporterIndex, blockedDistance) {
+  let earliest = null;
+  for (const obs of TELEPORTER_OBSTACLES_BY_INDEX.values()) {
+    const crossing = getShotTeleporterCrossing(from, to, obs);
+    if (crossing) {
+      const blocked = blockedTeleporterIndex !== null
+        && blockedDistance > 1e-6
+        && obs.teleporterIndex === blockedTeleporterIndex;
+      if (!blocked && (!earliest || crossing.t < earliest.event.t)) {
+        earliest = { obs, type: 'teleport', event: crossing };
+      }
+    }
+    const frameHit = getShotTeleporterFrameHit(from, to, obs);
+    if (frameHit && (!earliest || frameHit.t < earliest.event.t)) {
+      earliest = { obs, type: 'frameHit', event: frameHit };
+    }
+  }
+  return earliest;
+}
+
+// makeSegments' own maxSegment.
+const MAX_BEAM_SEGMENTS = 100;
+// traceShotStep's own clearance, so a beam's bounce and a shot's agree.
+const BEAM_SURFACE_CLEARANCE = SHOT_BOUNCE_CLEARANCE;
+
+// A beam's whole path, walked where nobody handed one over: a proxied target
+// traces the beam on each of its own clients and forwards no path, so this
+// walks it here instead. Same order as the server's traceShotBeam -- building,
+// ground, teleporter, bounce -- minus the tank hits, which stay the shooting
+// server's to decide.
+function traceBeamSegments(start, dir, range, ricochet) {
+  const obstacles = getCollisionColliders();
+  const segments = [];
+  let point = { ...start };
+  let drawFrom = { ...point };
+  let direction = { ...dir };
+  let remaining = range;
+  let blockedTeleporterIndex = null;
+  let blockedDistance = 0;
+  let justTeleported = false;
+
+  for (let segment = 0; segment < MAX_BEAM_SEGMENTS && remaining > 1e-6; segment++) {
+    const far = {
+      x: point.x + (direction.x * remaining),
+      y: point.y + (direction.y * remaining),
+      z: point.z + (direction.z * remaining),
+    };
+    const groundFraction = (direction.y < 0 && far.y < 0)
+      ? (0 - point.y) / (direction.y * remaining)
+      : Infinity;
+    const embedded = findShotEmbeddedObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS);
+    const impact = embedded
+      ? (justTeleported ? null : { fraction: 0, obstacle: embedded, face: null })
+      : findShotSegmentImpact(obstacles, point, far, SHOT_COLLISION_RADIUS);
+    const obstacleFraction = impact ? impact.fraction : Infinity;
+    justTeleported = false;
+
+    let reason = 'range';
+    let obstacle = null;
+    let obstacleFace = null;
+    let fraction = 1;
+    if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
+      reason = 'obstacle';
+      obstacle = impact.obstacle;
+      obstacleFace = impact.face ?? null;
+      fraction = obstacleFraction;
+    } else if (groundFraction < 1) {
+      reason = 'ground';
+      fraction = groundFraction;
+    }
+    let end = {
+      x: point.x + ((far.x - point.x) * fraction),
+      y: reason === 'ground' ? 0 : point.y + ((far.y - point.y) * fraction),
+      z: point.z + ((far.z - point.z) * fraction),
+    };
+
+    const teleporterEvent = findSegmentTeleporterEvent(point, end, blockedTeleporterIndex, blockedDistance);
+    if (teleporterEvent) {
+      end = { ...teleporterEvent.event.point };
+      reason = teleporterEvent.type === 'frameHit' ? 'frame_hit' : 'teleport';
+      obstacle = teleporterEvent.type === 'frameHit' ? teleporterEvent.obs : null;
+      obstacleFace = null;
+    }
+
+    segments.push({ from: { ...drawFrom }, to: { ...end }, end: reason });
+    const travelled = Math.hypot(end.x - point.x, end.y - point.y, end.z - point.z);
+    remaining = Math.max(0, remaining - travelled);
+    blockedDistance = Math.max(0, blockedDistance - travelled);
+    if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
+
+    if (reason === 'teleport') {
+      const sourceFaceId = teleporterEvent.event.sourceFaceId;
+      const destinations = TELEPORTER_LINKS_BY_SOURCE_FACE.get(sourceFaceId) || [];
+      const destFaceId = destinations.length > 0
+        ? destinations[0]
+        : ((Math.floor(sourceFaceId / 2) * 2) + (1 - (sourceFaceId % 2)));
+      const destTeleporterIndex = Math.floor(destFaceId / 2);
+      const destObs = TELEPORTER_OBSTACLES_BY_INDEX.get(destTeleporterIndex);
+      if (!destObs) break;
+      const transformed = transformShotThroughTeleporter(
+        end, direction, teleporterEvent.obs, sourceFaceId % 2, destObs, destFaceId % 2
+      );
+      point = {
+        x: transformed.pointOut.x + (transformed.dirOut.x * BEAM_SURFACE_CLEARANCE),
+        y: transformed.pointOut.y + (transformed.dirOut.y * BEAM_SURFACE_CLEARANCE),
+        z: transformed.pointOut.z + (transformed.dirOut.z * BEAM_SURFACE_CLEARANCE),
+      };
+      direction = transformed.dirOut;
+      drawFrom = { ...point };
+      justTeleported = true;
+      blockedTeleporterIndex = destTeleporterIndex;
+      blockedDistance = Math.max(
+        SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE,
+        (getShotTeleporterDims(destObs).activeHalfD * 2) + 0.05,
+      );
+      continue;
+    }
+
+    if (ricochet && (reason === 'obstacle' || reason === 'ground' || reason === 'frame_hit')) {
+      const normal = reason === 'ground'
+        ? { x: 0, y: 1, z: 0 }
+        : getShotObstacleNormal(obstacle, end.x, end.y, end.z, SHOT_COLLISION_RADIUS, obstacleFace);
+      direction = reflectShotDirection(direction.x, direction.y, direction.z, normal);
+      drawFrom = { ...end };
+      point = {
+        x: end.x + (normal.x * BEAM_SURFACE_CLEARANCE),
+        y: end.y + (normal.y * BEAM_SURFACE_CLEARANCE),
+        z: end.z + (normal.z * BEAM_SURFACE_CLEARANCE),
+      };
+      continue;
+    }
+
+    break;
+  }
+
+  return segments;
+}
+
 function isShotTeleportDebugEnabled() {
   try {
     return localStorage.getItem('debugShotTeleports') === '1';
@@ -12636,7 +12795,7 @@ function updateProjectiles(deltaTime) {
   }
 
   while (projectileSimAccumulator >= SHOT_SIM_STEP_SECONDS) {
-    projectiles.forEach((projectile) => {
+    projectiles.forEach((projectile, id) => {
       // A beam does not travel: the server traced its whole path when it was
       // fired and the shot is a line until it fades. Neither does a shock wave:
       // it stays where it was fired and grows, which is a per-frame job rather
@@ -12725,6 +12884,9 @@ function updateProjectiles(deltaTime) {
             y: impact.y + (normal.y * SHOT_BOUNCE_CLEARANCE),
             z: impact.z + (normal.z * SHOT_BOUNCE_CLEARANCE),
           };
+        } else if (clientTracesShots) {
+          removeProjectile(id, 0, impact.x, impact.y, impact.z);
+          return;
         } else {
           projectile.position.x = impact.x;
           projectile.position.y = impact.y;
@@ -12777,6 +12939,14 @@ function updateProjectiles(deltaTime) {
         ricochet: ownRicochet,
         justTeleported: frameBounceStart ? false : traced.teleports > 0,
       });
+      // Where the server owns the shot it says where it stopped, and this
+      // leaves an ordinary stop to it. Where the client owns it, this is the
+      // only thing that will: a building or the ground ends the shot right
+      // here, with the impact a `shotEnd` of reason 0 would have drawn.
+      if (clientTracesShots && step.bounces === 0 && (step.obstacle || step.ground)) {
+        removeProjectile(id, 0, step.x, step.y, step.z);
+        return;
+      }
       if (!ownRicochet && step.bounces === 0) return;
       projectile.position.x = step.x;
       projectile.position.y = step.y;
@@ -12808,6 +12978,25 @@ function updateProjectiles(deltaTime) {
   });
   if (hasGuided) renderManager.advanceMissileFrames(projectiles);
   renderManager.updateGMPuffs(clampedDelta);
+
+  // ShotStrategy::isActive: a shot's life is something the client already
+  // knows, so where it owns the path it owns the clock too and drops the shot
+  // when the life is up, with no impact -- upstream's own clients each expire
+  // their copy and no message says so. A beam is expired this way whoever
+  // owns it: the wire carries a reload time rather than a beam's own short
+  // life, and bzo's `shotEnd` lands at the same moment anyway.
+  projectiles.forEach((projectile, id) => {
+    if (!projectile.userData.beam && !clientTracesShots) return;
+    const createdAt = Number.isFinite(projectile.userData.createdAt)
+      ? projectile.userData.createdAt
+      : frameEpochMs;
+    const lifetimeSeconds = Number.isFinite(projectile.userData.lifetimeSeconds)
+      ? projectile.userData.lifetimeSeconds
+      : getShotLifetimeSeconds(projectile.userData.flag ?? null);
+    if ((frameEpochMs - createdAt) / 1000 < lifetimeSeconds) return;
+    renderManager.removeProjectile(projectile);
+    projectiles.delete(id);
+  });
 
   // ShockWaveStrategy::update, which upstream runs on the frame rather than on a
   // simulation step because nothing about it is integrated: the radius is a

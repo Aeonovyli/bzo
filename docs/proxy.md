@@ -241,7 +241,8 @@ than bzo's client needs to hear, and the proxy keeps the clock for it.
   ending itself, at the shot's own lifetime or the world's edge, whichever
   comes first, and sends it as reason 1 -- both wires spend that byte the same
   way, `0` meaning "show the explosion", so a shock wave fades rather than
-  going off.
+  going off. A beam is the exception: the wire carries a reload time rather
+  than a beam's own short life, so the client expires it on its own clock.
 - **A liveness change is not in a position update.** A `pmBatch` says where a
   tank is and not whether it is in the game, so a tank already alive when a
   connection opened -- one whose `MsgAlive` nobody here was present for --
@@ -303,10 +304,10 @@ prints it as plain text without creating a session.
   shooting or grabbing is forwarded, because bzfs is client-authoritative for
   exactly those things and bzo's client has never had to say them. That is the
   bulk of `docs/proxy-plan.md`.
-- **A shot's path.** Tracing a shot against the world is client-side work
-  upstream, and bzo's client does not do it, so a proxied shot passes through
-  a wall it should have stopped at, and a Laser arrives without the segments
-  bzo draws a beam from.
+- **A shell's path.** Tracing a shot against the world is client-side work
+  upstream, and bzo's client does it only for a beam, which arrives with no
+  segments and is traced where it is drawn. A shell still passes through a
+  wall it should have stopped at.
 - **A reconnect stays verified.** bzflag.org answers a token once, so the
   browser's next connection rejoins under the same callsign but unverified --
   which a registered callsign earns bzfs's "You must use global
