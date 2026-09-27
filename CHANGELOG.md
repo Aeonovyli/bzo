@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.76] - 2026-09-27
+
 ### Added
 - The chat entry recalls what you have typed before, with `Up` and `Down`.
   BZFlag keeps the last twenty lines, newest first, and a line said twice moves
@@ -22,7 +24,7 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   list the candidates in the Misc tab, and a bare `#` asks who is in which slot.
   The command names come from the server rather than a list kept in the client,
   so they cannot drift, and an operator's own commands appear once they log in.
-  Refs #143.
+  Closes #143.
 
 ## [1.2.75] - 2026-09-27
 
