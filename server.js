@@ -16111,6 +16111,11 @@ function buildProxyInit(session, mapEntry, viewer) {
     type: 'init',
     clientBuild: CLIENT_BUILD,
     serverVersion: SERVER_VERSION,
+    // A proxied session's chat goes to the target, and so do its commands --
+    // bzo's own table is not what answers them, and this server has no list of
+    // the target's. Completion falls back to the client's local commands and
+    // the callsigns it can see.
+    commands: [],
     // The target knows this viewer as an observer under the callsign it was
     // given, and the browser is told exactly that -- including the name, which
     // is why the entry dialog cannot rename it.
@@ -16754,6 +16759,16 @@ wss.on('connection', (ws, req) => {
     serverVersion: SERVER_VERSION,
     player: player.getState(isAdmin(player)),
     players: getRosterFor(player),
+    // The names the chat entry's Tab completes to, this server's own table
+    // rather than a copy of it kept in the client -- upstream hardcodes the
+    // list on the client side (`DefaultCompleter`, AutoCompleter.cxx:157) and
+    // it drifts from bzfs. `operator` is the tier, so the client can drop the
+    // ones this player may not run without being sent a second list when they
+    // log in and may.
+    commands: [...SERVER_COMMANDS.values()].map((command) => ({
+      name: command.name,
+      operator: command.tier === COMMAND_TIER.OPERATOR,
+    })),
     config: clientGameConfig,
     teamMode: TEAM_MODE,
     teamScores: getTeamScoreState(),

@@ -62,6 +62,10 @@ A `zoneflag WA` is ignored and `WA` never spawns.
   always safe to press one more time
 - `1` / `2` / `3` / `4` / `5` — switch chat tab (`All` / `Chat` / `Server` / `Misc` / `Debug`)
 - `[` / `]` — previous/next chat tab
+- `Tab` — while typing, complete a player, command or flag name; `@` starts a
+  mention and `#` a player's slot number
+- `Up` / `Down` — while typing, recall earlier lines; type the start of a line
+  first to recall only the ones beginning that way
 - `.` — reply to last direct-message sender
 - `,` — message nemesis target
 - `Page Up` / `Page Down` — scroll chat history

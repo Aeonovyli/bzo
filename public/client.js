@@ -319,6 +319,11 @@ import {
   stepVolumeLevel,
   writeVolumeLevel,
 } from './volume.mjs';
+import {
+  ComposeHistory,
+  WORD_KIND,
+  completeCompose,
+} from './compose.mjs';
 import { setupInstallPrompt } from './install.js';
 import {
   SHOT_COLLISION_RADIUS,
@@ -2909,10 +2914,82 @@ function tryLocalChatCommand(text) {
   return true;
 }
 
+// The lines this client has sent, and the words Tab reaches from the chat
+// entry. `public/compose.mjs` holds both rules; what is here is where the words
+// come from -- who is on the server, what this server answers, what the flags
+// are called.
+const composeHistory = new ComposeHistory();
+
+// The server's own command table, as `init` sends it. Filtered by tier at the
+// moment of completing rather than on arrival, because an operator logs in
+// after joining and the list must follow without being re-sent.
+let serverCommands = [];
+
+function composeVocabulary() {
+  const callsigns = [];
+  const slots = [];
+  tanks.forEach((tank, id) => {
+    if (id === myPlayerId) return;
+    const name = tank.userData.playerState.name;
+    callsigns.push(name);
+    slots.push({ word: `#${id}`, label: `#${id} "${name}"` });
+  });
+  return {
+    [WORD_KIND.COMMAND]: [
+      ...LOCAL_COMMANDS.keys(),
+      ...serverCommands.filter((command) => amAdmin || !command.operator)
+        .map((command) => command.name),
+    ],
+    [WORD_KIND.CALLSIGN]: callsigns,
+    [WORD_KIND.SLOT]: slots,
+    [WORD_KIND.FLAG]: Object.values(FLAG_TYPES).map((type) => ({
+      word: type.abbreviation,
+      label: `${type.abbreviation} (${type.name})`,
+    })),
+  };
+}
+
+// Tab. Only the line up to the caret is completed and the rest is put back
+// after it, so a word fixed in the middle of a finished sentence does not eat
+// the end of it -- upstream completes the whole compose string, having no
+// caret to speak of.
+function completeChatInput() {
+  const caret = chatInput.selectionStart;
+  const head = chatInput.value.slice(0, caret);
+  const tail = chatInput.value.slice(caret);
+  const completed = completeCompose(head, composeVocabulary());
+  if (completed.head !== head) {
+    chatInput.value = completed.head + tail;
+    chatInput.setSelectionRange(completed.head.length, completed.head.length);
+  }
+  // More than one word matched, so the candidates go where upstream puts them:
+  // into the message panel, as a line only this client sees
+  // (ComposeDefaultKey.cxx:67).
+  if (completed.matches.length > 0) {
+    addChatEntry(['misc', 'all'], completed.matches.join(', '), CHAT_KIND_MISC);
+    updateChatWindow();
+  }
+}
+
+// Up and Down. A recall that reaches the end of the matching lines leaves the
+// entry alone rather than clearing it, so holding Up does not lose what was
+// typed.
+function recallComposeLine(older) {
+  const line = older ? composeHistory.earlier(chatInput.value) : composeHistory.later();
+  if (line === null) return;
+  chatInput.value = line;
+  chatInput.setSelectionRange(line.length, line.length);
+}
+
 function sendChatInputText() {
   const chatTarget = document.getElementById('chatTarget');
   const text = chatInput.value.trim();
   if (text.length === 0) return;
+  // Whatever was composed, including a line the local table answers: upstream
+  // records the history after `LocalCommand::execute` has had it
+  // (ComposeDefaultKey.cxx:104), so `/highlight` comes back under Up like
+  // anything else.
+  composeHistory.remember(text);
   if (tryLocalChatCommand(text)) {
     chatInput.value = '';
     return;
@@ -5738,12 +5815,33 @@ function init() {
       e.preventDefault();
       return;
     }
+    // Tab would walk the focus out of the entry, which is the one thing chat
+    // entry must not lose -- see "Chat entry owns the keyboard" in AGENTS.md.
+    if (e.key === 'Tab') {
+      completeChatInput();
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      recallComposeLine(e.key === 'ArrowUp');
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Enter') {
       sendChatInputText();
       chatInput.blur();
     } else if (e.key === 'Escape') {
+      composeHistory.reset();
       chatInput.blur();
     }
+  });
+
+  // Typing ends a recall: the line is the player's own again, and the next Up
+  // starts over from the newest with whatever is now in front of the caret.
+  // Setting the value from the recall itself fires no `input` event, so only a
+  // real keystroke lands here.
+  chatInput.addEventListener('input', () => {
+    composeHistory.reset();
   });
 
   // Focus is what makes chat entry active, and the game gives up the keyboard
@@ -6343,6 +6441,9 @@ function handleServerMessage(message) {
       // (issue #75).
       amVerified = !!message.player.verified;
       amAdmin = !!message.player.admin;
+      // What this server answers, for the chat entry's Tab. A proxied session
+      // sends none, because the commands there are the target's.
+      serverCommands = message.commands;
       myGlobalCallsign = message.player.globalCallsign || null;
       applyAdminUi();
 

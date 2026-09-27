@@ -578,6 +578,7 @@ server is unreachable, and for tutorial levels built on top of that.
 | `public/audio.js` | Gameplay sound manifest, attenuation, and buffer loading |
 | `public/volume.mjs` | The 0..10 audio level model shared by the Audio dialog, XR, renderer, and voice |
 | `public/voice-channels.mjs` | Which players hear each other: All, Nearby, Team |
+| `public/compose.mjs` | The chat entry's line recall and word completion |
 | `public/package.json` | `{"type":"module"}` only, so Node can import `public/*.js` in tests |
 | `public/install.js` | Offers installing the game as an app, from the Settings menu |
 | `public/sw.js` | Service worker: install support and asset caching |
@@ -3074,6 +3075,58 @@ literal `/?` is sent to the server immediately after -- through the ordinary
 chat path, so the server's existing "never broadcast a `/` line" rule and
 `replyToPlayer`'s private reply are exactly what a player typing `/?` by hand
 would get.
+
+### Recall and completion in the chat entry -- `public/compose.mjs`
+
+Upstream splits these two over `ComposeDefaultKey` (the history) and
+`AutoCompleter` (the completion); bzo keeps both in one client-side module,
+because neither needs the DOM and both are worth a test rather than a play
+session (`npm run test:compose`). `client.js` owns the input element and builds
+the vocabulary; `compose.mjs` owns what happens to a string.
+
+**History is upstream's, plus the prefix.** Twenty lines, newest first, and a
+line said twice moves to the front rather than being stored twice
+(`ComposeDefaultKey.cxx:105`). Sending resets the recall, as upstream's
+`messageHistoryIndex = 0` does. What bzo adds is issue #143's own ask: the
+characters already typed when Up is first pressed are kept as a prefix and only
+lines starting with them are offered, so `/m` then Up reaches the last `/msg`
+rather than the last thing said. Down past the newest match puts those
+characters back -- upstream clears the line there, having nothing to put back.
+Recall is in memory only; a reload starts empty.
+
+**A word is completed from the shape of the line, not from a table of commands
+and their arguments.** A first word beginning with `/` is a command; `@ti` is a
+mention and `#3` a slot, both of them people; any later word on a `/` line is an
+argument, and every bzo command that takes one takes a player or a flag; anything
+else is ordinary chat, where only a callsign is worth offering. A table mapping
+each command to its argument types would be a second copy of the server's own
+table living in the client, and it would drift.
+
+**The command names come from the server, in `init`.** Upstream hardcodes its
+list in `DefaultCompleter` and it drifts from bzfs. bzo sends `commands` --
+each name and whether it is `OPERATOR` -- and the client filters by tier at the
+moment of completing, so logging in as an operator mid-game widens the list
+without a second message. A proxied session sends an empty list: the commands
+there are the target's, and this server has no list of them.
+
+**Matching ignores case and the completed word keeps its registered spelling**,
+which is what makes `@ti` reach `@Tim`. Upstream matches case exactly, because
+its word list is sorted and walked with `lower_bound`.
+
+**Ambiguity fills in as far as the matches agree and prints the candidates** to
+the Misc tab, where upstream puts them (`ComposeDefaultKey.cxx:67`). A slot is
+listed under the callsign standing in it and a flag under its full name, since
+`#3` and `SW` say nothing on their own.
+
+**Quoting is upstream's rule** (`noQuotes`, `AutoCompleter.cxx:135`): a completed
+word with a space in it is quoted when it is a command's argument, because that
+is the form `resolveCommandTarget` parses, and only once a single word matches --
+a closing quote around a prefix would end a word still being typed. A mention is
+never quoted; `@Some One` is prose.
+
+**Only the line up to the caret is completed**, with the rest put back after it,
+so fixing a word in the middle of a finished sentence does not eat the end of it.
+Upstream completes the whole compose string, having no caret to speak of.
 
 ### The chat panel is a folder, and its tabs stick up out of it
 

@@ -6,6 +6,24 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The chat entry recalls what you have typed before, with `Up` and `Down`.
+  BZFlag keeps the last twenty lines, newest first, and a line said twice moves
+  to the front rather than being stored twice. Typing the start of a line first
+  narrows the recall to the lines beginning that way, so `/m` then `Up` reaches
+  the last `/msg` rather than the last thing said, and `Down` past the newest
+  match puts those characters back. Refs #143.
+- `Tab` completes a word in the chat entry: a command, a player's callsign, a
+  player's `#3` slot, or a flag's abbreviation, picked by the shape of the line
+  rather than by a table of commands and their arguments. `@ti` reaches `@Tim`
+  and stays a mention in whatever channel it was aimed at; `/msg ti` reaches the
+  same player as a command's argument, quoted if their callsign has a space in
+  it. Matching ignores case, several matches fill in as far as they agree and
+  list the candidates in the Misc tab, and a bare `#` asks who is in which slot.
+  The command names come from the server rather than a list kept in the client,
+  so they cannot drift, and an operator's own commands appear once they log in.
+  Refs #143.
+
 ## [1.2.75] - 2026-09-27
 
 ### Changed
