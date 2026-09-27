@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.80] - 2026-09-27
+
 ### Fixed
 - Driving from one mesh's flat top onto another's no longer stops dead at the
   seam. `getTankHitNormal` searched for the struck face a second time and took
