@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.72] - 2026-09-27
+
+### Added
+- A browser watching a proxied BZFlag server traces the shots it draws. A
+  BZFlag server leaves a shot's path to each of its clients and never says
+  where one stopped, so a Laser is now drawn along a path worked out where it
+  is shown -- buildings, ground, teleporters and bounces -- and a shell stops
+  at the building, teleporter frame or ground it hits instead of carrying on
+  through. Refs #82.
+
+### Fixed
+- A proxied shell ricochets off the world border instead of vanishing at it.
+  The proxy had been ending a shot where it worked out the shot would leave
+  the map, which on a ricochet server is where it bounces. Refs #82.
+- Ricochet on a proxied server is read off the live connection, so turning it
+  on there takes effect without the world changing. Refs #82.
+- A Laser on a proxied server fades at a Laser's life rather than lingering
+  for seconds: the shot a BZFlag server forwards carries a reload time, not
+  the flag's own life. Refs #82.
+- The shot that kills somebody on a proxied server stops with them instead of
+  flying on. Refs #82.
+
 ## [1.2.71] - 2026-09-27
 
 ### Added
