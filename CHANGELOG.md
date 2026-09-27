@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.74] - 2026-09-27
+
 ### Changed
 - A tank's camo is retargeted in HSV rather than tinted, so it carries more than
   one colour. BZFlag paints a finished texture per team and draws it
@@ -19,7 +21,7 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   areas an artist left grey grey on every tank, and the lit areas give some of
   their colour back the way a real highlight does. A player's own shade scales
   the finished pattern, so two players on a team still differ in the world and
-  not only on the scoreboard. Refs #139.
+  not only on the scoreboard. Closes #139.
 - Rogue tanks are a plain dark grey in the world, as upstream's are. BZFlag
   paints rogue_tank.png in greys with no hue anywhere in it and gives the team
   its yellow only on the radar and the scoreboard, which is where a rogue is
@@ -29,7 +31,7 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   a yellow tank. A rogue lands within a few counts of upstream's own (55,55,55).
   Only where there are colour teams for Rogue to be one of: on a world without
   them every player is nominally a rogue while wearing a colour of their own,
-  and blacking them all out would throw that away. Refs #139.
+  and blacking them all out would throw that away. Part of #139.
 
 ### Added
 - `scripts/crowd-client.mjs` fills a server with parked tanks over the wire, no
