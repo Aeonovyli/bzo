@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The chat window keeps its transcript across a page reload, and a
+  `--- reloaded ---` line marks where the reload was. bzo reloads the tab on
+  its own whenever the server ships new client code, which is many times an
+  hour while something is being worked on; BZFlag needs none of this because
+  its client is a process that sits through a server restart with its window
+  intact. The last 200 lines are kept, in the tab that wrote them rather than
+  across every tab on the same origin, and only until the tab is closed. The
+  Debug tab is not kept: those lines already reach `server.log`. Refs #144.
+- The twenty lines under `Up` in the chat entry now outlive the tab too, beside
+  the callsign and the highlight pattern already stored there. Refs #144.
+- `/savemsgs [-t] [-s]` saves the All tab, as BZFlag's own does -- with the
+  same header and the same `msglog-<when>.txt` name, arriving as a download
+  because a browser has no config directory to write it into. `-t` stamps each
+  line with its date and time. `-s` strips colour codes upstream and does
+  nothing here, bzo having none in the text to strip. Refs #144.
+
 ## [1.2.76] - 2026-09-27
 
 ### Added

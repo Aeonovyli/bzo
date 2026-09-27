@@ -3004,7 +3004,7 @@ with, so a number that meant the other thing says so in the answer.
 `parseFacing` resolves both spellings to radians, `bearingToRotation` being the
 compass half of it, so the command handler never sees which one was typed.
 
-### Client-local commands -- `/silence`, `/unsilence`, `/highlight`, `/cmds`
+### Client-local commands -- `/silence`, `/unsilence`, `/highlight`, `/savemsgs`, `/cmds`
 
 `LOCAL_COMMANDS` (`public/client.js`) is the table upstream's own client claims
 a composed line against before anything is ever sent (`ComposeDefaultKey.cxx:98`).
@@ -3066,6 +3066,18 @@ three effects at once: pulsating, underlined, cyan (`.chat-highlight` in
 `styles.css`), placed after every `chat-kind-*` rule so it wins their shared
 colour at equal specificity.
 
+#### `/savemsgs [-t] [-s]`
+
+Upstream writes the All tab into `msglog-<when>.txt` in its config dir
+(`CommandsImplementation.cxx:778`, `ControlPanel::saveMessages`), with the same
+header and rule bzo writes. A browser has no config dir, so the file arrives as
+a download under the same name, out of a `Blob` and an `<a download>`. `-t`
+stamps each line as upstream's `formatTimestamp` mode 2 does. `-s` is accepted
+so the habit still works and does nothing: bzo carries a line's colours in its
+segments rather than in ANSI escapes inside the text, so what is written is
+already stripped. The formatting is in `public/chat-cache.mjs` beside the cache,
+since both turn the same entries into something outside the tab.
+
 #### `/cmds`
 
 Upstream's own `CommandList` prints its local table, then sends the server
@@ -3092,7 +3104,13 @@ characters already typed when Up is first pressed are kept as a prefix and only
 lines starting with them are offered, so `/m` then Up reaches the last `/msg`
 rather than the last thing said. Down past the newest match puts those
 characters back -- upstream clears the line there, having nothing to put back.
-Recall is in memory only; a reload starts empty.
+**The twenty lines survive the tab**, in `localStorage` under
+`composeHistory`. Upstream's die with the process, but upstream's process is not
+restarted for it by the server it is talking to -- bzo's tab is (see "The chat
+transcript across a reload" below) -- and what was typed is the same kind of
+thing as the callsign and the highlight pattern already stored beside it. They
+go back in oldest first, so `remember`'s cap and its move-to-front apply again
+rather than being trusted from storage.
 
 **A word is completed from the shape of the line, not from a table of commands
 and their arguments.** A first word beginning with `/` is a command; `@ti` is a
@@ -3127,6 +3145,48 @@ never quoted; `@Some One` is prose.
 **Only the line up to the caret is completed**, with the rest put back after it,
 so fixing a word in the middle of a finished sentence does not eat the end of it.
 Upstream completes the whole compose string, having no caret to speak of.
+
+### The chat transcript across a reload -- `public/chat-cache.mjs`
+
+Upstream persists no chat at all: `ControlPanel`'s messages live and die with
+the process, and `/savemsgs` is the only way to keep a copy. That is enough
+there because the process is long-lived -- an upstream client sits through a
+server restart, a leave and a rejoin with its window intact. bzo's process is
+the tab, and `checkClientBuild` reloads the tab whenever the server ships new
+client code, which while something is being worked on is many times an hour. So
+the transcript is written down to buy what upstream gets for free.
+
+- **`sessionStorage`, not `localStorage`.** The transcript belongs to the tab,
+  which is the thing that reloads. Two tabs on the same origin would otherwise
+  write over each other's, and a private `/msg` has no business outliving the
+  window it was said in.
+- **One flat list, not five tabs.** A line is one object pushed into each tab it
+  belongs to, so `packChatCache` finds its tabs by identity and writes it once;
+  `all` would otherwise double everything stored. Order comes from `seq`, a
+  counter stamped on each entry, because `ts` cannot separate the lines of a
+  burst that landed on the same millisecond.
+- **200 lines, against `CHAT_SCROLLBACK_LIMIT`'s 600.** This answers "what did I
+  miss", not "what was ever said", and every line costs part of a
+  `JSON.stringify` on a client that may be CPU bound.
+- **The debug tab is not cached.** Those lines already reach the server and land
+  in `server.log`, which outlives the tab by more than any cache does; keeping
+  them here as well would spend the whole budget on the noisiest tab.
+- **Written on a 2s debounce, flushed by anything that knows the page is
+  going.** `pagehide`, `visibilitychange` to hidden, and `reloadWhenServerIsUp`
+  immediately before `location.reload()` -- the reload this exists for.
+- **Restored lines are not news.** They go straight into the tabs rather than
+  through `addChatEntry`, so no tab is marked unread and nothing sounds for chat
+  that was already read. A `--- reloaded ---` divider closes them off so the
+  line above it is not read as something that just arrived. The highlight
+  pattern needs nothing here: `updateChatWindow` tests it on every line on every
+  repaint, as upstream does.
+- **What comes back is untrusted**, having been written by whichever version of
+  bzo the tab ran before. `CHAT_CACHE_VERSION` drops a cache of an older shape,
+  and a line with no text or no surviving tab is dropped rather than allowed to
+  reach the renderer.
+
+`npm run test:chat-cache` covers the packing, the round trip and `/savemsgs`'
+formatting; client.js owns the state, the storage and the file.
 
 ### The chat panel is a folder, and its tabs stick up out of it
 

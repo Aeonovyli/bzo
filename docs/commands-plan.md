@@ -13,8 +13,8 @@ formatting, the table and the dispatcher are in `server.js`. The commands are
 `/mute`, `/unmute`, `/mutelist`, `/playerlist`, `/flag` (`reset`, `up`, `show`,
 `drop [player]`), `/set`, `/mv`, `/countdown` and `/gameover` (issue #66), plus
 `/me`. Step 4's whole client-local table -- `/silence`, `/unsilence`,
-`/highlight`, `/cmds` -- is also done, entirely in `public/client.js` and
-never reaching the server. See "Server commands" in `AGENTS.md`.
+`/highlight`, `/savemsgs`, `/cmds` -- is also done, entirely in
+`public/client.js` and never reaching the server. See "Server commands" in `AGENTS.md`.
 
 **`/mv` is bzo's own.** Upstream has no command that moves a tank -- not in bzfs,
 not in `BanCommands`, not in any plugin, and there is no API call for it either.
@@ -103,8 +103,8 @@ choice to ignore somebody, and asking the server about it would be inventing
 state. So:
 
 - The client keeps a **local** table for things that are only its own:
-  `/silence`, `/unsilence`, `/highlight` and `/cmds` (**all done** -- see
-  "Server commands" in `AGENTS.md`), plus `/localset`-shaped settings, which
+  `/silence`, `/unsilence`, `/highlight`, `/savemsgs` and `/cmds` (**all done**
+  -- see "Server commands" in `AGENTS.md`), plus `/localset`-shaped settings, which
   wait on bzo having client-local settings worth naming this way. These need
   no server work at all and could land first, which is why they did.
 - Everything else goes to the server as a message whose text begins with `/`, and
@@ -279,8 +279,9 @@ piece of work here rather than two.
    reaches the three settings the Operator panel already propagates, and both now
    write through one `applyServerConfigChanges` -- the rule above, honoured.
 4. ~~**The client-local set**: `/silence`, `/unsilence`, `/highlight`,
-   `/cmds`.~~ **Done.** `/silence`/`/unsilence` are extended to voice, which
-   upstream has none of to extend.
+   `/savemsgs`, `/cmds`.~~ **Done.** `/silence`/`/unsilence` are extended to
+   voice, which upstream has none of to extend, and `/savemsgs` hands the
+   browser a download rather than writing a config dir it has not got.
 5. ~~**Lag measurement**~~ **Done**: every connection's lag, jitter and loss are
    tracked and `/lagstats` reports them. `/lagwarn`, `/lagdrop`, `/jitterwarn`,
    `/jitterdrop` and the idle commands still wait on the warn/kick machinery

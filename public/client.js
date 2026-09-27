@@ -324,6 +324,13 @@ import {
   WORD_KIND,
   completeCompose,
 } from './compose.mjs';
+import {
+  CHAT_CACHE_TABS,
+  formatTranscript,
+  packChatCache,
+  transcriptFilename,
+  unpackChatCache,
+} from './chat-cache.mjs';
 import { setupInstallPrompt } from './install.js';
 import {
   SHOT_COLLISION_RADIUS,
@@ -448,6 +455,10 @@ async function reloadWhenServerIsUp() {
   // Out of patience rather than answered: reload anyway, because a tab that
   // never reloads is no better off than one that reloaded too early, and the
   // browser will at least show why.
+  //
+  // The reload this cache exists for, so the last lines go down now rather
+  // than waiting for a timer the new page will never run.
+  saveChatCache();
   window.location.reload();
 }
 
@@ -2597,6 +2608,11 @@ function cycleChatTab(direction) {
 // kind's. `text` is still the whole line as one string -- it is what the XR
 // panel measures against and what anything that only wants the words reads --
 // so a renderer that ignores segments still draws something correct.
+// Stamped on every entry so the cache can put the tabs back in the order the
+// lines arrived in. A line is one object in however many tabs it appears, and
+// `ts` alone cannot separate two that landed on the same millisecond.
+let nextChatEntrySeq = 0;
+
 function addChatEntry(tabIds, text, kind = CHAT_KIND_MISC, segments = null) {
   const entry = {
     text: String(text),
@@ -2605,7 +2621,9 @@ function addChatEntry(tabIds, text, kind = CHAT_KIND_MISC, segments = null) {
     // Chat arrives from the socket, which keeps delivering while a hidden tab
     // delivers no frames, so this advances the clock rather than reading it.
     ts: sampleEpochClock(),
+    seq: nextChatEntrySeq,
   };
+  nextChatEntrySeq += 1;
   const uniqueTabIds = Array.from(new Set(tabIds));
   uniqueTabIds.forEach((tabId) => {
     const tabMessages = chatState.messages[tabId];
@@ -2618,8 +2636,90 @@ function addChatEntry(tabIds, text, kind = CHAT_KIND_MISC, segments = null) {
       chatState.unread[tabId] = true;
     }
   });
+  if (uniqueTabIds.some((tabId) => CHAT_CACHE_TABS.includes(tabId))) scheduleChatCacheSave();
   chatWindowDirty = true;
 }
+
+// Where a reload happened, so the line above it is not read as something that
+// just arrived. Upstream has nothing to copy here: its window never restarts
+// under it.
+const CHAT_RELOAD_DIVIDER = '--- reloaded ---';
+
+// `sessionStorage` rather than `localStorage`, because the transcript belongs
+// to the tab -- which is the thing that reloads. Two tabs on the same origin
+// would otherwise write over each other's, and a private `/msg` has no
+// business outliving the window it was said in.
+const CHAT_CACHE_KEY = 'bzoChatCache';
+// Long enough that a burst of chat costs one write, short enough that a tab
+// closed without warning loses almost nothing. Every path that knows the page
+// is going away flushes instead of waiting for this.
+const CHAT_CACHE_SAVE_MS = 2000;
+let chatCacheTimer = null;
+
+function saveChatCache() {
+  if (chatCacheTimer !== null) {
+    clearTimeout(chatCacheTimer);
+    chatCacheTimer = null;
+  }
+  try {
+    sessionStorage.setItem(CHAT_CACHE_KEY, JSON.stringify(packChatCache(chatState.messages)));
+  } catch {
+    // A full or blocked store means no cache, not a broken chat window.
+  }
+}
+
+function scheduleChatCacheSave() {
+  if (chatCacheTimer !== null) return;
+  chatCacheTimer = setTimeout(saveChatCache, CHAT_CACHE_SAVE_MS);
+}
+
+// Restored lines are not news: they go straight into the tabs rather than
+// through `addChatEntry`, so nothing is marked unread and nothing sounds for
+// chat that was already read before the reload. The highlight pattern is not
+// applied here either -- `updateChatWindow` tests it on every line on every
+// repaint (ControlPanel.cxx:513), so a restored line lights up exactly as it
+// did before.
+function restoreChatCache() {
+  let saved = null;
+  try {
+    saved = JSON.parse(sessionStorage.getItem(CHAT_CACHE_KEY) || 'null');
+  } catch {
+    return;
+  }
+  const restored = unpackChatCache(saved);
+  if (restored.length === 0) return;
+  const touched = new Set();
+  const push = (tabId, entry) => {
+    const tabMessages = chatState.messages[tabId];
+    if (!Array.isArray(tabMessages)) return;
+    tabMessages.push(entry);
+    touched.add(tabId);
+  };
+  restored.forEach((line) => {
+    const entry = {
+      text: line.text,
+      kind: line.kind,
+      segments: line.segments,
+      ts: line.ts,
+      seq: nextChatEntrySeq,
+    };
+    nextChatEntrySeq += 1;
+    line.tabs.forEach((tabId) => push(tabId, entry));
+  });
+  // `Date.now()` rather than `sampleEpochClock()`: this runs while the module
+  // is still loading, before there is a frame to sample.
+  const divider = {
+    text: CHAT_RELOAD_DIVIDER,
+    kind: CHAT_KIND_MISC,
+    segments: null,
+    ts: Date.now(),
+    seq: nextChatEntrySeq,
+  };
+  nextChatEntrySeq += 1;
+  [...touched].forEach((tabId) => push(tabId, divider));
+  chatWindowDirty = true;
+}
+
 
 // A few px of slack: a fractional `scrollHeight` from sub-pixel line heights
 // would otherwise read as "not at the bottom" forever.
@@ -2891,6 +2991,29 @@ defineLocalCommand('/highlight', (args) => {
   }
 });
 
+// SaveMsgsCommand (CommandsImplementation.cxx:189): upstream writes the All tab
+// into `msglog-<when>.txt` in its config dir. A browser has no config dir, so
+// the same file arrives as a download, under the same name. `-t` stamps each
+// line as it does upstream; `-s` is accepted so the habit still works, and does
+// nothing, because bzo keeps a line's colours in its segments rather than in
+// ANSI escapes inside the text.
+defineLocalCommand('/savemsgs', (args) => {
+  const flags = args.trim().split(/\s+/).filter(Boolean);
+  const timestamps = flags.includes('-t');
+  const at = Date.now();
+  const filename = transcriptFilename(at);
+  const text = formatTranscript(chatState.messages.all, { timestamps, savedAt: at });
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  // The click is synchronous, but the fetch the browser starts from it is not,
+  // so the URL outlives this turn of the loop.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  showMessage(`Saved messages to: ${filename}`);
+});
+
 // CommandList (CommandsImplementation.cxx:201-269): upstream prints its own
 // local table, then asks the server for its own list too, rather than
 // answering only one half of "what commands are there".
@@ -2919,6 +3042,38 @@ function tryLocalChatCommand(text) {
 // come from -- who is on the server, what this server answers, what the flags
 // are called.
 const composeHistory = new ComposeHistory();
+
+// The twenty lines under Up outlive the tab, unlike the transcript beside them.
+// Upstream's own die with the process, but upstream's process is not restarted
+// for it by the server it is talking to -- and what was typed is the same kind
+// of thing as the callsign and the highlight pattern already in `localStorage`
+// beside it: not a record of the session, but a habit worth keeping.
+const COMPOSE_HISTORY_KEY = 'composeHistory';
+
+function loadComposeHistory() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(COMPOSE_HISTORY_KEY) || 'null');
+  } catch {
+    return;
+  }
+  if (!Array.isArray(saved)) return;
+  // Newest first on the way out, so they go back in oldest first -- `remember`
+  // pushes to the front, and the cap and the de-duplication apply again on the
+  // way in rather than being trusted from storage.
+  saved.filter((line) => typeof line === 'string').reverse()
+    .forEach((line) => composeHistory.remember(line));
+}
+
+function saveComposeHistory() {
+  try {
+    localStorage.setItem(COMPOSE_HISTORY_KEY, JSON.stringify(composeHistory.lines));
+  } catch {
+    // Nothing to recall next time; no reason to refuse to send this line.
+  }
+}
+
+loadComposeHistory();
 
 // The server's own command table, as `init` sends it. Filtered by tier at the
 // moment of completing rather than on arrival, because an operator logs in
@@ -2990,6 +3145,7 @@ function sendChatInputText() {
   // (ComposeDefaultKey.cxx:104), so `/highlight` comes back under Up like
   // anything else.
   composeHistory.remember(text);
+  saveComposeHistory();
   if (tryLocalChatCommand(text)) {
     chatInput.value = '';
     return;
@@ -5632,6 +5788,19 @@ function init() {
   collectClientCapabilities();
 
   // Chat UI
+  //
+  // The transcript goes back before anything paints, and from here rather than
+  // from the top of the module: `chatWindowDirty` is declared further down it,
+  // so a restore during load would reach it before it exists.
+  restoreChatCache();
+  // The two things a browser says before a page goes away. `pagehide` covers a
+  // reload and a navigation; `visibilitychange` is the one a phone actually
+  // fires when the tab is swiped away, and neither alone is enough.
+  window.addEventListener('pagehide', saveChatCache);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveChatCache();
+  });
+
   const chatTabs = document.getElementById('chatTabs');
   chatInput = document.getElementById('chatInput');
   sendBtn = document.getElementById('sendBtn');
