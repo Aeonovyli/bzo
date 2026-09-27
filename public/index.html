@@ -194,11 +194,22 @@
       </div>
     </div>
   <div id="mainhud">
+    <!-- [Settings] [Mic] @name/flag [chevron]. The two things that act on the
+         client lead the row, the player's own name reads as the title it is,
+         and the control that puts the panel away sits at the far edge. -->
     <div id="stats">
-      <span id="playerLabel" class="playerLabel" title="Open Settings"><span id="playerName">Player</span><span id="playerFlag" class="scoreboardFlag"></span></span>
       <div class="hudButtons">
         <button id="settingsBtn" title="Settings"><span class="settingsIcon">&#9881;</span></button>
+        <!-- Microphone: the border is the state, green transmitting and red
+             not, which is what the voice panel out in the middle of the screen
+             used to say at much greater cost. -->
+        <button id="micBtn" type="button" class="micBtn micBtn--off" aria-pressed="false" title="Microphone off"><span class="settingsIcon">&#127908;</span></button>
         <button id="xrQuickBtn" title="Enter WebXR VR Mode"><span class="settingsIcon">&#129405;</span></button>
+      </div>
+      <!-- `@` for an admin and `+` for a signed-in player, before the name and
+           in cyan, exactly as a scoreboard row writes it. -->
+      <span id="playerLabel" class="playerLabel" title="Open Settings"><span id="playerStatus" class="scoreboardStatus"></span><span id="playerName">Player</span><span id="playerFlag" class="scoreboardFlag"></span></span>
+      <div class="hudButtons">
         <!-- Hides the roster below it and the chat folder at the foot of the
              screen together, leaving this row and the chat tabs behind. -->
         <button id="hudCollapseBtn" type="button" aria-expanded="true" title="Hide the scoreboard and chat"><span class="settingsIcon">&#9650;</span></button>
@@ -427,6 +438,9 @@
         <li><strong>C</strong> — <b>Camera View</b> (or click the Camera button)</li>
         <li><strong>O</strong> — <b>Operator Panel</b> (or click the Operator button)</li>
         <li><strong>/</strong> or <strong>?</strong> — <b>Show/Hide Help</b> (or click the Help button)</li>
+        <li><strong>&#127908;</strong> beside the gear — <b>Microphone</b> (or <strong>B</strong>): a green
+          border means you are transmitting and a red one means you are not, and the hover text names
+          the channel it would speak on</li>
         <li><strong>&#9650;</strong> beside the gear — <b>Hide the scoreboard and chat</b>, leaving the
           name row and the chat tabs; <strong>&#9660;</strong> brings them back. Typing a message borrows
           the chat window until you are done with it, and <strong>U</strong> or <strong>7</strong> borrows
@@ -610,10 +624,6 @@
   <div id="flagHelp" role="status" aria-live="polite"></div>
   <canvas id="altimeter"></canvas>
   <canvas id="shotStatus"></canvas>
-  <div id="voiceChannelHud" class="voiceChannelHud voiceChannelHud--muted" role="status" aria-live="polite" aria-label="Nearby voice channel, microphone off">
-    <span class="voiceChannelHudLabel">Nearby</span>
-    <span id="voiceChannelHudStatus" class="voiceChannelHudStatus">Microphone off</span>
-  </div>
   <div id="hudNotices">
     <div id="roamStatus" role="status" aria-live="polite"></div>
     <div id="alertHud" role="status" aria-live="assertive"></div>

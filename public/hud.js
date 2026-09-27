@@ -1118,7 +1118,11 @@ export function getPlayerStatusIndicator(state) {
 // (ScoreboardRenderer::drawPlayerScore) -- so the two sit tight here too and
 // only the colour changes between them. Both the panel's title and every row go
 // through this, which is what keeps them the same.
-function writePlayerLabel(nameEl, flagEl, { name, nameColor, flag } = {}) {
+function writePlayerLabel(nameEl, flagEl, { name, nameColor, flag, status, statusEl } = {}) {
+  if (statusEl) {
+    statusEl.textContent = status || '';
+    statusEl.style.color = colorToCSS(SCOREBOARD_STATUS_COLOR);
+  }
   if (nameEl) {
     if (name !== undefined) nameEl.textContent = name;
     if (nameColor !== undefined) nameEl.style.color = nameColor ? colorToCSS(nameColor) : '';
@@ -1324,9 +1328,16 @@ export function updateScoreboard({
   writePlayerLabel(
     document.getElementById('playerName'),
     document.getElementById('playerFlag'),
-    // The name is written from elsewhere; only the colour and the flag belong
-    // to this.
-    { nameColor: current?.color ?? null, flag: current?.flag },
+    // The name is written from elsewhere; the colour, the flag and the `@` or
+    // `+` of a signed-in player belong to this. The title carries the login
+    // character for the same reason a row does: it is part of how a callsign
+    // is written once there is one to write.
+    {
+      nameColor: current?.color ?? null,
+      flag: current?.flag,
+      status: current?.status ?? '',
+      statusEl: document.getElementById('playerStatus'),
+    },
   );
 
   // Create scoreboard entries
@@ -1355,14 +1366,17 @@ export function updateScoreboard({
     // Its own element, so it is never part of the name it sits beside.
     const statusSpan = document.createElement('span');
     statusSpan.className = 'scoreboardStatus';
-    statusSpan.textContent = player.status || '';
-    statusSpan.style.color = colorToCSS(SCOREBOARD_STATUS_COLOR);
     const nameSpan = document.createElement('span');
     nameSpan.className = 'scoreboardName';
     const flagSpan = document.createElement('span');
     flagSpan.className = 'scoreboardFlag';
     // The row already carries the player's colour; only the flag differs.
-    writePlayerLabel(nameSpan, flagSpan, { name: player.name, flag: player.flag });
+    writePlayerLabel(nameSpan, flagSpan, {
+      name: player.name,
+      flag: player.flag,
+      status: player.status,
+      statusEl: statusSpan,
+    });
     // Upstream's own suffix for a paused tank is the plain text `[p]`
     // (ScoreboardRenderer.cxx:800-801), a concession to its fixed bitmap font.
     // bzo draws to a real DOM, so an hourglass reads as "paused" without

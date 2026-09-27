@@ -697,6 +697,15 @@ body {
   justify-content: space-between;
 }
 
+/* The title gives before the controls do: a long callsign wraps or ellipses
+   rather than pushing the chevron off the end of a narrow panel. */
+#stats .playerLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The whole label opens Settings, so the whole label says so: the tooltip and
    the pointer belong to it rather than to the name alone. The flag takes the
    name's size, because upstream draws the pair as one run of text and a smaller
@@ -743,9 +752,25 @@ body {
 .hudButtons {
   display: flex !important;
   gap: 6px;
-  margin-left: 8px;
   justify-content: center;
   flex-wrap: wrap;
+}
+
+/* Green transmitting, red not, on the button itself: what the panel that used
+   to sit beside the targeting box said, in the corner where the rest of the
+   HUD's controls already are. The state is the border rather than a word, so
+   it reads at a glance and costs no width on a phone -- and the hover text
+   names the channel the microphone would be speaking on. */
+.hudButtons button.micBtn--on {
+  border-color: var(--color-accent-light);
+  color: var(--color-accent-light);
+  box-shadow: 0 0 0.45rem rgba(102, 187, 106, 0.55);
+}
+
+.hudButtons button.micBtn--off {
+  border-color: #f44336;
+  color: #f44336;
+  box-shadow: 0 0 0.45rem rgba(244, 67, 54, 0.4);
 }
 #stats span {
   font-weight: bold;
@@ -1781,57 +1806,6 @@ body.observing #roamStatus {
   z-index: 50;
 }
 
-.voiceChannelHud {
-  position: fixed;
-  top: calc(50% + max(2.5rem, 5vmin));
-  left: calc(50% + var(--motion-box) / 2 + max(16px, 2vw) + 16px);
-  z-index: 60;
-  min-width: 6.5rem;
-  max-width: min(12rem, 30vw);
-  padding: 0.45rem 0.75rem;
-  border: 2px solid #f44336;
-  border-radius: 0.35rem;
-  background: rgba(0, 0, 0, 0.78);
-  color: var(--color-fg);
-  font-size: 0.78rem;
-  font-weight: bold;
-  line-height: 1.2;
-  text-align: center;
-  pointer-events: auto;
-  box-sizing: border-box;
-  text-shadow: 0 1px 2px #000;
-}
-
-.voiceChannelHud--active {
-  border-color: var(--color-accent-light);
-  box-shadow: 0 0 0.55rem rgba(102, 187, 106, 0.55);
-}
-
-.voiceChannelHud--muted {
-  border-color: #f44336;
-  box-shadow: 0 0 0.55rem rgba(244, 67, 54, 0.4);
-}
-
-.voiceChannelHudLabel,
-.voiceChannelHudStatus {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.voiceChannelHudLabel {
-  color: var(--color-fg);
-  font-size: 0.95rem;
-}
-
-.voiceChannelHudStatus {
-  margin-top: 0.15rem;
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 0.7rem;
-  font-weight: normal;
-}
-
 #controlBox {
   position: fixed;
   top: 50%;
@@ -2386,14 +2360,6 @@ body.observing #roamStatus {
   background: transparent;
 }
 
-@media (max-width: 900px) {
-  .voiceChannelHud {
-    left: auto;
-    right: 10px;
-    max-width: 9rem;
-  }
-}
-
 @media (max-width: 600px) {
   .audioSettings {
     padding: 0.75rem;
@@ -2419,15 +2385,6 @@ body.observing #roamStatus {
   .audioSettingActions .settingsHudBtn {
     width: 100%;
     min-height: 2.75rem;
-  }
-
-  .voiceChannelHud {
-    top: calc(50% + 2.25rem);
-    right: 8px;
-    min-width: 5.75rem;
-    max-width: 8rem;
-    padding: 0.4rem 0.55rem;
-    font-size: 0.72rem;
   }
 
   .entryTeamSelector {

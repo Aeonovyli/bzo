@@ -1916,9 +1916,7 @@ function updateVoiceHud(nextState = null) {
     : getVoiceState();
   voiceManagerState = state;
 
-  const hud = document.getElementById('voiceChannelHud');
-  const label = hud?.querySelector('.voiceChannelHudLabel');
-  const statusElement = document.getElementById('voiceChannelHudStatus');
+  const micButton = document.getElementById('micBtn');
   const permissionStatus = document.getElementById('voicePermissionStatus');
   const permissionButton = document.getElementById('voiceRequestPermissionBtn');
   const microphoneButton = document.getElementById('voiceMicToggle');
@@ -1943,13 +1941,25 @@ function updateVoiceHud(nextState = null) {
     status = 'Microphone unavailable';
   }
 
-  if (hud) {
-    hud.classList.toggle('voiceChannelHud--active', transmitting);
-    hud.classList.toggle('voiceChannelHud--muted', !transmitting);
-    hud.setAttribute('aria-label', `${channelLabel} voice channel, ${status.toLowerCase()}`);
+  // What the hover says is what the click would do, then the channel it would
+  // do it on: `Disable Mic - Nearby`. Where the click cannot do anything --
+  // an observer, a blocked or missing microphone -- it says the reason instead
+  // of promising a toggle that will not happen.
+  const micActionLabel = isObserverTeam(team) ? 'Receive only'
+    : permission === 'denied' ? 'Mic blocked'
+      : permission === 'unavailable' ? 'Mic unavailable'
+        : transmitting ? 'Disable Mic' : 'Enable Mic';
+
+  // The whole of the on-screen voice display: a red or green border in the HUD
+  // row. The channel is in the hover text rather than on the button, that being
+  // the one thing a name can say and a colour cannot.
+  if (micButton) {
+    micButton.classList.toggle('micBtn--on', transmitting);
+    micButton.classList.toggle('micBtn--off', !transmitting);
+    micButton.setAttribute('aria-pressed', transmitting ? 'true' : 'false');
+    micButton.title = `${micActionLabel} - ${channelLabel}`;
+    micButton.setAttribute('aria-label', `${channelLabel} voice channel, ${status.toLowerCase()}`);
   }
-  if (label) label.textContent = channelLabel;
-  if (statusElement) statusElement.textContent = status;
   if (channelSelect) {
     channelSelect.value = selectedVoiceChannel;
   }

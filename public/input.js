@@ -1631,6 +1631,18 @@ function bindHudElements() {
     });
   }
 
+  // The microphone in the HUD row toggles transmission, which is the Audio
+  // panel's own Microphone control without the two taps it takes to reach it.
+  // Permission is asked for by the toggle itself where it has not been given.
+  domRefs.micBtn = document.getElementById('micBtn');
+  if (domRefs.micBtn) {
+    domRefs.micBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      hudContext.toggleVoiceMicrophone?.();
+    });
+  }
+
   if (domRefs.audioBtn) {
     domRefs.audioBtn.addEventListener('click', (e) => {
       e.preventDefault();
