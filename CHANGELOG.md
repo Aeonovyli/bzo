@@ -6,6 +6,63 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.71] - 2026-09-27
+
+### Added
+- Which BZFlag servers an instance proxies is configuration now, not source: a
+  `proxies` map in `server.json` from the name players see to the address bzo
+  dials, and nothing else can be named. Each target gets its own row on
+  `/list` carrying that server's own game -- player count, shot limit, style,
+  every option bit -- read off it directly rather than off the bzo carrying
+  it, and a link of its own. A target that did not answer the last dial leaves
+  the table, as does an instance the list has stopped hearing from: every row
+  there is a game somebody can join. Refs #82.
+- The bzo list shows which map a server is on. On a `bzfs` server that fact
+  has to live in the title, where changing the map means remembering to change
+  the title too; bzo reports it, so the row follows on its own. A proxied row
+  shows the server it carries instead.
+- `?view=` on a spectator link picks which roam view to watch in, so
+  `?follow=leader&view=track` comes back tracking the leader rather than
+  following them, and it survives a login.
+- Signing in from a proxied server returns to that server rather than to this
+  one's own game, and the global login is forwarded to the target unspent, so
+  bzfs is what verifies it.
+- `docs/installation.md`: Docker, source, configuration, reverse proxy,
+  listing your server, proxying BZFlag servers and updating, in one place. The
+  README points at it.
+- An operator on a whitelisted address manages list-server keys without a
+  bzflag.org login. Registering one still needs the login, since a key is
+  attributed to a BZID. Closes #136.
+
+### Changed
+- A proxy link spells its target `host_port`. A `:` is legal in a URL but
+  comes back from an address bar as `%3A`, and a link is made to be shared.
+- An observer may watch a cloaked or stealthed tank, and keeps watching one
+  that dies rather than dropping to free roam. Upstream asks nothing of a roam
+  subject but that it not be an observer; the rules bzo was applying belong to
+  `ID` Identify, which is one tank locking on to another.
+- `/flag show` answers with upstream's text and nothing else, on bzo as on
+  bzfs, and the client reads those lines to fill the flags in. One reader, so
+  it works on a proxied server's reply too.
+- Chat sent to a proxied server is converted to ASCII rather than costing the
+  player their connection: bzfs reads a line a byte at a time and kicks for
+  anything above 126, so one accent was a disconnect mid-sentence.
+
+### Fixed
+- A capture names the team whose flag it was. `MsgCaptureFlag` carries the
+  territory the flag was carried into, not the team that lost it, so a purple
+  flag taken into red territory was reported as a red flag captured.
+- A proxied player keeps their callsign across a reconnect and a restart. The
+  session it rests on carries no BZID, and the loader was discarding any
+  record whose BZID was not a string.
+- `npm run check` no longer truncates the running server's log. `server.js`
+  clears the log on start, and `log()` rebuilt that path rather than using the
+  one constant, so booting a second copy in the same directory wiped the first
+  one's. `npm run check:boot` also starts the server and waits for it to come
+  up, which `node --check` cannot do: it parses without running, so a
+  module-level ordering mistake reached the live server before anything caught
+  it.
+
 ## [1.2.70] - 2026-09-26
 
 ### Changed
