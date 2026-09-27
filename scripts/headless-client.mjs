@@ -185,13 +185,25 @@ const fetchSelf = async () => {
 // rather than called over HTTP -- the commands worth driving this probe with
 // are `/mv` and `/flag`, and neither has a REST equivalent.
 const sendChat = async (line) => {
-  // No sleep between these: an unfocused headless window keeps clearing
-  // whatever the page just focused, so this only sticks long enough to be
-  // read back if focus, typing and Enter all land in the same tick.
-  await evaluate('document.getElementById("chatInput")?.focus()');
-  await send('Input.insertText', { text: line });
-  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', code: 'Enter', key: 'Enter' });
-  await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Enter', key: 'Enter' });
+  // Focus, text and Enter in one `evaluate`, which is one synchronous tick in
+  // the page. Three separate CDP calls cannot be: a headless window has no
+  // real OS focus, so whatever the page focused on the first call is gone
+  // again before `Input.insertText` arrives, and the text lands nowhere with
+  // no error to say so -- the command simply never reaches the server.
+  // `chatInput`'s own submit is a plain `keydown` listener on the element
+  // (public/client.js), so a synthetic `KeyboardEvent` drives the same path a
+  // real Enter does.
+  const sent = await evaluate(`(() => {
+    const el = document.getElementById('chatInput');
+    if (!el) return 'no chatInput';
+    el.focus();
+    el.value = ${JSON.stringify(line)};
+    el.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', bubbles: true, cancelable: true,
+    }));
+    return el.value === '' ? 'sent' : 'not accepted: ' + el.value;
+  })()`);
+  if (sent !== 'sent') problems.push(`chat "${line}": ${sent}`);
   await sleep(500);
 };
 

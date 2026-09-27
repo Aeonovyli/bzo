@@ -455,6 +455,17 @@ function testPolygonInAxisBox(points, plane, mins, maxs) {
 // vertical velocity has nothing meaningful to dot against, and it still has
 // to hold the tank up.
 const MESH_FLAT_PLANE_THRESHOLD = 1 - 1e-5;
+// How far a step's own direction has to actually lean into a face before the
+// face is treated as being driven into rather than slid along -- relative to
+// the step's length, so it is an angle (about a millionth of a radian) and not
+// a distance. `dot < 0` alone asks a question rounding answers: a step running
+// exactly along a face has a mathematically zero dot, and the sign it comes out
+// with depends only on how the plane's own coefficients rounded. Getting a
+// hair below zero there makes a wall block a tank that is travelling parallel
+// to it, and a blocked step that has nothing to cancel -- the velocity has no
+// component along the normal to remove -- resolves to no progress at all,
+// every frame, forever.
+const MESH_GRAZE_TOLERANCE = 1e-6;
 
 // Whether a face blocks a query travelling in `direction` -- upstream's own
 // filter, and the reason it never gets the straddle bug bzo's first version
@@ -473,23 +484,43 @@ const MESH_FLAT_PLANE_THRESHOLD = 1 - 1e-5;
 // (upstream's own `!directional`), which always blocks regardless -- the
 // same as never having read this function at all.
 //
-// A flat top/bottom's own always-block exemption is *only* good within its
-// own actual footprint, though -- `pointInMeshFacePolygon` gates it there.
-// A query box is wide enough to still overlap a floor's polygon (a corner
-// candidate) from a position genuinely outside it, past whichever wall
-// meets it there, exactly the same straddle this function otherwise
-// prevents -- but that wall has already correctly let the query pass, since
-// it is a wall and gets the dot-product test above. Without this gate the
-// floor overrode that answer, its own flat exemption blocking motion no
-// wall was blocking a step outside the mesh's footprint at the mesh's own
-// ground level was ever going to be near in the first place.
-function meshFaceBlocksDirection(face, direction, obs, x, y, z) {
+// A flat top or bottom is not asked which way the step is heading at all --
+// a floor a tank drives along is square to its travel, so a dot product only
+// ever says "parallel" and would let it through. It is asked the vertical
+// question instead, which is upstream's own; see the branch below.
+function meshFaceBlocksDirection(face, direction, obs, y) {
   if (!direction) return true;
   if (Math.abs(face.plane[1]) >= MESH_FLAT_PLANE_THRESHOLD) {
-    return pointInMeshFacePolygon(obs, face, x, y, z);
+    // Upstream's own pair of tests, which ask what *height* the step began at
+    // and never where it is horizontally (World.cxx:335-341):
+    //
+    //   if (face->isUpPlane() &&
+    //       (!goingDown || (oldPos[2] < (facePos2 - 1.0e-3f))))   continue;
+    //   else if (face->isDownPlane() &&
+    //       ((oldPos[2] >= facePos2) || goingDown))               continue;
+    //
+    // A floor answers a step that began at or above it and is descending; a
+    // ceiling answers one that began below it and is rising. Whether the query
+    // actually reaches the polygon is `testPolygonInAxisBox`'s job, which the
+    // callers have already done -- so a horizontal gate here is a second and
+    // narrower footprint test laid over the real one, and it is measured at
+    // the tank's centre. A tank whose centre has passed beyond a flat top's
+    // edge while its box still rests on it therefore loses the floor it is
+    // standing on: crossing the two-metre gap between two catwalk segments on
+    // `import-xs.bzexcess.com_5155.bzw`, the deck stops answering and the only
+    // faces left are the segments' end caps, which face straight back along
+    // the walkway. Driving forward then resolves to a fraction of a metre
+    // *backwards* every frame.
+    const faceY = obs.vertices[face.vertexIndices[0]].y;
+    const startY = y - direction.y;
+    const goingDown = direction.y <= 0;
+    if (face.plane[1] > 0) return goingDown && startY >= faceY - 1e-3;
+    return !goingDown && startY < faceY;
   }
   const dot = (face.plane[0] * direction.x) + (face.plane[1] * direction.y) + (face.plane[2] * direction.z);
-  return dot < 0;
+  const reach = Math.sqrt((direction.x * direction.x) + (direction.y * direction.y)
+    + (direction.z * direction.z));
+  return dot < -MESH_GRAZE_TOLERANCE * reach;
 }
 
 // A mesh against a vertical cylinder, face by face -- `MeshFace::inCylinder`
@@ -514,7 +545,7 @@ function findMeshHitFace(obs, x, y, z, radius, height, passField = 'driveThrough
   const boxMins = [-radius, 0, -radius];
   const boxMaxs = [radius, height, radius];
   for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
     const localPoints = face.vertexIndices.map((vi) => {
       const v = obs.vertices[vi];
       return [v.x - x, v.y - y, v.z - z];
@@ -616,7 +647,7 @@ function findMeshHitFaceOriented(
   const boxMins = [-halfWidth, 0, -halfLength];
   const boxMaxs = [halfWidth, height, halfLength];
   for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
     const localPoints = face.vertexIndices.map((vi) => {
       const v = obs.vertices[vi];
       const dx = v.x - x;
@@ -664,7 +695,7 @@ function collectMeshHitFacesTank(
   const boxMins = [-halfWidth, 0, -halfLength];
   const boxMaxs = [halfWidth, height, halfLength];
   for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
     const localPoints = face.vertexIndices.map((vi) => {
       const v = obs.vertices[vi];
       const dx = v.x - x;
@@ -695,7 +726,7 @@ function collectMeshHitFacesCylinder(obs, x, y, z, radius, height, passField, di
   const boxMins = [-radius, 0, -radius];
   const boxMaxs = [radius, height, radius];
   for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, x, y, z)) continue;
+    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
     const localPoints = face.vertexIndices.map((vi) => {
       const v = obs.vertices[vi];
       return [v.x - x, v.y - y, v.z - z];
@@ -725,7 +756,7 @@ function collectMeshHitFacesCylinder(obs, x, y, z, radius, height, passField, di
 // found first only because of array order -- answer instead of the near
 // mesh's floor, and a wall's answer is "you are blocked," which a floor's
 // never is.
-function pickPriorityMeshFace(candidates, direction) {
+function pickPriorityMeshCandidate(candidates, direction) {
   if (candidates.length === 0) return null;
   const scored = candidates.map((candidate) => {
     const { face } = candidate;
@@ -741,7 +772,16 @@ function pickPriorityMeshFace(candidates, direction) {
     if (a.isUp) return b.upHeight - a.upHeight;
     return a.dot - b.dot;
   });
-  return scored[0].obs;
+  return scored[0];
+}
+
+// The obstacle half of `pickPriorityMeshCandidate`, which is all
+// `findTankObstacle` can hand back: its callers treat the answer as an
+// obstacle. `getTankHitNormal` wants the face that won instead, so it asks
+// for the candidate itself.
+function pickPriorityMeshFace(candidates, direction) {
+  const best = pickPriorityMeshCandidate(candidates, direction);
+  return best ? best.obs : null;
 }
 
 // The plane normal to reflect a ricocheting shot about. `hitFace`, when
@@ -2085,13 +2125,43 @@ function getTankHitNormal(obs, x, y, z, rotation, toY, height, sweep = null) {
     // to a made-up "roof" normal that is wrong in every way that matters --
     // upstream has no equivalent gap, since `getHitNormal` never has to
     // relocate anything, it already knows which face it is.
+    //
+    // Ranked by `pickPriorityMeshCandidate`, not taken as whichever face the
+    // search happens to reach first. Upstream never has to choose twice:
+    // `World::hitBuilding` sorts its hit list with `compareHitNormal` and
+    // hands the winning `MeshFace` back *as* the obstacle (World.cxx:344-352,
+    // a `MeshFace` being an `Obstacle` there), so `getHitNormal` cannot name a
+    // different face than the search settled on. `findTankObstacle` returns
+    // the mesh rather than the face -- every caller wants an obstacle -- so
+    // the ranking has to be repeated here, and taking a first match instead
+    // silently discards it.
+    //
+    // What that cost: an up plane outranks a wall, so a tank crossing the
+    // seam between two meshes whose flat tops meet at the same height
+    // resolves against the top it is driving onto. Array order named the far
+    // mesh's perimeter wall instead -- a wall the tank only touches at all
+    // because gravity sinks it a few thousandths of a unit below the shared
+    // top every frame -- and that wall's normal faces back the way the tank
+    // came, so the slide cancelled the whole of its forward speed and it
+    // stopped dead on the seam. Two boxes never showed it (a box answers from
+    // `findTankObstacle`'s own early return, before any face is weighed) and
+    // neither did a box meeting a mesh; it took two meshes.
     const queryX = (sweep && Number.isFinite(sweep.hitX)) ? sweep.hitX : x;
     const queryZ = (sweep && Number.isFinite(sweep.hitZ)) ? sweep.hitZ : z;
     const direction = sweep ? { x: sweep.toX - sweep.fromX, y: toY - y, z: sweep.toZ - sweep.fromZ } : null;
-    const face = (sweep && Number.isFinite(rotation))
-      ? findMeshHitFaceOriented(obs, queryX, low, queryZ, rotation, sweep.halfWidth, sweep.halfLength, height, 'driveThrough', direction)
-      : findMeshHitFace(obs, queryX, low, queryZ, height, height, 'driveThrough', direction);
-    return face ? { x: face.plane[0], y: face.plane[1], z: face.plane[2] } : { x: 0, y: 1, z: 0 };
+    const candidates = [];
+    if (sweep && Number.isFinite(rotation)) {
+      collectMeshHitFacesTank(
+        obs, queryX, low, queryZ, rotation, sweep.halfWidth, sweep.halfLength, height,
+        'driveThrough', direction, candidates,
+      );
+    } else {
+      collectMeshHitFacesCylinder(obs, queryX, low, queryZ, height, height, 'driveThrough', direction, candidates);
+    }
+    const best = pickPriorityMeshCandidate(candidates, direction);
+    return best
+      ? { x: best.face.plane[0], y: best.face.plane[1], z: best.face.plane[2] }
+      : { x: 0, y: 1, z: 0 };
   }
 
   if (crossedFlatTop(base + getObstacleHeight(obs), y, toY)) return { x: 0, y: 1, z: 0 };
@@ -2294,6 +2364,7 @@ module.exports = {
   collectMeshHitFacesTank,
   collectMeshHitFacesCylinder,
   pickPriorityMeshFace,
+  pickPriorityMeshCandidate,
   getColliderLocalPoint,
   testOrigRectCircle,
   TANK_HALF_LENGTH,

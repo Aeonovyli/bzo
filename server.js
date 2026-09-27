@@ -11840,6 +11840,19 @@ function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSe
         headline = `COLLISION with unknown object (${at})`;
       } else if (collision.collisionKind === 'boundary') {
         headline = `COLLISION with boundary (${at})`;
+      } else if (collision.type === 'mesh') {
+        // A mesh carries no `x`/`w`/`d`/`h`/`rotation` at all -- it is
+        // vertices and faces, and `obs.bounds` is the only box it has. Reading
+        // the box fields off one threw, which took the whole message handler
+        // with it and dropped the movement update this line only meant to
+        // describe.
+        const b = collision.bounds;
+        headline = b
+          ? `COLLISION obs:${collision.name} mesh`
+            + ` x:${b.minX.toFixed(2)}..${b.maxX.toFixed(2)},`
+            + ` y:${b.minY.toFixed(2)}..${b.maxY.toFixed(2)},`
+            + ` z:${b.minZ.toFixed(2)}..${b.maxZ.toFixed(2)} (${at})`
+          : `COLLISION obs:${collision.name} mesh (${at})`;
       } else {
         const { x, z, w, d, h, baseY, rotation } = collision;
         headline = `COLLISION obs:${collision.name} ${x.toFixed(2)},${baseY.toFixed(2)},${z.toFixed(2)},`

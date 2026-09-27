@@ -6,6 +6,46 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- Driving from one mesh's flat top onto another's no longer stops dead at the
+  seam. `getTankHitNormal` searched for the struck face a second time and took
+  whichever came first in the mesh's own face list, throwing away the ranking
+  the collision search had already done; a perimeter wall the tank only grazes
+  because gravity sinks it a few thousandths of a unit below the shared top
+  then answered in place of the top it was driving onto, facing back the way it
+  came. Upstream never chooses twice -- `World::hitBuilding` sorts its hit list
+  with `compareHitNormal`, up planes first, and hands that `MeshFace` back as
+  the obstacle -- so bzo now ranks the same way. Two boxes never showed this
+  and neither did a box meeting a mesh: a box answers from `findTankObstacle`'s
+  own early return, before any face is weighed. `bzo.bzw`'s hexagon honeycomb
+  is the fixture, and `npm run test:mesh-seams` is the guard.
+- A flat mesh face is chosen by the height the step began at, which is
+  upstream's own test (`World.cxx:335-341`), rather than by whether the tank's
+  centre point sits inside the face's polygon. The centre test lost a tank the
+  floor it was standing on whenever that centre passed beyond the floor's edge
+  while its body still rested on it -- crossing the two-metre gap built into
+  every `Catwalk` joint on `import-xs.bzexcess.com_5155.bzw`, the deck stopped
+  answering and the segments' end caps were all that was left, so holding
+  forward moved the tank slowly backwards and reverse moved it forwards.
+- A mesh face a tank travels exactly along no longer blocks it. The dot product
+  that decides "driven into" against "slid along" is mathematically zero there,
+  so its sign came down to how the face's own plane coefficients rounded, and a
+  blocked step with no velocity component to cancel resolves to no progress at
+  all, every frame. It is now measured against the step's own length.
+- Reporting a collision with a mesh no longer throws. The anti-cheat log line
+  read `x`, `w`, `d`, `h` and `rotation` off the obstacle, which a mesh does
+  not have -- it is vertices and faces, with `bounds` for a box -- and the
+  `TypeError` took the whole message handler with it, dropping the movement
+  update the line only meant to describe.
+- `mesh_cube` in `bzo.bzw` had its bottom face wound counter-clockwise, so its
+  normal pointed up into the cube and the engine read the cube as having an
+  up-facing floor at ground level. The `Hexagon` prism beside it was already
+  wound the other way.
+- `--mv` and `--chat` in `scripts/headless-client.mjs` reach the server again.
+  Focus, text and Enter were three separate CDP calls, and a headless window
+  has no real OS focus to hold between them, so the text landed nowhere and the
+  command was silently dropped. They are one page-side call now.
+
 ## [1.2.79] - 2026-09-27
 
 ### Added
