@@ -5350,7 +5350,7 @@ class RenderManager {
   // the ground (or lower)" (`_prepareBoxGeometry`'s own `omitFaces`, above).
   // A mesh author has no equivalent switch, and no reason to reach for one:
   // nothing before the shell ever rendered a ground-level face's buried side
-  // anyway, so the map's own "Octagon" (`bzo.bzw`) left its floor cap in its
+  // anyway, so the map's own "Hexagon" (`bzo.bzw`) left its floor cap in its
   // default wall texture same as its walls. A phasing tank is always on the
   // ground -- `OO` grants no flight -- so this is exactly the face its own
   // feet are standing on, coplanar with the real ground mesh, and additively

@@ -702,38 +702,39 @@ end
 
 # Four obstacle tests, one per corner, clear of the rings and the bases.
 
-# North-east: the octagon and a thin wall, `hix.bzw`'s own third-person
-# camera geometry, also carried in `flagbuffet.bzw`. Four planks at one
-# position, 45 degrees apart; the half-width is the half-depth times
-# (1 + sqrt 2), which is what puts each plank's corners exactly on its
-# neighbour's. Near the middle a tank or a chase camera is inside as many as
-# four obstacles at once.
+# North-east: a honeycomb of three hexagons and a thin wall. The hexagons are
+# the same regular hexagon -- circumradius 15, 12 high, vertices at 30, 90,
+# 150, 210, 270 and 330 degrees -- built three different ways, and each one
+# shares a whole face with each of the other two, so driving from any of them
+# onto either other one crosses a seam with nothing between the two surfaces.
+# Their centres sit `sqrt 3 * 15` apart, which is twice the apothem: the
+# distance at which two hexagons in this orientation meet flat.
+#
+# The plank hexagon, `hix.bzw`'s own third-person camera geometry, also
+# carried in `flagbuffet.bzw`. Three planks at one position, 60 degrees
+# apart; the half-width is the half-depth times sqrt 3, which is what puts
+# each plank's corners exactly on its neighbour's, so their union is the
+# hexagon rather than a star. Near the middle a tank or a chase camera is
+# inside as many as three obstacles at once.
 box
-  name oct_0
-  position 105 105 0
+  name hex_0
+  position 100.980762 95 0
   rotation 0
-  size 14.485281374 6 12
+  size 12.990381 7.5 12
 end
 
 box
-  name oct_45
-  position 105 105 0
-  rotation 45
-  size 14.485281374 6 12
+  name hex_60
+  position 100.980762 95 0
+  rotation 60
+  size 12.990381 7.5 12
 end
 
 box
-  name oct_90
-  position 105 105 0
-  rotation 90
-  size 14.485281374 6 12
-end
-
-box
-  name oct_135
-  position 105 105 0
-  rotation 135
-  size 14.485281374 6 12
+  name hex_120
+  position 100.980762 95 0
+  rotation 120
+  size 12.990381 7.5 12
 end
 
 # A wall a metre thick, thinner than the chase camera's trail, so backing
@@ -754,74 +755,77 @@ box
   texture http://images.bzflag.org/astevens/pine.png
 end
 
-# The same octagon again, but as one real mesh instead of four overlapping
-# boxes -- same footprint (its 8 vertices are `oct_0`..`oct_135`'s own
+# The same hexagon again, but as one real mesh instead of three overlapping
+# boxes -- same footprint (its 6 vertices are `hex_0`..`hex_120`'s own
 # corners, local to this `define` so `group`'s own `position` below does the
 # placing, `docs/bzw.md`'s "Groups" the same way `Watchtower` further down
 # does) and the same 0..12 height, so driving into it and standing in it are
-# a direct A/B against the plank emulation above. The eighth-dimension
+# a direct A/B against the plank emulation beside it. The eighth-dimension
 # (`OO`) point is the real difference `docs/bzw-plan.md`'s "Mesh geometry"
 # still calls out: a tank near the planks' shared centre can be inside as
-# many as four separate obstacles at once (each with its own eighth-
+# many as three separate obstacles at once (each with its own eighth-
 # dimension node), where this is one obstacle and, once meshes get an
 # eighth-dimension node of their own, would be one node.
-define Octagon
+define Hexagon
 mesh
   name Prism
-  vertex -14.485281 -6.000000 0
-  vertex -6.000000 -14.485281 0
-  vertex 6.000000 -14.485281 0
-  vertex 14.485281 -6.000000 0
-  vertex 14.485281 6.000000 0
-  vertex 6.000000 14.485281 0
-  vertex -6.000000 14.485281 0
-  vertex -14.485281 6.000000 0
-  vertex -14.485281 -6.000000 12
-  vertex -6.000000 -14.485281 12
-  vertex 6.000000 -14.485281 12
-  vertex 14.485281 -6.000000 12
-  vertex 14.485281 6.000000 12
-  vertex 6.000000 14.485281 12
-  vertex -6.000000 14.485281 12
-  vertex -14.485281 6.000000 12
+  vertex -12.990381 -7.500000 0
+  vertex 0.000000 -15.000000 0
+  vertex 12.990381 -7.500000 0
+  vertex 12.990381 7.500000 0
+  vertex 0.000000 15.000000 0
+  vertex -12.990381 7.500000 0
+  vertex -12.990381 -7.500000 12
+  vertex 0.000000 -15.000000 12
+  vertex 12.990381 -7.500000 12
+  vertex 12.990381 7.500000 12
+  vertex 0.000000 15.000000 12
+  vertex -12.990381 7.500000 12
   texture boxwall
   face
-    vertices 0 1 9 8
+    vertices 0 1 7 6
   endface
   face
-    vertices 1 2 10 9
+    vertices 1 2 8 7
   endface
   face
-    vertices 2 3 11 10
+    vertices 2 3 9 8
   endface
   face
-    vertices 3 4 12 11
+    vertices 3 4 10 9
   endface
   face
-    vertices 4 5 13 12
+    vertices 4 5 11 10
   endface
   face
-    vertices 5 6 14 13
+    vertices 5 0 6 11
   endface
   face
-    vertices 6 7 15 14
-  endface
-  face
-    vertices 7 0 8 15
-  endface
-  face
-    vertices 7 6 5 4 3 2 1 0
+    vertices 5 4 3 2 1 0
     texture roof
   endface
   face
-    vertices 8 9 10 11 12 13 14 15
+    vertices 6 7 8 9 10 11
     texture roof
   endface
 end
 enddef
 
-group Octagon
-  position 50 105 0
+group Hexagon
+  position 75 95 0
+end
+
+# The third of the honeycomb, and the only one that is a single primitive:
+# `arc`'s own `divisions 6` over a full 360 degrees is a hexagonal prism,
+# and `rotation 30` starts its first vertex where the other two put theirs.
+# Its west and south-west faces are the mesh's and the planks' north ones.
+arc
+  name hex_arc
+  position 87.990381 117.5 0
+  size 15 15 12
+  rotation 30
+  divisions 6
+  angle 360
 end
 
 # North-west: two overlap tests. A pyramid, a box and a flipped pyramid
@@ -831,42 +835,42 @@ end
 # tank can only ever be resting on the outermost one still taller than it.
 pyramid
   name overlap_up
-  position -95 83 0
+  position -110 91 0
   rotation 0
   size 18.0 9.0 10.0
 end
 
 box
   name overlap_mid
-  position -95 95 0
+  position -110 103 0
   rotation 0
   size 18.0 3.0 10.0
 end
 
 pyramid
   name overlap_down
-  position -95 107 0
+  position -110 115 0
   rotation 0
   size 18.0 9.0 -10.0
 end
 
 pyramid
   name nest_base
-  position -95 55 0
+  position -124 55 0
   rotation 0
   size 10.0 10.0 3.0
 end
 
 pyramid
   name nest_mid
-  position -95 55 0
+  position -124 55 0
   rotation 0
   size 5.0 5.0 7.0
 end
 
 pyramid
   name nest_top
-  position -95 55 0
+  position -124 55 0
   rotation 0
   size 2.0 2.0 12.0
 end
@@ -1884,7 +1888,7 @@ end
 # this is also the only fixture testing `startside`/`endside` on an `arc`.
 arc
   name test_arc_ring
-  position 105 85 0
+  position -124 32 0
   size 8 8 6
   ratio 0.5
   divisions 16
@@ -1900,7 +1904,7 @@ end
 
 sphere
   name test_sphere
-  position -15 70 6
+  position -45 108 6
   radius 6
   divisions 4
 end
@@ -1920,10 +1924,10 @@ end
 
 tetra
   name test_tetra
-  vertex 10 65 0
-  vertex 20 65 0
-  vertex 15 75 0
-  vertex 15 70 8
+  vertex -70 85 0
+  vertex -60 85 0
+  vertex -65 95 0
+  vertex -65 90 8
 end
 
 meshbox

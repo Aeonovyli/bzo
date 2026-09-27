@@ -6,6 +6,32 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The HUD's title row reads `[Settings] [Mic] @name/flag [chevron]`. The
+  microphone is new there: its border is green while you are transmitting and
+  red while you are not, clicking it toggles transmission as `B` does, and the
+  hover text says which it would do and on which channel -- `Disable Mic -
+  Nearby`.
+- The title carries the login character a scoreboard row already does, so a
+  signed-in player reads `@Tim Riker` or `+Tim Riker`. `@` for an admin and `+`
+  for a verified callsign are upstream's own indicators
+  (`ScoreboardRenderer.cxx:718`).
+
+### Changed
+- The voice panel that sat beside the targeting box is gone; the microphone
+  button in the title row says the same thing in the corner where the other HUD
+  controls already are.
+- `bzo.bzw`'s north-east corner is a honeycomb of three identical hexagons --
+  one built from three overlapping planks, one a real mesh, one a single `arc`
+  with `divisions 6` -- each sharing a whole face with the other two, so
+  driving from any one onto either other crosses a seam with nothing between
+  the surfaces. It replaces the octagon pair, which tested the same three ways
+  of building a prism without ever putting two of them edge to edge.
+- `bzo.bzw`'s test fixtures no longer sit inside each other: the hollow arc and
+  the nested pyramids moved to the west wall, the sphere north of the
+  hemisphere, and the tetrahedron and the overlap stack out of the plain arc's
+  footprint.
+
 ## [1.2.78] - 2026-09-27
 
 ### Added
