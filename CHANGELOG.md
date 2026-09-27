@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.77] - 2026-09-27
+
 ### Added
 - The chat window keeps its transcript across a page reload, and a
   `--- reloaded ---` line marks where the reload was. bzo reloads the tab on
@@ -21,7 +23,7 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   same header and the same `msglog-<when>.txt` name, arriving as a download
   because a browser has no config directory to write it into. `-t` stamps each
   line with its date and time. `-s` strips colour codes upstream and does
-  nothing here, bzo having none in the text to strip. Refs #144.
+  nothing here, bzo having none in the text to strip. Closes #144.
 
 ## [1.2.76] - 2026-09-27
 
