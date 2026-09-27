@@ -1911,58 +1911,101 @@ deviations above -- so it passes `enforceable = false` and always logs ALLOWED.
 ## Shot timing
 
 BZFlag derives shot timing from `_reloadTime`, which itself defaults to
-`_shotRange / _shotSpeed`:
+`_shotRange / _shotSpeed` (`global.cxx:127`). Three different numbers come off
+it, and conflating any two of them is the mistake this section exists to
+prevent:
 
-- `ShotPath.cxx:48` — a shot's lifetime is `_reloadTime`
-- `LocalPlayer.cxx:1311` — a slot reloads after `_reloadTime / numShots`
+- **The shot's life** -- `ShotPath.cxx:48`, `_reloadTime` scaled by the flag's
+  `adLife`. How long the shell is in the air.
+- **The slot's reload** -- `ShotPath::reloadTime`, `_reloadTime` scaled by the
+  flag's `adRate` in each segmented strategy's constructor,
+  `setReloadTime(reload / adRate)`. How long the weapon that fired is out of
+  action. `SHOT_LIFETIME` carries a map's own `_reloadTime` and replaces the
+  basis for both.
+- **The sustained rate** -- `_reloadTime / maxShots`. What `maxShots` slots each
+  held for one reload works out to, and what `SHOT_RELOAD_TIME` carries.
 
-So firing continuously sustains exactly `maxShots` shots in flight. bzo derives
-`SHOT_RELOAD_TIME` the same way, after the `server.json` overrides are applied
-and again once the map's own physics are (its `-ms`, `_reloadTime`, `_shotSpeed`
-and `_shotRange` together, in one pass), so changing `shotMaxActive`,
-`shotSpeed`, or `shotDistance` keeps the relation intact. A map stating
-`_reloadTime` replaces the derived basis with its own. With the defaults and one slot that is
+`SHOT_RELOAD_TIME` is derived after the `server.json` overrides are applied and
+again once the map's own physics are (its `-ms`, `_reloadTime`, `_shotSpeed` and
+`_shotRange` together, in one pass), so changing `shotMaxActive`, `shotSpeed` or
+`shotDistance` keeps the relation intact. With the defaults and one slot that is
 3500ms; `maps/hix.bzw` asks for five and gets 700ms.
+
+### A shot slot is a clock on the weapon, not a live shell
+
+`findFreeShotSlot` in `public/shots.mjs` is the rule, and both ends keep their
+own copy of the same clock: `player.shotSlotFreeAt` on the server,
+`myShotSlotFreeAt` on the client. A slot is taken when it is fired and comes
+back when its own reload runs out.
+
+**Nothing frees a slot early.** A shell that stops against a wall a metre away
+costs exactly what one that flies its whole range costs. That is both ends of
+upstream: `LocalPlayer` reaps a slot on `isReloaded()` and never on
+`isExpired()` (`LocalPlayer.cxx:137`), and bzfs's `removeShot` clears a shot's
+`running` flag while leaving its `expireTime` alone. bzo used to free a slot
+when the projectile left the map, which turned a close-range wall hit into a
+free reload.
+
+**The reload bzo holds a slot for is the bzflag client's, not bzfs's.** The two
+differ: `GameKeeper::addShot` (`GameKeeper.cxx:420`) tests
+`now < shotsInfo[id].expireTime` and `expireTime` comes from `GetShotLifetime`,
+so bzfs would accept a laser every 0.35s where an honest bzflag client fires one
+every 7s. `L`, `SW` and `TH` are where the two diverge -- `L` has `_laserAdLife`
+0.1 against `_laserAdRate` 0.5, `SW` has `_shockAdLife` 0.2 against no rate
+scaling at all because `ShockWaveStrategy` never calls `setReloadTime`, and `TH`
+has `_thiefAdLife` 0.05 against `_thiefAdRate` 12.
+
+Holding bzo to the client's number is deliberate and matters most once players
+are proxied into a real bzfs: a bzo player is then exactly as fast as a desktop
+one rather than ahead of them on three flags, and every shot bzo sends is one
+the target will accept. `shotFired` drops a shot it refuses without a word
+(`bzfs.cxx:4142`), which on a phone would read as a trigger that sometimes does
+nothing. **Do not "fix" this toward bzfs's looser check.**
 
 ### The server does not enforce a reload timer
 
 Fire rate is limited by shot slots alone. `bzfs.cxx` `shotFired()` has no
 elapsed-time check at all, and `GameKeeper.cxx` `addShot()` refuses a shot only
-when that shot's own slot is still live. Each slot expires a full shot lifetime
-after it was filled, so two consecutive shots never share a timer.
+when that shot's own slot is still live.
 
 **Do not add a global cooldown back.** A reload timer compares shots that are
-one reload apart, which is the interval network jitter actually lands in: the
-client starts its window when it sends and the server started its window when it
-received, so any dip in latency between two shots makes an honest one look
-early. Slot expiry compares shots a full lifetime apart, where jitter is noise.
-The sustained rate is identical either way -- `maxShots` slots each held for one
-shot lifetime is one shot per `SHOT_RELOAD_TIME`.
+one sustained interval apart, which is the interval network jitter actually
+lands in: the client starts its window when it sends and the server started its
+window when it received, so any dip in latency between two shots makes an honest
+one look early. Slot expiry compares shots a full reload apart, where jitter is
+noise. The sustained rate is identical either way.
 
-### Open question: a variant's slot frees on its life, not its reload
+### The trigger: tap and hold are told apart
 
-Upstream keeps the two apart. `ShotPath::reloadTime` starts at `_reloadTime` and
-each segmented strategy scales it in its own constructor -- `setReloadTime(reload
-/ adRate)` -- while `FiringInfo::lifetime` is scaled by the flag's `adLife`. The
-slot frees on the reload; the shot dies on the life. For `F` Rapid Fire and `MG`
-Machine Gun the two coincide, because their life is declared as the reciprocal of
-their rate, and that is the coincidence bzo built on: the server holds a slot for
-`lifetimeSeconds` and the client gates firing on `SHOT_RELOAD_TIME / rateFactor`.
+**This is bzo's own rule and upstream has nothing to copy.** Its BZDB table
+carries `_reloadTime` and the per-flag `AdRate`/`AdLife` pairs and no trigger
+tuning of any kind, and its own held-trigger behaviour is accidental:
+`SDL2Display.cxx:544` never checks `event.key.repeat`, so a held fire *key*
+auto-repeats at the operating system's rate while a held mouse button fires
+once. Upstream reads the trigger once per press (`cmdFire`,
+`clientCommands.cxx:333`) on the one device it has.
 
-Three flags break the coincidence. `L` Laser has `_laserAdLife` 0.1 against
-`_laserAdRate` 0.5, `SW` Shock Wave has `_shockAdLife` 0.2 against no rate
-scaling at all, because `ShockWaveStrategy` is the one strategy that never calls
-`setReloadTime`, and `TH` Thief has `_thiefAdLife` 0.05 against `_thiefAdRate` 12.
-So an honest client fires a laser every 7s, a shock wave every 3.5s and a thief
-beam every 0.29s, exactly as upstream does, while the server's slot check would
-let a modified one fire a laser every 0.35s, a wave every 0.7s and a thief beam
-every 0.18s. Honest play is right; the anti-cheat gate is loose.
+bzo has a touch button, an XR trigger and a gamepad, where a trigger left held
+would fire on every frame. So the rising edge and the hold are gated
+separately, both still behind a free slot:
 
-The fix is to give `Projectile` a slot expiry separate from its lifetime -- the
-reload scaled by `rateFactor` -- and check shot slots against that rather than
-against how long the shell lives. Deferred rather than folded into the phase that
-found it, because it touches every shot variant and the two the gap is visible on
-are already in.
+- A **press** may fire again `SHOT_TAP_SPACING_MS` (100ms) later. That sits at
+  about the rate a practised player can click a mouse, so tapping is as fast as
+  upstream and no faster, and one press cannot be read twice.
+- A trigger **still held** repeats at the sustained rate instead, so a thumb
+  resting on a virtual button never empties the slots.
+
+Holding is the convenience; it is never the faster option. Neither gate is sent
+to the server or enforced there -- a server-side gate that short would compare
+shots well inside jitter range. The slots are what the wire enforces.
+
+`MG` Machine Gun needs no special case: its held interval is divided by
+`_mGunAdRate`. `TR` Trigger Happy skips both gates, as it pulls its own trigger
+every frame (`playing.cxx:7345`), and is spaced by `forceReload` instead --
+`LocalPlayer.cxx:1311`, "make sure all the shots don't go off at once", which is
+the one place upstream itself puts a gap between two shots. That same
+`forceReload` sets `shotJamUntil`, upstream's `jamTime`, which `_thiefDropTime`
+also charges.
 
 ### Open question: shot position tolerance
 
@@ -1974,10 +2017,10 @@ upstream here. Rejections now log as `[ANTICHEAT:...] SHOT REJECTED`; if honest
 shots are being refused on position during testing, widen the tolerance toward
 upstream's rather than assuming a client bug.
 
-`shotReloadTime` in `server.json` pins the value and disables the derivation.
-Leave it unset unless an operator deliberately wants a non-BZFlag fire rate --
-in particular do not add it to `example-server.json`, which is copied to
-`server.json` on first start.
+`shotReloadTime` in `server.json` pins `SHOT_RELOAD_TIME` and disables the
+derivation, which sets the held-trigger rate. Leave it unset unless an operator
+deliberately wants a non-BZFlag fire rate -- in particular do not add it to
+`example-server.json`, which is copied to `server.json` on first start.
 
 ## Keyboard
 

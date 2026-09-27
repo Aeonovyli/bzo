@@ -43,6 +43,9 @@ const {
   getWorldWeaponDirection,
   WORLD_WEAPON_DEFAULT_DELAY,
   normalizeWorldWeaponDelays,
+  getWorldReloadSeconds,
+  getSlotReloadSeconds,
+  findFreeShotSlot,
 } = require('./server/shots.cjs');
 const {
   BASE_SIZE,
@@ -2373,6 +2376,15 @@ function sanitizeListServerStatus(body) {
     gameOptionsBits: Number.isFinite(gameOptionsBits) ? gameOptionsBits : 0,
     maxShots: Number.isFinite(maxShots) ? maxShots : 0,
     style: typeof body?.style === 'string' ? body.style.slice(0, 20) : '',
+    // Which world the reporting instance is running, and which servers it
+    // proxies. Both are read straight off `live` by `listPublicListServerRows`,
+    // so a field dropped here is a field that instance can never show: this is
+    // the only thing that writes `live` for a server reporting over HTTP.
+    map: typeof body?.map === 'string' ? body.map.slice(0, 120) : '',
+    // Bounded here rather than trusted, since this is the edge an untrusted
+    // instance reports at; `listPublicListServerRows` shapes each row again on
+    // the way out, where it also drops the targets that were unreachable.
+    proxies: Array.isArray(body?.proxies) ? body.proxies.slice(0, MAX_REPORTED_PROXIES) : [],
     voiceEnabled: body?.voiceEnabled === true,
   };
 }
@@ -9147,6 +9159,11 @@ class Player {
     this.z = 0;
     this.rotation = 0;
     this.alive = false;
+    // When each shot slot comes back, as an epoch time per slot. Upstream's
+    // `shots[]` array with the shells left out: a slot is taken when it is
+    // fired and comes back on its own reload, and a shell that stops early
+    // never hands one back. See `findFreeShotSlot` in `server/shots.cjs`.
+    this.shotSlotFreeAt = [];
     this.lastUpdate = Date.now();
     // The client's own clock (`message.ct`, seconds relative to that client's
     // own origin -- never an absolute time) as of the last *accepted* move,
@@ -9437,6 +9454,10 @@ class Player {
     this.z = spawnPos.z;
     this.rotation = spawnPos.rotation;
     this.alive = true;
+    // `LocalPlayer::restart` (LocalPlayer.cxx:1052) deletes every shot the tank
+    // had, so a tank that comes back comes back loaded. The life that fired
+    // them is over; nothing is left in the air to hold a slot.
+    this.shotSlotFreeAt = [];
     this.verticalVelocity = 0;
     this.isJumping = false;
     this.onObstacle = false;
@@ -9678,13 +9699,12 @@ class Projectile {
     this.originX = x;
     this.originY = this.y;
     this.originZ = z;
-    // GetShotLifetime (GameKeeper.cxx:401): the world's reload interval scaled by
-    // the flag's own life factor. The slot this shot holds frees with it, which
-    // is how Rapid Fire and Machine Gun get their rate -- their life is declared
-    // as the reciprocal of it.
-    this.lifetimeSeconds = (GAME_CONFIG.SHOT_SPEED > 0
-      ? (GAME_CONFIG.SHOT_RANGE / GAME_CONFIG.SHOT_SPEED)
-      : 10) * effects.lifeFactor;
+    // GetShotLifetime (GameKeeper.cxx:401): the world's reload scaled by the
+    // flag's own life factor. How long the *shell* lives, which is not how long
+    // the slot that fired it is out of action -- see `getSlotReloadMs`. For an
+    // ordinary shot the two are the same number, which is the coincidence the
+    // pair used to be conflated on.
+    this.lifetimeSeconds = getWorldReloadSeconds(GAME_CONFIG) * effects.lifeFactor;
     this.teleportReentryBlockTeleporterIndex = null;
     this.teleportReentryBlockDistance = 0;
   }
@@ -11928,8 +11948,8 @@ function getShotRejection(player, shotX, shotY, shotZ, now = Date.now()) {
 
   // Fire rate is limited by shot slots alone, matching bzfs: GameKeeper.cxx
   // addShot() rejects a shot only when its own slot is still live, and there is
-  // no elapsed-time check. Slots each expire independently a full shot lifetime
-  // after they were filled, so consecutive shots never share a timer and network
+  // no elapsed-time check. Slots each expire independently a full reload after
+  // they were filled, so consecutive shots never share a timer and network
   // jitter cannot make an honest shot look early. See the slot check below.
 
   // Use extrapolated position, not stored position
@@ -11964,14 +11984,11 @@ function getShotRejection(player, shotX, shotY, shotZ, now = Date.now()) {
     return { reason: 'cannot shoot from inside a building', fatal: false };
   }
 
-  let activeShotCount = 0;
-  projectiles.forEach((proj) => {
-    if (proj.playerId === player.id) activeShotCount++;
-  });
-
-  if (activeShotCount >= GAME_CONFIG.SHOT_MAX_ACTIVE) {
+  if (getAvailableShotSlot(player, now) < 0) {
+    const soonest = Math.min(...player.shotSlotFreeAt.slice(0, GAME_CONFIG.SHOT_MAX_ACTIVE));
     return {
-      reason: `exceeded active shot slots (${activeShotCount}/${GAME_CONFIG.SHOT_MAX_ACTIVE})`,
+      reason: `every shot slot is still reloading (${GAME_CONFIG.SHOT_MAX_ACTIVE} slots,`
+        + ` next in ${Math.max(0, soonest - now)}ms)`,
       fatal: false,
     };
   }
@@ -12010,17 +12027,22 @@ function reportJumpRejection(player, flagType) {
     `JUMP REJECTED: jumping is off and the tank carries ${flagType || 'no flag'}`);
 }
 
-function getAvailableShotSlot(playerId) {
-  const occupiedSlots = new Set();
-  projectiles.forEach((proj) => {
-    if (proj.playerId === playerId && Number.isInteger(proj.shotSlot) && proj.shotSlot >= 0) {
-      occupiedSlots.add(proj.shotSlot);
-    }
-  });
-  for (let slot = 0; slot < GAME_CONFIG.SHOT_MAX_ACTIVE; slot++) {
-    if (!occupiedSlots.has(slot)) return slot;
-  }
-  return -1;
+// How long the slot a shot of this flag fills stays out of action, in ms.
+function getSlotReloadMs(flag) {
+  const worldReload = getWorldReloadSeconds(GAME_CONFIG);
+  return getSlotReloadSeconds(worldReload, getShotEffects(flag).rateFactor) * 1000;
+}
+
+function getAvailableShotSlot(player, now) {
+  return findFreeShotSlot(player.shotSlotFreeAt, GAME_CONFIG.SHOT_MAX_ACTIVE, now);
+}
+
+// Take the slot. Nothing gives it back early -- not a hit, not the shot running
+// out of range -- so this is the only place a slot's clock is ever set, and the
+// respawn that clears them all is the only place it is unset.
+function occupyShotSlot(player, slot, flag, now) {
+  if (!Number.isInteger(slot) || slot < 0) return;
+  player.shotSlotFreeAt[slot] = now + getSlotReloadMs(flag);
 }
 
 // Broadcast to all players except sender
@@ -17279,7 +17301,9 @@ wss.on('connection', (ws, req) => {
           // A shot allowed past the slot check in warning mode has no slot left
           // to take. It flies with slot -1: the reload bar ignores it, and the
           // log above already says the client thought it had one.
-          const shotSlot = getAvailableShotSlot(player.id);
+          const shotSlot = getAvailableShotSlot(player, now);
+          const shotFlag = getShotFlagFor(player);
+          occupyShotSlot(player, shotSlot, shotFlag, now);
           const id = (++projectileIdCounter).toString();
           const proj = new Projectile(
             id,
@@ -17294,7 +17318,7 @@ wss.on('connection', (ws, req) => {
             // ShotPath::FiringInfo (ShotPath.cxx:46): an unzoned Phantom Zone
             // tank fires ordinary shells, so the flag a shot is fired under is
             // not always the flag its shooter is holding.
-            getShotFlagFor(player),
+            shotFlag,
             now
           );
           projectiles.set(id, proj);

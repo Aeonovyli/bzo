@@ -823,10 +823,11 @@ the larger of the map's number and the config's, because every one of them is
 a switch that happens to be spelled with a number. `-ms` **replaces** the
 config's `shotMaxActive` outright: upstream reads
 a map's `options` block where `-world` sits on its command line, so the map's
-number is simply the later assignment. Changing it re-derives the reload time from
-`shotRange / shotSpeed / shotMaxActive`, since each slot comes back after
-`_reloadTime / maxShots`; a `shotReloadTime` pinned in `server.json` still wins,
-and a map stating `_reloadTime` replaces the basis -- see **Map physics**.
+number is simply the later assignment. Changing it re-derives the sustained
+fire rate from `shotRange / shotSpeed / shotMaxActive`, since `maxShots` slots
+each held for one reload works out to one shot per `_reloadTime / maxShots`; a
+`shotReloadTime` pinned in `server.json` still wins, and a map stating
+`_reloadTime` replaces the basis -- see **Map physics**.
 `-ms 0` means "tanks cannot shoot", and bzo reads it that way too
 (`CmdLineOptions.cxx:897-909`, which warns and then honours it). Only a
 *negative* or unparseable count becomes one shot, upstream's own split. A
@@ -962,11 +963,13 @@ Two of them are not quite a direct copy:
 
 - `_gravity` is a downward acceleration upstream and so is written negative;
   bzo stores the magnitude, so `-9.81` and `9.81` mean the same thing here.
-- `_reloadTime` is how long a shot lives, not how long a reload takes. Each
-  slot comes back after `_reloadTime / maxShots`, which is why a map stating
-  it and a map stating `-ms` are applied together and the reload is derived
-  once from the pair. A map that states neither gets upstream's own default
-  basis of `_shotRange / _shotSpeed`.
+- `_reloadTime` is the basis every shot time is derived from rather than a
+  time in its own right: a shot lives for it, and the slot that fired comes
+  back after it. That is why a map stating it and a map stating `-ms` are
+  applied together, since the pair also fixes the sustained rate. A map that
+  states neither gets upstream's own default basis of
+  `_shotRange / _shotSpeed`. A flag scales both halves and does not scale them
+  equally -- see AGENTS.md's **Shot timing**.
 - `_rejoinTime` is upstream's own name for the wait before a dead tank may
   spawn again. Upstream defaults it to `_explodeTime` and bzo keeps one
   number for both, so only this spelling is read: `_explodeTime` on its own

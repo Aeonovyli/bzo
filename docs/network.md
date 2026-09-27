@@ -134,7 +134,7 @@ omitted rather than sent null.
 | `killed` | `victimId`, `shooterId`, `projectileId`, plus the hit's own fields | somebody died, and why |
 | `shotBegin` | `id`, `playerId`, `x`,`y`,`z`, `shotSlot`, `dirX`,`dirY`,`dirZ`, `flag`, `ricochet`, `segments`, `target`, `createdAt` | a shot exists |
 | `shotEnd` | `id`, `reason`, `x`,`y`,`z` | it stopped, and where |
-| `reload` | -- | a shot slot came back |
+| `reload` | -- | reload the page: the server is restarting, usually for a map change |
 | `flagUpdate` | `flags` | the whole flag array |
 | `grabFlag` / `dropFlag` | `playerId`, `flag` | one flag changed hands |
 | `transferFlag` | `fromId`, `toId`, `flag` | Steal |

@@ -7,7 +7,7 @@
 
 // hud.js - Handles HUD and debug display logic
 
-import { normalizeShotSlotCount } from './shots.mjs';
+import { normalizeShotSlotCount, getShotSlotProgress } from './shots.mjs';
 import { HUNT_MARKER_COLOR } from './hunt.mjs';
 import {
   PLAYER_TEAM,
@@ -1532,7 +1532,9 @@ export function updateAltimeter({ myTank, tickSpacing = 5 }) {
   ctx.restore();
 }
 
-export function updateShotStatus({ myPlayerId, projectiles, gameConfig, now = Date.now() }) {
+export function updateShotStatus({
+  myPlayerId, slotFreeAt, slotReloadMs, gameConfig, now = Date.now(),
+}) {
   const hud = getHudCanvasContext(shotStatusRenderState, 'shotStatus');
   if (!hud || !myPlayerId || !gameConfig) return;
   const { canvas: shotStatus, controlBox, ctx } = hud;
@@ -1597,36 +1599,20 @@ export function updateShotStatus({ myPlayerId, projectiles, gameConfig, now = Da
     }
   }
 
-  const shotSpeed = Number.isFinite(gameConfig.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100;
-  const shotRange = Number.isFinite(gameConfig.SHOT_RANGE)
-    ? gameConfig.SHOT_RANGE
-    : (Number.isFinite(gameConfig.SHOT_DISTANCE) ? gameConfig.SHOT_DISTANCE : 350);
-  const slotLifetimeMs = shotSpeed > 0 ? (shotRange / shotSpeed) * 1000 : 0;
-  const slotProgress = new Array(maxSlots).fill(1);
-  if (projectiles && typeof projectiles.forEach === 'function') {
-    projectiles.forEach((projectile) => {
-      if (projectile?.userData?.playerId !== myPlayerId) return;
-      const slotIndex = Number.isInteger(projectile?.userData?.shotSlot) ? projectile.userData.shotSlot : -1;
-      if (slotIndex < 0 || slotIndex >= maxSlots) return;
-      const createdAt = Number.isFinite(projectile?.userData?.createdAt) ? projectile.userData.createdAt : now;
-      const ageMs = Math.max(0, now - createdAt);
-      // GetShotLifetime: a shot variant holds its slot for its own life, not the
-      // world's, which is what makes a Machine Gun's slots come back ten times
-      // as fast.
-      const lifeFactor = Number.isFinite(projectile?.userData?.lifeFactor)
-        ? projectile.userData.lifeFactor
-        : 1;
-      const lifetimeMs = slotLifetimeMs * lifeFactor;
-      const progress = lifetimeMs > 0 ? Math.max(0, Math.min(1, ageMs / lifetimeMs)) : 0;
-      slotProgress[slotIndex] = progress;
-    });
+  // HUDRenderer.cxx:1988. A bar reads its own slot's reload and nothing else:
+  // an empty slot is 1.0, full, with no global term anywhere in it. Upstream's
+  // one global gate -- `jamTime`, set by `forceReload` -- reaches
+  // `getReloadTime()`, and `getReloadTime` feeds the "Reloaded in %.1f" *text*
+  // at HUDRenderer.cxx:1012. It never touches the bars.
+  //
+  // What a bar fills on is the slot's reload, not the shell's flight: a shot
+  // that stops against a wall leaves its bar filling exactly as it was, because
+  // upstream reaps a slot on `isReloaded()` and never on `isExpired()`.
+  const slotProgress = new Array(maxSlots);
+  for (let slot = 0; slot < maxSlots; slot++) {
+    slotProgress[slot] = getShotSlotProgress(slotFreeAt, slot, slotReloadMs?.[slot], now);
   }
 
-  // HUDRenderer.cxx:1988. A bar reads the shot in its own slot and nothing else:
-  // an empty slot is 1.0, full, with no global term anywhere in it. Upstream's
-  // one global gate -- `jamTime`, set by `forceReload(_reloadTime / numShots)`
-  // after every shot -- reaches `getReloadTime()`, and `getReloadTime` feeds the
-  // "Reloaded in %.1f" *text* at HUDRenderer.cxx:1012. It never touches the bars.
   //
   // Then sorted, as upstream sorts, ascending. The bars are a tally of how ready
   // the slots are and not a row of named slots, so sorting stops a bar jumping

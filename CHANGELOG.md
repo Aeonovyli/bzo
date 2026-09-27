@@ -6,6 +6,49 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.73] - 2026-09-27
+
+### Changed
+- A shot slot is the weapon reloading, not the shell flying. A slot is taken
+  when it fires and comes back when its own reload runs out, so a shot that
+  stops against a wall a metre away costs exactly what one that flies its whole
+  range costs -- where before, hitting something nearby handed the slot straight
+  back and a close-range wall was a free reload. Both ends of BZFlag work this
+  way: its client reaps a slot when the reload is up and never when the shot
+  ends, and its server leaves a stopped shot's expiry where it was. Closes #141.
+- Firing is no longer spaced by a fixed interval. BZFlag waits on one thing, a
+  free slot, and a player empties their slots as fast as they can click; bzo
+  held every shot to `_reloadTime / maxShots` apart whether or not slots were
+  free, which on a five-slot map like `hix.bzw` was 700ms between shots that
+  could all have been fired at once. The slots are the only limit now, which is
+  also the only limit the server has ever enforced.
+- Holding the trigger and tapping it are told apart. A press may fire again
+  100ms later -- about as fast as a mouse can be clicked, so a deliberate burst
+  is as quick as BZFlag's -- while a trigger that is simply still held repeats
+  at the world's sustained rate instead. BZFlag reads its trigger once per
+  press on a mouse and has no answer for a touch button, an XR trigger or a
+  gamepad, where a held control would otherwise fire on every frame and a thumb
+  resting on the fire button would empty every slot at once. Holding stays the
+  convenient option and is never the faster one.
+- Trigger Happy spaces its own shots, as upstream does: it pulls its trigger
+  every frame, and the reload it forces after each one is what stops a tank
+  nobody is aiming from firing its whole magazine into the ground the instant
+  it picks the flag up.
+
+### Fixed
+- The shot bars beside the control box fill on the slot's reload rather than
+  the shell's flight, so a shot that stops early leaves its bar filling instead
+  of snapping to ready. The bar in a headset had the same fault and got the
+  same fix.
+- A map that states its own `_reloadTime` now sets how long shots live, on both
+  the server and the client. Both had been working it out from
+  `_shotRange / _shotSpeed` and ignoring the map's number.
+- Another bzo instance listed on `/list` shows the map it is running, and the
+  BZFlag servers it proxies. The list server accepts a report by copying only
+  the fields it knows, and neither of those was among them, so every row but
+  the list server's own -- which reports to itself without passing through
+  that copy -- arrived with both stripped.
+
 ## [1.2.72] - 2026-09-27
 
 ### Added

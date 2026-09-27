@@ -297,6 +297,11 @@ import {
   normalizeShotSlotCount,
   WORLD_WEAPON_PLAYER_ID,
   WORLD_WEAPON_TEAM,
+  SHOT_TAP_SPACING_MS,
+  getWorldReloadSeconds,
+  getSlotReloadSeconds,
+  getShotSlotProgress,
+  findFreeShotSlot,
 } from './shots.mjs';
 import { CLIENT_VERSION } from './version.mjs';
 import {
@@ -693,10 +698,30 @@ let xrSettingsMenuNavigationDirection = 0;
 let xrSettingsMenuNextRepeatAt = 0;
 let xrSettingsMenuActivateLatched = false;
 let xrSettingsMenuBackLatched = false;
-let nextAllowedShotAt = 0;
-// The interval the last shot started, so the reload bars can show how far into
-// it they are. A flag that changes the rate changes this with it.
-let lastShotReloadMs = 0;
+// Upstream's `shots[]` (LocalPlayer.h:170) with the shells left out: when each
+// of this tank's slots comes back, and nothing else. A slot is taken when it is
+// fired and freed only by its own reload running out -- a shell stopping
+// against a wall does not hand one back, on either end, so there is nothing
+// about the shot itself worth keeping here. Cleared on spawn, as
+// `LocalPlayer::restart` clears it.
+let myShotSlotFreeAt = [];
+// The reload each slot was filled on, kept beside it because a bar reads its
+// own shot's `ShotPath::reloadTime` and not the tank's current one: fire with a
+// Machine Gun and drop it, and those slots still come back at a Machine Gun's
+// rate. Only the bars need this; what the trigger waits on is the time above.
+let myShotSlotReloadMs = [];
+// `LocalPlayer::jamTime`, the one gate that sits across every slot at once.
+// `getReloadTime` reads it before it looks at a single slot, and `forceReload`
+// is the only thing that sets it: Thief's drop penalty, and Trigger Happy
+// keeping its own shots from going off together.
+let shotJamUntil = 0;
+// The trigger's own two gates, which are bzo's and not upstream's -- see
+// `SHOT_TAP_SPACING_MS`. One press may fire again `SHOT_TAP_SPACING_MS` later;
+// a trigger that is simply still held repeats at the world's sustained rate
+// instead, so a thumb resting on a touch button never empties the slots.
+let nextTapShotAt = 0;
+let nextHeldShotAt = 0;
+let fireWasHeld = false;
 let playerTeam = PLAYER_TEAM.ROGUE;
 // `rabbitIndex` on the client side (playing.cxx keeps it in the players' teams
 // alone; bzo keeps the id as well, because the radar and the scoreboard both
@@ -1413,20 +1438,29 @@ function getShotSpeed(flag) {
 // shock wave is the one shot the client has to know this for, because the size
 // it is drawn at is how far through its life it is.
 function getShotLifetimeSeconds(flag) {
-  const speed = Number.isFinite(gameConfig?.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100;
-  const range = Number.isFinite(gameConfig?.SHOT_RANGE)
-    ? gameConfig.SHOT_RANGE
-    : (Number.isFinite(gameConfig?.SHOT_DISTANCE) ? gameConfig.SHOT_DISTANCE : 350);
-  const base = speed > 0 ? range / speed : 10;
-  return base * getShotEffects(flag).lifeFactor;
+  return getWorldReloadSeconds(gameConfig || {}) * getShotEffects(flag).lifeFactor;
 }
 
-// LocalPlayer::getReloadTime, scaled by the firing flag's rate. bzo's world
-// reload is one interval shared by every slot rather than upstream's timer per
-// slot, so a flag that fires twice as often waits half as long between shots;
-// the shot slots agree on their own, because a variant's life is the reciprocal
-// of its rate.
-function getShotReloadTimeMs() {
+// `ShotPath::reloadTime` for a shot of this flag, in ms -- how long the slot it
+// fills is out of action. Not the same as the shot's life: `SW` and `GM` never
+// call `setReloadTime` at all, so their slots come back on the world's own
+// interval however briefly each shot lives.
+function getSlotReloadMs(flag) {
+  const worldReload = getWorldReloadSeconds(gameConfig || {});
+  return getSlotReloadSeconds(worldReload, getShotEffects(flag).rateFactor) * 1000;
+}
+
+// How often a trigger that is simply *held* fires, in ms. Every slot held for
+// one reload sustains exactly `maxShots` shots per reload, and that is the
+// interval: the world's reload over its slot count, which is what
+// `SHOT_RELOAD_TIME` carries and what an operator pins when they set
+// `shotReloadTime`. Scaled by the firing flag's rate, so a Machine Gun's held
+// trigger repeats as fast as its slots can take it.
+//
+// bzo's own rule, for a device upstream does not have. A tap is gated by
+// `SHOT_TAP_SPACING_MS` instead, and neither gate is ever the reason a shot is
+// refused on the wire -- the slots are.
+function getHeldTriggerIntervalMs() {
   const configuredReload = Number(gameConfig?.SHOT_RELOAD_TIME);
   const base = Number.isFinite(configuredReload) && configuredReload > 0
     ? configuredReload
@@ -1434,11 +1468,12 @@ function getShotReloadTimeMs() {
   return base / getShotEffects(getMyShotFlag()).rateFactor;
 }
 
-// LocalPlayer::forceReload. The trigger is out of action for this long whatever
-// the reload had left, which is what a theft costs the thief. bzo's reload is
-// one gate rather than a timer per slot, so this is that gate pushed out.
+// LocalPlayer::forceReload, which sets `jamTime`: the trigger is out of action
+// for this long whatever the slots have left, and `getReloadTime` answers with
+// it before it looks at a slot at all. What a theft costs the thief, and what
+// keeps a Trigger Happy tank's shots from going off together.
 function forceReload(seconds) {
-  nextAllowedShotAt = Math.max(nextAllowedShotAt, performance.now() + (seconds * 1000));
+  shotJamUntil = Math.max(shotJamUntil, sampleEpochClock() + (seconds * 1000));
 }
 
 function getVoiceAudioSettings() {
@@ -7095,7 +7130,6 @@ function createProjectile(data) {
     if (!beam) return;
     beam.userData.playerId = data.playerId;
     beam.userData.createdAt = data.createdAt;
-    beam.userData.shotSlot = Number.isInteger(data.shotSlot) ? data.shotSlot : 0;
     beam.userData.radarColor = `#${beamColor.getHexString()}`;
     beam.userData.flag = data.flag ?? null;
     beam.userData.segments = segments;
@@ -7120,7 +7154,6 @@ function createProjectile(data) {
       localProjectile.userData.dirY = Number.isFinite(data.dirY) ? data.dirY : 0;
       localProjectile.userData.dirZ = data.dirZ;
       localProjectile.userData.createdAt = data.createdAt;
-      localProjectile.userData.shotSlot = Number.isInteger(data.shotSlot) ? data.shotSlot : 0;
       localProjectile.userData.pendingServerAck = false;
       localProjectile.userData.flag = data.flag ?? null;
       localProjectile.userData.ricochet = data.ricochet === true;
@@ -7161,7 +7194,6 @@ function createProjectile(data) {
   projectile.userData.playerId = data.playerId;
   projectile.userData.createdAt = data.createdAt;
   projectile.userData.dirY = Number.isFinite(data.dirY) ? data.dirY : 0;
-  projectile.userData.shotSlot = Number.isInteger(data.shotSlot) ? data.shotSlot : 0;
   projectile.userData.radarColor = `#${shotColor.getHexString()}`;
   // The flag a shot was fired with, as upstream's FiringInfo carries it, and the
   // one thing bzo reads off it so far: whether the shot bounces.
@@ -7216,7 +7248,6 @@ function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0 }) {
   projectile.userData.playerId = myPlayerId;
   projectile.userData.createdAt = frameEpochMs;
   projectile.userData.dirY = Number.isFinite(dirY) ? dirY : 0;
-  projectile.userData.shotSlot = null;
   projectile.userData.radarColor = `#${shotColor.getHexString()}`;
   projectile.userData.pendingServerAck = true;
   // The server decides this too, and says so in shotBegin; predicting it here is
@@ -7269,14 +7300,6 @@ function hasGuidedShotInFlight(playerId) {
     if (projectile?.userData?.playerId === playerId && projectile.userData.guided) return true;
   }
   return false;
-}
-
-function getActiveProjectileCountForPlayer(playerId) {
-  let count = 0;
-  projectiles.forEach((projectile) => {
-    if (projectile?.userData?.playerId === playerId) count++;
-  });
-  return count;
 }
 
 function handlePlayerHit(message) {
@@ -7519,6 +7542,13 @@ function handlePlayerRespawn(message) {
       renderManager.deathFollowTarget = null;
       renderManager.deathFollowAnchor = null;
       updateDeathCameraHudVisibility();
+      // `LocalPlayer::restart` (LocalPlayer.cxx:1052) deletes every shot the
+      // tank had, so it comes back loaded. The server clears its own copy of
+      // this on the same event; a jam does not survive the life it was charged
+      // in either, since the flag that charged it is gone with the tank.
+      myShotSlotFreeAt = [];
+      myShotSlotReloadMs = [];
+      shotJamUntil = 0;
     }
     tank.position.set(message.player.x, message.player.y, message.player.z);
     tank.rotation.y = message.player.rotation;
@@ -11154,21 +11184,48 @@ function handleMotion(deltaTime) {
 
   // Fire: the keyboard fire key or the left mouse button, and on mobile, XR or
   // a gamepad, virtualInput.fire.
-  // "Tank can't stop firing." Trigger Happy pulls the trigger every frame whether
-  // or not anybody is holding it, and upstream's firingStatus stays Ready however
-  // long the reload has left (LocalPlayer.cxx:847) -- so a free shot slot is the
-  // only thing it waits for, which is the rule the server holds every shot to
-  // anyway. Skipping the reload gate is therefore not a rate increase: it is the
-  // same sustained rate with the wait moved onto the slots.
+  //
+  // `LocalPlayer::fireShot` waits on one thing: a free slot. `firingStatus`
+  // stays Ready however long a reload has left (LocalPlayer.cxx:847), and
+  // nothing upstream puts a minimum gap between two shots -- a bzflag player
+  // empties their slots as fast as they can click. What upstream does have is a
+  // trigger read once per press (`cmdFire`, clientCommands.cxx:333) on a mouse.
+  //
+  // bzo has a touch button, an XR trigger and a gamepad, where a trigger left
+  // held would fire on every frame. So a press and a hold are told apart: a
+  // press may fire again after `SHOT_TAP_SPACING_MS`, which is short enough
+  // that tapping is as fast as clicking a mouse, and a trigger still held
+  // repeats at the world's sustained rate instead. Holding is the convenience;
+  // it is never the faster option.
+  //
+  // "Tank can't stop firing." Trigger Happy pulls the trigger every frame
+  // whether or not anybody is holding it, and neither of the trigger's own
+  // gates applies to it -- but `forceReload` below does, which is upstream's
+  // own way of stopping all of its shots going off at once.
   const triggerHappy = firesContinuously(getMyFlag()?.type ?? null);
-  const firePressed = triggerHappy || isFireHeld();
-  const fireNow = performance.now();
-  if (firePressed && (triggerHappy || fireNow >= nextAllowedShotAt)) {
+  const fireHeld = isFireHeld();
+  const firePress = fireHeld && !fireWasHeld;
+  fireWasHeld = fireHeld;
+  const fireNow = frameEpochMs;
+  let triggerOpen = false;
+  if (triggerHappy) triggerOpen = true;
+  else if (firePress) triggerOpen = fireNow >= nextTapShotAt;
+  else if (fireHeld) triggerOpen = fireNow >= nextHeldShotAt;
+  if (triggerOpen && fireNow >= shotJamUntil) {
     const maxActiveShots = normalizeShotSlotCount(gameConfig?.SHOT_MAX_ACTIVE);
-    if (getActiveProjectileCountForPlayer(myPlayerId) < maxActiveShots) {
-      if (shoot()) {
-        lastShotReloadMs = getShotReloadTimeMs();
-        nextAllowedShotAt = fireNow + lastShotReloadMs;
+    const slot = findFreeShotSlot(myShotSlotFreeAt, maxActiveShots, fireNow);
+    if (slot >= 0 && shoot()) {
+      const slotReloadMs = getSlotReloadMs(getMyShotFlag());
+      myShotSlotFreeAt[slot] = fireNow + slotReloadMs;
+      myShotSlotReloadMs[slot] = slotReloadMs;
+      nextTapShotAt = fireNow + SHOT_TAP_SPACING_MS;
+      nextHeldShotAt = fireNow + getHeldTriggerIntervalMs();
+      // LocalPlayer.cxx:1311, "make sure all the shots don't go off at once".
+      // The one place upstream itself spaces shots, and it spaces only this
+      // flag's: a tank nobody is even aiming would otherwise fire its whole
+      // magazine into the ground the instant it picked the flag up.
+      if (triggerHappy) {
+        forceReload(getWorldReloadSeconds(gameConfig || {}) / Math.max(1, maxActiveShots));
       }
     }
   }
@@ -13434,31 +13491,16 @@ function ensureXRShotStatusOverlay() {
     xrShotStatusPanel.mesh.visible = false;
     return;
   }
-  const shotSpeed = Number.isFinite(gameConfig?.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100;
-  const shotRange = Number.isFinite(gameConfig?.SHOT_RANGE)
-    ? gameConfig.SHOT_RANGE
-    : (Number.isFinite(gameConfig?.SHOT_DISTANCE) ? gameConfig.SHOT_DISTANCE : 350);
-  const slotLifetimeMs = shotSpeed > 0 ? (shotRange / shotSpeed) * 1000 : 0;
-  const slotProgress = new Array(maxSlots).fill(1);
-
-  projectiles.forEach((projectile) => {
-    if (projectile?.userData?.playerId !== myPlayerId) return;
-    const slotIndex = Number.isInteger(projectile?.userData?.shotSlot) ? projectile.userData.shotSlot : -1;
-    if (slotIndex < 0 || slotIndex >= maxSlots) return;
-    const createdAt = Number.isFinite(projectile?.userData?.createdAt) ? projectile.userData.createdAt : frameEpochMs;
-    const ageMs = Math.max(0, frameEpochMs - createdAt);
-    // A shot variant holds its slot for its own life; see updateShotStatus.
-    const lifeFactor = Number.isFinite(projectile?.userData?.lifeFactor)
-      ? projectile.userData.lifeFactor
-      : 1;
-    const lifetimeMs = slotLifetimeMs * lifeFactor;
-    slotProgress[slotIndex] = lifetimeMs > 0 ? Math.max(0, Math.min(1, ageMs / lifetimeMs)) : 0;
-  });
-
-  // The XR copy of the same bar, and it had the same fault: see the comment in
-  // `updateShotStatus`. A bar reads the shot in its own slot and nothing else,
-  // and the row is sorted, because the bars tally how ready the slots are rather
-  // than naming them (HUDRenderer.cxx:1988). Issue #36.
+  // The XR copy of the same bar: see the comment in `updateShotStatus`. A bar
+  // fills on its own slot's reload and nothing else, and the row is sorted,
+  // because the bars tally how ready the slots are rather than naming them
+  // (HUDRenderer.cxx:1988). Issue #36.
+  const slotProgress = new Array(maxSlots);
+  for (let slot = 0; slot < maxSlots; slot++) {
+    slotProgress[slot] = getShotSlotProgress(
+      myShotSlotFreeAt, slot, myShotSlotReloadMs[slot], frameEpochMs,
+    );
+  }
   slotProgress.sort((a, b) => a - b);
 
   const barGap = 2;
@@ -15607,7 +15649,10 @@ function animate(frameTime) {
     updateAltimeter({ myTank });
     updateDegreeBar({ myTank, playerRotation, markers: getFlagHeadingMarkers() });
     updateShotStatus({
-      myPlayerId, myTank, projectiles, gameConfig,
+      myPlayerId,
+      slotFreeAt: myShotSlotFreeAt,
+      slotReloadMs: myShotSlotReloadMs,
+      gameConfig,
       now: frameEpochMs,
     });
   }

@@ -95,3 +95,87 @@ export function normalizeWorldWeaponDelays(delays) {
 // `remotePlayers`, and bzo keeps it out of the roster for the same reason.
 export const WORLD_WEAPON_NAME = 'world weapon';
 export const WORLD_WEAPON_TEAM = 'rogue';
+
+// --- Shot slots as a clock ---------------------------------------------------
+
+// The world's `_reloadTime`, in seconds. Upstream declares it
+// `_shotRange / _shotSpeed` (global.cxx:127) and a map may state its own, which
+// is what `SHOT_LIFETIME` carries. Everything below is a multiple of it, and so
+// is a shot's life, so both ends have to read it the same way or they disagree
+// about when a slot comes back.
+export function getWorldReloadSeconds(config) {
+  const lifetimeMs = Number(config?.SHOT_LIFETIME);
+  if (Number.isFinite(lifetimeMs) && lifetimeMs > 0) return lifetimeMs / 1000;
+  const speed = Number.isFinite(config?.SHOT_SPEED) ? config.SHOT_SPEED : 100;
+  const range = Number.isFinite(config?.SHOT_RANGE)
+    ? config.SHOT_RANGE
+    : (Number.isFinite(config?.SHOT_DISTANCE) ? config.SHOT_DISTANCE : 350);
+  return speed > 0 ? range / speed : 10;
+}
+
+// How long one slot is out of action after it is fired: `ShotPath::reloadTime`,
+// which starts at the world's reload and is divided by the firing flag's rate in
+// each segmented strategy's constructor -- `setReloadTime(reload / adRate)`.
+//
+// **This is the client's rule, not bzfs's, and that is deliberate.** bzfs frees
+// a slot on the shot's *life* instead (`GameKeeper::addShot` tests
+// `now < shotsInfo[id].expireTime`, and `expireTime` comes from
+// `GetShotLifetime`), which for `L`, `SW` and `TH` is far shorter than the
+// reload an honest bzflag client waits out. Holding bzo to the client's rule is
+// what keeps a bzo player level with a desktop one rather than ahead of them,
+// and it means every shot bzo sends is one the target server will accept --
+// a shot bzfs refuses is simply dropped, which on a phone would look like a
+// trigger that sometimes does nothing.
+export function getSlotReloadSeconds(worldReloadSeconds, rateFactor) {
+  const rate = Number.isFinite(rateFactor) && rateFactor > 0 ? rateFactor : 1;
+  return worldReloadSeconds / rate;
+}
+
+// `LocalPlayer::getReloadTime` (LocalPlayer.cxx:1315) walking `shots[]` for an
+// empty slot, with the shells replaced by the times their slots come back.
+//
+// A slot is free once its reload has elapsed since it was *filled*, and nothing
+// frees one early: `LocalPlayer` reaps a slot on `isReloaded()` and not on
+// `isExpired()`, and bzfs's `removeShot` clears a shot's `running` flag while
+// leaving its `expireTime` alone. The slot belongs to the weapon, so a shell
+// that stops against a wall a metre away costs exactly what one that flies its
+// whole range costs.
+//
+// Returns the lowest free slot, or -1 when every slot is still reloading.
+export function findFreeShotSlot(slotFreeAt, slotCount, now) {
+  for (let slot = 0; slot < slotCount; slot++) {
+    const freeAt = Number(slotFreeAt?.[slot]);
+    if (!Number.isFinite(freeAt) || freeAt <= now) return slot;
+  }
+  return -1;
+}
+
+// How ready a slot is, 0 to 1, for the row of bars beside the control box
+// (HUDRenderer.cxx:1988). A slot that was never fired reads full.
+export function getShotSlotProgress(slotFreeAt, slot, reloadMs, now) {
+  const freeAt = Number(slotFreeAt?.[slot]);
+  if (!Number.isFinite(freeAt) || freeAt <= now) return 1;
+  if (!(reloadMs > 0)) return 1;
+  return Math.max(0, Math.min(1, 1 - ((freeAt - now) / reloadMs)));
+}
+
+// The shortest gap bzo puts between two shots fired by two separate pulls of
+// the trigger. **Upstream has nothing to copy here.** Its BZDB table
+// (global.cxx) has `_reloadTime` and the per-flag `AdRate`/`AdLife` pairs and
+// no trigger tuning of any kind, and its own held-trigger behaviour is whatever
+// the platform does: `SDL2Display.cxx:544` never checks `event.key.repeat`, so
+// a held fire *key* auto-repeats at the operating system's rate while a held
+// mouse button fires once.
+//
+// bzo needs an answer because it has a touch button, an XR trigger and a
+// gamepad where upstream has a mouse. This is a floor on the *tap* path only --
+// a guard against one press being read twice, or a finger resting on a virtual
+// button emptying every slot in three frames. At 100ms it sits at about the
+// rate a practised player can click a mouse, so it takes nothing away from a
+// deliberate burst and leaves a bzo player no faster than a desktop one.
+//
+// Client-side only, and deliberately not sent to the server or enforced there:
+// a server-side gate this short would compare shots inside the range network
+// jitter actually lands in. See the shot slots above for the rule that *is*
+// enforced.
+export const SHOT_TAP_SPACING_MS = 100;
