@@ -421,11 +421,10 @@ These are deliberate. Do not "fix" them without being asked.
   This is the one place bzo's motion loop diverges from `doUpdateMotion`.
   `npm run test:motion` holds the rule.
 
-- **`WA` Wide Angle is not implemented and will not be.** It widens the field of
-  view, which the headset runtime owns in VR, so the flag would be a real
-  penalty in a browser and a no-op in a headset -- worse than absent, because it
-  looks like it works. It is the only flag BZFlag has that bzo does not. See
-  `docs/flags.md` and the Flags section of the README.
+- **`WA` Wide Angle is not implemented and will not be**, and neither is
+  upstream's binoculars key: both move the field of view, which the headset
+  runtime owns. `WA` is the only flag BZFlag has that bzo does not.
+  `docs/flags.md` says why.
 
 - **A face buried inside other obstacles is never built.** Upstream leaves out
   the two cases every map hits and no more: a box's bottom polygon when it sits
@@ -580,6 +579,7 @@ server is unreachable, and for tutorial levels built on top of that.
 | `public/volume.mjs` | The 0..10 audio level model shared by the Audio dialog, XR, renderer, and voice |
 | `public/voice-channels.mjs` | Which players hear each other: All, Nearby, Team |
 | `public/package.json` | `{"type":"module"}` only, so Node can import `public/*.js` in tests |
+| `public/install.js` | Offers installing the game as an app, from the Settings menu |
 | `public/sw.js` | Service worker: install support and asset caching |
 | `public/icons/` | Installed-app icons; see `docs/icons.md` |
 | `public/*.mjs` | Client-side copies of logic shared with the server |
@@ -2954,12 +2954,11 @@ groups come from bzflag.org and the server cannot edit them.
 `isAdmin`, which is the same gate as the admin channel and the Operator panel. A
 refusal is upstream's own sentence, naming the command.
 
-**The Operator panel stays the primary surface for anything an operator does more
-than once**, because it is the one that works in a headset. Commands are for
-one-offs, for questions, and for a test client -- which is what `localAdmin` is
-for. Where both exist they must call the same function: `/msg` and the chat entry
-both go through `deliverChatMessage`, so the admin channel's permission check
-cannot exist in only one of them.
+**Where a command and the Operator panel do the same thing, they call the same
+function.** `/msg` and the chat entry both go through `deliverChatMessage`, so
+the admin channel's permission check cannot live in only one of them. Which
+surface a new action belongs on -- and why the panel is the primary one -- is
+in `docs/commands-plan.md`.
 
 **`/mv` is bzo's own**, and the only command here upstream has no version of --
 not in bzfs, not in any plugin, and no API call to move a tank either. bzo is
@@ -3727,6 +3726,9 @@ Three things to reach for, in the order they cost:
 - **`npx eslint`** over what you changed, and `node --check server.js`. The
   pre-commit hook runs eslint with `--max-warnings=0` over staged JS, so a commit
   will refuse work that does not pass anyway.
+- **`npm run check:boot`** after touching anything `server.js` runs at module
+  level -- `--check` parses without running, and the first thing that actually
+  runs the file is nodemon, on the live server.
 - **`node scripts/check-controls-docs.mjs`**, which holds the controls list in
   `index.html` to the bindings in `input.js`.
 - **`node scripts/headless-client.mjs`**, which joins the running server in a
