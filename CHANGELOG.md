@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.79] - 2026-09-27
+
 ### Added
 - The HUD's title row reads `[Settings] [Mic] @name/flag [chevron]`. The
   microphone is new there: its border is green while you are transmitting and
