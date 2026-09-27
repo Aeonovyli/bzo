@@ -3351,6 +3351,38 @@ function getPlayerShotColor(playerId) {
   return lightenHexColor(color, 0.45);
 }
 
+// The colour the radar draws a shot in. Deliberately not `getPlayerShotColor`:
+// that lightens a player's colour by 45% so the bolt reads as hot against the
+// world, and a pale green is fine as a glowing ball in the sky but reads as
+// plain white once it is a two-pixel line on a dark panel. The radar wants the
+// colour its own blips use, so a shot and the tank that fired it are the same
+// colour on the same panel.
+//
+// Upstream asks the same question and answers it the same way -- its shots take
+// `Team::getRadarColor` (RadarRenderer.cxx:671), the radar palette, not the
+// lightened `Team::getShotColor` the bolt itself is drawn with.
+function getShotRadarColor(playerId) {
+  // A world weapon has no tank to match, so it keeps rogue -- the colour no
+  // player of a colour team wears, which is what makes its shots read as
+  // nobody's.
+  if (playerId === WORLD_WEAPON_PLAYER_ID) {
+    return colorToCSS(getPlayerTeamRadarColor(WORLD_WEAPON_TEAM));
+  }
+  // The one blip bzo paints from a team rather than from the player, for the
+  // reason spelled out where the blip itself is drawn: the rabbit's grey is the
+  // one shade that does not read on a dark panel.
+  if (isTheRabbit(playerId) && !isColorblind()) {
+    return colorToCSS(getPlayerTeamRadarColor(PLAYER_TEAM.RABBIT));
+  }
+  const tank = tanks.get(playerId);
+  const playerColor = tank?.userData?.playerState?.color;
+  const color = getEffectiveTankColor(
+    playerId,
+    typeof playerColor === 'number' ? playerColor : 0x4caf50
+  );
+  return colorToCSS(color);
+}
+
 // Input state
 
 // Entry Dialog
@@ -7153,7 +7185,7 @@ function createProjectile(data) {
     if (!beam) return;
     beam.userData.playerId = data.playerId;
     beam.userData.createdAt = data.createdAt;
-    beam.userData.radarColor = `#${beamColor.getHexString()}`;
+    beam.userData.radarColor = getShotRadarColor(data.playerId);
     beam.userData.flag = data.flag ?? null;
     beam.userData.segments = segments;
     beam.userData.lifetimeSeconds = getShotLifetimeSeconds(data.flag ?? null);
@@ -7217,7 +7249,7 @@ function createProjectile(data) {
   projectile.userData.playerId = data.playerId;
   projectile.userData.createdAt = data.createdAt;
   projectile.userData.dirY = Number.isFinite(data.dirY) ? data.dirY : 0;
-  projectile.userData.radarColor = `#${shotColor.getHexString()}`;
+  projectile.userData.radarColor = getShotRadarColor(projectile.userData.playerId);
   // The flag a shot was fired with, as upstream's FiringInfo carries it, and the
   // one thing bzo reads off it so far: whether the shot bounces.
   projectile.userData.flag = data.flag ?? null;
@@ -7271,7 +7303,7 @@ function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0 }) {
   projectile.userData.playerId = myPlayerId;
   projectile.userData.createdAt = frameEpochMs;
   projectile.userData.dirY = Number.isFinite(dirY) ? dirY : 0;
-  projectile.userData.radarColor = `#${shotColor.getHexString()}`;
+  projectile.userData.radarColor = getShotRadarColor(projectile.userData.playerId);
   projectile.userData.pendingServerAck = true;
   // The server decides this too, and says so in shotBegin; predicting it here is
   // what keeps a bounce from arriving a round trip late on the shooter's own
@@ -14149,6 +14181,33 @@ function drawRadarMarkerRing(x, y, style, radius = RADAR_MARKER_RING_RADIUS) {
   radarCtx.restore();
 }
 
+// SegmentedShotStrategy::radarRender (SegmentedShotStrategy.cxx:329) draws a
+// bolt as a line along its own velocity rather than a dot, so the panel says
+// which way a shot is going and not just where it is. The line runs forward
+// from the shot -- upstream's `leadingShotLine` default of 1, the one that
+// shows where the shot will be rather than where it has been.
+//
+// Its length is `_shotTailLength * linedradarshots`, and upstream's defaults
+// are 4.0 and 5. That is a world distance, not a pixel one, so the line grows
+// and shrinks with the radar's range exactly as the map under it does.
+const RADAR_SHOT_LINE_TAIL_MULTIPLIER = 5;
+const RADAR_SHOT_LINE_TAIL_LENGTH_DEFAULT = 4.0;
+// A guided missile draws a longer line than anything else. Upstream draws every
+// shot's the same length -- `GuidedMissileStrategy::radarRender` is the
+// segmented one's line word for word -- but a missile is the one shot whose
+// direction is a live answer rather than a fixed one, and the one shot you most
+// need to read off the panel in the second you have to turn away from it. The
+// extra third is enough to pick it out of a crowded panel without making it the
+// only thing on there.
+const RADAR_SHOT_LINE_GM_FACTOR = 1.3;
+const RADAR_SHOT_LINE_WIDTH = 2;
+// Upstream's "bright bullet tip": `sizedradarshots` pixels of grey 0.75 at the
+// shot's own position, drawn over the line's near end. It is deliberately not
+// the shot's colour -- the line carries that, and a tip brighter than its line
+// is what picks the shot itself out of the streak it is drawing.
+const RADAR_SHOT_TIP_SIZE = 4;
+const RADAR_SHOT_TIP_COLOR = 'rgb(191,191,191)';
+
 // RadarRenderer::render's noise branch (RadarRenderer.cxx:433). Upstream paints a
 // noise texture over the whole panel at full white and draws nothing else, so the
 // radar is gone rather than dimmed -- "Radar doesn't work" is the flag's own help
@@ -14594,6 +14653,12 @@ function updateRadar() {
 
   // Draw projectiles (shots) within radar distance
   const shotRadarColorOf = (proj) => proj.userData?.radarColor || '#FFD700';
+  // One length for the whole panel: it comes off the server's `_shotTailLength`
+  // and cannot change inside a frame.
+  const shotTailLength = Number.isFinite(gameConfig.SHOT_TAIL_LENGTH)
+    ? gameConfig.SHOT_TAIL_LENGTH
+    : RADAR_SHOT_LINE_TAIL_LENGTH_DEFAULT;
+  const shotLineWorldLength = shotTailLength * RADAR_SHOT_LINE_TAIL_MULTIPLIER;
   if (typeof projectiles !== 'undefined' && projectiles.forEach) {
     projectiles.forEach((proj) => {
       // RadarRenderer.cxx:664. An Invisible Bullet is drawn on its owner's radar
@@ -14654,18 +14719,53 @@ function updateRadar() {
         return;
       }
       const rel = toRadarRelative(proj.position.x, proj.position.z);
-      if (isOutsideRadarSquare(rel.x, rel.y)) return;
+      const lineLength = proj.userData?.guided
+        ? shotLineWorldLength * RADAR_SHOT_LINE_GM_FACTOR
+        : shotLineWorldLength;
+      // The line reaches forward from the shot, so a shot already past the edge
+      // can still have the near end of its line on the panel. The margin is the
+      // whole line: one that has nothing on the panel is dropped, and one that
+      // has any of itself on it is drawn and clipped by the canvas.
+      if (isOutsideRadarSquare(rel.x, rel.y, lineLength)) return;
       const pos = radarToCanvas(rel.x, rel.y);
       const shotRadarColor = shotRadarColorOf(proj);
 
+      // `dirX/dirY/dirZ` rather than the trail's direction: these are rewritten
+      // by every bounce, every teleport and every step a missile steers, so the
+      // line turns with the shot instead of pointing at the muzzle forever.
+      //
+      // Upstream normalises the whole velocity and then draws the x and y of
+      // it, which shortens the line as the shot climbs or dives -- the panel is
+      // a top-down view, and a shot going mostly upwards is covering little
+      // ground. Dividing the horizontal components by the 3D length does that.
+      const dirX = Number.isFinite(proj.userData?.dirX) ? proj.userData.dirX : 0;
+      const dirY = Number.isFinite(proj.userData?.dirY) ? proj.userData.dirY : 0;
+      const dirZ = Number.isFinite(proj.userData?.dirZ) ? proj.userData.dirZ : 0;
+      const dirLength = Math.hypot(dirX, dirY, dirZ);
+
       radarCtx.save();
-      radarCtx.beginPath();
-      radarCtx.arc(pos.x, pos.y, 4, 0, Math.PI * 2);
-      radarCtx.fillStyle = shotRadarColor;
       radarCtx.globalAlpha = 0.85;
-      radarCtx.shadowColor = shotRadarColor;
-      radarCtx.shadowBlur = 6;
-      radarCtx.fill();
+      if (dirLength > 1e-6) {
+        const reach = lineLength / dirLength;
+        const tipRel = toRadarRelative(
+          proj.position.x + (dirX * reach),
+          proj.position.z + (dirZ * reach),
+        );
+        const tipPos = radarToCanvas(tipRel.x, tipRel.y);
+        radarCtx.strokeStyle = shotRadarColor;
+        radarCtx.lineWidth = RADAR_SHOT_LINE_WIDTH;
+        radarCtx.beginPath();
+        radarCtx.moveTo(pos.x, pos.y);
+        radarCtx.lineTo(tipPos.x, tipPos.y);
+        radarCtx.stroke();
+      }
+      radarCtx.fillStyle = RADAR_SHOT_TIP_COLOR;
+      radarCtx.fillRect(
+        pos.x - (RADAR_SHOT_TIP_SIZE / 2),
+        pos.y - (RADAR_SHOT_TIP_SIZE / 2),
+        RADAR_SHOT_TIP_SIZE,
+        RADAR_SHOT_TIP_SIZE,
+      );
       radarCtx.restore();
     });
   }

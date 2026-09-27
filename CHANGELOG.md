@@ -6,6 +6,35 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.75] - 2026-09-27
+
+### Changed
+- A shot on the radar is a line along its own direction rather than a dot, so
+  the panel says which way it is going. BZFlag draws the line forward from the
+  shot -- where it will be, not where it has been -- at `_shotTailLength`
+  times `linedradarshots`, twenty world units on the defaults, and tops it with
+  a grey tip at the shot's own position. It is a world length, so it grows and
+  shrinks with the radar's range the way the map under it does, and it comes
+  off the shot's live direction: it turns with every ricochet, every teleport
+  and every step a missile steers. Lasers and shock waves already drew as a
+  line and a circle and are unchanged. Closes #142.
+- A guided missile throws flares, which is what BZFlag gives it and gives
+  nothing else (`setFlares(true)`). Three to five spikes in directions picked
+  at random out of the bolt, re-picked every frame and reaching twice its
+  radius, so the missile flickers and breaks the round silhouette every other
+  shot has. bzo already had the missile's animated sheet and its smoke trail,
+  and those alone left it reading as an ordinary bolt in the shooter's colour.
+  Refs #6.
+- A guided missile's line on the radar is a third longer than any other shot's.
+  BZFlag draws them all the same length, but a missile is the one shot whose
+  direction is a live answer rather than a fixed one, and the one you most need
+  to read off the panel in the moment you have to turn away from it. Refs #6.
+- Shots on the radar take the colour the radar draws their owner's tank in
+  rather than the lightened colour the bolt wears in the world. A bolt is
+  lightened to read as hot against the sky, which a two-pixel line on a dark
+  panel does not need -- it only made every shot read as white. BZFlag draws
+  its radar shots from the radar palette too.
+
 ## [1.2.74] - 2026-09-27
 
 ### Changed

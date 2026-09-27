@@ -371,6 +371,23 @@ const BZFLAG_LOCKON_WORLD_SIZE = 7;
 // and a missile is the shot you most want to know the owner of.
 const BZFLAG_MISSILE_TEXTURE = '/textures/missile.png';
 const BZFLAG_MISSILE_ANIM_CELLS = 4;            // setTextureAnimation(4, 4)
+// BoltSceneNode's flares (BoltSceneNode.cxx:615), which upstream turns on for
+// the guided missile and for nothing else (`setFlares(true)`,
+// GuidedMissleStrategy.cxx:49). Three to five spikes in random directions out
+// of the bolt, re-picked every single frame -- it is the flicker rather than
+// the shape that does the work, and it is what makes a missile read as
+// something burning rather than as an ordinary bolt in a different colour.
+//
+// The spikes are drawn in the bolt's own billboard frame, so they face the
+// camera with it, and they reach twice the bolt's radius: far enough to break
+// the round silhouette every other shot has.
+const BZFLAG_GM_FLARE_MIN = 3;                  // 3 + int(3 * bzfrand())
+const BZFLAG_GM_FLARE_RANGE = 3;
+const BZFLAG_GM_FLARE_MAX = BZFLAG_GM_FLARE_MIN + BZFLAG_GM_FLARE_RANGE - 1;
+const BZFLAG_GM_FLARE_SIZE = 1.0;               // FlareSize
+const BZFLAG_GM_FLARE_SPREAD = 0.08;            // FlareSpread, radians
+// flareColor takes the bolt's rgb and its own alpha (BoltSceneNode.cxx:304).
+const BZFLAG_GM_FLARE_OPACITY = 0.667;
 // `shot_tail.png` is a four-by-four sheet of wisps, and a shot takes six
 // consecutive cells of it from a random start so that two shots in the air do
 // not wear the same tail.
@@ -7410,6 +7427,87 @@ class RenderManager {
     return texture;
   }
 
+  // One mesh a missile, rewritten in place every frame. The spikes are four
+  // vertices each -- upstream's `GL_TRIANGLE_STRIP` of a point at the bolt's
+  // centre, two shoulders and a tip -- so the whole thing is twenty vertices at
+  // its widest and re-randomising it costs a handful of floats rather than a
+  // buffer of a new size. `drawRange` covers the frames that picked fewer than
+  // the maximum, which is what keeps the allocation a one-off.
+  _createGMFlares(baseColor) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(
+      new Float32Array(BZFLAG_GM_FLARE_MAX * 4 * 3), 3,
+    ));
+    const indices = new Uint16Array(BZFLAG_GM_FLARE_MAX * 6);
+    for (let i = 0; i < BZFLAG_GM_FLARE_MAX; i += 1) {
+      const base = i * 4;
+      // The two triangles a four-vertex strip stands for. Wound either way: the
+      // material is double-sided, because a spike picked at random in 3-space
+      // is as likely to point away from the camera as towards it.
+      indices.set([base, base + 1, base + 2, base + 1, base + 3, base + 2], i * 6);
+    }
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    // The bolt's own colour, and never lit: upstream draws the flares with
+    // lighting off and blends them over the world.
+    const material = new THREE.MeshBasicMaterial({
+      color: baseColor,
+      transparent: true,
+      opacity: BZFLAG_GM_FLARE_OPACITY,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = SHOT_RENDER_ORDER - 1;
+    // The spikes are re-picked from nothing every frame, so a bounding sphere
+    // computed from the vertices would be stale the moment it was built -- and
+    // a missile is never the thing worth culling anyway.
+    mesh.frustumCulled = false;
+    this._updateGMFlares(mesh);
+    return mesh;
+  }
+
+  // One frame's spikes. `phi` is upstream's own correction to a uniform pick:
+  // spreading it evenly biases the directions towards the poles, and squaring
+  // it moves the crowd back towards the equator, where a flare is side-on to
+  // the camera and reads longest.
+  _updateGMFlares(mesh, cameraWorldPosition = null) {
+    const position = mesh.geometry.attributes.position;
+    const array = position.array;
+    const count = BZFLAG_GM_FLARE_MIN + Math.floor(Math.random() * BZFLAG_GM_FLARE_RANGE);
+    // Upstream scales the whole billboard by the bolt's radius, which is half
+    // the width the head sprite is drawn at.
+    const radius = BZFLAG_SHOT_HEAD_SCALE / 2;
+    for (let i = 0; i < count; i += 1) {
+      const theta = Math.random() * Math.PI * 2;
+      const rawPhi = Math.random() - 0.5;
+      const phi = rawPhi * (Math.PI * 2 * Math.abs(rawPhi));
+      const c = BZFLAG_GM_FLARE_SIZE * Math.cos(phi) * radius;
+      const z = BZFLAG_GM_FLARE_SIZE * Math.sin(phi) * radius;
+      const near = theta - BZFLAG_GM_FLARE_SPREAD;
+      const far = theta + BZFLAG_GM_FLARE_SPREAD;
+      const base = i * 12;
+      array[base] = 0;
+      array[base + 1] = 0;
+      array[base + 2] = 0;
+      array[base + 3] = c * Math.cos(near);
+      array[base + 4] = c * Math.sin(near);
+      array[base + 5] = z;
+      array[base + 6] = c * Math.cos(far);
+      array[base + 7] = c * Math.sin(far);
+      array[base + 8] = z;
+      array[base + 9] = c * Math.cos(theta) * 2;
+      array[base + 10] = c * Math.sin(theta) * 2;
+      array[base + 11] = z * 2;
+    }
+    position.needsUpdate = true;
+    mesh.geometry.setDrawRange(0, count * 6);
+    // The billboard upstream gets from `executeBillboard`. `lookAt` takes a
+    // world point and accounts for whatever the parents are doing, which is
+    // what makes this right in a headset too -- there the world sits under a
+    // rig transform that a copied camera rotation would ignore.
+    if (cameraWorldPosition) mesh.lookAt(cameraWorldPosition);
+  }
+
   // `offset` is a uniform rather than image data, so stepping a frame costs a
   // matrix update and never a texture upload -- which matters, because this runs
   // once a frame for every missile in the air.
@@ -7421,7 +7519,17 @@ class RenderManager {
   // BoltSceneNode.cxx:864, on the last frame of each render: step one cell along,
   // wrapping to the next row and then back to the start.
   advanceMissileFrames(projectiles) {
+    // One read for the whole pass: the flares billboard against the camera, and
+    // it does not move between two missiles inside a frame.
+    let cameraWorldPosition = null;
+    if (this.camera) {
+      cameraWorldPosition = this._gmFlareCameraPosition
+        || (this._gmFlareCameraPosition = new THREE.Vector3());
+      this.camera.getWorldPosition(cameraWorldPosition);
+    }
     projectiles.forEach((projectile) => {
+      const flares = projectile?.userData?.guidedFlares;
+      if (flares) this._updateGMFlares(flares, cameraWorldPosition);
       const texture = projectile?.userData?.missileTexture;
       if (!texture?.userData) return;
       texture.userData.u += 1;
@@ -8304,6 +8412,12 @@ class RenderManager {
       head.renderOrder = SHOT_RENDER_ORDER;
       projectile.add(head);
       projectile.userData.guidedHead = head;
+      // Under the head rather than over it, as upstream draws the flares before
+      // the billboard square: the sprite covers the inner ends of the spikes,
+      // so they read as coming out of the bolt and not as crossing it.
+      const flares = this._createGMFlares(projectileColor);
+      projectile.add(flares);
+      projectile.userData.guidedFlares = flares;
       projectile.userData.projectileTexture = missileTexture;
       // Only a missile's sheet is stepped; every other shot is one still image.
       projectile.userData.missileTexture = missileTexture;
@@ -8525,6 +8639,11 @@ class RenderManager {
     }
     // A bolt and its trail belong to the colour's batch and outlive the shot;
     // a guided missile's own animated sheet is the only thing here a shot owns.
+    const guidedFlares = projectile.userData?.guidedFlares;
+    if (guidedFlares) {
+      guidedFlares.geometry.dispose();
+      guidedFlares.material.dispose();
+    }
     const guidedHead = projectile.userData?.guidedHead;
     if (guidedHead?.material) {
       guidedHead.material.map?.dispose();
