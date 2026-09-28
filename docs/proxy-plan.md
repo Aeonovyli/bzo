@@ -1,11 +1,16 @@
 # Proxying a real bzfs server -- what is left
 
 What bzo does *not* yet do for a browser on a real BZFlag server.
-`docs/proxy.md` is what it does: watching a live match, with the world, the
-roster, the tanks, the flags, the shots and the chat all coming off the target.
-This is the rest of issue #82 -- playing above all -- and it is kept current
-with the code, so anything built is deleted from here rather than marked done.
-Upstream references are paths under `$HOME/bzflag/`.
+`docs/proxy.md` is what it does, which now includes playing: picking a team,
+spawning, driving, shooting and handling flags on the target, as well as
+watching. This is the rest of issue #82, and it is kept current with the code,
+so anything built is deleted from here rather than marked done. Decisions are
+kept, because the reasoning outlives the diff.
+
+The largest thing left is **dying**, which is also the only place the client
+gains semantics of its own; the largest thing left that a player would *notice*
+is that there is no way to reach a proxy from inside a running game. Upstream
+references are paths under `$HOME/bzflag/`.
 
 ## An instance that proxies rather than hosts
 
@@ -24,7 +29,7 @@ zones, no world weapons, no bases, no clock, because none of it is simulated
 for a proxied connection. What is per-target is a world to serve and a
 connection to dial, and both of those already work.
 
-## The one real design cost: authority
+## Authority, and what it actually cost
 
 bzo is server-authoritative. The client sends inputs; the server simulates
 shots, decides hits and runs one `applyDeath`. bzfs is client-authoritative for
@@ -33,14 +38,29 @@ exactly these things: the victim decides it died and says so
 declares flag grabs and teleports. bzfs relays and scores; it does not
 adjudicate geometry, which is why it has no `positionCorrection`.
 
-So **the browser has to say "I died."** It is already capable -- it predicts
-motion, traces shot paths locally, and shares `collision.mjs` with the server.
-It simply never sends those conclusions. That is roughly six new client to
-server messages (`killed`, `shotEnd`, `alive`, plus grab/drop/capture/teleport
-changing from request to notification) behind a mode flag.
+The fear here was that the client would acquire a second set of semantics and
+every gameplay feature after it would have to work both ways. **That did not
+happen, and it is worth saying why**, because it changes the price of what is
+left. bzo's own client already speaks in the messages upstream declares: it
+names the flag index it drove over, the base team it capped on, the shot it
+fired, where its tank is. Those were being *dropped* by the proxy rather than
+missing. Turning them on took a handler each and no new client semantics at
+all. Only four small things in the client know they are proxied: the team on
+the socket URL, the team staged from `init`, the hidden tank selector, and the
+team carried through login -- none of them gameplay.
 
-The cost is not the six messages. It is that the client acquires a second set
-of semantics, and every gameplay feature after that has to work both ways.
+What genuinely needs the client to conclude something it has never concluded
+is **death**. The rest of this section is about that, and it is the reason the
+estimate for it should not be read down from how cheaply the others landed.
+
+**The target's numbers are the target's.** Anything read for arithmetic comes
+off its own BZDB, which arrives as *expressions* rather than numbers --
+`_reloadTime` is `_shotRange / _shotSpeed`, `_muzzleFront` is
+`_tankRadius + 0.1` -- so it is evaluated (`evalBzdb`), never parsed as a float
+and never handed to `eval`, since the values come from a machine this one does
+not own. `shotFired` drops a shot whose lifetime misses the target's own
+`_reloadTime` by more than an epsilon and says nothing, so a parsed `NaN` would
+have been a shot that silently never happened.
 
 ## Every way a proxied tank dies
 
@@ -88,10 +108,12 @@ sends `MsgAlive` (`clientCommands.cxx:379`, `ServerLink.cxx:816`), guarded by
 not-game-over, not-observer, not-alive and not-exploding; bzfs then queues the
 spawn honoring the delay and its spawn policy.
 
-A proxied player therefore needs two things bzo does not have: a
-**dead-and-waiting state** to sit in with a prompt, and an `alive` message to
-leave it with. The state is not from nothing -- the roam camera already knows
-how to sit somewhere and look around.
+The `alive` message exists now -- a proxied join asks for its spawn, because
+where a tank starts is the target's to decide and bzo's own server spawns a
+player as part of the join. What is still missing is the **dead-and-waiting
+state** to sit in with a prompt, and it cannot be built before there is a way
+to die. The state is not from nothing -- the roam camera already knows how to
+sit somewhere and look around.
 
 Separately there is a real cooldown, but it is for re-entering the *server*,
 not for dying. `RejoinList` adds a player on part if they had ever spawned
@@ -114,14 +136,64 @@ one. Two more, both of them the ones Map Viewer already has, because a proxy
 is the same thing seen from further away: the same client, pointed somewhere
 else.
 
-- **A picker in the entry dialog**, beside the Map Viewer one, fed by a
-  `proxies` list on `init` the way `viewableMaps` feeds that one. A player who
-  has never seen a link picks a server from the instance's own list. Choosing
-  one is a page navigation to its `?proxy=` link rather than a message on the
-  live socket: the target is fixed when the socket opens -- `init` is
-  synthesized from it -- and a navigation is what `/login` already does for
-  the same reason.
+- **One destination selector in the entry dialog**, `local | proxy... | map...`
+  with local first, fed by a `proxies` list on `init` the way `viewableMaps`
+  already feeds the Map Viewer one. It is the way in for a player who has
+  never been handed a link -- from inside a running local game there is no
+  path to a proxy at all today.
 - **A row on `/list`**, which is the section below.
+
+### How the selector behaves
+
+- **Every destination change is one navigation.** Local clears the query,
+  a proxy sets `?proxy=<key>` and its team, a map sets `?viewmap=<file>`;
+  `viewMapFile` folds into the same call rather than sending its own
+  `joinGame`. The target has to be fixed before the socket opens, because
+  `init` is synthesized from it, so the expensive case exists regardless --
+  making the cheap one match removes the branch instead of adding one.
+- **The URL is the only truth about where you are.** Everything stages from
+  it on load, so there is no in-session destination state to disagree with the
+  connection. That disagreement is a real bug class, not a hypothetical: it
+  cost us a login round trip that silently dropped the team, and a
+  press-OK-and-bounce loop that needed a guard.
+- **A reload is affordable here**, which is what makes the above tolerable.
+  The transcript survives it -- `chat-cache.mjs` writes to `sessionStorage`
+  precisely because "bzo's process is the tab" -- the world is hash-named and
+  `immutable`, and what is left is the join round trip.
+- **Browsing maps stays free.** The dialog already stages selections and
+  applies them on OK, so cycling the list previews in-session and only the
+  commit navigates. A preview is a render, not a destination.
+- **Map Viewer stops being a team.** It is a client-only sentinel that
+  `getJoinTeamFields` rewrites to `observer` before it reaches any wire;
+  moving it into this selector retires the fake team.
+- **The team selector's contents follow the destination** -- the local map's
+  teams, the target's own, or observer for a map preview. That dependency
+  exists today and is hidden by Map Viewer living inside the team list.
+- **Reachable targets only**, the way the `/list` rows already filter on
+  `proxy.reachable === true`. Shown when there is more than one destination to
+  choose between, which is the rule `getDialogTeamSelections` already applies
+  to Map Viewer -- "always more than one" does not hold, since a proxy-only
+  instance has no local entry.
+
+### OK and Login
+
+On a proxy, a playing team needs a token that no live connection can be
+holding: a token is single use and spent at `MsgEnter`, so **any** new proxy
+connection needs a fresh one. That makes the rule local to the client with no
+token state to track -- destination is a proxy and team is not observer, so OK
+greys and **Login** is the enabled action beside it, carrying both.
+
+Greying OK is right here only because there is an enabled alternative in
+reach. The rejected alternative -- offering observer alone until signed in --
+reads tidier and is worse: it removes the only way to stage the team the login
+then carries.
+
+**Login stays enabled on observer too, and is worth using.** A verified
+observer arrives under their registered callsign rather than `bzo-view-N`,
+carries the `@`/`+` the scoreboard draws, and holds whatever their BZID has in
+the target's own groupdb -- operator commands already work, since chat goes
+straight out including lines starting with `/`. Remote observer-admin is a use
+for this, not a side effect, which is why `MsgAdminInfo` is on the list below.
 
 **Several targets on one instance is the ordinary case, not the exotic one.**
 A host running four `bzfs` on four local ports publishes one bzo and four
@@ -214,10 +286,26 @@ asking for.
   what a cheat proxy looks like. It sees a host on its own network, though,
   which is unmistakably something its operator installed, and the global
   login every proxied player carries is what keeps them answerable.
-- **Cheating.** A proxy hands anyone a BZFlag client they can modify in
-  devtools, and bzo's anti-cheat does not run in proxy mode. BZFlag's client is
-  open source too, but editing JavaScript and recompiling C++ are not the same
-  bar. This wants a decision before the play path is built, not after.
+- **Cheating, answered by accountability rather than by enforcement.** A proxy
+  hands anyone a BZFlag client they can modify in devtools, and bzo's
+  anti-cheat does not run in proxy mode. BZFlag's client is open source too,
+  but editing JavaScript and recompiling C++ are not the same bar. Nothing on
+  this side can close that, so the decision taken instead is that **playing
+  requires a global login**: a connection without a token watches, whatever
+  team its link asked for, and is told why.
+
+  bzfs would admit an unregistered player itself, so this is the proxy's
+  courtesy rather than the target's rule. What it buys the operator is that
+  every proxied *player* is answerable by a BZID -- `/idban` reaches one of
+  them where `/ban` would reach all of them, which is a stronger guarantee
+  than a native client gives. An operator who disagrees edits their own bzo:
+  it is a default, not a boundary, and saying so is more honest than
+  pretending the client can be trusted.
+
+  It also happens to be the only correct answer for a registered callsign,
+  which cannot spawn without a token at all (`playerAlive`, bzfs.cxx:3199) --
+  a bzo restart lands there, since the session outlives it and the single-use
+  token held in memory does not.
 - **Latency.** The proxy adds its own hop to bzfs's, and the token constraint
   pins it inside the target's network, so that hop is sub-millisecond and the
   player's total is browser-to-proxy -- the same order as a native client
@@ -232,30 +320,45 @@ first, it needs both ends of a bzo pair updated before a row appears, and
 every step before it is cheaper against one hardcoded loopback target than
 against a registry.
 
-1. **Add play.** The client's second authority mode (`killed`, `shotEnd`,
-   `alive`, and grab/drop/capture/teleport as notifications), the
-   dead-and-waiting state, the rejoin cooldown, holding the bzfs connection
-   across a browser reconnect -- which also keeps a reconnecting player
-   verified, since a token is answered once -- and the cheating decision,
-   which wants settling before this lands rather than after.
+1. **The destination selector**, above. It is the only remaining way for a
+   player already in a game to reach a proxy at all, so it comes before more
+   of what a proxied player can do once there. `init` grows its `proxies`
+   list first; everything else in that section hangs off it.
 
-   What bzfs asks of a shot is worth having before that starts, because it
-   drops one that fails without a word (`shotFired`, bzfs.cxx:4075):
-   `FiringInfo::lifetime` has to be the world's `_reloadTime` within an
-   epsilon -- the reload, not the flag's own shot life -- the speed no more
-   than `_shotSpeed` plus the tank's, and the origin within
-   `_tankSpeed * _velocityAd + 2 * _muzzleFront` of the shooter's last state.
-   That last one is why upstream sends a player update immediately before
-   every shot (`LocalPlayer::fireShot`), and a proxied shot needs the same
-   pair. `_reloadTime` on a real target is the expression
-   `_shotRange / _shotSpeed`, so a BZDB value read for arithmetic has to be
-   evaluated rather than parsed.
+2. **Death.** The one conclusion the client has never had to reach, and the
+   only place it gains semantics of its own. Its shape is settled in "Every
+   way a proxied tank dies" above; what is not settled is the hit test, which
+   lives in `server.js` rather than in the shared `collision.mjs` and tests
+   every tank rather than only your own -- upstream never has that to decide,
+   because each client tests one tank by construction.
 
-2. **Trace a forwarded shell on the client.** A shot's path is client-side
-   work upstream and bzo's client does it only for a beam, so a proxied shell
-   passes through a wall it should have stopped at. This is the client
-   learning to fly a shot it was given, not the proxy simulating one.
+   The **rejoin cooldown** and **holding the bzfs connection across a browser
+   reconnect** belong with it: both are about a player who leaves and comes
+   back, which only matters once leaving can happen by dying.
 
-3. **Multi-world only if something wants two local maps on one host** -- never
+3. **The senders still missing**, in descending order of what anyone else can
+   see: `MsgShotEnd`, so a shot stops where it stopped rather than running its
+   reload out; `MsgGMUpdate`, so a guided missile tracks for the people it is
+   chasing (unhandled inbound too, so a native's missile does not track here
+   either); `MsgAdminInfo` inbound, so a proxied operator's `/playerlist`
+   carries addresses (`sendIPUpdate`, bzfs.cxx:619); `MsgTeleport`, for the
+   effect at both ends; and `MsgExit`, to announce leaving rather than
+   dropping the socket.
+
+   Untested rather than missing: shot slots cycle up to the target's
+   `maxShots` without enforcing reload timing, so `addShot` may refuse one
+   reused too soon.
+
+4. **Pause, if the countdown is worth converging.** Upstream's *client* owns
+   it -- five seconds, cancellable, refused in a building or in the air
+   (`clientCommands.cxx:451`, `playing.cxx:6872`) -- where bzo's *server*
+   does, as `pause.mjs` says outright. A proxied pause therefore takes effect
+   at once, with no countdown and no location checks, because no bzo game is
+   in the loop to run them. Converging means moving the clock to the client,
+   which is upstream's shape and collapses this to one path; bzo's server
+   keeps validating by elapsed time, the way it already validates a sticky
+   flag's shake timeout.
+
+5. **Multi-world only if something wants two local maps on one host** -- never
    a prerequisite for any of the above, since several proxied targets are not
    multi-world.
