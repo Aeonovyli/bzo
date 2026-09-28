@@ -387,6 +387,11 @@
       <span id="serverMotd"></span>
     </div>
     <input type="text" id="entryInput" maxlength="20" placeholder="Enter your name">
+    <!-- Upstream's own name for it: a short line a player writes about
+         themselves, drawn beside their callsign on the scoreboard. It travels
+         to a proxied or watched server as the `motto` that field has always
+         been, alongside the attribution this instance adds. -->
+    <input type="text" id="entryMottoInput" maxlength="40" placeholder="Motto (optional)">
     <!-- Where this browser is pointed: this server's own game, or one of the
          bzfs servers it proxies (`proxies` on `init`). Hidden when there is
          only one destination, which is every instance that proxies nothing.

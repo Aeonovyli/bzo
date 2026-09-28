@@ -1180,6 +1180,11 @@ export function buildScoreboardRows({
       localWins: state.localWins || 0,
       localLosses: state.localLosses || 0,
       selfKills: state.selfKills || 0,
+      // A player's own tagline, drawn beside the name the way upstream draws
+      // it (`ScoreboardRenderer.cxx:766`). Only a proxied or watched server
+      // sends one today -- bzo's own players have none -- so it is absent
+      // rather than empty on this server's own board.
+      motto: typeof state.motto === 'string' ? state.motto : '',
       paused: Boolean(state.paused),
       micOn: Boolean(state.voiceMicEnabled),
       // Mic-on says the peer could be heard; this says voice.js's own read of
@@ -1273,6 +1278,9 @@ function writeScoreboardHeader(columns, rabbitChase, tier, huntSelecting) {
 // The roster as the flat HUD draws it. Everything it needs arrives already
 // assembled, so this decides only how the rows look -- see the model builder in
 // `client.js`, which is the one entry point every repaint goes through.
+// `mottoDispLen`'s own default upstream, which clamps 0..128 and ships at 32.
+const SCOREBOARD_MOTTO_MAX = 32;
+
 export function updateScoreboard({
   rows,
   teamRows,
@@ -1406,7 +1414,21 @@ export function updateScoreboard({
     huntSpan.className = 'scoreboardHunt' + (player.huntCursor ? ' huntCursor' : '');
     huntSpan.textContent = getScoreboardHuntLabel(player);
     huntSpan.style.color = colorToCSS(SCOREBOARD_HUNT_COLOR);
-    labelSpan.append(statusSpan, nameSpan, flagSpan, pausedSpan, micSpan, rabbitSpan, huntSpan);
+    // The tagline, where upstream puts it: in parentheses right after the
+    // callsign, truncated so a long one cannot push the rest of the row off
+    // (`ScoreboardRenderer.cxx:766`, which clamps to `mottoDispLen`). Dimmed,
+    // because it is something the player wrote rather than something the game
+    // decided, and empty for anyone who set none.
+    const mottoSpan = document.createElement('span');
+    mottoSpan.className = 'scoreboardMotto';
+    mottoSpan.textContent = player.motto
+      ? ` (${player.motto.length > SCOREBOARD_MOTTO_MAX
+        ? `${player.motto.slice(0, SCOREBOARD_MOTTO_MAX)}…`
+        : player.motto})`
+      : '';
+    labelSpan.append(
+      statusSpan, nameSpan, mottoSpan, flagSpan, pausedSpan, micSpan, rabbitSpan, huntSpan,
+    );
 
     // One cell per column, in the header's order. The name column holds the
     // label assembled above; every other column asks `formatScoreboardCell`,

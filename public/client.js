@@ -1124,14 +1124,24 @@ let localDestinationMap = '';
 // Where this page actually is, read off its own URL rather than remembered, so
 // there is no second copy of the answer to drift from the connection.
 function currentDestination() {
-  const key = new URLSearchParams(window.location.search).get('proxy');
+  const params = new URLSearchParams(window.location.search);
+  // A watched server is its own destination: not this instance's game, and
+  // not one of the targets it proxies either.
+  const watching = params.get('watch');
+  if (watching) return `watch:${watching}`;
+  const key = params.get('proxy');
   return key ? `proxy:${key}` : DESTINATION_LOCAL;
 }
 
 let selectedDestination = currentDestination();
 
 function getDestinationChoices() {
-  return [DESTINATION_LOCAL, ...availableProxies.map((proxy) => `proxy:${proxy.key}`)];
+  const choices = [DESTINATION_LOCAL, ...availableProxies.map((proxy) => `proxy:${proxy.key}`)];
+  // Watching is reached from the View dialog rather than chosen here, but a
+  // page already on one has to be able to name where it is -- and to leave.
+  const here = currentDestination();
+  if (here.startsWith('watch:')) choices.unshift(here);
+  return choices;
 }
 
 function findProxyDestination(destination) {
@@ -1141,6 +1151,9 @@ function findProxyDestination(destination) {
 }
 
 function destinationLabel(destination) {
+  if (destination.startsWith('watch:')) {
+    return `watching ${destination.slice('watch:'.length).replace(/_(\d+)$/, ':$1')}`;
+  }
   const proxy = findProxyDestination(destination);
   // `host:port`, not the title the public list carries. A title is a
   // description -- two servers may well share one, and "bzo compatibilty
@@ -1158,6 +1171,9 @@ function destinationLabel(destination) {
 // anywhere else it is what that destination said about itself, which is the
 // best anyone can know before arriving.
 function getDestinationTeams(destination) {
+  // A watcher observes and nothing else -- no token, so the target would
+  // refuse a spawn even if one were asked for.
+  if (destination.startsWith('watch:')) return [PLAYER_TEAM.OBSERVER];
   if (destination === currentDestination()) return availablePlayerTeams;
   const proxy = findProxyDestination(destination);
   if (proxy) return PLAYER_TEAMS.filter((team) => proxy.teams.includes(team));
@@ -2374,6 +2390,7 @@ function setPendingJoinRequest(name) {
     name,
     isMobile,
     tankModel: selectedTankModelId,
+    motto: myPlayerMotto,
   };
 }
 
@@ -2385,6 +2402,7 @@ function maybeSendPendingJoinRequest() {
     name: pendingJoinRequest.name,
     isMobile: pendingJoinRequest.isMobile,
     tankModel: pendingJoinRequest.tankModel,
+    motto: pendingJoinRequest.motto,
     ...getJoinTeamFields(),
   });
 }
@@ -3721,8 +3739,23 @@ function queueDebugPacket(payload) {
 // A server-assigned 'Player' or 'Player n' is a placeholder, not a name the
 // player chose, so it does not count as one to join under. Neither does having
 // no name at all, which is what a browser that has never been here has.
+// The server's own ceiling (`MAX_MOTTO_LENGTH`), repeated here only so the
+// field stops accepting before it starts silently losing characters.
+const MAX_MOTTO_LENGTH = 40;
+
 function isDefaultPlayerName(name) {
   return !name || name === 'Player' || /^Player \d+$/.test(name);
+}
+
+// Upstream's `motto`: a short line the player writes about themselves, drawn
+// beside their callsign on the scoreboard and carried to a proxied or watched
+// server in the field of that name. Kept in `localStorage` like the name, and
+// bounded again on the server, which is the copy that matters.
+let myPlayerMotto = (localStorage.getItem('playerMotto') || '').slice(0, MAX_MOTTO_LENGTH);
+
+function savePlayerMotto(motto) {
+  myPlayerMotto = String(motto).trim().slice(0, MAX_MOTTO_LENGTH);
+  localStorage.setItem('playerMotto', myPlayerMotto);
 }
 
 function savePlayerName(name) {
@@ -3902,6 +3935,7 @@ function openEntryDialog(name = '') {
     name: myPlayerName,
     team: getSelectedPlayerTeam(),
     tankModel: selectedTankModelId,
+    motto: myPlayerMotto,
   };
   setInputContext(INPUT_CONTEXT.ENTRY);
   entryDialog.style.display = 'block';
@@ -3913,6 +3947,9 @@ function openEntryDialog(name = '') {
   const forcedName = forcedEntryName();
   entryInput.value = forcedName ?? (name === '' ? myPlayerName : name);
   entryInput.disabled = forcedName !== null;
+  // Staged like every other row: what is in the box is a draft until OK.
+  const mottoInput = document.getElementById('entryMottoInput');
+  if (mottoInput) mottoInput.value = myPlayerMotto;
   entryInput.focus();
   entryDialogReturnCameraMode = cameraMode;
   cameraMode = 'overview';
@@ -3956,6 +3993,8 @@ function applyEntrySelections() {
   if (!entryInput || !snapshot) return;
 
   savePlayerName(entryInput.value);
+  const mottoInput = document.getElementById('entryMottoInput');
+  if (mottoInput) savePlayerMotto(mottoInput.value);
   // The login carries the staged destination and team already, so it lands on
   // exactly what was asked for (`startGlobalLogin`).
   if (destinationNeedsLogin(selectedDestination, getJoinTeamFields().team)) {
@@ -3974,6 +4013,7 @@ function applyEntrySelections() {
 
   const rejoin = !gameplayJoinConfirmed
     || myPlayerName !== snapshot.name
+    || myPlayerMotto !== snapshot.motto
     || getSelectedPlayerTeam() !== snapshot.team;
   if (!rejoin) return;
   // The join is the authority on both, and it is refused while the client still
@@ -3994,6 +4034,10 @@ function resetEntrySelectionsToDefault() {
     entryInput.value = '';
     entryInput.focus();
   }
+  // The player's own, and the Default button's to clear -- unlike the name,
+  // nothing else ever sets it.
+  const mottoInput = document.getElementById('entryMottoInput');
+  if (mottoInput) mottoInput.value = '';
   selectedPlayerTeam = PLAYER_TEAM.AUTOMATIC;
   syncPlayerTeamSelector();
   setSelectedTankModel(getDefaultTankModel().id);
@@ -6564,9 +6608,19 @@ function connectToServer() {
   // no message for changing it afterwards, so the team is part of which
   // connection this is rather than something to ask for once it is open.
   const proxyTeam = proxyTarget ? params.get('team') : null;
-  const query = proxyTarget
-    ? `/?proxy=${encodeURIComponent(proxyTarget)}${proxyTeam ? `&team=${encodeURIComponent(proxyTeam)}` : ''}`
-    : '';
+  // `?watch=` rides on the socket for the same reason `?proxy=` does: the
+  // server has to know which game this connection is before it can build
+  // `init`, and it builds it the moment the socket opens. Without this the
+  // page sits on a watch URL while the socket joins the local game.
+  const watchTarget = params.get('watch');
+  // A player's own motto is not sent to a target. The motto is one of the few
+  // ways a proxied connection announces itself at all, so it says only that --
+  // see `proxyMotto`.
+  const query = watchTarget
+    ? `/?watch=${encodeURIComponent(watchTarget)}`
+    : (proxyTarget
+      ? `/?proxy=${encodeURIComponent(proxyTarget)}${proxyTeam ? `&team=${encodeURIComponent(proxyTeam)}` : ''}`
+      : '');
   ws = new WebSocket(`${protocol}//${window.location.host}${query}`);
 
   ws.onopen = () => {
@@ -8399,6 +8453,15 @@ function makeRowActivate(row, activate, label) {
   });
 }
 
+// Whether this connection may watch a live game on a server this instance
+// does not proxy. Both halves are the server's own answer, already on `init`:
+// verified is what makes the forum name sendable, and admin is the gate on
+// connecting anywhere the operator did not configure. The server checks the
+// same two things again on the socket -- this only decides whether to offer.
+function canWatchRemoteServers() {
+  return amVerified && amAdmin;
+}
+
 // The row tooltip: what the four columns leave out. Only what the map states,
 // so a map with no teleporters says nothing about them rather than "0".
 function describeMapStats(stats) {
@@ -8538,6 +8601,28 @@ function renderServerTable() {
         showMessage(`${server.host}:${server.port} did not answer`);
       }, 15000);
     }, `View ${server.title || server.host}`);
+    // Watching is the live game rather than the map: a real observer
+    // connection to that server, carrying the forum callsign bzo verified
+    // (`docs/list-server-plan.md`). Offered only to an admin of this instance
+    // who is signed in, because it connects this server to one its operator
+    // never configured -- and because bzo will not send a name it did not
+    // check. Stops the click reaching the row, which would view instead.
+    if (canWatchRemoteServers()) {
+      const watchBtn = document.createElement('button');
+      watchBtn.type = 'button';
+      watchBtn.textContent = 'Watch';
+      watchBtn.title = `Watch the live game on ${server.host}:${server.port}`;
+      watchBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        // A navigation like every other destination change: the target has to
+        // be fixed before the socket opens, because `init` is built from it.
+        // `host_port`, not `host:port` -- the spelling `?proxy=` already uses,
+        // so a browser shows the address rather than offering to search it.
+        window.location.href = `${window.location.pathname}?watch=`
+          + encodeURIComponent(`${server.host}_${server.port}`);
+      });
+      actionCell.appendChild(watchBtn);
+    }
     // Kept beside it only where there is already a copy to replace: a map
     // imported an hour ago is not the map that server is running now. It stops
     // the click going through to the row, which would view rather than refetch.
@@ -8615,6 +8700,7 @@ function viewMapFile(file) {
       name: myPlayerName,
       isMobile,
       tankModel: selectedTankModelId,
+      motto: myPlayerMotto,
       ...getJoinTeamFields(),
     });
   });
@@ -16189,6 +16275,7 @@ function applyXRJoinSelection() {
     name: myPlayerName,
     isMobile,
     tankModel: selectedTankModelId,
+    motto: myPlayerMotto,
     ...getJoinTeamFields(),
   });
 }

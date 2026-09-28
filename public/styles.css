@@ -942,6 +942,17 @@ body.scoreboard-collapsed #mainhud {
   white-space: nowrap;
 }
 
+/* Dimmed, because a tagline is something the player wrote rather than
+   something the game decided, and it sits between the name and the marks that
+   describe the row. It may be long, so it is the part that gives way first. */
+.scoreboardMotto {
+  opacity: 0.65;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 /* ScoreboardRenderer.cxx:562 drops a blank line in front of the first observer.
    Sorting them last says where they are; the gap says they are a separate group
    rather than the worst players on the board. */

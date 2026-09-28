@@ -9235,6 +9235,11 @@ class Player {
     this.onObstacle = false;
     this.connectDate = new Date();
     this.tankModel = 'bzflag';
+    // A tagline the player writes for themselves, drawn beside their name on
+    // the scoreboard. Upstream's `motto`, which is why it travels under that
+    // name to a proxied target (`proxyMotto`) and arrives under it from one
+    // (`decodeAddPlayer`).
+    this.motto = '';
     // Teams are server-authoritative. Observer is receive-only and non-combatant.
     this.team = 'rogue';
     // Set on a Map Viewer join (issue #68), cleared on any other -- see
@@ -9546,6 +9551,7 @@ class Player {
       connectDate: this.connectDate ? this.connectDate.toISOString() : undefined,
       color: this.color,
       tankModel: this.tankModel,
+      motto: this.motto,
       team: this.team,
       voiceMicEnabled: this.voiceMicEnabled,
       voiceChannel: this.voiceChannel,
@@ -15966,6 +15972,30 @@ const PROXY_CLIENT_VERSION = `${SERVER_VERSION}.${CLIENT_BUILD}-bzo-web`;
 // fact the operator on the other end cannot work out for themselves -- several
 // instances may proxy the same server (see docs/proxy.md) -- and it is
 // what a native client sees with `showMotto`.
+// How long a player's own motto may be. bzo's own, and shorter than
+// upstream's 128-byte `MOTTO_LEN` because nothing carries it off this server:
+// it is drawn on a scoreboard row beside a name, a flag and several marks,
+// and a long one crowds all of them out.
+const MAX_MOTTO_LENGTH = 40;
+
+// Bounded rather than trusted: a motto reaches every other player's
+// scoreboard, and a proxied one is carried to a target with its own
+// `MOTTO_LEN` to respect. Control characters go because this is drawn as text
+// on two surfaces and packed into a fixed-width field on a third.
+function sanitizeMotto(value) {
+  if (typeof value !== 'string') return '';
+  let clean = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code >= 0x20 && code !== 0x7f) clean += ch;
+  }
+  return clean.trim().slice(0, MAX_MOTTO_LENGTH);
+}
+
+// What a target's player list is told about this connection. Deliberately
+// *only* the attribution: a player's own motto is not forwarded, because this
+// field is one of the few ways a proxied connection announces itself at all
+// and sharing it would be giving that away for decoration.
 function proxyMotto(req) {
   const host = sanitizeHost(req.headers.host);
   if (!host) return 'via bzo';
@@ -16021,11 +16051,44 @@ let nextProxyViewerNumber = 1;
 // `/proxy/...` every one of them resolves a directory deep and 404s. A query
 // parameter is also the shape `?viewmap=` already established for "the same
 // client, pointed somewhere else".
-function resolveProxyTarget(url) {
+// Which game a socket is for. Two spellings, one shape: `?proxy=` names a
+// target the operator configured and may ask for any team it offers, and
+// `?watch=` names any server on the public BZFlag list and is always an
+// observer. A watch is a proxy with the team forced and the token withheld,
+// so everything past this point is the same code -- only `kind` differs, and
+// only for how the request is authorised (`authoriseProxyRequest`).
+//
+// Both travel as `host_port` rather than `host:port` (`proxyUrlKey`): a colon
+// in a query value makes a browser offer to search for the address instead of
+// showing it. `host:port` stays the identity everywhere else.
+function resolveProxyRequest(url) {
   if (typeof url !== 'string') return null;
   const query = url.indexOf('?');
   if (query === -1) return null;
   const params = new URLSearchParams(url.slice(query + 1));
+
+  const watchSpec = params.get('watch');
+  if (watchSpec) {
+    const parsed = parseHostPort(watchSpec.replace(/_(\d+)$/, ':$1'));
+    const key = parsed ? `${parsed.host}:${parsed.port}` : watchSpec;
+    return {
+      kind: 'watch',
+      key,
+      // A watcher carries no token, so bzfs would refuse a spawn anyway
+      // (`isAllowedToEnter`, Permissions.cxx:129). Entering on a playing team
+      // would only buy a kick to explain.
+      team: PLAYER_TEAM.OBSERVER,
+      target: parsed ? Object.freeze({
+        key,
+        urlKey: proxyUrlKey(key),
+        displayHost: parsed.host,
+        displayPort: parsed.port,
+        host: parsed.host,
+        port: parsed.port,
+      }) : null,
+    };
+  }
+
   const key = params.get('proxy');
   if (!key) return null;
   // The team rides on the socket's own URL because bzfs fixes it at
@@ -16035,6 +16098,7 @@ function resolveProxyTarget(url) {
   // watches rather than guessing at a colour.
   const asked = params.get('team');
   return {
+    kind: 'proxy',
     key,
     target: PROXY_TARGETS_BY_URL[key] || null,
     // `automatic` is the entry dialog's own first option and upstream's
@@ -16047,16 +16111,66 @@ function resolveProxyTarget(url) {
   };
 }
 
-// One of the target's players as a bzo roster record. Everything about where a
-// tank is and what it is doing is left at rest: positions arrive in
-// `MsgPlayerUpdate`, which is step 3, and a record that guessed would draw
-// tanks at the origin rather than nowhere.
+// Whether this socket may have the game it asked for, and under what name.
+// The only place the two kinds differ.
+//
+// A proxied target is the operator's own configuration, so naming the ones
+// that exist turns a dead link into a signpost. A watched one is any server
+// on the public list -- the same rule the map importer applies, since
+// watching *is* that connection held open -- but only for an admin of this
+// instance who is signed in: the login is what makes the forum name sendable
+// at all, and admin is the gate on connecting somewhere the operator never
+// configured (`docs/list-server-plan.md`).
+async function authoriseProxyRequest(req, request) {
+  if (request.kind !== 'watch') {
+    if (request.target) return { allowed: true };
+    const offered = Object.values(PROXY_TARGETS).map((target) => target.urlKey);
+    return {
+      allowed: false,
+      error: offered.length > 0
+        ? `This server does not proxy that server. It proxies: ${offered.join(', ')}`
+        : 'This server does not proxy any servers.',
+    };
+  }
+
+  const cookies = parseCookies(req.headers.cookie);
+  const session = sessions.get(cookies[SESSION_COOKIE_NAME]);
+  const callsign = session && typeof session.callsign === 'string' ? session.callsign : '';
+  if (!callsign) return { allowed: false, error: 'Watching needs a global login.' };
+  if (!isAdminSession(session, ADMIN_GROUPS)) {
+    return { allowed: false, error: "Watching is limited to this server's admins." };
+  }
+  if (!request.target) return { allowed: false, error: 'Expected watch=<host>_<port>' };
+
+  // Never a bare catch into "allow": a list that could not be fetched is a
+  // check that did not happen.
+  let listed = false;
+  try {
+    const servers = await getRemoteServerList();
+    listed = Boolean(findPublicServer(servers, request.target.host, request.target.port));
+  } catch (error) {
+    return { allowed: false, error: `Could not reach the BZFlag list server: ${error.message}` };
+  }
+  if (!listed) {
+    return { allowed: false, error: `${request.key} is not in the public BZFlag server list` };
+  }
+  // The forum name bzo verified, sent as itself. The remote cannot check the
+  // claim and marks the player unverified regardless, so the motto naming this
+  // instance is what an operator actually has to act on.
+  return { allowed: true, callsign };
+}
+
 function proxyPlayerRecord(player, motion = null) {
   const team = getTeamFromColorIndex(player.team) || PLAYER_TEAM.OBSERVER;
   const position = motion ? proxyPosition(motion.pos) : { x: 0, y: 0, z: 0 };
   return {
     id: String(player.id),
     name: player.callsign,
+    // The tagline a player set on the target. `MsgAddPlayer` has always
+    // carried it (`decodeAddPlayer`) and bzo simply never passed it on;
+    // upstream draws it beside the callsign on its own scoreboard
+    // (`ScoreboardRenderer.cxx:766`).
+    motto: typeof player.motto === 'string' ? player.motto : '',
     x: round2(position.x),
     y: round2(position.y),
     z: round2(position.z),
@@ -16443,10 +16557,25 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
 // A proxy connection, from the handshake to the socket closing. The browser is
 // answered only after the target has answered us: an `init` that named an
 // empty world would be a lie a reload could not fix.
-async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OBSERVER) {
+async function handleProxyConnection(ws, req, request) {
+  const { kind, key, target, team } = request;
   const send = (message) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
   };
+
+  // The one place the two kinds differ. Everything below is shared.
+  const allowed = await authoriseProxyRequest(req, request);
+  if (!allowed.allowed) {
+    // The string the caller sent is not echoed back -- it chose that value,
+    // and bzo's own sentence is the one worth putting in front of whoever
+    // reads it; the log has it.
+    log(`[${kind.toUpperCase()}] refused "${key}": ${allowed.error}`);
+    send({ error: allowed.error });
+    ws.close();
+    return;
+  }
+  if (ws.readyState !== ws.OPEN) return;
+  const options = { watch: kind === 'watch', callsign: allowed.callsign };
   const cookies = parseCookies(req.headers.cookie);
   // A login held for this target, if the browser has just been through one.
   // Taken rather than read: the token is answered once whatever happens next.
@@ -16460,9 +16589,13 @@ async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OB
     // twice but a name costs nothing to keep; then a numbered one for a
     // browser that has never signed in. Never the client's own choosing, at
     // any step (docs/proxy.md).
-    callsign: pendingLogin
-      ? pendingLogin.callsign
-      : (loginSession ? loginSession.callsign : `bzo-view-${nextProxyViewerNumber++}`),
+    // A watcher's name is decided before it gets here: it is the forum
+    // callsign bzo verified, and the whole point of the mode is that the
+    // remote sees it (`handleWatchConnection`).
+    callsign: options.callsign
+      || (pendingLogin
+        ? pendingLogin.callsign
+        : (loginSession ? loginSession.callsign : `bzo-view-${nextProxyViewerNumber++}`)),
     globalCallsign: pendingLogin
       ? pendingLogin.callsign
       : (loginSession ? loginSession.callsign : null),
@@ -16539,7 +16672,7 @@ async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OB
     const enterTeam = (wanted === PLAYER_TEAM.AUTOMATIC || offered.includes(wanted))
       ? wanted
       : PLAYER_TEAM.OBSERVER;
-    if (cannotSpawn && team !== PLAYER_TEAM.OBSERVER) {
+    if (cannotSpawn && team !== PLAYER_TEAM.OBSERVER && !options.watch) {
       log(`[PROXY] ${key}: "${viewer.callsign}" carries no global login,`
         + ` so watching rather than ${team}`);
     }
@@ -16593,7 +16726,7 @@ async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OB
     // worse than being refused out loud. A global login is spent the first
     // time it is offered, so a bzo restart leaves the name behind and takes
     // the proof with it.
-    if (cannotSpawn && team !== PLAYER_TEAM.OBSERVER) {
+    if (cannotSpawn && team !== PLAYER_TEAM.OBSERVER && !options.watch) {
       send({
         type: 'message',
         src: SERVER_PLAYER,
@@ -17126,28 +17259,12 @@ async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OB
 // When a new player connects, assign a default name and number
 wss.on('connection', (ws, req) => {
 
-  // A proxy connection takes none of what follows: no `Player`, no entry in
-  // `players`, no place in this server's game. See `handleProxyConnection`.
-  const proxied = resolveProxyTarget(req.url);
-  if (proxied) {
-    if (!proxied.target) {
-      // The name the client asked for is not echoed back -- it chose that
-      // string, and bzo's own sentence is the one worth putting in front of
-      // whoever reads it; the log has the value. What the instance *does*
-      // proxy is the operator's own configuration, so naming it turns a dead
-      // end into a signpost, which matters most when a link has gone stale.
-      log(`[PROXY] refused an unknown target "${proxied.key}"`);
-      // The link spellings, since that is what the caller got wrong.
-      const offered = Object.values(PROXY_TARGETS).map((target) => target.urlKey);
-      ws.send(JSON.stringify({
-        error: offered.length > 0
-          ? `This server does not proxy that server. It proxies: ${offered.join(', ')}`
-          : 'This server does not proxy any servers.',
-      }));
-      ws.close();
-      return;
-    }
-    void handleProxyConnection(ws, req, proxied.key, proxied.target, proxied.team);
+  // A proxied or watched connection takes none of what follows: no `Player`,
+  // no entry in `players`, no place in this server's game. The two spellings
+  // are one path -- see `resolveProxyRequest`.
+  const request = resolveProxyRequest(req.url);
+  if (request) {
+    void handleProxyConnection(ws, req, request);
     return;
   }
 
@@ -18113,6 +18230,10 @@ wss.on('connection', (ws, req) => {
             dropPlayerFlag(player.id);
           }
           player.name = joinName;
+          // Bounded here rather than trusted: it reaches every other player's
+          // scoreboard, and a proxied one carries it to a target that has its
+          // own `MOTTO_LEN` to respect.
+          player.motto = sanitizeMotto(message.motto);
           player.tankModel = isAllowedTankModel(requestedTankModel)
             ? requestedTankModel
             : 'bzflag';
