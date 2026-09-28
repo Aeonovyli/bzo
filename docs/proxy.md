@@ -117,7 +117,9 @@ the connection announces itself, and it says only that.
 - **Chat, where that server allows it.** bzfs itself puts no verification
   check on `MsgMessage` (`bzfs.cxx:5024`), but servers configure this: Planet
   MoFo relays a watcher's chat, while a server set up to withhold messaging
-  from unauthenticated observers silently does not. Watching works on both.
+  from unauthenticated observers refuses it and says so. That refusal is an
+  ordinary server message and reaches the browser like any other, so nothing
+  here has to explain it. Watching works on both.
 
 **Bans are collective here, unlike playing.** A proxied *player* carries a
 real token, so a target can `/idban` one of them by BZID. A watcher carries

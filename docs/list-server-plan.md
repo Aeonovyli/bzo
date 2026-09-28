@@ -77,13 +77,13 @@ ordinary signed-in player should be able to watch a stranger's server from
 here -- which is really a question about how much traffic an operator wants
 this instance sending to servers they have no relationship with.
 
-**Chat is the server's answer, not ours.** bzfs puts no verification check on
-`MsgMessage`, but servers configure it: Planet MoFo relays a watcher's chat
-and a server set to withhold messaging from unauthenticated observers does
-not. Watching works either way. So "should a watcher be able to chat" was the
-wrong question -- it is not one answer, and bzo neither grants nor withholds
-it. What is worth deciding is whether a watcher whose chat is being dropped
-should be *told* so, rather than typing into silence.
+Chat needed nothing, which is worth recording so it is not reopened. bzfs
+puts no verification check on `MsgMessage`, but servers configure it: Planet
+MoFo relays a watcher's chat and a server set to withhold messaging from
+unauthenticated observers does not, while watching works on both. bzo neither
+grants nor withholds it, and a target that refuses says so itself -- the
+refusal arrives as an ordinary server message and is already shown. Nothing
+to build.
 
 **A row does not yet say whether watching is worth it.** `observerMax` is free
 from the ping and already decoded, so a server that accepts no observers could
