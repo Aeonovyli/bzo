@@ -5656,9 +5656,13 @@ class RenderManager {
   // it is not straddling one. Called every frame for a tank carrying a phasing
   // flag and never for any other, which is the same gate upstream's
   // `CrossingWall` status bit is.
-  setTankCrossingPlane(tank, plane) {
+  // `clip` false keeps the lights and skips the cut, which is upstream's
+  // `if (!inCockpit) tankNode->setClipPlane(plane)` (Player.cxx:961-963):
+  // the lights and the clip come from one plane in one `if` there, and the
+  // tank you are driving gets the lights without the cut.
+  setTankCrossingPlane(tank, plane, clip = true) {
     if (!tank?.userData) return;
-    this._applyTankClipPlane(tank, plane);
+    this._applyTankClipPlane(tank, clip ? plane : null);
     this._updateTankIDL(tank, plane);
   }
 

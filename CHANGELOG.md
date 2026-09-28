@@ -7,6 +7,20 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 ## [Unreleased]
 
 ### Fixed
+- A tank phasing inside a mesh is drawn again, rather than vanishing and
+  leaving its flag hanging in the air. Two separate faults. `OO`'s crossing
+  effect clips a tank to the plane of the wall it is half inside, and the mesh
+  version of "which wall" returned the first face the tank touched instead of
+  the first one it actually straddled -- a tank standing inside a solid always
+  touches its floor first, whose outward normal points straight down, so the
+  cut took the whole tank. And the cut was applied to the tank the view was
+  looking out of, where upstream never applies it (`Player.cxx:961-963`): the
+  clip is only there to give the interdimensional lights a clean coplanar
+  edge, and the depth buffer does the real occluding either way. Your own tank
+  in first person, and a tank being roamed in its "Driving with" view, now get
+  the lights without the cut, matching upstream's `inCockpit`. Third person,
+  TRACK and FOLLOW keep it, so a tank half through a wall still shows its back
+  sticking out.
 - A tank standing behind a `nosorting` face is hidden by it, the same as on
   BZFlag. Upstream's flag does not merely skip a sort -- it takes the face out
   of the sorted pass entirely, so the face blends, writes depth, and shares a

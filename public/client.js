@@ -9477,7 +9477,17 @@ function updateTankDimensions(deltaTime) {
     //
     // Null rather than skipping the call, because a tank that stops qualifying
     // has to lose both the plane and the lights it already has.
+    //
+    // The cut itself is skipped for the tank you are driving, seen from its own
+    // cockpit -- upstream's `if (!inCockpit)` (Player.cxx:961-963), where
+    // `inCockpit` is true for your own tank in ordinary play
+    // (playing.cxx:6143). The clip is only there to give the lights a clean
+    // coplanar edge; the depth buffer already hides whatever is behind a wall,
+    // so skipping it costs nothing and is the difference between seeing your
+    // own tank inside a building and seeing none of it (#98). bzo's own third
+    // person is the `devDriving` half of that test, so it keeps the cut.
     const crossingScale = getTankDimensionScale(viewedFlag);
+    const inCockpit = isTankInCockpit(playerId);
     renderManager.setTankCrossingPlane(
       tank,
       tank.visible && drivesThroughBuildings(viewedFlag, viewedZoned)
@@ -9485,6 +9495,7 @@ function updateTankDimensions(deltaTime) {
           tank.position.x, tank.position.y, tank.position.z, tank.rotation.y, crossingScale,
         )
         : null,
+      !inCockpit,
     );
 
     const baseScaleX = tank.userData.baseScaleX;
@@ -9956,6 +9967,26 @@ function getRoamTargetId() {
 function getRoamTargetTank() {
   const id = getRoamTargetId();
   return id === null ? null : tanks.get(id) || null;
+}
+
+// The tank the current view is looking out of, which upstream calls
+// `inCockpit` and works out twice: once for your own tank (playing.cxx:6143)
+// and once for a roamed one (playing.cxx:6182-6185, true only in its FP view
+// and only for the tank actually being roamed). It is what decides whether a
+// tank crossing a wall wears the clip plane, because the cut is only there to
+// give the interdimensional lights a clean coplanar edge -- the depth buffer
+// does the real occluding either way -- and cutting the tank you are looking
+// out of leaves you with none of it (#98).
+//
+// bzo's own `drive-fp` is the same view one step further on, so it counts.
+// Every other view -- third person, TRACK, FOLLOW, `drive-tp` -- watches the
+// tank from outside, which is upstream's non-FP case, and keeps the cut.
+function isTankInCockpit(playerId) {
+  if (isObserver()) {
+    if (roamView !== ROAM_VIEW.FPS && roamView !== ROAM_VIEW.DRIVE_FP) return false;
+    return getRoamTargetId() === playerId;
+  }
+  return playerId === myPlayerId && cameraMode === 'first-person';
 }
 
 // Only team flags are trackable, which is upstream's `flagTeam != NoTeam` test.

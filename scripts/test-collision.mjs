@@ -958,6 +958,61 @@ assert.ok(Math.abs(trapped.x) < 1, 'and leaves the shot inside the corridor');
   }
 }
 
+// getMeshCrossingPlane owes the box version's "entirely inside is not
+// crossing" answer (#98). A phasing tank standing on a solid's own floor face
+// is the case that made this matter: the face is a real hit, its outward
+// normal points straight down through the ground, and clipping the tank to
+// the outward half of that plane cuts away all of it -- the tank vanishes and
+// its flag hangs in the air alone.
+{
+  // A closed hollow cube as a mesh: x/z in [-10, 10], y in [0, 20]. Face
+  // planes are [nx, ny, nz, d] with the outward normal and d = -(n . vertex),
+  // the same convention server.js's computeMeshFacePlane writes.
+  const vertices = [];
+  for (const y of [0, 20]) for (const z of [-10, 10]) for (const x of [-10, 10]) vertices.push({ x, y, z });
+  const at = (x, y, z) => vertices.findIndex((p) => p.x === x && p.y === y && p.z === z);
+  const quad = (corners, plane) => ({ vertexIndices: corners.map((c) => at(...c)), plane });
+  const cube = {
+    type: 'mesh',
+    x: 0,
+    z: 0,
+    baseY: 0,
+    rotation: 0,
+    phydrv: null,
+    vertices,
+    faces: [
+      quad([[-10, 0, -10], [10, 0, -10], [10, 0, 10], [-10, 0, 10]], [0, -1, 0, 0]),
+      quad([[-10, 20, -10], [10, 20, -10], [10, 20, 10], [-10, 20, 10]], [0, 1, 0, -20]),
+      quad([[-10, 0, -10], [-10, 20, -10], [-10, 20, 10], [-10, 0, 10]], [-1, 0, 0, -10]),
+      quad([[10, 0, -10], [10, 20, -10], [10, 20, 10], [10, 0, 10]], [1, 0, 0, -10]),
+      quad([[-10, 0, -10], [10, 0, -10], [10, 20, -10], [-10, 20, -10]], [0, 0, -1, -10]),
+      quad([[-10, 0, 10], [10, 0, 10], [10, 20, 10], [-10, 20, 10]], [0, 0, 1, -10]),
+    ],
+    bounds: { minX: -10, maxX: 10, minZ: -10, maxZ: 10, minY: 0, maxY: 20 },
+  };
+
+  // Standing on the floor inside: every corner of the tank is on the inward
+  // side of the floor's own plane, so there is nothing to straddle.
+  assert.equal(
+    client.getMeshCrossingPlane(cube, 0, 0, 0, 0), null,
+    'a tank resting on a mesh floor is inside it, not crossing it'
+  );
+  assert.equal(client.getMeshCrossingPlane(cube, 3, 0, -2, 1), null, 'and off-centre and turned');
+
+  // Half in the +x wall still is, which is the effect this feeds.
+  const crossing = client.getMeshCrossingPlane(cube, 9.5, 0, 0, 0);
+  assert.ok(crossing, 'straddling a mesh wall is still crossing it');
+  assert.ok(crossing.x > 0.99, 'and the normal still points out through that wall');
+
+  for (const args of [[cube, 0, 0, 0, 0], [cube, 3, 0, -2, 1], [cube, 9.5, 0, 0, 0]]) {
+    assert.deepEqual(
+      server.getMeshCrossingPlane(...args),
+      client.getMeshCrossingPlane(...args),
+      'client/server mesh crossing planes diverged'
+    );
+  }
+}
+
 // resolvePhysicsDriverAt: the one lookup both the client's motion step and
 // the server's anti-cheat call use, so they must agree exactly. A plain
 // obstacle answers with its own `.phydrv`; a mesh needs its specific face

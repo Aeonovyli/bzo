@@ -1302,10 +1302,49 @@ export function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
   if (!obs) return null;
   const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
   const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
-  const face = findMeshHitFaceOriented(obs, x, y, z, rotation, halfWidth, halfLength, TANK_HEIGHT);
-  if (!face || !face.plane) return null;
-  const [nx, ny, nz, d] = face.plane;
-  return { x: nx, y: ny, z: nz, d };
+  // Every face the tank is touching, not just the first one, because the
+  // first one is not necessarily a face it is *crossing*. `getBoxCrossingPlane`
+  // answers "entirely inside is not crossing" with `tankRectInsideOrigRect`
+  // over the whole footprint; a mesh has no footprint to ask, so the same
+  // question is asked of each face's own plane, and the first face the tank
+  // actually straddles is the answer.
+  //
+  // A tank standing on a solid's own floor face is why this cannot just take
+  // the first hit (#98): the floor is a real hit, its outward normal points
+  // straight down through the ground, and the tank is entirely on the inward
+  // side of it -- so clipping to the outward half cut away all of the tank and
+  // left its flag hanging in the air alone. Its feet rest on that floor for as
+  // long as it is inside, so the wall it is genuinely half-through is never
+  // the first face hit.
+  const hits = collectMeshHitFacesTank(
+    obs, x, y, z, rotation, halfWidth, halfLength, TANK_HEIGHT, 'driveThrough', null, [],
+  );
+  if (!hits.length) return null;
+
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const corners = [];
+  for (const [sw, sl] of [[1, 1], [1, -1], [-1, -1], [-1, 1]]) {
+    const cornerW = sw * halfWidth;
+    const cornerL = sl * halfLength;
+    corners.push([x + cos * cornerW - sin * cornerL, z + sin * cornerW + cos * cornerL]);
+  }
+
+  for (const { face } of hits) {
+    if (!face.plane) continue;
+    const [nx, ny, nz, d] = face.plane;
+    // `ZERO_TOLERANCE` and not `0` for the same reason the shot code uses it:
+    // a corner sitting exactly on the face is on it, not out through it, and
+    // a tank's feet are exactly on the floor it is standing on.
+    for (const [cx, cz] of corners) {
+      const horizontal = nx * cx + nz * cz + d;
+      if (horizontal + ny * y > ZERO_TOLERANCE
+        || horizontal + ny * (y + TANK_HEIGHT) > ZERO_TOLERANCE) {
+        return { x: nx, y: ny, z: nz, d };
+      }
+    }
+  }
+  return null;
 }
 
 // --- Shots ------------------------------------------------------------------
