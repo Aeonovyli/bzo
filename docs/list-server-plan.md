@@ -66,67 +66,29 @@ and it should be chosen deliberately rather than arrived at. The alternative
 is what already happens: import on demand, and a server nobody has looked at
 has no picture yet.
 
-## Watch: the import connection, held open
+## Watch: what is left of it
 
-`performRemoteMapImport` already opens a real bzfs connection to any server on
-the public list (`server.js`, which refuses a host the list does not carry),
-joins as an observer, takes the world and leaves. Watching is that same
-connection not hung up, forwarded to a browser the way a proxied one is.
+Built, and described in `docs/proxy.md` under "Watching a server this instance
+does not proxy". What that section does not settle:
 
-So this needs no change to `proxies`: that allowlist governs `?proxy=`, which
-is *playing* on a target the operator configured. Watching is governed by the
-rule the importer already uses -- on the public list or not at all -- and
-travels as its own `?watch=host:port` so the two policies never blur. It is a
-third destination kind beside local and proxy, and like them it is a
-navigation, because a target is fixed before the socket opens.
+**Who may, eventually.** It is limited to a signed-in admin of this instance
+while it is being tried out. The question the limit defers is whether an
+ordinary signed-in player should be able to watch a stranger's server from
+here -- which is really a question about how much traffic an operator wants
+this instance sending to servers they have no relationship with.
 
-**It requires a bzo login, and the remote sees the verified forum name.** Not
-for the target's benefit -- it cannot check the claim -- but because bzo will
-only send a name it verified itself. The motto names the instance that
-vouched, which is the one thing the operator cannot work out alone and the
-only place a complaint can be aimed.
+**Chat is the server's answer, not ours.** bzfs puts no verification check on
+`MsgMessage`, but servers configure it: Planet MoFo relays a watcher's chat
+and a server set to withhold messaging from unauthenticated observers does
+not. Watching works either way. So "should a watcher be able to chat" was the
+wrong question -- it is not one answer, and bzo neither grants nor withholds
+it. What is worth deciding is whether a watcher whose chat is being dropped
+should be *told* so, rather than typing into silence.
 
-This is knowingly weaker than the play path, and the plan should not pretend
-otherwise:
-
-- bzfs marks the player unverified in `MsgPlayerInfo`, so the scoreboard shows
-  `-` rather than `+`. A player who looks can tell the difference between a
-  name and an authenticated name.
-- A modified bzo could send any name. The trust sits with the instance, which
-  is where the proxy already puts it.
-- Bans stay collective. With no token there is no BZID on the remote, so
-  `/idban` cannot single out one watcher the way it can one proxied player --
-  only an address ban, which takes every watcher from that instance.
-
-It is still better than `bzo-watch-2`, which offers the operator nothing at
-all. The ceiling here is upstream's authentication model rather than a choice
-of ours: a token only verifies when bzfs sees the peer at a private address
-(`docs/proxy.md`), so a stranger's server can never verify a watcher. If
-upstream ever gains OAuth2 or anything that survives a relay, this improves
-without the design changing.
-
-**What a watcher can do is settled by bzfs, not by us.** Chat is relayed with
-no verification check (`bzfs.cxx:5024`). Spawning is refused --
-`isAllowedToEnter()` is `verified || !isRegistered()` and gates `playerAlive`
-(`Permissions.cxx:129`, `bzfs.cxx:3199`) -- and a watch connection never sends
-`MsgAlive` anyway, so it does not provoke a kick it would then have to
-explain. Permissions come from groups, and groups are granted only inside
-`if (verified)` after the list server approves a token
-(`ListServerConnection.cxx:263-276`), so a watcher holds none. `/` lines pass
-straight through and the target answers: `/msg`, `/serverquery` and `/uptime`
-work, while `/report`, `/clientquery`, `/playerlist` and `/set` are refused in
-bzfs's own words.
-
-**Whether observers are accepted is free from the list.** `observerMax` is the
-sixth entry of the ping's `teamMaximums` (`decodePingHex`), so a Watch action
-can be offered or withheld per row with no probing at all. Measured against
-the live list: 235 of 235 accept observers, none with the slots full. That
-does not make it permanent -- the row should read the field, and a refusal at
-connect should be a sentence rather than a broken page.
-
-Deliberately unresolved: whether a watcher may chat at all. It works, so it is
-a choice. A silent watcher bothers nobody; a talking one under a name the
-target cannot verify is the thing an operator would object to first.
+**A row does not yet say whether watching is worth it.** `observerMax` is free
+from the ping and already decoded, so a server that accepts no observers could
+be shown as such before anyone presses anything. None currently refuse, which
+is why this has not bitten.
 
 ## Player counts, rosters, and who is where
 
@@ -186,11 +148,11 @@ Worth adding if either becomes one.
 2. **Uptime from `boot`.** One timestamp on the key record and one line in the
    pane, once the pane exists.
 
-3. **Watch.** The plumbing rather than the policy: a `?watch=` destination,
-   the public-list rule, the verified callsign and vouching motto, and the
-   chat decision above made explicitly.
+3. **SVG overviews**, with the scanning question answered rather than assumed.
 
-4. **SVG overviews**, with the scanning question answered rather than assumed.
-
-5. **Presence and history**, behind the database decision, which availability-
+4. **Presence and history**, behind the database decision, which availability-
    over-a-window is the test for.
+
+Watch is built (above), ahead of this order rather than in it: it was wanted
+for testing, and it turned out to need no new policy -- only the map
+importer's own rule and a narrower gate.

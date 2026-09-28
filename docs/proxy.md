@@ -75,6 +75,59 @@ and still refuses a host the public list does not carry -- that address comes
 from a client, and the check is what stands between it and an arbitrary
 outbound connection.
 
+## Watching a server this instance does not proxy
+
+`proxies` is the operator's list of servers a browser may *play* on. Watching
+is a separate thing with a separate rule: `?watch=<host>_<port>` reaches any
+server on the public BZFlag list, as an observer, and nothing else.
+
+It is not a second implementation. A watch is a proxy with the team forced and
+the token withheld, so both spellings resolve into one request and only the
+authorisation differs. Nor is the connection new: `performRemoteMapImport`
+already joins any listed server as an observer to take its world and leave,
+and watching is that same connection not hung up.
+
+**Who may.** A signed-in admin of this instance. Narrow while the feature is
+being tried out, and each half answers something: the global login is what
+makes the name sendable, because the remote is shown the forum callsign bzo
+verified and bzo will not claim one it did not check; admin is the gate on
+connecting somewhere the instance's own operator never configured. The
+session is checked before any network work, and a public list that could not
+be fetched refuses rather than allowing -- a check that did not happen is not
+a check that passed.
+
+**What the target sees.** The verified forum callsign, a motto of
+`via <this bzo>`, and the ordinary bzo version string. It cannot verify the
+callsign and marks the player unverified regardless, so its scoreboard shows
+`-` rather than `+`; what the motto gives an operator is the instance to
+address, which is the same trust model the rest of this document rests on. A
+player's own motto is never forwarded -- that field is one of the few ways
+the connection announces itself, and it says only that.
+
+**What a watcher can do**, decided by bzfs rather than by anything here:
+
+- **Not spawn.** `isAllowedToEnter` is `verified || !isRegistered()` and gates
+  `playerAlive` (`Permissions.cxx:129`, `bzfs.cxx:3199`). A watch connection
+  never sends `MsgAlive` either, so it does not provoke a kick to explain.
+- **Nothing privileged.** Groups are granted only inside `if (verified)` once
+  the list server approves a token (`ListServerConnection.cxx:263-276`), so a
+  watcher holds none. `/` lines pass straight through and the target answers:
+  `/msg`, `/serverquery` and `/uptime` work; `/report`, `/clientquery`,
+  `/playerlist` and `/set` are refused in bzfs's own words.
+- **Chat, where that server allows it.** bzfs itself puts no verification
+  check on `MsgMessage` (`bzfs.cxx:5024`), but servers configure this: Planet
+  MoFo relays a watcher's chat, while a server set up to withhold messaging
+  from unauthenticated observers silently does not. Watching works on both.
+
+**Bans are collective here, unlike playing.** A proxied *player* carries a
+real token, so a target can `/idban` one of them by BZID. A watcher carries
+none and never can, so the only lever is an address ban, which takes every
+watcher from that instance at once.
+
+Whether observers are accepted at all is knowable without connecting:
+`observerMax` is the sixth entry of the ping's `teamMaximums`, which the
+public list already carries.
+
 ## A proxy runs inside its target's network
 
 **Not a preference -- the only deployment where a forwarded login works.**

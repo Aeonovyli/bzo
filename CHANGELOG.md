@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- Watch a live game on any server in the public BZFlag list, from the View
+  dialog, without leaving the browser. It is an observer connection: you see
+  the match and can chat where that server allows it, and cannot play. The
+  server is shown your bzflag.org callsign with a note saying which bzo you
+  came through, so its operator knows who is there. Limited for now to an
+  admin of the bzo instance, signed in.
+- Players have a motto, as they do in BZFlag: a short line shown beside the
+  callsign on the scoreboard. Mottos set on a proxied or watched server are
+  shown too, which is what they were missing before. A player's own motto
+  stays on this server -- what a proxied connection tells the target is which
+  bzo it came through, and nothing else.
+
 ## [1.2.84] - 2026-09-28
 
 ### Changed
