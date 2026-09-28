@@ -1136,9 +1136,150 @@ function syncMapViewerPreview() {
 // (see `PLAYER_TEAM.MAP_VIEWER`'s own comment in teams.mjs), offered here
 // purely as a client-side alternative to plain Observer, exactly when
 // Observer itself is offered and there is at least one map to look at.
+// --- Where this browser is pointed ------------------------------------------
+//
+// `local`, or `proxy:<key>` for one of the bzfs servers this instance carries
+// (`proxies` on `init`). Changing it is a page navigation, not a message: a
+// proxied target is fixed before the socket opens, because `init` is
+// synthesized from it. See docs/proxy-plan.md, "How the selector behaves".
+
+const DESTINATION_LOCAL = 'local';
+
+let availableProxies = [];
+let localDestinationTeams = [];
+
+// Where this page actually is, read off its own URL rather than remembered, so
+// there is no second copy of the answer to drift from the connection.
+function currentDestination() {
+  const key = new URLSearchParams(window.location.search).get('proxy');
+  return key ? `proxy:${key}` : DESTINATION_LOCAL;
+}
+
+let selectedDestination = currentDestination();
+
+function getDestinationChoices() {
+  return [DESTINATION_LOCAL, ...availableProxies.map((proxy) => `proxy:${proxy.key}`)];
+}
+
+function findProxyDestination(destination) {
+  if (!destination.startsWith('proxy:')) return null;
+  const key = destination.slice('proxy:'.length);
+  return availableProxies.find((proxy) => proxy.key === key) || null;
+}
+
+function destinationLabel(destination) {
+  const proxy = findProxyDestination(destination);
+  if (!proxy) return 'This server';
+  return proxy.title || proxy.name;
+}
+
+// The teams the chosen destination would accept. For wherever this connection
+// already is that is `init`'s own answer, which is the authoritative one; for
+// anywhere else it is what that destination said about itself, which is the
+// best anyone can know before arriving.
+function getDestinationTeams(destination) {
+  if (destination === currentDestination()) return availablePlayerTeams;
+  const proxy = findProxyDestination(destination);
+  if (proxy) return PLAYER_TEAMS.filter((team) => proxy.teams.includes(team));
+  return PLAYER_TEAMS.filter((team) => localDestinationTeams.includes(team));
+}
+
+// Whether pressing OK would open a *new* proxy connection on a playing team,
+// which always needs a fresh global login: a token is single use and is spent
+// at `MsgEnter`, so no live connection is holding one and none can be reused.
+// That is the whole test -- there is no token state to track.
+//
+// Being verified somewhere else does not count, and asking `amVerified` here
+// was a bug: it says this connection is verified on the server it is already
+// talking to, which is exactly the thing a token cannot be carried over from.
+//
+// Staying put does not count either. Already on that target and already on
+// that team, OK is a rejoin down the connection that was authenticated when
+// it opened, so nothing new is needed.
+//
+// Observer never needs one, though signing in is still worth it there: it is
+// how a player arrives under their registered callsign with whatever it
+// carries on the target.
+function destinationNeedsLogin(destination, team) {
+  if (destination === DESTINATION_LOCAL) return false;
+  if (team === PLAYER_TEAM.OBSERVER) return false;
+  return !(destination === currentDestination() && team === proxyEnteredTeam);
+}
+
+function setAvailableProxies(proxies, localTeams) {
+  availableProxies = Array.isArray(proxies)
+    ? proxies.filter((proxy) => proxy && typeof proxy.key === 'string' && Array.isArray(proxy.teams))
+    : [];
+  localDestinationTeams = Array.isArray(localTeams) ? localTeams : [];
+  selectedDestination = currentDestination();
+  syncDestinationSelector();
+}
+
+function syncDestinationSelector() {
+  const row = document.getElementById('entryDestinationSelector');
+  const value = document.getElementById('entryDestinationValue');
+  if (!row || !value) return;
+  // Nothing to choose between is not a choice. Same rule the Map Viewer team
+  // already follows, and it is the one that survives a proxy-only instance.
+  const choices = getDestinationChoices();
+  row.hidden = choices.length < 2;
+  value.textContent = destinationLabel(selectedDestination);
+  row.setAttribute('aria-label', `Server: ${value.textContent}`);
+}
+
+function selectRelativeDestination(direction) {
+  const choices = getDestinationChoices();
+  if (choices.length < 2) return;
+  const at = choices.indexOf(selectedDestination);
+  const next = choices[((at < 0 ? 0 : at) + direction + choices.length) % choices.length];
+  if (next === selectedDestination) return;
+  selectedDestination = next;
+  // The team offered has to follow, or the dialog would carry a team the new
+  // destination has never heard of into the link.
+  const teams = getDestinationTeams(next);
+  if (selectedPlayerTeam !== PLAYER_TEAM.AUTOMATIC && !teams.includes(selectedPlayerTeam)) {
+    selectedPlayerTeam = PLAYER_TEAM.AUTOMATIC;
+  }
+  syncDestinationSelector();
+  syncPlayerTeamSelector();
+  // The login row means something different per destination: for a proxy it
+  // is always a fresh login for that target rather than this connection's own
+  // status (`applyLoginUi`).
+  applyLoginUi();
+  syncEntryActions();
+}
+
+// Where the dialog's OK goes when the destination is not where we already are.
+function destinationHref(destination, team) {
+  if (destination === DESTINATION_LOCAL) return `${window.location.pathname}`;
+  const proxy = findProxyDestination(destination);
+  if (!proxy) return `${window.location.pathname}`;
+  const params = new URLSearchParams({ proxy: proxy.key });
+  if (team && team !== PLAYER_TEAM.AUTOMATIC) params.set('team', team);
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
+// OK cannot take you somewhere you would be refused. It greys only because
+// Login is enabled beside it and carries both the destination and the team --
+// a dead button with an enabled way through is a prompt, not a wall.
+function syncEntryActions() {
+  const ok = document.getElementById('entryOkButton');
+  if (!ok) return;
+  const team = getJoinTeamFields().team;
+  ok.disabled = destinationNeedsLogin(selectedDestination, team);
+  ok.title = ok.disabled
+    ? 'Playing on a proxied server needs a global login. Use Global login below.'
+    : '';
+}
+
 function getDialogTeamSelections() {
-  const base = getPlayerTeamSelections(availablePlayerTeams);
-  if (!availablePlayerTeams.includes(PLAYER_TEAM.OBSERVER) || availableViewMaps.length === 0) {
+  const teams = getDestinationTeams(selectedDestination);
+  const base = getPlayerTeamSelections(teams);
+  // Map Viewer previews a world this server has hashed, which is this server's
+  // business wherever the tank is going -- so it is offered only when staying
+  // put, not as something to carry into a link.
+  if (selectedDestination !== currentDestination()
+    || !teams.includes(PLAYER_TEAM.OBSERVER) || availableViewMaps.length === 0) {
     return base;
   }
   const observerIndex = base.indexOf(PLAYER_TEAM.OBSERVER);
@@ -1160,7 +1301,10 @@ function selectRelativePlayerTeam(direction) {
   const currentIndex = teamSelections.indexOf(selectedPlayerTeam);
   const nextIndex = (currentIndex + direction + teamSelections.length) % teamSelections.length;
   selectedPlayerTeam = teamSelections[nextIndex];
+  // After the selector, not before: `getSelectedPlayerTeam` reads the row's
+  // own dataset, which `syncPlayerTeamSelector` is what writes.
   syncPlayerTeamSelector();
+  syncEntryActions();
 }
 
 function isObserver() {
@@ -2067,6 +2211,17 @@ function toggleVoiceMicrophone() {
 
 function bindAudioControls() {
   bindVolumeControls();
+
+  const destinationSelector = document.getElementById('entryDestinationSelector');
+  if (destinationSelector) {
+    destinationSelector.addEventListener('click', (event) => selectRelativeDestination(getMenuClickDirection(event)));
+    destinationSelector.addEventListener('menuadjust', (event) => {
+      const direction = Number(event.detail?.direction) < 0 ? -1 : 1;
+      selectRelativeDestination(direction);
+      event.preventDefault();
+    });
+  }
+  syncDestinationSelector();
 
   const teamSelector = document.getElementById('entryTeamSelector');
   if (teamSelector) {
@@ -3453,6 +3608,28 @@ function applyLoginUi() {
     if (forcedName !== null) entryInput.value = forcedName;
   }
   if (!value) return;
+  // A staged proxy destination needs a token of its own, and no local status
+  // can supply one: a token is single use, spent at `MsgEnter`, and issued per
+  // target. So this row stops reporting where this connection stands and
+  // becomes the one thing that helps -- a fresh login for the target. Showing
+  // the local callsign here would be worse than unhelpful, because while
+  // signed in the row is a sign-*out*, and pressing it would leave for the
+  // proxy carrying nothing.
+  // Only when the staged proxy is somewhere this page is not. Already on it
+  // and verified, the row reports that standing the way it does anywhere else
+  // -- it is the target's own answer, and signing out is a real thing to want.
+  const stagedProxy = findProxyDestination(selectedDestination);
+  const goingElsewhere = stagedProxy && `proxy:${stagedProxy.key}` !== currentDestination();
+  if (goingElsewhere) {
+    value.textContent = 'Sign in';
+    if (row) {
+      delete row.dataset.loggedIn;
+      row.setAttribute('aria-label', `Global login for ${stagedProxy.name}`);
+      row.title = `Sign in at bzflag.org to play on ${stagedProxy.name}.`
+        + ' A login is needed for each target, and bzo never sees your password.';
+    }
+    return;
+  }
   if (amVerified) {
     value.textContent = `${amAdmin ? '@' : '+'}${myGlobalCallsign || myPlayerName}`;
     if (row) {
@@ -3501,8 +3678,23 @@ function startGlobalLogin() {
   // leader, so a page on `?follow=leader` comes back on `view=follow`, which
   // is the same camera.
   const params = new URLSearchParams(window.location.search);
-  const proxyTarget = params.get('proxy');
-  const watching = isObserver() && roamView ? encodeURIComponent(roamView) : '';
+  // The destination staged in the dialog, not the one this page is on: a
+  // player who picked a proxy and a team, and found they must sign in, is
+  // saying where they want to land. `/login` comes back to that link.
+  const stagedProxy = findProxyDestination(selectedDestination);
+  const proxyTarget = stagedProxy ? stagedProxy.key : params.get('proxy');
+  const stagedTeam = proxyTarget ? (getJoinTeamFields().team || params.get('team')) : null;
+  // The roam view only comes back if a playing team is *not* being carried.
+  // Clicking this row while watching is the ordinary case -- a tokenless
+  // connection is an observer -- so the view would otherwise ride along beside
+  // the team, and `?view=` forces observer on arrival (`autoObserving` below).
+  // The player would sign in, enter on the team they asked for, and then be
+  // navigated straight back to watching. The team is the more specific of the
+  // two requests, so it is the one that survives.
+  const carryingPlay = Boolean(stagedTeam) && stagedTeam !== PLAYER_TEAM.OBSERVER;
+  const watching = !carryingPlay && isObserver() && roamView
+    ? encodeURIComponent(roamView)
+    : '';
   // The team comes back too, and it is the team *staged in the dialog* rather
   // than the one this connection entered on. Signing in is the thing that
   // makes playing possible at all on a target that has the callsign
@@ -3514,12 +3706,16 @@ function startGlobalLogin() {
   //
   // Path segments are positional, so a team with no view still fills the view
   // slot; `-` is not a view name and resolves to none.
-  const proxyTeam = proxyTarget ? (getJoinTeamFields().team || params.get('team')) : null;
+  const proxyTeam = stagedTeam;
   const tail = proxyTeam
     ? `/${watching || '-'}/${encodeURIComponent(proxyTeam)}`
     : (watching ? `/${watching}` : '');
   const returnPage = proxyTarget ? `/${encodeURIComponent(proxyTarget)}${tail}` : '';
-  window.location.href = `${amVerified ? '/logout' : '/login'}${returnPage}`;
+  // Never `/logout` when a proxy is staged: that row is a fresh login for the
+  // target whatever this connection's own status is (`applyLoginUi`).
+  const goingElsewhere = stagedProxy && `proxy:${stagedProxy.key}` !== currentDestination();
+  const action = (amVerified && !goingElsewhere) ? '/logout' : '/login';
+  window.location.href = `${action}${returnPage}`;
 }
 
 function syncDebugTabVisibility() {
@@ -3774,6 +3970,12 @@ function applyEntrySelections() {
   if (!entryInput || !snapshot) return;
 
   savePlayerName(entryInput.value);
+  // Somewhere else is a navigation rather than a join: the name is saved
+  // above, so it survives the reload and the arriving `init` joins with it.
+  if (selectedDestination !== currentDestination()) {
+    window.location.href = destinationHref(selectedDestination, getJoinTeamFields().team);
+    return;
+  }
   if (selectedTankModelId !== snapshot.tankModel) {
     applySelectedTankModel(selectedTankModelId);
   }
@@ -4668,7 +4870,19 @@ let cachedCollisionColliders = [];
 const VELOCITY_THRESHOLD = 0.15; // Send if forward/rotation speed changes by 15%
 const VERTICAL_VELOCITY_THRESHOLD = 1.0; // Send if vertical velocity changes significantly
 const AIR_VELOCITY_THRESHOLD = 0.35; // Send if airborne horizontal velocity changes significantly
-const MAX_UPDATE_INTERVAL = 5000; // Force update every 5 seconds
+// How long this client will go without reporting, whatever the tank is doing.
+// The server's, because it is the server that decides what silence means: bzo
+// extrapolates between packets and keeps the socket alive with WebSocket
+// pings, while a proxied connection is answering a bzfs, which takes the flag
+// of a player it has not heard from (see `MAX_UPDATE_INTERVAL` in server.js).
+// The fallback is bzo's own default, for an `init` that predates the field.
+const MAX_UPDATE_INTERVAL_DEFAULT = 5000;
+function getMaxUpdateInterval() {
+  const configured = Number(gameConfig?.MAX_UPDATE_INTERVAL);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : MAX_UPDATE_INTERVAL_DEFAULT;
+}
 const DEAD_STICK_STOP_THRESHOLD = 0.03; // Force an update when ground motion settles to near-zero
 const MAX_REMOTE_EXTRAPOLATION_STOP_SECONDS = 0.3; // Short horizon only when replicated state is fully stopped
 // The occupant height every tank collision test measures with. Upstream passes
@@ -6651,6 +6865,7 @@ function handleServerMessage(message) {
       // previewed map already applied underneath it.
       applyWorldGameplay(currentWorldData?.gameplay || null);
       setAvailablePlayerTeams(message.teamMode.teams);
+      setAvailableProxies(message.proxies, message.localTeams);
       teamScores = message.teamScores || [];
       // bzfs.cxx:2437 sends MsgNewRabbit to a joining player for the same reason:
       // who the rabbit is is world state rather than an event. Set directly --
@@ -10763,7 +10978,7 @@ function sendObserverUpdate() {
   ) >= OBSERVER_DRIFT_THRESHOLD;
   const due = drifted
     ? sinceLastSend >= OBSERVER_DRIFT_MIN_INTERVAL
-    : sinceLastSend >= MAX_UPDATE_INTERVAL;
+    : sinceLastSend >= getMaxUpdateInterval();
   if (!due) return;
   lastObserverHeartbeatAt = now;
   lastObserverSentX = playerX;
@@ -11527,7 +11742,7 @@ function handleMotion(deltaTime) {
   if (rotationSpeedDelta > VELOCITY_THRESHOLD) reasons.push(`rs:${rotationSpeedDelta.toFixed(3)}`);
   if (verticalVelocityDelta > VERTICAL_VELOCITY_THRESHOLD) reasons.push(`vv:${verticalVelocityDelta.toFixed(3)}`);
   if (airVelocityDelta > AIR_VELOCITY_THRESHOLD) reasons.push(`av:${airVelocityDelta.toFixed(3)}`);
-  if (timeSinceLastSend > MAX_UPDATE_INTERVAL) reasons.push(`time:${(timeSinceLastSend/1000).toFixed(1)}s`);
+  if (timeSinceLastSend > getMaxUpdateInterval()) reasons.push(`time:${(timeSinceLastSend/1000).toFixed(1)}s`);
 
   // Minimum 100ms between non-forced updates to prevent rapid-fire from calculation noise
   const minTimeBetweenUpdates = 100; // ms
@@ -11545,7 +11760,7 @@ function handleMotion(deltaTime) {
     // Costs nothing on an ordinary jump, which never runs long
     // enough to reach it, and is the one thing that still fires when a jump
     // that should have taken two seconds is still going after five.
-    timeSinceLastSend > MAX_UPDATE_INTERVAL ||
+    timeSinceLastSend > getMaxUpdateInterval() ||
     (canSendVelocityUpdate && (
       forwardSpeedDelta > VELOCITY_THRESHOLD ||
       rotationSpeedDelta > VELOCITY_THRESHOLD ||

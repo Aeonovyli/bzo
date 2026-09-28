@@ -1564,6 +1564,13 @@ const GAME_CONFIG = {
   SHOT_RADIUS: 0.5, // BZFlag _shotRadius default
   SHOT_TAIL_LENGTH: 4.0, // BZFlag _shotTailLength default
   SHOTS_KEEP_VERTICAL_VELOCITY: false, // BZFlag _shotsKeepVerticalVelocity default
+  // ms between player updates when nothing has changed. bzo's own server
+  // extrapolates between packets and keeps the socket alive with WebSocket
+  // pings, so this only has to be often enough that a resting tank is not
+  // mistaken for a gone one. A proxied connection overrides it, because a
+  // bzfs measures silence against `_notRespondingTime` and takes the flag of
+  // whoever exceeds it (`buildProxyInit`).
+  MAX_UPDATE_INTERVAL: 5000,
   MAX_SPEED_TOLERANCE: 1.5, // Allow 50% tolerance for latency
   SHOT_POSITION_TOLERANCE: 2, // Max distance shot can be from claimed position
   // cmdPause() counts down five seconds before a pause takes hold, so a tank
@@ -12523,6 +12530,34 @@ async function refreshProxyStatuses() {
   }));
 }
 
+// The targets a browser may be sent to, for the entry dialog's destination
+// selector (`docs/proxy-plan.md`). The same facts `/list` publishes, minus the
+// live counts a picker does not need, plus the one thing it does: which teams
+// the target would accept, so the team selector can follow the destination
+// without a round trip to find out.
+//
+// Only targets that answered their last dial. A row for a server nothing can
+// reach is an option that fails after the navigation rather than before it,
+// which is the same rule the `/list` rows already apply.
+function getProxyDestinations() {
+  return Object.values(PROXY_TARGETS)
+    .map((target) => {
+      const status = proxyStatuses.get(target.key);
+      if (!status || status.reachable !== true) return null;
+      const listed = findPublicServer(
+        remoteServerListCache.servers, target.displayHost, target.displayPort);
+      return {
+        key: target.urlKey,
+        name: target.key,
+        title: listed?.title || '',
+        style: status.style || '',
+        teams: teamModeFromMaximums(
+          status.teamMaximums, status.maxPlayers ?? MAX_REAL_PLAYERS).teams,
+      };
+    })
+    .filter(Boolean);
+}
+
 // The list rows for this instance's targets. The title is the public BZFlag
 // list's word about a target that is on it; a target that is not listed shows
 // under its own configured name, which is all anybody has for it.
@@ -15864,6 +15899,9 @@ function getRosterFor(recipient) {
 // them nor gates on them, and `/clientquery` prints the whole string, so the
 // release a proxied player is actually running is the useful thing to put
 // here. Capped at `VersionLen` 60 (`global.h:34`), which this cannot reach.
+// `MaxUpdateTime` (`Player.cxx:38`), in ms: how long a native client will go
+// without reporting, whatever its tank is doing.
+const PROXY_MAX_UPDATE_INTERVAL = 1000;
 const PROXY_CLIENT_VERSION = `${SERVER_VERSION}.${CLIENT_BUILD}-bzo-web`;
 // The motto a target's player list shows beside the callsign: which bzo this
 // player came through, taken from the Host they reached it on. That is the one
@@ -16285,6 +16323,19 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
       ),
       ALL_SHOTS_RICOCHET: proxyGameOptions(session) !== null
         && (proxyGameOptions(session) & GAME_OPTION_BITS.ricochet) !== 0,
+      // What a native client does: `MaxUpdateTime` is one second, and
+      // `isDeadReckoningWrong` returns true past it whatever the tank is doing
+      // -- "otherwise always send at least one packet per second"
+      // (`Player.cxx:38`, `:1251`). Not a number derived from the timeout it
+      // has to beat, because upstream already answered this.
+      //
+      // The timeout is why it matters. bzfs refreshes `lastupdate` from
+      // `MsgPlayerUpdate` and nothing else (`GameKeeper.cxx:503`), and a
+      // player silent for `_notRespondingTime` has the flag they were holding
+      // dropped (`bzfs.cxx:5806-5824`). bzo's own default is five seconds,
+      // which is that timeout exactly, so a parked tank on a proxy raced it
+      // and lost about half the time.
+      MAX_UPDATE_INTERVAL: PROXY_MAX_UPDATE_INTERVAL,
     },
     // Nothing here simulates a shot: upstream leaves a shot's path to each
     // client and so does this connection, which is what the proxy cannot do
@@ -16311,6 +16362,13 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
     world: { hash: mapEntry.hash, url: mapEntry.url },
     currentMap: mapEntry.fileName,
     viewableMaps: getViewableMapsList(),
+    // Every target this instance carries, this one included, so a proxied
+    // player can move between them and back to the local game without a link.
+    proxies: getProxyDestinations(),
+    // This instance's own game, for the same selector: a proxied player
+    // choosing "local" needs to know which teams they would land among, and
+    // `teamMode` above describes wherever this connection currently is.
+    localTeams: TEAM_MODE.teams,
     flags: session.state.flags.filter(Boolean).map(proxyFlagState),
     worldTime,
     serverName: `${viewer.key} (proxied)`,
@@ -16514,6 +16572,7 @@ async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OB
     };
     const moveTimer = setInterval(flushMoves, 50);
     ws.on('close', () => clearInterval(moveTimer));
+
 
     // What the browser has been told about who is alive. A `pmBatch` carries
     // where a tank is and not whether it is in the game, so a tank that was
@@ -17216,6 +17275,15 @@ wss.on('connection', (ws, req) => {
     // arriving as a push update; the View dialog avoids that by asking fresh
     // instead (`getMaps`/`mapList` carries the same list on demand).
     viewableMaps: getViewableMapsList(),
+    // The bzfs servers this instance proxies, so a player in the local game
+    // can reach one from the entry dialog rather than needing a link
+    // (`docs/proxy-plan.md`, "A way in that is not a link"). Empty on an
+    // instance that proxies nothing, which is what hides the selector.
+    proxies: getProxyDestinations(),
+    // This instance's own game, for the same selector: a proxied player
+    // choosing "local" needs to know which teams they would land among, and
+    // `teamMode` above describes wherever this connection currently is.
+    localTeams: TEAM_MODE.teams,
     flags: getFlagStates(),
     worldTime,
     serverName: serverConfig.serverName || '',

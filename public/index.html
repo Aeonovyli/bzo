@@ -380,6 +380,16 @@
       <span id="serverMotd"></span>
     </div>
     <input type="text" id="entryInput" maxlength="20" placeholder="Enter your name">
+    <!-- Where this browser is pointed: this server's own game, or one of the
+         bzfs servers it proxies (`proxies` on `init`). Hidden when there is
+         only one destination, which is every instance that proxies nothing.
+         Choosing one is a page navigation rather than a message on the live
+         socket, because a proxied target is fixed before the socket opens --
+         see docs/proxy-plan.md, "How the selector behaves". -->
+    <button id="entryDestinationSelector" class="entryTeamSelector" type="button" data-menu-row="destination" data-menu-kind="choice" hidden>
+      <span class="entryTeamLabel">Server:</span>
+      <span id="entryDestinationValue" class="entryTeamValue">This server</span>
+    </button>
     <button id="entryTeamSelector" class="entryTeamSelector" type="button" data-team="automatic" data-menu-row="team" data-menu-kind="choice">
       <span class="entryTeamLabel">Team:</span>
       <span id="entryTeamValue" class="entryTeamValue">Automatic</span>
