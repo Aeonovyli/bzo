@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.82] - 2026-09-28
+
 ### Fixed
 - A tank phasing inside a mesh is drawn again, rather than vanishing and
   leaving its flag hanging in the air. Two separate faults. `OO`'s crossing
