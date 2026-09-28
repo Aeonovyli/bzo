@@ -221,7 +221,7 @@ A material's own fields:
 | `specular <r g b [a]>`, `shininess <n>`, `emission <r g b [a]>` | a highlight on the face, and a self-lit tint -- see **Lighting**, below |
 | `alphathresh <n>` | the alpha test a partly transparent texture is cut at -- see **Alpha threshold**, below |
 | `noculling` | draws both sides of a face built from a `drawInfo` block, and nothing anywhere else -- see **Transparency flags**, below |
-| `nosorting` | a translucent face goes on writing depth instead of joining the back-to-front pass -- see **Transparency flags**, below |
+| `nosorting` | a translucent face blends in the ordinary pass, still writing depth, instead of joining the back-to-front one -- see **Transparency flags**, below |
 | `notexalpha` | the texture's own alpha channel is ignored, so a picture carrying one still draws opaque |
 | `notexcolor` | a textured face stops being modulated by the material's own tint -- the picture is drawn as it is |
 | `ambient <r g b [a]>`, `groupAlpha` | read and dropped -- see **Lighting** and **Transparency flags**, below, for why |
@@ -558,13 +558,21 @@ a map stating one is named on load rather than quietly ignored. The three
 read-and-dropped keywords below are the exception -- a box gets the same
 nothing from them that upstream gives it, so they are not reported.
 
-- **`nosorting`** keeps a translucent face writing depth. Upstream leaves it
-  out of the back-to-front ordered pass (`MeshSceneNode.cxx:520`), and that
-  pass is the only thing `SceneRenderer::doRender` wraps in
-  `glDepthMask(GL_FALSE)` -- so the depth write is what the flag actually
-  buys a mapper, and it is what bzo reproduces. three.js sorts its own
-  transparent queue back to front regardless, which is the correct order
-  rather than something to opt out of.
+- **`nosorting`** draws a translucent face in the ordinary pass instead of
+  the back-to-front one, still blending but still writing depth. Upstream
+  clears the face's `needsSorting` (`MeshSceneNode.cxx:520`,
+  `WallSceneNode.cxx:373-374`), which sends it to a gstate bucket rather than
+  `orderedList` (`SceneRenderer.h:367-377`); `SceneRenderer::doRender`
+  (`SceneRenderer.cxx:1061-1074`) draws the buckets first and wraps only
+  `orderedList` in `glDepthMask(GL_FALSE)`. The face therefore shares a pass
+  with the tanks and can depth-reject them, which is the visible point of the
+  flag: a tank behind a `nosorting` pane is hidden, not blended through.
+  bzo reproduces both halves -- it keeps the face out of three.js's
+  transparent queue (which always draws after the entire opaque list) and
+  blends it with `CustomBlending` in the opaque pass instead. Bucket order is
+  arbitrary upstream and front-to-back in three.js, so bzo hides the tank
+  whenever the pane is nearer rather than whenever the pointers happen to
+  sort that way.
 - **`notexalpha`** keeps the texture's alpha channel out of the *blend*, so
   a picture that happens to carry one still draws opaque. Upstream reads the
   channel only while this is unset (`MeshSceneNode.cxx:429-433`,

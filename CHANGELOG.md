@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A tank standing behind a `nosorting` face is hidden by it, the same as on
+  BZFlag. Upstream's flag does not merely skip a sort -- it takes the face out
+  of the sorted pass entirely, so the face blends, writes depth, and shares a
+  pass with the tanks, which it can then depth-reject. bzo set `depthWrite` and
+  left the material flagged transparent, but Three.js buckets on that flag
+  rather than on the depth mask and always draws its transparent list after the
+  whole opaque one, so the tank had already been drawn and the depth write had
+  nothing left to reject. A `nosorting` material now leaves the transparent list
+  and blends in the opaque pass instead.
+
 ## [1.2.81] - 2026-09-28
 
 ### Changed

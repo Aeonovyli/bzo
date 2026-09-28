@@ -877,18 +877,47 @@ function resolveAlphaTest(material, textureName) {
   return FOLIAGE_ALPHA_TEST;
 }
 
-// `nosorting` (`BzMaterial::getNoSorting`). Upstream draws a material like
-// this in the ordinary render lists rather than in the back-to-front ordered
-// one, and the ordered list is the only thing `SceneRenderer::doRender`
-// (`SceneRenderer.cxx:1069-1074`) wraps in `glDepthMask(GL_FALSE)` -- so what
-// the flag actually buys a mapper is that the face goes on writing depth
-// after it turns transparent. bzo has a single draw list, so that depth write
-// is the whole of what carries over: three.js already sorts its transparent
-// queue back to front, which is the correct order rather than a thing to opt
-// out of. Read off `userData` so the alpha callback, which fires a microtask
-// or a network round trip later, sees the same answer as the code below it.
+// `nosorting` (`BzMaterial::getNoSorting`). Upstream's flag does not ask for
+// an unsorted draw as a hint -- it takes the face out of the sorted pass
+// entirely. `WallSceneNode.cxx:373-374` clears `needsSorting`, which sends
+// the node to a gstate bucket instead of `orderedList`
+// (`SceneRenderer.h:367-377`), and `SceneRenderer::doRender`
+// (`SceneRenderer.cxx:1061-1074`) draws every bucket first and wraps only
+// `orderedList` in `glDepthMask(GL_FALSE)`. So the face blends, writes depth,
+// and shares a pass with the tanks -- which is why a tank behind a `nosorting`
+// pane is simply depth-rejected upstream (issue #138).
+//
+// `depthWrite` alone cannot reproduce that here, because three.js buckets on
+// the flag rather than the depth mask: any `transparent: true` material goes
+// into the transparent list, which always draws after the *whole* opaque list
+// regardless of renderOrder -- the same trap the sun glow hits from the other
+// side (issue #102). Leaving the transparent flag off is what puts the face
+// back in the opaque pass alongside the tanks.
+//
+// The blending has to be `CustomBlending` and not `NormalBlending`: three.js
+// derives its `OPAQUE` shader define from `transparent === false && blending
+// === NormalBlending`, and `opaque_fragment` forces `diffuseColor.a = 1.0`
+// under it, which would draw the pane solid. `CustomBlending` fails that test,
+// so the alpha survives, and `WebGLState.setMaterial` still enables real
+// blending for it.
+//
+// Read off `userData` so the alpha callback, which fires a microtask or a
+// network round trip later, sees the same answer as the code below it.
 function setTransparentDepthWrite(material) {
-  material.depthWrite = !!material.userData?.noSorting;
+  if (material.userData?.noSorting) {
+    material.transparent = false;
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.AddEquation;
+    material.blendSrc = THREE.SrcAlphaFactor;
+    material.blendDst = THREE.OneMinusSrcAlphaFactor;
+    material.depthWrite = true;
+  } else {
+    material.depthWrite = false;
+  }
+  // `blending`/`transparent` are both program parameters, so a material that
+  // has already been rendered once -- the texture-alpha path always has --
+  // needs its program re-evaluated rather than just its uniforms updated.
+  material.needsUpdate = true;
 }
 
 function applyTextureAlpha(material, hasAlpha, textureName = null) {
@@ -899,19 +928,19 @@ function applyTextureAlpha(material, hasAlpha, textureName = null) {
   // gaps, the class of pixel that was wrongly blocking a teleporter's own
   // effect before this existed. Upstream's own equivalent
   // (`alphaThreshold`/`GL_GEQUAL`, `MeshSceneNode.cxx:519-520`) only
-  // activates when a mapper explicitly sets `alphathresh`, which bzo does
-  // not read yet -- this applies the same mechanism unconditionally
-  // instead, at a low enough threshold that it only ever catches the
-  // pixels upstream's own default (no threshold at all) would have shown
-  // as fully invisible anyway.
+  // activates when a mapper explicitly sets `alphathresh`; `resolveAlphaTest`
+  // honours that stated value and otherwise falls back to a threshold low
+  // enough that it only ever catches the pixels upstream's own default (no
+  // threshold at all) would have shown as fully invisible anyway.
   material.alphaTest = resolveAlphaTest(material, textureName);
   // Upstream renders every alpha-blended material in a separate ordered
-  // pass with `glDepthMask(GL_FALSE)` (`SceneRenderer.cxx:1069-1074`), so
+  // pass with `glDepthMask(GL_FALSE)` (`SceneRenderer.cxx:1061-1074`), so
   // overlapping transparent geometry (crossed-quad foliage billboards,
   // stacked leaf layers) blends instead of occluding itself through the
   // depth buffer. Depth *testing* stays on, so this still hides correctly
-  // behind opaque scene geometry -- only writes are disabled, and a material
-  // whose map states `nosorting` keeps even those.
+  // behind opaque scene geometry -- only writes are disabled. A material
+  // whose map states `nosorting` opts out of that pass altogether; see
+  // `setTransparentDepthWrite`.
   setTransparentDepthWrite(material);
   material.needsUpdate = true;
 }
