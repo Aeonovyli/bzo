@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.85] - 2026-09-28
+
 ### Added
 - Watch a live game on any server in the public BZFlag list, from the View
   dialog, without leaving the browser. It is an observer connection: you see
