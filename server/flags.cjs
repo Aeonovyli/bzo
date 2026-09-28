@@ -692,6 +692,25 @@ const FLAG_TYPES = Object.freeze({
     team: null,
     help: 'Radar doesn\'t work.  Can still see.',
   }),
+  // The one flag bzo knows about and does nothing with. Upstream widens the
+  // field of view to 120 degrees (`playing.cxx:5984`); bzo leaves the view
+  // alone, because a fixed wide angle is the wrong instrument here -- a phone
+  // already has a narrow one and a headset's is the headset's to decide, not
+  // a flag's.
+  //
+  // Spawned like any other bad flag. The help text is what makes that fair --
+  // a player who picks one up is told exactly what it does here -- and `US`
+  // above already sets the precedent from the other side: a good flag that
+  // does nothing, by design. A bad one that does nothing is no worse.
+  WA: Object.freeze({
+    abbreviation: 'WA',
+    name: 'Wide Angle',
+    endurance: FLAG_ENDURANCE.STICKY,
+    quality: FLAG_QUALITY.BAD,
+    team: null,
+    help: 'Fish-eye lens distorts view.  bzo leaves the view alone, '
+      + 'so this one only costs you the time to shake it off.',
+  }),
 });
 
 const FLAG_ABBREVIATIONS = Object.freeze(Object.keys(FLAG_TYPES));

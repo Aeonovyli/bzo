@@ -36,6 +36,7 @@ const {
   BzfsSession,
   toBzfsChatText,
   evalBzdb,
+  NO_PLAYER: BZFS_NO_PLAYER,
   PLAYER_STATUS: BZFS_PLAYER_STATUS,
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
 } = require('./server/bzfs-session.cjs');
@@ -10155,7 +10156,12 @@ defineCommand('/playerlist', COMMAND_TIER.OPERATOR,
       const marks = [
         other.muted ? 'muted' : null,
         other.localAdmin ? 'local' : null,
-        other.verified ? `verified as ${other.globalCallsign}` : null,
+        // Just "verified". Not "verified as <callsign>": `resolveJoinName`
+        // returns the session's callsign for anyone signed in, ignoring the
+        // name they asked for, so the two are the same string by construction
+        // and naming it again says nothing. Upstream's own `/playerlist` is
+        // `[id]callsign: host` with no such note at all (`commands.cxx`).
+        other.verified ? 'verified' : null,
       ].filter(Boolean);
       replyToPlayer(player, `#${other.id} ${other.name} [${other.team}] ${other.clientIP || 'unknown'}`
         + (marks.length ? ` (${marks.join(', ')})` : ''));
@@ -14695,7 +14701,7 @@ function setLockTarget(player, targetId) {
   log(next === null
     ? `"${player.name}" lost the lock`
     : `"${player.name}" locked on "${target?.name ?? next}"`);
-  broadcastAll({ type: 'lockTarget', playerId: player.id, targetId: next });
+  broadcastAll({ type: 'gmUpdate', playerId: player.id, targetId: next });
 }
 
 // tankHasShotType() (playing.cxx:4376). Who may lock: the flag in hand, or a
@@ -16171,6 +16177,10 @@ function proxyPlayerRecord(player, motion = null) {
     // upstream draws it beside the callsign on its own scoreboard
     // (`ScoreboardRenderer.cxx:766`).
     motto: typeof player.motto === 'string' ? player.motto : '',
+    // Only ever present when the target chose to tell this connection
+    // (`MsgAdminInfo`), which it does for a holder of `playerList` and nobody
+    // else. `clientIP` is the name bzo's own roster already uses.
+    clientIP: typeof player.address === 'string' ? player.address : null,
     x: round2(position.x),
     y: round2(position.y),
     z: round2(position.z),
@@ -16989,6 +16999,25 @@ async function handleProxyConnection(ws, req, request) {
 
     // Upstream's reason travels as it is: `reason == 0` is "show the
     // explosion" on both sides of this proxy.
+    // A guided missile's lock. bzo's own server decides who a missile is
+    // steering at and tells everyone (`setLockTarget`); a target decides it
+    // for itself and says so here, under the same name bzo's client already
+    // answers to (`gmUpdate`). Without this a native's
+    // missile flies straight on a proxied screen while it is chasing
+    // somebody on theirs.
+    //
+    // The position and velocity it also carries are left alone: bzo's client
+    // steers a missile it was given rather than being told where it is, and
+    // upstream only sends these because its own receivers re-anchor. Worth
+    // revisiting if a proxied missile is seen to drift.
+    session.on('gmUpdate', ({ player, target }) => {
+      send({
+        type: 'gmUpdate',
+        playerId: String(player),
+        targetId: target === BZFS_NO_PLAYER ? null : String(target),
+      });
+    });
+
     session.on('shotEnd', ({ player, id, reason }) => {
       endShot(`${player}-${id}`, reason);
     });
@@ -17013,6 +17042,21 @@ async function handleProxyConnection(ws, req, request) {
         player: proxyPlayerRecord(player, session.state.motion.get(player.id)),
       });
     });
+    // Addresses, for a proxied connection privileged enough to be told them.
+    // A watcher never is -- no token means no `playerList` permission -- so
+    // this stays empty for one and the roster simply carries no address, the
+    // same as it does on this server for a non-admin.
+    session.on('adminInfo', (info) => {
+      for (const entry of info) {
+        const player = session.state.players.get(entry.id);
+        if (!player) continue;
+        send({
+          type: 'playerUpdated',
+          player: proxyPlayerRecord(player, session.state.motion.get(entry.id)),
+        });
+      }
+    });
+
     session.on('playerLeft', (player) => {
       announcedAlive.delete(player.id);
       send({ type: 'playerLeft', id: String(player.id) });
@@ -18017,7 +18061,7 @@ wss.on('connection', (ws, req) => {
             ricochet: proj.ricochet,
             segments: proj.segments,
             // Who the shooter has locked, so a client that has not seen a
-            // `lockTarget` for them yet still steers this missile from its first
+            // `gmUpdate` for them yet still steers this missile from its first
             // frame -- and so the tank being shot at learns of it, which is when
             // upstream warns them rather than when the lock was taken.
             target: proj.guided ? (getLockTarget(proj.playerId)?.id ?? null) : null,

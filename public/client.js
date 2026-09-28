@@ -7403,8 +7403,11 @@ function handleServerMessage(message) {
 
     // MsgGMUpdate's target half (GuidedMissleStrategy.cxx:430). Who a player has
     // locked, so every client steers that player's missiles at the same tank and
-    // the shooter's own gets the marker.
-    case 'lockTarget':
+    // the shooter's own gets the marker. Named after the message it answers to,
+    // which is what the rest of bzo's wire does (`docs/network.md`): on a
+    // proxied server it *is* that message, and a name of bzo's own would be one
+    // more thing to map.
+    case 'gmUpdate':
       setPlayerLockTarget(message.playerId, message.targetId ?? null);
       warnLockedOnMe(message.playerId, message.targetId ?? null);
       break;

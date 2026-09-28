@@ -919,8 +919,7 @@ this stays unread on purpose rather than pending.
 `-f` is a switch that happens to name its target: disallows accumulate, nothing
 puts one back, and `good` or `bad` takes a whole quality out at once. It filters
 the pool a slot draws from, next to the two types the game style already forbids
-(`JP` or `NJ` by the jumping switch, `R` on a `+r` world). Naming `WA`, the one
-flag bzo does not carry, is not an error -- it was not in the pool to remove.
+(`JP` or `NJ` by the jumping switch, `R` on a `+r` world).
 
 Upstream's `+f <abbrev>[{count}]`, which pins a chosen number of one type in the
 world, is **not** read: bzo's flag model is one pool and one slot count, with no

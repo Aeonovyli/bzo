@@ -336,14 +336,27 @@ against a registry.
    reconnect** belong with it: both are about a player who leaves and comes
    back, which only matters once leaving can happen by dying.
 
-3. **The senders still missing**, in descending order of what anyone else can
-   see: `MsgShotEnd`, so a shot stops where it stopped rather than running its
-   reload out; `MsgGMUpdate`, so a guided missile tracks for the people it is
-   chasing (unhandled inbound too, so a native's missile does not track here
-   either); `MsgAdminInfo` inbound, so a proxied operator's `/playerlist`
-   carries addresses (`sendIPUpdate`, bzfs.cxx:619); `MsgTeleport`, for the
-   effect at both ends; and `MsgExit`, to announce leaving rather than
-   dropping the socket.
+3. **The senders still missing.** `MsgGMUpdate`, so a guided missile tracks
+   for the people it is chasing -- unhandled inbound too, so a native's
+   missile does not track here either. `MsgTeleport`, for the effect at both
+   ends. `MsgExit`, to announce leaving rather than dropping the socket. And
+   `MsgAdminInfo` inbound, which carries the addresses `sendIPUpdate` sends to
+   anyone holding `playerList` (`bzfs.cxx:619`) -- only of use to a *proxied
+   operator*, since a watcher holds no permissions at all.
+
+   **`MsgShotEnd` is not among them: it belongs with death.** It is not what
+   stops a shot at a wall -- each client traces and expires its own copy, and
+   no message says so. Upstream sends it from two places only
+   (`playing.cxx:4169`, `GuidedMissleStrategy.cxx:464`): the victim ending
+   *the shot that hit them* -- `hit->getPlayer()`, somebody else's shot id --
+   so it cannot hit again after a shield drops, and a guided missile ending.
+
+   The anti-cheat shows the same shape. `endShotCredit` rises on every
+   `MsgShotEnd` and falls only when the sender **dies** (`bzfs.cxx:4899`) or
+   fires a GM, and above `_endShotDetection` (default 2) the player is kicked.
+   So ends and deaths are paired by construction, and sending ends without the
+   `MsgKilled` that pays for them would disconnect the player on the third
+   shot. Which is why this cannot be built before death is.
 
    Untested rather than missing: shot slots cycle up to the target's
    `maxShots` without enforcing reload timing, so `addShot` may refuse one

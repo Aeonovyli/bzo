@@ -145,7 +145,7 @@ omitted rather than sent null.
 | `scoreOver` | `playerId`, `team` | the match ended on score |
 | `timeUpdate` | `timeLeft` | the match clock |
 | `newRabbit` | `playerId` | rabbit anointed |
-| `lockTarget` | `playerId`, `targetId` | a GM lock |
+| `gmUpdate` | `playerId`, `targetId` | a GM lock (`MsgGMUpdate`'s target half) |
 | `identifyResult` | `targetId`, `locked` | the identify answer |
 | `playerPaused` / `playerUnpaused` / `pauseCountdown` / `pauseCancelled` | `playerId` (+ position on pause) | pause state |
 | `message` | `src`, `dst`, `msgType`, `text`, `ts` | chat, in and out |
@@ -284,12 +284,12 @@ the mapping is mostly one to one:
 | `MsgMessage` | `message` |
 | `MsgSetVar` / `MsgGameSettings` | `init.config` / `serverConfigUpdate` |
 | `MsgGetWorld` / `MsgWantWHash` | `init.world` + HTTP |
+| `MsgGMUpdate` | `gmUpdate` -- the target half only; bzo flies the missile itself rather than being told where it is |
 | `MsgLagPing` | `lag` (measured server-side, not answered) |
 | `MsgSuperKill` | closing the socket (it is a forced disconnect, not a kill) |
 
-Upstream messages bzo has no counterpart for: `MsgGMUpdate` (retargeting a
-guided missile in flight -- bzo sends `lockTarget` instead and the server flies
-it), `MsgNegotiateFlags`, `MsgAdminInfo`, `MsgPlayerInfo`, `MsgHandicap`,
+Upstream messages bzo has no counterpart for: `MsgNegotiateFlags`,
+`MsgAdminInfo`, `MsgPlayerInfo`, `MsgHandicap`,
 `MsgAutoPilot`, `MsgCustomSound`, `MsgFetchResources`, `MsgCacheURL`,
 `MsgGameTime`, `MsgLagState`, `MsgFlagType`, `MsgReplayReset`,
 `MsgPortalAdd`/`Remove`/`Update`, and the ping-packet codes.

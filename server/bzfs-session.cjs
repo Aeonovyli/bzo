@@ -42,6 +42,9 @@ const MESSAGE_LEN = 128;
 // The PlayerIds that are not players (`Address.h:73-78`). A team destination
 // is `FirstTeam` minus the team's own index, which is why teams count down.
 const NO_PLAYER = 255;
+// `NetHandler::sizeOfIP`: one type byte plus four address bytes. It answers 17
+// for a v6 peer, which nothing upstream can pack or unpack (`decodeAdminInfo`).
+const ADDRESS_IPV4_SIZE = 5;
 const ALL_PLAYERS = 254;
 const SERVER_PLAYER_ID = 253;
 const ADMIN_PLAYERS = 252;
@@ -164,6 +167,63 @@ function decodeShotBegin(payload) {
     team: (r.u16() << 16) >> 16,
     flag: r.flagAbbv(),
     lifetime: r.f32(),
+  };
+}
+
+// MsgAdminInfo: a count, then one record per player of `sizeOfIP`, the player
+// id, and the address itself (`packAdminInfo`, GameKeeper.cxx:201). Sent only
+// to players holding `playerList` (`sendIPUpdate`, bzfs.cxx:619), so a
+// connection that never verified will not see one at all.
+//
+// IPv4 only in practice. `sizeOfIP` can return 17 and the wire has a type
+// byte, but `Address::pack` hardcodes a type of 4 with four bytes and
+// `Address::unpack` skips the type entirely -- its own FIXME says it "should
+// actually parse the first byte". Anything that is not a five-byte IPv4
+// record is something upstream does not produce and could not read back.
+//
+// Stops rather than guesses. The records are variable length inside a counted
+// list, so one that does not look right makes every record after it
+// meaningless -- and upstream has a case that produces exactly that: a player
+// with no `netHandler` is written as four address bytes with no type byte
+// while still claiming a size of five (GameKeeper.cxx:203-210). Returning the
+// records read so far is honest; reading past that point would invent
+// addresses.
+function decodeAdminInfo(payload) {
+  const r = new Reader(payload);
+  const count = r.u8();
+  const players = [];
+  for (let i = 0; i < count; i += 1) {
+    if (r.remaining < 2) break;
+    const size = r.u8();
+    const id = r.u8();
+    if (size !== ADDRESS_IPV4_SIZE || r.remaining < ADDRESS_IPV4_SIZE) break;
+    const type = r.u8();
+    const octets = [r.u8(), r.u8(), r.u8(), r.u8()];
+    if (type !== 4) break;
+    players.push({ id, address: octets.join('.') });
+  }
+  return players;
+}
+
+// MsgGMUpdate: a guided missile's own report -- `ShotUpdate::pack` again,
+// then the player it is locked onto (`GuidedMissileStrategy::sendUpdate`,
+// GuidedMissleStrategy.cxx:405). The shooter sends one whenever the lock
+// changes, and every receiver replaces the missile's position and velocity
+// with what it carries: "probably better to have the shot in the right place
+// than to maintain smooth motion", in its own words.
+function decodeGMUpdate(payload) {
+  const r = new Reader(payload);
+  const player = r.u8();
+  const id = r.u16();
+  return {
+    player,
+    id,
+    slot: id & 0xff,
+    pos: r.vec3(),
+    velocity: r.vec3(),
+    dt: r.f32(),
+    team: (r.u16() << 16) >> 16,
+    target: r.u8(),
   };
 }
 
@@ -649,6 +709,21 @@ class BzfsSession {
       case 'se':
         this.emit('shotEnd', decodeShotEnd(payload));
         break;
+      case 'ai': {
+        const info = decodeAdminInfo(payload);
+        // Merged onto the player record the way `MsgPlayerInfo` merges
+        // registered/verified, so everything known about a player is in one
+        // place rather than two the caller has to join.
+        for (const entry of info) {
+          const player = this.state.players.get(entry.id);
+          if (player) player.address = entry.address;
+        }
+        this.emit('adminInfo', info);
+        break;
+      }
+      case 'gm':
+        this.emit('gmUpdate', decodeGMUpdate(payload));
+        break;
       case 'ap': {
         const player = decodeAddPlayer(payload);
         this.state.players.set(player.id, player);
@@ -1032,5 +1107,7 @@ module.exports = {
   decodeCapture,
   decodeShotBegin,
   decodeShotEnd,
+  decodeGMUpdate,
+  decodeAdminInfo,
   decodeMessage,
 };
