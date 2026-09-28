@@ -6,6 +6,35 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.84] - 2026-09-28
+
+### Changed
+- Viewing a map has moved out of Player Options and into the View dialog,
+  which already listed local maps and running BZFlag servers. Map Viewer is no
+  longer a team to pick, and the map row beside it is gone. Clicking a row is
+  what views it, on both lists -- a column of identical View buttons was noise
+  -- and rows answer the keyboard as well as the mouse.
+- A remote server takes one press rather than Import, wait, then View, and the
+  wait is shown: the same progress a `?viewmap=` link has always put up, which
+  a press in the dialog never did. Re-import stays on servers already fetched,
+  since a map imported an hour ago is not what that server is running now.
+- Local maps say what they are before anyone opens them: world size, object
+  count, mesh faces and style, with the breakdown of boxes, pyramids, meshes,
+  bases and teleporters on the row. Faces is the one worth reading -- among the
+  bundled maps, 47 objects is 81,332 faces on one and 4,280 on another, while
+  409 objects is 56 -- so it is what tells you whether a map is worth opening
+  on a phone or in a headset. Style is read from the world file the way bzfs
+  reads it: a map with bases is CTF.
+- The View dialog is larger, up to almost the whole screen, and each table
+  scrolls its own overflow rather than the shorter list sitting below all of
+  the longer one.
+- Playing on a proxied server no longer stops at a disabled OK. The button
+  reads "Sign in & Play" and does it, landing on the team that was picked. The
+  tank row follows the server being chosen rather than the page, so picking
+  this server from a proxied one brings it back with the model you saved, and
+  a server in that list is named by its address rather than by its
+  description, which two servers can share.
+
 ## [1.2.83] - 2026-09-28
 
 ### Added
