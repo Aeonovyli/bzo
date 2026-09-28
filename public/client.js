@@ -1036,39 +1036,9 @@ function syncPlayerTeamSelector() {
   // is the row below needing to be repainted. Every team change comes through
   // here, which is why the call belongs here rather than at each caller.
   refreshTankPreviewColor();
-  // Same reasoning for Map Viewer's map row and its preview (issue #68): every
-  // team change is a place the picker might need to appear, disappear, or hand
-  // off to a different world.
-  syncViewMapSelector();
-  syncMapViewerPreview();
-}
-
-// The map row inside the entry dialog. Always present rather than shown only
-// for Map Viewer -- a row that appears and disappears as the team selector
-// above it cycles is one more thing an XR menu (a plain array of rows, no DOM
-// to insert into) would have needed its own logic for, so both surfaces use
-// the same answer: the row stays, greyed out like any other control that
-// does not apply to the current selection (`.entryTeamSelector:disabled` is
-// already styled for this), and it still shows what it would apply to.
-function syncViewMapSelector() {
-  const row = document.getElementById('entryViewMapSelector');
-  const valueEl = document.getElementById('entryViewMapValue');
-  const isStagedAsMapViewer = getSelectedPlayerTeam() === PLAYER_TEAM.MAP_VIEWER;
-  if (row) row.disabled = !isStagedAsMapViewer;
-  if (!selectedViewMapFile || !availableViewMaps.some((entry) => entry.file === selectedViewMapFile)) {
-    selectedViewMapFile = availableViewMaps[0]?.file ?? null;
-  }
-  if (valueEl) valueEl.textContent = selectedViewMapFile || 'No maps available yet';
-}
-
-// Offered the same way the team row is: usable before or after joining.
-function selectRelativeViewMap(direction) {
-  if (availableViewMaps.length === 0) return;
-  const files = availableViewMaps.map((entry) => entry.file);
-  const currentIndex = Math.max(0, files.indexOf(selectedViewMapFile));
-  const nextIndex = (currentIndex + direction + files.length) % files.length;
-  selectedViewMapFile = files[nextIndex];
-  syncViewMapSelector();
+  // Whether a previewed world is still the one being looked at: leaving Map
+  // Viewer for a playing team is what hands the view back to the live match
+  // (issue #68). The map itself is chosen in the View dialog, not here.
   syncMapViewerPreview();
 }
 
@@ -1147,6 +1117,9 @@ const DESTINATION_LOCAL = 'local';
 
 let availableProxies = [];
 let localDestinationTeams = [];
+// The map this instance's own game is on, without its extension: `hix`, not
+// `hix.bzw`. What names the local row in the destination selector.
+let localDestinationMap = '';
 
 // Where this page actually is, read off its own URL rather than remembered, so
 // there is no second copy of the answer to drift from the connection.
@@ -1169,8 +1142,15 @@ function findProxyDestination(destination) {
 
 function destinationLabel(destination) {
   const proxy = findProxyDestination(destination);
-  if (!proxy) return 'This server';
-  return proxy.title || proxy.name;
+  // `host:port`, not the title the public list carries. A title is a
+  // description -- two servers may well share one, and "bzo compatibilty
+  // testing https://bz.rikers.org" says nothing about which of them this row
+  // is. The address is the one thing that cannot collide.
+  if (proxy) return proxy.name;
+  // This instance has no `host:port` to show for itself -- it is the page you
+  // are already on -- so its map is what distinguishes it from the targets
+  // beside it.
+  return localDestinationMap ? `local ${localDestinationMap}` : 'This server';
 }
 
 // The teams the chosen destination would accept. For wherever this connection
@@ -1206,11 +1186,12 @@ function destinationNeedsLogin(destination, team) {
   return !(destination === currentDestination() && team === proxyEnteredTeam);
 }
 
-function setAvailableProxies(proxies, localTeams) {
+function setAvailableProxies(proxies, localTeams, localMap) {
   availableProxies = Array.isArray(proxies)
     ? proxies.filter((proxy) => proxy && typeof proxy.key === 'string' && Array.isArray(proxy.teams))
     : [];
   localDestinationTeams = Array.isArray(localTeams) ? localTeams : [];
+  localDestinationMap = typeof localMap === 'string' ? localMap.replace(/\.bzw$/i, '') : '';
   selectedDestination = currentDestination();
   syncDestinationSelector();
 }
@@ -1242,10 +1223,12 @@ function selectRelativeDestination(direction) {
   }
   syncDestinationSelector();
   syncPlayerTeamSelector();
-  // The login row means something different per destination: for a proxy it
-  // is always a fresh login for that target rather than this connection's own
-  // status (`applyLoginUi`).
+  // Both of these mean something different per destination: the login row is a
+  // fresh login for a target rather than this connection's own status
+  // (`applyLoginUi`), and a tank model reaches nobody on a proxied one
+  // (`syncTankSelectorForDestination`).
   applyLoginUi();
+  syncTankSelectorForDestination();
   syncEntryActions();
 }
 
@@ -1266,24 +1249,25 @@ function syncEntryActions() {
   const ok = document.getElementById('entryOkButton');
   if (!ok) return;
   const team = getJoinTeamFields().team;
-  ok.disabled = destinationNeedsLogin(selectedDestination, team);
-  ok.title = ok.disabled
-    ? 'Playing on a proxied server needs a global login. Use Global login below.'
+  // OK goes where it was asked to go. Playing on a proxied target has exactly
+  // one route -- a global login, then that team -- so refusing to move until
+  // the player finds the row that starts it is the button declining its own
+  // job over a step it could take itself.
+  //
+  // It is not a surprise redirect either, because the label says so before it
+  // is pressed. That was the real objection to OK doing this, and naming the
+  // action answers it; a greyed button whose remedy is another row does not.
+  const signsIn = destinationNeedsLogin(selectedDestination, team);
+  ok.disabled = false;
+  ok.textContent = signsIn ? 'Sign in & Play' : 'OK';
+  ok.title = signsIn
+    ? 'Playing here needs a bzflag.org global login. This signs you in, then'
+      + ' joins on the team you picked.'
     : '';
 }
 
 function getDialogTeamSelections() {
-  const teams = getDestinationTeams(selectedDestination);
-  const base = getPlayerTeamSelections(teams);
-  // Map Viewer previews a world this server has hashed, which is this server's
-  // business wherever the tank is going -- so it is offered only when staying
-  // put, not as something to carry into a link.
-  if (selectedDestination !== currentDestination()
-    || !teams.includes(PLAYER_TEAM.OBSERVER) || availableViewMaps.length === 0) {
-    return base;
-  }
-  const observerIndex = base.indexOf(PLAYER_TEAM.OBSERVER);
-  return [...base.slice(0, observerIndex + 1), PLAYER_TEAM.MAP_VIEWER, ...base.slice(observerIndex + 1)];
+  return getPlayerTeamSelections(getDestinationTeams(selectedDestination));
 }
 
 function setAvailablePlayerTeams(teams) {
@@ -1304,6 +1288,9 @@ function selectRelativePlayerTeam(direction) {
   // After the selector, not before: `getSelectedPlayerTeam` reads the row's
   // own dataset, which `syncPlayerTeamSelector` is what writes.
   syncPlayerTeamSelector();
+  // The login row's wording depends on the staged team as well as the
+  // destination, since it is what says "to play" when OK cannot.
+  applyLoginUi();
   syncEntryActions();
 }
 
@@ -2234,15 +2221,6 @@ function bindAudioControls() {
   }
   syncPlayerTeamSelector();
 
-  const viewMapSelector = document.getElementById('entryViewMapSelector');
-  if (viewMapSelector) {
-    viewMapSelector.addEventListener('click', (event) => selectRelativeViewMap(getMenuClickDirection(event)));
-    viewMapSelector.addEventListener('menuadjust', (event) => {
-      const direction = Number(event.detail?.direction) < 0 ? -1 : 1;
-      selectRelativeViewMap(direction);
-      event.preventDefault();
-    });
-  }
 
   const loginRow = document.getElementById('entryLoginRow');
   if (loginRow) {
@@ -2347,11 +2325,19 @@ function isProxiedPage() {
 // maps to view. The XR panel greys its own row instead, which is that panel's
 // idiom (`mapViewXR`). The model is forced back to the default without saving
 // it, so a player's real choice is still theirs in this server's own game.
-function syncTankSelectorForProxy() {
-  if (!isProxiedPage()) return;
-  selectedTankModelId = DEFAULT_TANK_MODEL_ID;
+function syncTankSelectorForDestination() {
   const selector = document.getElementById('tankSelector');
-  if (selector) selector.style.display = 'none';
+  const proxied = selectedDestination !== DESTINATION_LOCAL;
+  if (selector) selector.style.display = proxied ? 'none' : '';
+  // Follows the destination rather than the page, the way the team row does.
+  // Staging this server from a proxied page is about to go somewhere the
+  // choice means something again, so it comes back -- and comes back as the
+  // player's own, because forcing the default never wrote over what they
+  // saved. Nothing here is committed until OK either way.
+  const wanted = proxied
+    ? DEFAULT_TANK_MODEL_ID
+    : canonicalTankModelId(localStorage.getItem('tankModelId') || DEFAULT_TANK_MODEL_ID);
+  if (wanted !== selectedTankModelId) setSelectedTankModel(wanted);
 }
 
 // The team the live connection entered its target on, as the target itself
@@ -3970,6 +3956,12 @@ function applyEntrySelections() {
   if (!entryInput || !snapshot) return;
 
   savePlayerName(entryInput.value);
+  // The login carries the staged destination and team already, so it lands on
+  // exactly what was asked for (`startGlobalLogin`).
+  if (destinationNeedsLogin(selectedDestination, getJoinTeamFields().team)) {
+    startGlobalLogin();
+    return;
+  }
   // Somewhere else is a navigation rather than a join: the name is saved
   // above, so it survives the reload and the arriving `init` joins with it.
   if (selectedDestination !== currentDestination()) {
@@ -6865,7 +6857,7 @@ function handleServerMessage(message) {
       // previewed map already applied underneath it.
       applyWorldGameplay(currentWorldData?.gameplay || null);
       setAvailablePlayerTeams(message.teamMode.teams);
-      setAvailableProxies(message.proxies, message.localTeams);
+      setAvailableProxies(message.proxies, message.localTeams, message.localMap);
       teamScores = message.teamScores || [];
       // bzfs.cxx:2437 sends MsgNewRabbit to a joining player for the same reason:
       // who the rabbit is is world state rather than an event. Set directly --
@@ -6934,8 +6926,8 @@ function handleServerMessage(message) {
         proxyEnteredTeam = message.player.team;
         selectedPlayerTeam = proxyEnteredTeam;
         syncPlayerTeamSelector();
-        syncTankSelectorForProxy();
       }
+      syncTankSelectorForDestination();
 
       // A server that does not offer the observer team cannot honour the
       // spectator link, so the page joins as it otherwise would rather than
@@ -8364,12 +8356,10 @@ function handleMapsList(message) {
   // The entry dialog's own picker reads `availableViewMaps`, which `init`
   // seeds once. A map hashed after that -- the background trickle finishing
   // its pass, or a remote import landing -- arrives as one of these, so the
-  // picker has to take it too or it stays stuck on whatever list happened to
-  // exist the moment this client connected. `syncViewMapSelector` re-picks
-  // on its own if the staged choice is no longer in the list.
+  // list has to take it too or it stays stuck on whatever existed the moment
+  // this client connected.
   if (Array.isArray(message.viewableMaps)) {
     availableViewMaps = message.viewableMaps;
-    syncViewMapSelector();
   }
   populateViewMapTable(Array.isArray(message.viewableMaps) ? message.viewableMaps : []);
 }
@@ -8394,6 +8384,47 @@ function remoteMapFileName(host, port) {
   return `import-${host}_${port}`.replace(/[^A-Za-z0-9._-]/g, '_') + '.bzw';
 }
 
+// A table row that behaves like the button it replaces: pointer, keyboard and
+// a name, since a bare `click` handler on a `<tr>` is reachable by mouse only.
+function makeRowActivate(row, activate, label) {
+  row.classList.add('clickable');
+  row.tabIndex = 0;
+  row.setAttribute('role', 'button');
+  row.setAttribute('aria-label', label);
+  row.addEventListener('click', activate);
+  row.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    activate();
+  });
+}
+
+// The row tooltip: what the four columns leave out. Only what the map states,
+// so a map with no teleporters says nothing about them rather than "0".
+function describeMapStats(stats) {
+  const parts = [];
+  const counts = stats.counts || {};
+  // Spelled out rather than suffixed: "box" takes -es and "pyramid" takes -s.
+  for (const [key, one, many] of [
+    ['box', 'box', 'boxes'],
+    ['pyramid', 'pyramid', 'pyramids'],
+    ['mesh', 'mesh', 'meshes'],
+  ]) {
+    const count = counts[key];
+    if (count) parts.push(`${count.toLocaleString()} ${count === 1 ? one : many}`);
+  }
+  if (stats.bases) parts.push(`${stats.bases} base${stats.bases === 1 ? '' : 's'}`);
+  if (stats.teleporters) {
+    parts.push(`${stats.teleporters} teleporter${stats.teleporters === 1 ? '' : 's'}`);
+  }
+  const has = [];
+  if (stats.water) has.push('water');
+  if (stats.weather) has.push('weather');
+  if (stats.ground) has.push('custom ground');
+  if (has.length) parts.push(has.join(', '));
+  return parts.join(' | ');
+}
+
 function populateViewMapTable(viewableMaps) {
   viewableMapFiles = new Set(viewableMaps.map((entry) => entry.file));
   viewableMapEntries = viewableMaps;
@@ -8402,15 +8433,39 @@ function populateViewMapTable(viewableMaps) {
     tbody.innerHTML = '';
     for (const entry of viewableMaps) {
       const row = document.createElement('tr');
+      const stats = entry.stats || null;
+      // What the map is, before anyone waits for it to load. Faces is the
+      // column that earns its place: nothing else predicts it, and it is what
+      // decides whether a map is worth opening on a phone or in a headset.
       const nameCell = document.createElement('td');
       nameCell.textContent = entry.file;
-      const actionCell = document.createElement('td');
-      const viewBtn = document.createElement('button');
-      viewBtn.type = 'button';
-      viewBtn.textContent = 'View';
-      viewBtn.addEventListener('click', () => viewMapFile(entry.file));
-      actionCell.appendChild(viewBtn);
-      row.append(nameCell, actionCell);
+      const numberCell = (value) => {
+        const td = document.createElement('td');
+        if (Number.isFinite(value)) {
+          td.textContent = value.toLocaleString();
+          // What the column sorts on, since the text is grouped for reading.
+          td.dataset.value = String(value);
+        } else {
+          td.textContent = '';
+        }
+        return td;
+      };
+      const styleCell = document.createElement('td');
+      styleCell.textContent = stats?.style || '';
+      // The breakdown rides on the row's own tooltip rather than in columns:
+      // it is detail to read about one map, not a number to compare maps by.
+      if (stats) row.title = describeMapStats(stats);
+      // The row is the button. A table where every row carries an identical
+      // one-word control is a table with a column of noise in it, and `/list`
+      // already treats a row as the way in (`tbody tr.clickable`, server.js).
+      makeRowActivate(row, () => viewMapFile(entry.file), `View ${entry.file}`);
+      row.append(
+        nameCell,
+        numberCell(stats?.size),
+        numberCell(stats?.objects),
+        numberCell(stats?.faces),
+        styleCell,
+      );
       tbody.appendChild(row);
     }
   }
@@ -8446,28 +8501,62 @@ function renderServerTable() {
       cell(server.host),
       cell(String(server.port)),
     );
+    // The row is the action here too. A server nobody has imported yet is
+    // fetched first and shown when it lands (`pendingRemoteView`), so the old
+    // two-step "Import, then View" is one press on the row.
     const actionCell = document.createElement('td');
-    if (alreadyImported) {
-      const viewBtn = document.createElement('button');
-      viewBtn.type = 'button';
-      viewBtn.textContent = 'View';
-      viewBtn.addEventListener('click', () => viewMapFile(fileName));
-      actionCell.appendChild(viewBtn);
-    }
-    const importBtn = document.createElement('button');
-    importBtn.type = 'button';
-    importBtn.textContent = alreadyImported ? 'Re-import' : 'Import';
-    importBtn.addEventListener('click', () => {
-      importBtn.disabled = true;
-      const label = importBtn.textContent;
-      importBtn.textContent = 'Importing…';
+    let fetching = false;
+    makeRowActivate(row, () => {
+      if (viewableMapFiles.has(fileName)) {
+        viewMapFile(fileName);
+        return;
+      }
+      if (fetching) return;
+      fetching = true;
+      pendingRemoteView = {
+        fileName,
+        done: () => { fetching = false; },
+      };
+      // The wording a `?viewmap=` link already uses for this exact step, so
+      // the two ways in read the same. The map's own load takes over from
+      // here once the fetch lands (`viewMapFile`).
+      setLoadingOverlayState({
+        visible: true,
+        progress: 0.02,
+        status: 'Fetching remote server\'s map...',
+        detail: `${server.host}:${server.port}`,
+      });
       sendToServer({ type: 'importMap', hostPort: `${server.host}:${server.port}` });
+      // The reply may never come -- a server that stopped answering between
+      // being listed and being asked. The row goes back to offering rather
+      // than sitting on a promise nothing will keep.
       setTimeout(() => {
-        importBtn.disabled = false;
-        importBtn.textContent = label;
-      }, 4000);
-    });
-    actionCell.appendChild(importBtn);
+        if (pendingRemoteView?.fileName !== fileName || !fetching) return;
+        pendingRemoteView = null;
+        fetching = false;
+        hideLoadingOverlay();
+        showMessage(`${server.host}:${server.port} did not answer`);
+      }, 15000);
+    }, `View ${server.title || server.host}`);
+    // Kept beside it only where there is already a copy to replace: a map
+    // imported an hour ago is not the map that server is running now. It stops
+    // the click going through to the row, which would view rather than refetch.
+    if (alreadyImported) {
+      const importBtn = document.createElement('button');
+      importBtn.type = 'button';
+      importBtn.textContent = 'Re-import';
+      importBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        importBtn.disabled = true;
+        importBtn.textContent = 'Importing…';
+        sendToServer({ type: 'importMap', hostPort: `${server.host}:${server.port}` });
+        setTimeout(() => {
+          importBtn.disabled = false;
+          importBtn.textContent = 'Re-import';
+        }, 4000);
+      });
+      actionCell.appendChild(importBtn);
+    }
     row.appendChild(actionCell);
     tbody.appendChild(row);
   }
@@ -8492,8 +8581,34 @@ function viewMapFile(file) {
   selectedViewMapFile = file;
   syncPlayerTeamSelector();
   const entry = viewableMapEntries.find((candidate) => candidate.file === file);
-  const worldPromise = entry ? loadWorldFile(entry).then((world) => applyWorldData(world)) : Promise.resolve();
+  // The same overlay a `?viewmap=` link puts up, for the same wait. Arriving by
+  // link and pressing View do identical work -- fetch the world, build it,
+  // rejoin looking at it -- and until now only the link said so, leaving the
+  // dialog's press looking like nothing had happened for as long as a large
+  // map takes. The stages are the real ones: the fetch, then the build, which
+  // is where the time goes (`prepareInitialRender` names the same two).
+  setLoadingOverlayState({
+    visible: true,
+    progress: 0.05,
+    status: 'Loading map...',
+    detail: file,
+  });
+  const worldPromise = entry
+    ? loadWorldFile(entry).then((world) => {
+      setLoadingOverlayState({
+        visible: true,
+        progress: 0.4,
+        status: 'Building world geometry...',
+        detail: file,
+      });
+      return applyWorldData(world);
+    })
+    : Promise.resolve();
   worldPromise.finally(() => {
+    // Hidden whichever way it went. A map that failed to load leaves the view
+    // where it was, and an overlay left up over it would be the only thing
+    // still claiming to be busy.
+    hideLoadingOverlay();
     if (proxyTeamChangeNavigated(getJoinTeamFields().team)) return;
     sendToServer({
       type: 'joinGame',
@@ -8515,14 +8630,34 @@ function openViewPanel() {
   requestViewData();
 }
 
+// A View press on a server nobody had imported yet, waiting for the fetch.
+let pendingRemoteView = null;
+
 function importMapResultReceived(message) {
+  const waiting = pendingRemoteView;
   if (message.success && message.file) {
     // The reply already renamed the file it wrote; re-asking for the maps
-    // list is what turns that into a `viewableMapFiles` entry the remote
-    // table can offer a View button for. Cheap and always fresh, unlike the
-    // entry dialog's `init.viewableMaps`, which only updates on a reload.
+    // list is what turns that into a `viewableMapFiles` entry the table can
+    // offer. Cheap and always fresh, unlike the entry dialog's
+    // `init.viewableMaps`, which only updates on a reload.
     sendToServer({ type: 'getMaps' });
+    // Whoever pressed View is owed the map, not just the download. The
+    // reply's own filename is used rather than the one guessed from the
+    // address, because the server is what decides what it wrote.
+    if (waiting) {
+      pendingRemoteView = null;
+      waiting.done?.();
+      viewMapFile(message.file);
+      return;
+    }
   }
+  if (!waiting) return;
+  // Nothing to show, so the button goes back to offering rather than sitting
+  // disabled on a fetch that failed.
+  pendingRemoteView = null;
+  waiting.done?.();
+  hideLoadingOverlay();
+  showMessage('That server\'s map could not be fetched');
 }
 
 // The reply to `requestMapImportForView`. Ignored if it is not an answer to
@@ -8558,11 +8693,18 @@ function attachSortFilter(tableId, filterId) {
       const numeric = th.dataset.sort === 'num';
       const rows = Array.from(tbody.rows);
       rows.sort((a, b) => {
-        let av = a.cells[colIndex]?.textContent.trim() || '';
-        let bv = b.cells[colIndex]?.textContent.trim() || '';
+        const acell = a.cells[colIndex];
+        const bcell = b.cells[colIndex];
+        let av = acell?.textContent.trim() || '';
+        let bv = bcell?.textContent.trim() || '';
         if (numeric) {
-          const an = parseFloat(av);
-          const bn = parseFloat(bv);
+          // The raw value where a cell carries one, because a displayed number
+          // is grouped for reading -- `parseFloat('81,332')` is 81, which sorted
+          // the largest map in the list down among the small ones. Stripping the
+          // separator would work only for a locale that groups with a comma, and
+          // `toLocaleString` follows the reader's.
+          const an = parseFloat(acell?.dataset.value ?? av);
+          const bn = parseFloat(bcell?.dataset.value ?? bv);
           return ((Number.isNaN(an) ? -Infinity : an) - (Number.isNaN(bn) ? -Infinity : bn)) * dir;
         }
         return av.localeCompare(bv) * dir;
@@ -15739,26 +15881,14 @@ function getXRPlayerOptionsMenuItems() {
       disabled: !keyboard,
     },
     { id: 'teamXR', label: 'Team', value: PLAYER_TEAM_LABELS[selectedPlayerTeam], adjustable: true },
-    // Map Viewer's map picker (issue #68), the same row the flat dialog has --
-    // always present rather than only while Map Viewer is staged, since this
-    // is a plain array of rows with nothing to insert it into on the fly.
-    // `adjustXRSettingsMenuItem`'s own disabled check is what keeps left/right
-    // inert here, same as any other disabled row.
-    {
-      id: 'mapViewXR',
-      label: 'Map',
-      value: selectedViewMapFile || 'None available',
-      adjustable: true,
-      disabled: selectedPlayerTeam !== PLAYER_TEAM.MAP_VIEWER,
-    },
     {
       id: 'tankXR',
       label: 'Tank',
       value: tankModel.label || tankModel.id,
       adjustable: true,
       // Nothing on a proxied target can see this choice; see
-      // `syncTankSelectorForProxy`.
-      disabled: isProxiedPage(),
+      // `syncTankSelectorForDestination`.
+      disabled: selectedDestination !== DESTINATION_LOCAL,
     },
     { id: 'rejoinXR', label: gameplayJoinConfirmed ? 'Apply & Rejoin' : 'Join', value: '' },
     { id: 'backXR', label: 'Back', value: '' },
@@ -15979,10 +16109,6 @@ function adjustXRSettingsMenuItem(item, direction) {
   }
   if (item.id === 'teamXR') {
     selectRelativePlayerTeam(direction);
-    return true;
-  }
-  if (item.id === 'mapViewXR') {
-    selectRelativeViewMap(direction);
     return true;
   }
   if (item.id === 'tankXR') {

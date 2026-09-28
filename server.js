@@ -8438,7 +8438,15 @@ function registerMapFile(
   // the hashed JSON would make an identical map hash differently call to
   // call. `importMapForView`'s freshness check (`IMPORT_REUSE_MS`) is the one
   // reader; nothing else needs a map's age.
-  const registered = { fileName, hash, url, registeredAt: Date.now(), ...entry };
+  const registered = {
+    fileName, hash, url, registeredAt: Date.now(), ...entry,
+    // Outside the hashed `entry` for the same reason `registeredAt` is: this
+    // is a description *of* the map rather than part of it, and folding it in
+    // would make an identical map hash differently. Counted once here rather
+    // than per request, because the View dialog asks for the whole list every
+    // time it opens.
+    stats: summariseMap(entry),
+  };
   MAP_REGISTRY.set(fileName, registered);
   return registered;
 }
@@ -15835,9 +15843,59 @@ function getAccelerationWindow(arrivalGap, clientSendGap) {
 // background is simply absent until the next call, same caveat as `init`'s
 // own copy. Shared so the View dialog (which asks fresh, on demand, rather
 // than waiting for a reconnect) and `init` never compute this two ways.
+// What the View dialog says about a map before anyone opens it. Counting only
+// -- everything here was parsed on the way in.
+//
+// Faces is the number worth having and the one nothing else predicts: among
+// the bundled maps, 47 objects is 81,332 faces on one and 4,280 on another,
+// while 409 objects is 56. Object count measures how much a mapper typed;
+// faces measure what a browser has to draw, which is what decides whether a
+// map is worth opening on a phone or a headset.
+function summariseMap(entry) {
+  const obstacles = Array.isArray(entry.obstacles) ? entry.obstacles : [];
+  const counts = { box: 0, pyramid: 0, mesh: 0 };
+  // A base is a box with a `kind` (`base` in parseBZWMap), so counting by
+  // `type` alone files it under boxes. It is counted separately because it is
+  // what decides the style below, and because "12 boxes" reads wrong when
+  // four of them are the bases.
+  let bases = 0;
+  let faces = 0;
+  for (const obstacle of obstacles) {
+    if (obstacle.kind === 'base') bases += 1;
+    else if (counts[obstacle.type] !== undefined) counts[obstacle.type] += 1;
+    if (Array.isArray(obstacle.faces)) faces += obstacle.faces.length;
+  }
+  const teamMode = entry.teamMode || {};
+  return {
+    size: entry.mapSize,
+    objects: obstacles.length,
+    faces,
+    // Upstream's own order, from the world file rather than from the
+    // switches: a map with bases is Classic CTF, then Rabbit Chase, then
+    // free-for-all (`bzfs.cxx:1120-1130`, where `worldData.ctf` is set by the
+    // map having bases at all). So a map that states no mode is described by
+    // what it contains, which is how bzfs would run it.
+    style: bases > 0 ? 'CTF' : (teamMode.rabbitSelection ? 'Rabbit' : 'FFA'),
+    counts,
+    bases,
+    // Teleporters are not obstacles in this JSON; the graph is where they are,
+    // and it is an object of two lists rather than a list itself
+    // (`{ teleporters, links }`, as `applyWorldData` reads it). A map with
+    // them plays differently enough to be worth saying.
+    teleporters: Array.isArray(entry.teleporterGraph?.teleporters)
+      ? entry.teleporterGraph.teleporters.length
+      : 0,
+    water: entry.waterLevel !== null && entry.waterLevel !== undefined,
+    weather: Boolean(entry.weather),
+    ground: Boolean(entry.groundMaterial),
+  };
+}
+
 function getViewableMapsList() {
   return Array.from(MAP_REGISTRY.values())
-    .map((entry) => ({ file: entry.fileName, hash: entry.hash, url: entry.url }))
+    .map((entry) => ({
+      file: entry.fileName, hash: entry.hash, url: entry.url, stats: entry.stats || null,
+    }))
     // Sorted here rather than left in registration order. The registry is
     // filled in whatever order maps arrive -- the served map first, because
     // it is registered before anything else, then the background trickle's
@@ -16369,6 +16427,11 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
     // choosing "local" needs to know which teams they would land among, and
     // `teamMode` above describes wherever this connection currently is.
     localTeams: TEAM_MODE.teams,
+    // And which map it is on, because that is what distinguishes this
+    // instance's own game in a list beside a row of `host:port` targets. A
+    // proxied connection's `currentMap` above is the *target's*, so the local
+    // one has to be said separately.
+    localMap: MAP_SOURCE,
     flags: session.state.flags.filter(Boolean).map(proxyFlagState),
     worldTime,
     serverName: `${viewer.key} (proxied)`,
@@ -17284,6 +17347,11 @@ wss.on('connection', (ws, req) => {
     // choosing "local" needs to know which teams they would land among, and
     // `teamMode` above describes wherever this connection currently is.
     localTeams: TEAM_MODE.teams,
+    // And which map it is on, because that is what distinguishes this
+    // instance's own game in a list beside a row of `host:port` targets. A
+    // proxied connection's `currentMap` above is the *target's*, so the local
+    // one has to be said separately.
+    localMap: MAP_SOURCE,
     flags: getFlagStates(),
     worldTime,
     serverName: serverConfig.serverName || '',

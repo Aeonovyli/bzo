@@ -1110,6 +1110,48 @@ body.scoreboard-collapsed #mainhud {
   display: none;
 }
 
+/* Each table scrolls inside the dialog rather than the dialog scrolling as one
+   piece. With the server list running to hundreds of rows, a single scroll put
+   "Local maps" below all of them -- the shorter list became the harder one to
+   reach. Both sections stay on screen, and each gives up room to the other
+   through flex rather than by a fixed split. */
+#viewOverlay .dialogContent {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+#viewOverlay .viewTableScroll {
+  overflow-y: auto;
+  /* A zero basis, not `auto`. On content size the server list -- hundreds of
+     rows against the maps' handful -- takes nearly all the height and leaves
+     the other table a couple of lines, which is the problem the scroll areas
+     were added to solve. Sharing the free space evenly gives each list a
+     usable window whatever is in it, and each scrolls its own overflow. */
+  flex: 1 1 0;
+  min-height: 6em;
+}
+
+/* The row is the control, so it says so on hover and on focus. `/list` uses
+   the same class for the same reason (`tbody tr.clickable`, server.js). */
+#viewOverlay .viewTable tbody tr.clickable {
+  cursor: pointer;
+}
+
+#viewOverlay .viewTable tbody tr.clickable:hover,
+#viewOverlay .viewTable tbody tr.clickable:focus-visible {
+  background: rgba(76, 175, 80, 0.18);
+  outline: none;
+}
+
+#viewOverlay .viewTable thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.92);
+}
+
 #audioOverlay {
   z-index: 310;
   display: none;
@@ -1963,6 +2005,22 @@ body.observing #roamStatus {
   overflow-x: hidden;
   font-size: var(--hud-font-title);
   line-height: 1.45;
+}
+
+/* After the shared block above, not before: that rule names this dialog too
+   and at equal specificity the later one wins. */
+#viewOverlay {
+  /* Wider and taller than the dialogs it shares a block with. They hold prose
+     or a form, which wants a comfortable reading width; this one holds two
+     tables -- a seven-column list of every running BZFlag server, which is
+     hundreds of rows -- and at 820px the titles were the column that paid for
+     it. The ceilings only matter on a large screen: both already collapse to
+     the viewport on a small one. */
+  width: min(1400px, calc(100vw - 24px));
+  height: min(94vh, 1200px);
+  /* svh for the same reason the shared rule takes it: on mobile Chrome `vh` is
+     the viewport with the URL bar retracted, which is taller than the window. */
+  height: min(94svh, 1200px);
 }
 
 #settingsHud {
