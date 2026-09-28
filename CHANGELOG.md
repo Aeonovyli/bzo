@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.83] - 2026-09-28
+
 ### Added
 - A browser can play on a proxied BZFlag server, not only watch it. Pick a
   team in the entry dialog and the connection enters the target on it, your
@@ -17,6 +19,14 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   is told why -- so the target's operator can act on one proxied player with
   `/idban` rather than on all of them with `/ban`. Dying is not carried yet: a
   proxied player cannot be killed.
+- The entry dialog picks which server to play on: this one, or any BZFlag
+  server this instance proxies. Until now a proxied server could only be
+  reached by a link, and from inside a running game not at all. The row is
+  hidden when there is nothing to choose between, the team beside it offers
+  what the chosen server would actually accept, and picking one is a page
+  navigation, so the address bar always says where you are. Playing on a
+  proxied server greys OK until you have signed in, with Global login beside
+  it carrying both the server and the team you picked.
 - Pausing and jumping reach a proxied target. The pause is declared to it, so
   a paused browser is paused for everyone rather than only on its own screen,
   and the airborne state rides on the player update -- which a target needs,
@@ -37,6 +47,13 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   makes states a version it is not.
 
 ### Fixed
+- A tank parked on a proxied server no longer loses the flag it is holding. A
+  bzfs learns a player is still there from their position updates and nothing
+  else, and drops the flag of anyone silent for five seconds; bzo's own
+  heartbeat was also five seconds, so a resting tank raced that limit and lost
+  about half the time. How often a client reports is now the server's to say,
+  and a proxied connection uses the one-second interval a native BZFlag client
+  uses.
 - A tank belonging to a player who has joined but not spawned is no longer
   drawn at the centre of the map. The cloaking pass owns how transparent a
   tank is, but it was also deciding whether the tank was drawn at all, and the
