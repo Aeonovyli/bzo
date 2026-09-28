@@ -6,6 +6,35 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.81] - 2026-09-28
+
+### Changed
+- The caution tape on `hix`'s walkways, bridges and platforms now crawls,
+  circulating clockwise about each object it wraps at 0.4 units per second --
+  a tile every 20 seconds, against a tank's own 25 units per second. A shift
+  alone was not enough to get one direction out of it: two of the walls ran
+  their `u` axis against their own mesh's winding, so a single shift sent the
+  tape opposite ways on neighbouring walls. Every wall wearing the tape now
+  runs `u` the way its mesh winds.
+- `hix`'s ground wears zaphod's asphalt, the texture
+  `import-Planet-MoFo.com_4202.bzw` names in its own `GroundMaterial`, and the
+  concrete every top wears tiles at four times the size.
+
+### Fixed
+- `hix`'s walkway corners no longer flicker. Where the edge ring met a
+  diagonal bridge, three decks all claimed the same 15x15 of ground at the
+  same height, and coplanar faces facing the same way have no depth order to
+  settle on. The ring is now cut back from the point where its own inner wall
+  meets the bridge's side edge out to the map corner, and the bridge tapers to
+  a point at that corner between the two cuts, so all three decks share the
+  corner vertex and none of them overlap. Each cut face is the same quad as
+  the bridge face it lands on, wound the other way, leaving backface culling
+  exactly one of the pair to draw -- which matters here, because the walkways
+  have see-through undersides and those edges show from below.
+- One of `hix`'s bridge walls tiled 3.6% longer than the wall opposite it,
+  from the far end of a mirrored texture coordinate being signed wrong.
+  Invisible while the texture sat still, not once it moves.
+
 ## [1.2.80] - 2026-09-27
 
 ### Fixed
