@@ -42,6 +42,40 @@ changing from request to notification) behind a mode flag.
 The cost is not the six messages. It is that the client acquires a second set
 of semantics, and every gameplay feature after that has to work both ways.
 
+## Every way a proxied tank dies
+
+Six of them, and the client owns all six. `gotBlowedUp` sends `MsgKilled` for
+exactly `GotShot`, `GotRunOver`, `GenocideEffect`, `SelfDestruct`,
+`WaterDeath` and `DeathTouch` (`playing.cxx:3963-3967`); the other two reasons
+it knows are the ones it must stay quiet about. `GotKilledMsg` is bzfs telling
+the client, so echoing it would be a loop, and `GotCaptured` is the target's
+own conclusion from `MsgCaptureFlag` -- a capture kills the team at bzfs.
+
+bzo decides five of the six server-side today and the client sends only the
+sixth. `killPlayer` is called with `PHYSICS_DRIVER` and `WATER` from the
+motion step (`server.js`), `RUN_OVER` from the roller check and `GENOCIDE`
+from the shot code, and hits come out of the shot simulation; `selfDestruct`
+is the single client to server death message that exists. So the client
+already carries the geometry for all of it -- `collision.mjs` is the shared
+file, and it runs the same physics-driver and water tests for prediction --
+and none of the callers.
+
+Three details that bite:
+
+- **The outbound message is not the inbound one.** What a client sends is
+  killer, reason, shot id and the *killer's* flag, with the physics driver
+  appended only for `DeathTouch` (`ServerLink.cxx:757-774`). There is no
+  victim field -- bzfs takes the victim from the connection -- so
+  `decodeKilled`'s layout is the broadcast's and not a template for a sender.
+- **A wrong one is a kick, not a shrug.** `invalidPlayerAction(..., "die")`
+  removes the player outright for a death claimed as an observer or before
+  first spawn (`bzfs.cxx:4352-4374`, `4874`). Paused is the one exception, so
+  that self destruct works. A mode flag that leaks one `killed` from a
+  watching browser ejects it from the match.
+- **The flag drops first.** `gotBlowedUp` sends `MsgDropFlag` at the victim's
+  position before the kill (`playing.cxx:3898`), so the order on the wire is
+  drop then killed, not killed alone.
+
 ## Respawn, and the rejoin cooldown
 
 bzo respawns automatically: `applyDeath` queues `victim.respawn()` on a
