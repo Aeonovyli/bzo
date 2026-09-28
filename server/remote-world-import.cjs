@@ -48,13 +48,25 @@ const TOKEN_LEN = 22;
 const VERSION_LEN = 60;
 const PLAYER_ID_LEN = 1;
 const OBSERVER_TEAM = 5;
+// `AutomaticTeam` (`global.h:61`): let the target pick, which it does with its
+// own `autoTeamSelect` on every join (`bzfs.cxx:2299`).
+const AUTOMATIC_TEAM = -2;
 const TANK_PLAYER = 0;
-// Who the remote server sees for the moment this is joined. The version
-// string is read with `sscanf(..., "%d.%d.%d", ...)` upstream, so it leads
-// with digits an operator's logs can sort, and says what it is after them.
+// Who the remote server sees for the moment this is joined. The version is the
+// shape `getAppVersion()` builds (`buildDate.cxx:138-150`): bzfs reads the
+// first three numbers with `sscanf(..., "%d.%d.%d", ...)` and keeps the rest
+// as typed, so an operator reading their log sees which bzo called on them.
 const IMPORT_CALLSIGN = 'bzo-import';
 const IMPORT_MOTTO = 'bzo map import -- https://github.com/timriker/bzo';
-const IMPORT_CLIENT_VERSION = `0.0.0 bzo`;
+const IMPORT_CLIENT_VERSION = (() => {
+  // Never a made-up number: a release bzo cannot read is said as `unknown`,
+  // which `sscanf` declines rather than believing.
+  let version = 'unknown';
+  try {
+    version = String(require('../package.json').version);
+  } catch { /* said as unknown */ }
+  return `${version}-bzo-import`;
+})();
 // Long enough for a busy server to get through MsgAccept and its BZDB dump,
 // short enough that a server which answers neither does not hold the import
 // open. Failure here is never fatal: the map still imports, without `-set`.
@@ -247,7 +259,11 @@ function buildEnterPayload({
     2 + 2 + CALLSIGN_LEN + MOTTO_LEN + TOKEN_LEN + VERSION_LEN + PLAYER_ID_LEN
   );
   payload.writeUInt16BE(TANK_PLAYER, 0);
-  payload.writeUInt16BE(team, 2);
+  // Signed, because `AutomaticTeam` is -2 (`global.h:61`) and bzfs unpacks the
+  // field into an `int16_t` before it casts (`PlayerInfo::unpackEnter`). Every
+  // real team is positive and packs the same either way, so this costs the
+  // ordinary case nothing and is what lets a player ask the target to choose.
+  payload.writeInt16BE(team, 2);
   let at = 4;
   payload.write(callsign, at, CALLSIGN_LEN - 1, 'ascii'); at += CALLSIGN_LEN;
   payload.write(motto, at, MOTTO_LEN - 1, 'ascii'); at += MOTTO_LEN;
@@ -493,6 +509,10 @@ function queryServerStatus(host, port, timeout = 8000) {
           maxPlayerScore: game.maxPlayerScore,
           maxTeamScore: game.maxTeamScore,
           maxTime: game.maxTime,
+          // Rogue, red, green, blue, purple, observer -- the per-team maxima
+          // bzfs itself tests a join against (`bzfs.cxx:2345`), which is what
+          // tells a proxied entry dialog which teams the target would accept.
+          teamMaximums: game.teamMaximums,
         });
       } catch (err) {
         fail(err);
@@ -1765,6 +1785,7 @@ module.exports = {
   fetchServerList,
   fetchWorldFromServer,
   queryServerStatus,
+  AUTOMATIC_TEAM,
   probeGlobalToken,
   collectNonDefaultVariables,
   decodeGameSettings,

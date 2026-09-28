@@ -25,6 +25,8 @@ const {
   buildEnterPayload,
   decodeSetVars,
 } = require('./remote-world-import.cjs');
+// Upstream's own defaults, for a name the target never mentioned.
+const { BZDB_DEFAULTS } = require('./bzdb-defaults.cjs');
 
 // `CtfTeams` (`global.h`): the teams MsgTeamUpdate can carry, which stops
 // before observer -- rogue, red, green, blue, purple.
@@ -208,6 +210,25 @@ const PLAYER_STATUS = Object.freeze({
   PLAY_SOUND: 1 << 10,
 });
 
+// `BlowedUpReason` (`playing.h:128`), as the numbers `MsgKilled` carries.
+// `gotBlowedUp` reports exactly these six and stays quiet about the other two:
+// `GotKilledMsg` is bzfs telling the client, so echoing it would be a loop,
+// and `GotCaptured` is the target's own conclusion from `MsgCaptureFlag`
+// (`playing.cxx:3963-3967`). `DeathTouch` is not in the run -- it is
+// `PhysicsDriverDeath`, which is why it is the one with a tail.
+const BLOWED_UP = Object.freeze({
+  GOT_KILLED_MSG: 0,
+  GOT_SHOT: 1,
+  GOT_RUN_OVER: 2,
+  GOT_CAPTURED: 3,
+  GENOCIDE_EFFECT: 4,
+  SELF_DESTRUCT: 5,
+  WATER_DEATH: 6,
+  // Not the next in the run: `DeathTouch = PhysicsDriverDeath`, which is the
+  // message code 'pd' reused as a reason (`Protocol.h:179`).
+  DEATH_TOUCH: 0x7064,
+});
+
 // `MsgPlayerUpdateSmall`'s fixed point (`PlayerState.cxx:26-35`). bzo rounds
 // to two decimals on the way out and calls that its whole compression story;
 // this is upstream's, and it is why a small update is 16 bytes where a full
@@ -271,6 +292,20 @@ function decodeKilled(payload) {
   return { victim, killer, reason, shotId, flag };
 }
 
+// MsgNearFlag: where the nearest flag is and what it is called
+// (`sendClosestFlagMessage`, bzfs.cxx:512). Sent unprompted to a player
+// carrying Identify, once per change, off the target's own `searchFlag` on
+// every player update it receives -- so a proxied player gets these for free
+// once its position is going up, and asking for them would be asking twice.
+//
+// It carries the flag's *name* ("Identify"), not its abbreviation, and no
+// index at all: upstream's client has the whole flag table and only needs
+// something to print. `nboPackStdString` is a `uint32` length then the bytes.
+function decodeNearFlag(payload) {
+  const r = new Reader(payload);
+  return { pos: r.vec3(), name: r.str() };
+}
+
 // MsgScore: a count, then that many (id, `Score::pack`).
 function decodeScores(payload) {
   const r = new Reader(payload);
@@ -302,6 +337,89 @@ function decodePlayerInfo(payload) {
     });
   }
   return info;
+}
+
+// BZDB holds expressions, not just numbers. On a stock server `_reloadTime` is
+// `_shotRange / _shotSpeed`, `_muzzleFront` is `_tankRadius + 0.1` and
+// `_tankRadius` is `0.72 * _tankLength` (`global.cxx`), and a live target
+// sends all 168 entries exactly as written. Upstream reads them through
+// `BZDB.eval` (`StateDatabase::evaluate`) and compares a shot against the
+// result, so a proxied shot has to arrive at the same number -- parsing the
+// string as a float would give NaN for a good part of the table and every
+// shot built on one would be dropped without a word.
+//
+// Arithmetic only: four operators, parentheses and a sign, which is all the
+// stock table uses. Never `eval`, because these values come off the wire from
+// a machine this one does not own. A name that resolves to nothing, or to a
+// cycle, is NaN rather than a guess.
+const BZDB_TOKENS = /\d+\.?\d*(?:[eE][-+]?\d+)?|[A-Za-z_][A-Za-z0-9_]*|[-+*/()]|\s+/g;
+
+function tokenizeBzdb(text) {
+  const tokens = [];
+  let consumed = 0;
+  for (const match of text.matchAll(BZDB_TOKENS)) {
+    // A gap means something the grammar does not cover, so the whole value is
+    // refused rather than silently read as the part that did parse.
+    if (match.index !== consumed) return null;
+    consumed = match.index + match[0].length;
+    if (match[0].trim() !== '') tokens.push(match[0]);
+  }
+  return consumed === text.length ? tokens : null;
+}
+
+function parseBzdb(tokens, resolve) {
+  let at = 0;
+  const peek = () => tokens[at];
+  const expression = () => {
+    let value = term();
+    while (peek() === '+' || peek() === '-') {
+      const operator = tokens[at]; at += 1;
+      const right = term();
+      value = operator === '+' ? value + right : value - right;
+    }
+    return value;
+  };
+  const term = () => {
+    let value = signed();
+    while (peek() === '*' || peek() === '/') {
+      const operator = tokens[at]; at += 1;
+      const right = signed();
+      value = operator === '*' ? value * right : value / right;
+    }
+    return value;
+  };
+  const signed = () => {
+    if (peek() === '-') { at += 1; return -signed(); }
+    if (peek() === '+') { at += 1; return signed(); }
+    return atom();
+  };
+  const atom = () => {
+    const token = tokens[at]; at += 1;
+    if (token === undefined) return NaN;
+    if (token === '(') {
+      const value = expression();
+      if (tokens[at] !== ')') return NaN;
+      at += 1;
+      return value;
+    }
+    if (/^[A-Za-z_]/.test(token)) return resolve(token);
+    return Number(token);
+  };
+  const value = expression();
+  // Trailing tokens mean the value was not one expression, so it is no answer.
+  return at === tokens.length ? value : NaN;
+}
+
+function evalBzdb(vars, name, seen = new Set()) {
+  if (seen.has(name)) return NaN;
+  const raw = (vars && vars.get(name) !== undefined) ? vars.get(name) : BZDB_DEFAULTS[name];
+  if (raw === undefined || String(raw).trim() === '') return NaN;
+  const direct = Number(raw);
+  if (Number.isFinite(direct)) return direct;
+  const tokens = tokenizeBzdb(String(raw));
+  if (tokens === null) return NaN;
+  const outer = new Set(seen).add(name);
+  return parseBzdb(tokens, (reference) => evalBzdb(vars, reference, outer));
 }
 
 // What a bzfs will accept in a chat line, which is printable ASCII and
@@ -630,6 +748,9 @@ class BzfsSession {
         this.emit('info', info);
         break;
       }
+      case 'Nf':
+        this.emit('nearFlag', decodeNearFlag(payload));
+        break;
       case 'nR':
         this.state.rabbitId = payload.readUInt8(0);
         this.emit('rabbit', this.state.rabbitId);
@@ -780,6 +901,47 @@ class BzfsSession {
     this.send('cf', payload);
   }
 
+  // MsgPause: one byte, non-zero for paused (`bzfs.cxx:5209`). bzfs holds the
+  // flag itself and tells everyone, so this is a declaration like the rest --
+  // and it is the message that makes a pause mean anything, since a tank that
+  // only stopped sending updates is still alive and still worth shooting.
+  sendPause(paused) {
+    const payload = Buffer.alloc(1);
+    payload.writeUInt8(paused ? 1 : 0, 0);
+    this.send('pa', payload);
+  }
+
+  // MsgDropFlag, which a client also declares for itself: where the tank was
+  // standing when it let go (`ServerLink.cxx:749`). Sent immediately before a
+  // death, because upstream's own `gotBlowedUp` drops the flag first
+  // (`playing.cxx:3898`) -- "you can't take it with you".
+  sendDropFlag(pos) {
+    const payload = Buffer.alloc(12);
+    let at = 0;
+    for (const value of pos) { payload.writeFloatBE(value, at); at += 4; }
+    this.send('df', payload);
+  }
+
+  // MsgKilled, the message this whole mode turns on: upstream's victim decides
+  // it died and says so, and bzfs scores it without adjudicating any geometry
+  // (`ServerLink.cxx:757`). Note the shape is not `decodeKilled`'s -- that one
+  // reads the broadcast, which leads with the victim. A client sends no victim
+  // at all, because bzfs takes that from the connection.
+  //
+  // `flag` is the *killer's* flag, and the physics driver rides along only for
+  // a `DeathTouch`, which is the one reason with a tail.
+  sendKilled({ killer, reason, shotId = -1, flag = '', phydrv = -1 }) {
+    const tail = reason === BLOWED_UP.DEATH_TOUCH ? 4 : 0;
+    const payload = Buffer.alloc(1 + 2 + 2 + 2 + tail);
+    let at = 0;
+    payload.writeUInt8(killer, at); at += 1;
+    payload.writeUInt16BE(reason & 0xffff, at); at += 2;
+    payload.writeInt16BE(shotId, at); at += 2;
+    payload.write(String(flag).padEnd(2, '\0'), at, 2, 'ascii'); at += 2;
+    if (tail) payload.writeInt32BE(phydrv, at);
+    this.send('kl', payload);
+  }
+
   // MsgShotBegin: `FiringInfo::pack`, the declaration upstream lets a client
   // make for itself. The shot id is the slot in its low byte and a counter in
   // its high one, so that reusing a slot is a different shot.
@@ -856,6 +1018,9 @@ module.exports = {
   ACTION_MESSAGE,
   decodePlayerUpdate,
   decodeAlive,
+  decodeNearFlag,
+  evalBzdb,
+  BLOWED_UP,
   decodeKilled,
   decodeScores,
   decodePlayerInfo,

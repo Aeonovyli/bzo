@@ -6,6 +6,44 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- A browser can play on a proxied BZFlag server, not only watch it. Pick a
+  team in the entry dialog and the connection enters the target on it, your
+  tank spawns where the target puts it, and your movement, shots and flags all
+  reach the real game -- native BZFlag clients see them. The teams offered are
+  the target's own, read from the per-team maxima it reports rather than from
+  this instance's configuration, so a team it would refuse is never on the
+  list. Playing needs a global login -- a connection without one watches, and
+  is told why -- so the target's operator can act on one proxied player with
+  `/idban` rather than on all of them with `/ban`. Dying is not carried yet: a
+  proxied player cannot be killed.
+- Pausing and jumping reach a proxied target. The pause is declared to it, so
+  a paused browser is paused for everyone rather than only on its own screen,
+  and the airborne state rides on the player update -- which a target needs,
+  because it skips the vertical part of its shot-origin check for a falling
+  tank and drops a shot fired mid-jump without it.
+- The Identify flag works on a proxied server. The target volunteers the
+  nearest flag off its own search, and the name it sends is matched to bzo's
+  flag table and written into the flag record, so the label, the radar cross
+  and the scoreboard all read it exactly as they do in a local game.
+
+### Changed
+- bzo names its own release everywhere it introduces itself to somebody else's
+  host. Proxying a bzfs server and importing a map from one both carry it in
+  the version string `MsgEnter` takes, in the shape `getAppVersion()` builds,
+  so a target operator's `/clientquery` and their log say which bzo called on
+  them. Every outbound HTTP request carries it too, as
+  `bzo/<release> (<build>; +https://github.com/timriker/bzo)`. No request bzo
+  makes states a version it is not.
+
+### Fixed
+- A tank belonging to a player who has joined but not spawned is no longer
+  drawn at the centre of the map. The cloaking pass owns how transparent a
+  tank is, but it was also deciding whether the tank was drawn at all, and the
+  first frame after a tank is built always took that branch -- putting back on
+  screen the tank that had just been hidden for not being alive. A player who
+  died later never showed this, which is what made it look intermittent.
+
 ## [1.2.82] - 2026-09-28
 
 ### Fixed

@@ -2175,6 +2175,50 @@ function hideLoadingOverlay() {
 // Join" alike -- translates the client-only `mapviewer` sentinel the same
 // way; a second copy of this ternary is how the XR path once sent it to the
 // server raw, which read as an unrecognized team and fell back to Rogue.
+// Whether this page is pointed at a proxied bzfs rather than this server's own
+// game. Read off the URL rather than waiting for `init`, because the entry
+// dialog is dressed before the first message arrives.
+function isProxiedPage() {
+  return new URLSearchParams(window.location.search).get('proxy') !== null;
+}
+
+// Upstream has one tank model and no way to choose another, and the bzfs
+// protocol carries no field for one -- so on a proxied connection the choice
+// reaches nobody: not the target, not the native clients, not even another bzo
+// browser watching the same match, all of which draw every tank with the
+// default. A control whose setting only the person touching it can see is one
+// that promises something it cannot deliver, so it goes away rather than
+// greys, the way the entry dialog already drops Map Viewer where there are no
+// maps to view. The XR panel greys its own row instead, which is that panel's
+// idiom (`mapViewXR`). The model is forced back to the default without saving
+// it, so a player's real choice is still theirs in this server's own game.
+function syncTankSelectorForProxy() {
+  if (!isProxiedPage()) return;
+  selectedTankModelId = DEFAULT_TANK_MODEL_ID;
+  const selector = document.getElementById('tankSelector');
+  if (selector) selector.style.display = 'none';
+}
+
+// The team the live connection entered its target on, as the target itself
+// reported it. Null off a proxy, where a team is this server's to change on the
+// open socket like any other setting.
+let proxyEnteredTeam = null;
+
+// Changing team on a proxied connection is opening a different connection.
+// bzfs fixes the team when it answers `MsgEnter` and the protocol carries no
+// message for changing it, so there is nothing to send -- the choice goes on
+// the page's own URL and the reload is what applies it, the same way `?proxy=`
+// and `/login` already work (`docs/proxy.md`). Returns true when it has taken
+// over, and the caller sends nothing.
+function proxyTeamChangeNavigated(team) {
+  if (proxyEnteredTeam === null || team === proxyEnteredTeam) return false;
+  const params = new URLSearchParams(window.location.search);
+  if (!params.get('proxy')) return false;
+  params.set('team', team);
+  window.location.search = params.toString();
+  return true;
+}
+
 function getJoinTeamFields() {
   const team = getSelectedPlayerTeam();
   const isMapViewer = team === PLAYER_TEAM.MAP_VIEWER;
@@ -2194,6 +2238,7 @@ function setPendingJoinRequest(name) {
 
 function maybeSendPendingJoinRequest() {
   if (!renderReadyForJoin || gameplayJoinConfirmed || !pendingJoinRequest) return;
+  if (proxyTeamChangeNavigated(getJoinTeamFields().team)) return;
   sendToServer({
     type: 'joinGame',
     name: pendingJoinRequest.name,
@@ -3457,8 +3502,23 @@ function startGlobalLogin() {
   // is the same camera.
   const params = new URLSearchParams(window.location.search);
   const proxyTarget = params.get('proxy');
-  const watching = isObserver() && roamView ? `/${encodeURIComponent(roamView)}` : '';
-  const returnPage = proxyTarget ? `/${encodeURIComponent(proxyTarget)}${watching}` : '';
+  const watching = isObserver() && roamView ? encodeURIComponent(roamView) : '';
+  // The team comes back too, and it is the team *staged in the dialog* rather
+  // than the one this connection entered on. Signing in is the thing that
+  // makes playing possible at all on a target that has the callsign
+  // registered, so the player who picks a team, finds they must sign in and
+  // clicks this row has already said where they want to land -- coming back
+  // on the old team would grant the wish and undo the choice in one move.
+  // `getJoinTeamFields` is what every join reads, so Map Viewer resolves to
+  // Observer here the same way it does on the wire.
+  //
+  // Path segments are positional, so a team with no view still fills the view
+  // slot; `-` is not a view name and resolves to none.
+  const proxyTeam = proxyTarget ? (getJoinTeamFields().team || params.get('team')) : null;
+  const tail = proxyTeam
+    ? `/${watching || '-'}/${encodeURIComponent(proxyTeam)}`
+    : (watching ? `/${watching}` : '');
+  const returnPage = proxyTarget ? `/${encodeURIComponent(proxyTarget)}${tail}` : '';
   window.location.href = `${amVerified ? '/logout' : '/login'}${returnPage}`;
 }
 
@@ -6291,8 +6351,16 @@ function connectToServer() {
   // server knows which real bzfs this connection is for, and it has to know
   // before it can send `init`, which it does the moment the socket opens. A
   // page without it connects to this server's own game, as it always has.
-  const proxyTarget = new URLSearchParams(window.location.search).get('proxy');
-  const query = proxyTarget ? `/?proxy=${encodeURIComponent(proxyTarget)}` : '';
+  const params = new URLSearchParams(window.location.search);
+  const proxyTarget = params.get('proxy');
+  // `&team=` rides along for the same reason `?proxy=` does, and it has to:
+  // bzfs fixes a player's team when it answers `MsgEnter` and the protocol has
+  // no message for changing it afterwards, so the team is part of which
+  // connection this is rather than something to ask for once it is open.
+  const proxyTeam = proxyTarget ? params.get('team') : null;
+  const query = proxyTarget
+    ? `/?proxy=${encodeURIComponent(proxyTarget)}${proxyTeam ? `&team=${encodeURIComponent(proxyTeam)}` : ''}`
+    : '';
   ws = new WebSocket(`${protocol}//${window.location.host}${query}`);
 
   ws.onopen = () => {
@@ -6641,6 +6709,18 @@ function handleServerMessage(message) {
       serverCommands = message.commands;
       myGlobalCallsign = message.player.globalCallsign || null;
       applyAdminUi();
+
+      // A proxied connection is already on a team -- the target decided it when
+      // it answered `MsgEnter` -- so the dialog shows what this connection is,
+      // not what localStorage remembers wanting. Anything else would read as a
+      // team change the moment Join was pressed and bounce the page for no
+      // reason (`proxyTeamChangeNavigated`).
+      if (isProxiedPage()) {
+        proxyEnteredTeam = message.player.team;
+        selectedPlayerTeam = proxyEnteredTeam;
+        syncPlayerTeamSelector();
+        syncTankSelectorForProxy();
+      }
 
       // A server that does not offer the observer team cannot honour the
       // spectator link, so the page joins as it otherwise would rather than
@@ -8199,6 +8279,7 @@ function viewMapFile(file) {
   const entry = viewableMapEntries.find((candidate) => candidate.file === file);
   const worldPromise = entry ? loadWorldFile(entry).then((world) => applyWorldData(world)) : Promise.resolve();
   worldPromise.finally(() => {
+    if (proxyTeamChangeNavigated(getJoinTeamFields().team)) return;
     sendToServer({
       type: 'joinGame',
       name: myPlayerName,
@@ -9303,7 +9384,19 @@ function applyTankAlpha(tank, alpha) {
   const hidden = alpha <= 0;
   if (tank.userData.cloakHidden !== hidden) {
     tank.userData.cloakHidden = hidden;
-    tank.visible = !hidden;
+    // Cloaking owns the *alpha*, never whether there is a tank to draw at all.
+    // `cloakHidden` starts undefined, so the first frame after a tank is built
+    // always takes this branch -- and a tank built for a player who has not
+    // spawned was hidden by `addPlayer` a moment earlier. Writing plain
+    // `!hidden` here put it back on screen at the origin, which on a proxied
+    // server is every player bzfs has listed but not yet placed. A player who
+    // dies later never hit it, because `cloakHidden` is already `false` by
+    // then and this branch is skipped, which is why it looked intermittent.
+    //
+    // `!== false` rather than a truth test: only an explicit "not alive" hides
+    // a tank here. A path that has not said either way is left alone, which is
+    // what the local tank relies on.
+    tank.visible = !hidden && tank.userData.playerState?.alive !== false;
   }
   // The tank's own shadow needs no help: _projectShadowForMesh already refuses
   // to project from a mesh whose `visible` is false, so hiding the tank takes
@@ -11500,6 +11593,15 @@ function handleMotion(deltaTime) {
       // time. See docs/lag-plan.md, "Extrapolate on the client's clock, not
       // ours".
       ct: Number(((frameEpochMs - clientClockOrigin) / 1000).toFixed(3)),
+      // Upstream's `PlayerState::Falling`, which is a tank whose location is
+      // `InAir` or `InBuilding` rather than resting on ground or a building
+      // (`LocalPlayer.cxx:819-823`). Only a proxied connection reads it: this
+      // server works out for itself whether a tank is airborne, because here
+      // the client is not the authority on where it is. A target bzfs is --
+      // it believes a client's own state outright -- and it needs this one
+      // because it skips the vertical part of its shot-origin check for a
+      // falling tank, so a shot fired mid-jump is dropped without it.
+      air: (onGround || onObstacle) ? 0 : 1,
     };
 
     // Add optional direction field if sliding
@@ -15434,7 +15536,15 @@ function getXRPlayerOptionsMenuItems() {
       adjustable: true,
       disabled: selectedPlayerTeam !== PLAYER_TEAM.MAP_VIEWER,
     },
-    { id: 'tankXR', label: 'Tank', value: tankModel.label || tankModel.id, adjustable: true },
+    {
+      id: 'tankXR',
+      label: 'Tank',
+      value: tankModel.label || tankModel.id,
+      adjustable: true,
+      // Nothing on a proxied target can see this choice; see
+      // `syncTankSelectorForProxy`.
+      disabled: isProxiedPage(),
+    },
     { id: 'rejoinXR', label: gameplayJoinConfirmed ? 'Apply & Rejoin' : 'Join', value: '' },
     { id: 'backXR', label: 'Back', value: '' },
   ];
@@ -15731,6 +15841,7 @@ function applyXRJoinSelection() {
   // is already frozen.
   closeXRSettingsMenu();
   gameplayJoinConfirmed = false;
+  if (proxyTeamChangeNavigated(getJoinTeamFields().team)) return;
   applySelectedTankModel(selectedTankModelId);
   sendToServer({
     type: 'joinGame',

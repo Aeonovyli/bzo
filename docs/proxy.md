@@ -98,17 +98,30 @@ Three consequences, and they are the shape of the feature rather than details:
   Dialling the target's *public* name from the same host fails too, since the
   kernel picks a public source address for a public destination: the private
   address has to be configured, not resolved.
-- **Only a server whose own operator installs the proxy can be proxied.** A
-  stranger's public bzfs cannot carry a forwarded token in the first place --
-  a far stronger consent property than a ban list, and it needs no
-  coordination.
+- **Only a server whose own operator installs the proxy can carry verified
+  players.** Anyone can point a proxy at a stranger's public bzfs and it will
+  work: it is an ordinary client connection. It is not a covert one -- the
+  version string and the motto both name this bzo, by design ("What a target
+  operator sees") -- but saying who you are is not the same as being let in.
+  What cannot follow is the forwarded token, so every player arrives
+  unverified, which is a watcher's inconvenience and a player's wall. So
+  proxying a stranger's server is a thing an operator would object to rather
+  than a thing they are protected from, and their lever against it is the same
+  address ban it has always been.
 - The added hop is sub-millisecond by construction, so a proxied player's
   latency is browser-to-proxy, the same order as a native client reaching a
   distant server.
 
-Where the check fails it is not a kick. The player loses their global identity
-and plays unverified, which on a registered callsign also earns bzfs's "This
-callsign is registered. You must use global authentication."
+Where the check fails it is not a kick, at least not at the door. The player
+loses their global identity and joins unverified, and a registered callsign
+earns bzfs's "This callsign is registered. You must use global
+authentication." on the way in (`bzfs.cxx:2560-2567`) -- a message and nothing
+more. The wall is the first spawn: `playerAlive` asks
+`accessInfo.isAllowedToEnter()` and removes an unidentified player outright
+for "unidentified" (`bzfs.cxx:3199-3205`). So an unverified proxy can watch a
+stranger's server indefinitely and cannot play on it for a second, which is a
+distinction that only starts to bite once there is a play path at all
+(`docs/proxy-plan.md`).
 
 ## Being listed
 
@@ -151,9 +164,25 @@ every one of them individually accountable, which is a stronger guarantee than
 a native client gives, since bzfs otherwise admits unregistered players.
 
 `MsgEnter` carries a client version string (`getAppVersion()`,
-`ServerLink.cxx:690`), and a proxy puts its own there, so who arrived by bzo
-is visible without anybody inventing a mechanism. The motto beside the
-callsign says which bzo they came through.
+`ServerLink.cxx:690`), and a proxy puts its own there -- the release, the
+build id, then `-bzo-web`, in upstream's own shape -- so who arrived by bzo,
+on which version, is visible without anybody inventing a mechanism. bzfs reads
+the leading three numbers and keeps the string as typed, and `/clientquery`
+prints it. The motto beside the callsign says which bzo they came through.
+
+Between the two, an operator who wants no proxied players can see them and
+can refuse them, and that is the intended end state rather than a gap. A
+proxy that could not be refused would be the problem; being announced is what
+makes refusing it possible.
+
+**Only a verified player plays.** A connection carrying no global login joins
+as an observer whatever team its link asked for, and is told why. bzfs would
+admit it as a player itself -- this is the proxy's courtesy, not the target's
+rule -- and what it buys the operator is that every proxied player is
+answerable by a BZID, so `/idban` reaches one of them where `/ban` would reach
+all of them. An operator who does not want the policy edits their own bzo: it
+is a default, not a boundary. A registered callsign gets the same answer for a
+second reason, since it could not have spawned anyway.
 
 ## What a proxy connection is
 
@@ -163,7 +192,10 @@ bzo stops being a game server for that connection and becomes a codec: no shot
 simulation, no hit detection, no flag logic, no scores, no clock, no rabbit,
 no anti-cheat. Each browser gets its own `BzfsSession`
 (`server/bzfs-session.cjs`) and therefore its own connection to the target,
-because bzfs allots a `PlayerId` per connection and has no multiplexing.
+because bzfs allots a `PlayerId` per connection and has no multiplexing. One
+consequence worth knowing before an instance carries a crowd: every broadcast
+the target sends arrives once down each socket, so the proxy reads N copies of
+it. Wasteful, harmless, and exactly why nothing here needs mirroring.
 
 **Ids are the target's.** bzo numbers players out of upstream's own space
 (`docs/network.md`, "Player ids"), so the slot the target calls 3 is the slot

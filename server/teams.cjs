@@ -253,6 +253,45 @@ function clampPlayingLimits(limits, maxRealPlayers) {
   return clamped;
 }
 
+// A proxied target's own team limits, read off the wire rather than inferred
+// from its switches. `MsgQueryGame` packs the six `-mp` maxima in
+// `BZFLAG_MP_TEAM_ORDER` (`decodeQueryGame`, server/remote-world-import.cjs),
+// and `maxTeam[t]` is the very number bzfs tests before it accepts a join --
+// `team[t].size >= clOptions->maxTeam[t]` is a `RejectTeamFull`
+// (`bzfs.cxx:2345`). So a team the target reports as zero is a team it would
+// refuse, and offering it in the entry dialog would be offering a rejection.
+//
+// This is the whole gate, which is why the game type is not consulted: Rabbit
+// Chase zeroes every colour and moves the rogue limit to the hunters
+// (`CmdLineOptions.cxx:1586-1597`), and an `-offa` operator zeroes them with
+// `-mp`, so both arrive here already counted. A target that answered nothing
+// leaves only Observer, which is the one team every server has room for and
+// the one this proxy can always deliver.
+function teamModeFromMaximums(teamMaximums, maxRealPlayers = Number.MAX_SAFE_INTEGER) {
+  const counts = Array.isArray(teamMaximums) ? teamMaximums : [];
+  const limits = Object.fromEntries(BZFLAG_MP_TEAM_ORDER.map((team, index) => [
+    team,
+    Number.isInteger(counts[index]) && counts[index] > 0 ? counts[index] : 0,
+  ]));
+  const offered = PLAYER_TEAMS.filter((team) => limits[team] > 0);
+  const teams = offered.length > 0 ? offered : [PLAYER_TEAM.OBSERVER];
+  return {
+    // bzo's `enabled` is "there are colour teams to pick between", which is
+    // what the target's own maxima say rather than anything configured here.
+    enabled: teams.some((team) => (
+      team !== PLAYER_TEAM.ROGUE && team !== PLAYER_TEAM.OBSERVER
+    )),
+    // The target runs its own `autoTeamSelect` on every join
+    // (`bzfs.cxx:2299`), so bzo never picks a team for a proxied player.
+    autoTeam: false,
+    rabbitSelection: null,
+    colorTeamsRefused: false,
+    maxRealPlayers,
+    teams,
+    limits,
+  };
+}
+
 // `maxRealPlayers` is the configured playing limit -- upstream's `-mp` -- and it
 // is both the default per-team limit and the cap on every playing team's own.
 function resolveTeamMode(serverValue, mapOverride = null, maxRealPlayers = Number.MAX_SAFE_INTEGER, serverRabbit = null) {
@@ -733,6 +772,7 @@ module.exports = {
   clampPlayingLimits,
   parseBZWTeamMode,
   resolveTeamMode,
+  teamModeFromMaximums,
   selectPlayerTeam,
   getPlayerTeamColor,
   getPlayerTeamRadarColor,

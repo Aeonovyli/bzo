@@ -25,6 +25,7 @@ const {
   fetchServerList,
   fetchWorldFromServer,
   queryServerStatus,
+  AUTOMATIC_TEAM,
   probeGlobalToken,
   decodeGameSettings,
   decodeQueryGame,
@@ -34,6 +35,8 @@ const {
 const {
   BzfsSession,
   toBzfsChatText,
+  evalBzdb,
+  PLAYER_STATUS: BZFS_PLAYER_STATUS,
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
 } = require('./server/bzfs-session.cjs');
 const {
@@ -57,6 +60,7 @@ const {
   FLAG_GRAB_LEVEL_TOLERANCE,
   FLAG_RADIUS,
   FLAG_STATUS,
+  FLAG_TYPES,
   IDENTIFY_RANGE,
   findNearestGroundFlag,
   GM_TURN_ANGLE,
@@ -153,6 +157,7 @@ const {
   normalizeTeamLimits,
   parseBZWTeamMode,
   resolveTeamMode,
+  teamModeFromMaximums,
   selectPlayerTeam,
   getPlayerTeamColor,
   getInitialPlayerColor,
@@ -456,6 +461,13 @@ const SERVER_VERSION = (() => {
   }
 })();
 
+// How bzo introduces itself on every request it makes to somebody else's
+// host: the release, the build that distinguishes two servers on it, and
+// where to go to find out what it is. Nothing bzo dials should have to guess
+// what called on it.
+const BZO_USER_AGENT =
+  `bzo/${SERVER_VERSION} (${CLIENT_BUILD}; +https://github.com/timriker/bzo)`;
+
 // index.html is rendered per request so the page is named after the host before
 // any script runs. iOS reads `apple-mobile-web-app-title` for a home screen
 // label, so it has to be in the markup that Safari parses, not added later by
@@ -542,7 +554,7 @@ async function checkGlobalToken(callsign, token, groups = []) {
       ? `&groups=${groups.map((group) => encodeURIComponent(group)).join('%0D%0A')}`
       : '');
   const response = await fetch(url, {
-    headers: { 'User-Agent': `bzo ${CLIENT_BUILD}` },
+    headers: { 'User-Agent': BZO_USER_AGENT },
     signal: AbortSignal.timeout(10000),
   });
   const body = await response.text();
@@ -607,14 +619,23 @@ const PROXY_PROBE_PREFIX = 'probe-';
 // own page, never in a path or a host, so the shape is the whole check.
 const RETURN_VIEW_PATTERN = /^[a-z][a-z-]{1,11}$/;
 
-function resolveLoginReturnPath(segment, view) {
+function resolveLoginReturnPath(segment, view, team) {
   if (segment === undefined) return '/';
   if (LOGIN_RETURN_PATHS[segment] !== undefined) return LOGIN_RETURN_PATHS[segment];
   if (!PROXY_TARGETS_BY_URL[segment]) return undefined;
   const watching = typeof view === 'string' && RETURN_VIEW_PATTERN.test(view)
     ? `&view=${encodeURIComponent(view)}`
     : '';
-  return `/?proxy=${encodeURIComponent(segment)}${watching}`;
+  // A third segment names the team to come back on. Signing in is what makes
+  // playing possible at all on a target that has the callsign registered
+  // (`playerAlive`, bzfs.cxx:3199), so a round trip that dropped the team
+  // would answer the player's question and undo their choice in one move --
+  // they would arrive verified and watching. Checked against the same list
+  // `resolveProxyTarget` accepts, because it lands in the same parameter.
+  const playing = (team === PLAYER_TEAM.AUTOMATIC || PLAYER_TEAMS.includes(team))
+    ? `&team=${encodeURIComponent(team)}`
+    : '';
+  return `/?proxy=${encodeURIComponent(segment)}${watching}${playing}`;
 }
 
 // The token half of a login made on a proxied server's behalf, waiting for
@@ -706,10 +727,10 @@ function finishLogin(res, sessionId, returnPath = '/') {
 // optional `:returnPage` segment is only ever `list` today (see
 // `LOGIN_RETURN_PATHS`); both halves read it the same way, since bzflag.org's
 // callback is this same URL with `t` filled in.
-app.get('/login/:returnPage?/:returnView?', loginRateLimit, async (req, res) => {
+app.get('/login/:returnPage?/:returnView?/:returnTeam?', loginRateLimit, async (req, res) => {
   const probe = resolveProbeTarget(req.params.returnPage);
   const probeTarget = probe ? probe.target : undefined;
-  const returnPath = resolveLoginReturnPath(req.params.returnPage, req.params.returnView);
+  const returnPath = resolveLoginReturnPath(req.params.returnPage, req.params.returnView, req.params.returnTeam);
   if (returnPath === undefined && probeTarget === undefined) {
     res.status(404).type('text/plain').send('Unknown login return page.\n');
     return;
@@ -729,9 +750,17 @@ app.get('/login/:returnPage?/:returnView?', loginRateLimit, async (req, res) => 
     // and whether they still substitute is not documented -- so this is the
     // shape known to work. The return page rides in the *path* instead, for the
     // same reason: it costs no `&` either.
-    const callback = `https://${host}/login${req.params.returnPage ? `/${req.params.returnPage}` : ''}`
-      + `${req.params.returnPage && req.params.returnView ? `/${req.params.returnView}` : ''}`
-      + `?t=%TOKEN%:%USERNAME%`;
+    // Every segment the round trip has to survive goes here, in order: a
+    // segment left out is a choice the player has to make again after signing
+    // in, and the team is the one they most often signed in *for*.
+    // Stops at the first one missing, because the segments are positional:
+    // a team behind an absent view would arrive as the view.
+    let carried = '';
+    for (const segment of [req.params.returnPage, req.params.returnView, req.params.returnTeam]) {
+      if (!segment) break;
+      carried += `/${segment}`;
+    }
+    const callback = `https://${host}/login${carried}?t=%TOKEN%:%USERNAME%`;
     const target = `${BZFLAG_LOGIN_URL}?action=weblogin&url=${callback}`;
     log(`[LOGIN] redirecting to bzflag.org, callback ${callback}`);
     // The header is set rather than sent through `res.redirect`, which runs the
@@ -856,10 +885,10 @@ app.get('/login/:returnPage?/:returnView?', loginRateLimit, async (req, res) => 
 // still names one, and clears it either way. Also a page navigation, for the
 // same reason `/login` is one -- there is no identity to migrate onto a live
 // connection, so the browser has to come back on a fresh socket to see it gone.
-app.get('/logout/:returnPage?/:returnView?', (req, res) => {
+app.get('/logout/:returnPage?/:returnView?/:returnTeam?', (req, res) => {
   // The same allowlist `/login` returns through, for the same reason: signing
   // out while watching a proxied match should leave you watching it.
-  const returnPath = resolveLoginReturnPath(req.params.returnPage, req.params.returnView);
+  const returnPath = resolveLoginReturnPath(req.params.returnPage, req.params.returnView, req.params.returnTeam);
   if (returnPath === undefined) {
     res.status(404).type('text/plain').send('Unknown logout return page.\n');
     return;
@@ -1646,7 +1675,7 @@ async function getBzoServerList() {
   }
   try {
     const response = await fetch(`${LIST_SERVER_URL}/api/list-server/list`, {
-      headers: { 'User-Agent': `bzo ${CLIENT_BUILD}` },
+      headers: { 'User-Agent': BZO_USER_AGENT },
       signal: AbortSignal.timeout(8000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2108,7 +2137,7 @@ async function probeAdminWhitelist() {
   const fetchProbe = async (forwardedFor) => {
     const response = await fetch(probeUrl, {
       headers: {
-        'User-Agent': `bzo ${CLIENT_BUILD}`,
+        'User-Agent': BZO_USER_AGENT,
         ...(forwardedFor ? { 'X-Forwarded-For': forwardedFor } : {}),
       },
       signal: AbortSignal.timeout(8000),
@@ -2394,7 +2423,7 @@ async function validateListServerKey(record) {
   try {
     const response = await fetch(
       `${record.url}/api/list-server/challenge?${new URLSearchParams({ nonce })}`,
-      { headers: { 'User-Agent': `bzo ${CLIENT_BUILD}` }, signal: AbortSignal.timeout(8000) },
+      { headers: { 'User-Agent': BZO_USER_AGENT }, signal: AbortSignal.timeout(8000) },
     );
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
@@ -12449,6 +12478,26 @@ function computeLocalGameOptionsBits() {
 // the match a player is deciding whether to join (`docs/proxy.md`).
 const proxyStatuses = new Map();
 
+// The target's own game, for a browser that is about to be asked which team it
+// wants. The poller below refreshes these on the report's cadence, which is
+// plenty for team maxima -- they change when a bzfs restarts -- so a join
+// reuses what is already held and only dials for a target nothing has asked
+// about yet.
+async function proxyTargetStatus(key, target) {
+  const held = proxyStatuses.get(key);
+  if (held && held.reachable) return held;
+  try {
+    const status = await queryServerStatus(target.host, target.port);
+    proxyStatuses.set(key, { ...status, reachable: true, error: null, at: Date.now() });
+    return status;
+  } catch (error) {
+    // Never fatal: the dialog falls back to Observer, which is the one team
+    // the proxy can always deliver, and the world and roster are unaffected.
+    log(`[PROXY] ${key}: could not ask what game it is running: ${error.message || error}`);
+    return null;
+  }
+}
+
 async function refreshProxyStatuses() {
   const targets = Object.values(PROXY_TARGETS);
   if (targets.length === 0) return;
@@ -12562,7 +12611,7 @@ function reportToListServer(reason) {
   if (!LIST_SERVER_KEY) return;
   fetch(`${LIST_SERVER_URL}/api/list-server/report`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': `bzo ${CLIENT_BUILD}` },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': BZO_USER_AGENT },
     body: JSON.stringify({ key: LIST_SERVER_KEY, ...payload }),
     signal: AbortSignal.timeout(8000),
   }).then(async (response) => {
@@ -15807,10 +15856,15 @@ function getRosterFor(recipient) {
 // the slot the target calls 3 is the slot bzo calls 3.
 // ---------------------------------------------------------------------------
 
-// What a target's player list calls bzo. Upstream reads a client version with
-// `sscanf(..., "%d.%d.%d", ...)`, so it leads with digits and says what it is
-// after them, the same shape the world importer uses.
-const PROXY_CLIENT_VERSION = '0.0.0 bzo';
+// What a target's player list calls bzo, in the shape `getAppVersion()` builds
+// (`buildDate.cxx:138-150`): the release, the build that distinguishes two
+// servers on it, then what this client is. bzfs reads the first three numbers
+// with `sscanf(..., "%d.%d.%d", ...)` and keeps the rest as typed
+// (`PlayerInfo::processEnter`, PlayerInfo.cxx:156-162) -- it neither validates
+// them nor gates on them, and `/clientquery` prints the whole string, so the
+// release a proxied player is actually running is the useful thing to put
+// here. Capped at `VersionLen` 60 (`global.h:34`), which this cannot reach.
+const PROXY_CLIENT_VERSION = `${SERVER_VERSION}.${CLIENT_BUILD}-bzo-web`;
 // The motto a target's player list shows beside the callsign: which bzo this
 // player came through, taken from the Host they reached it on. That is the one
 // fact the operator on the other end cannot work out for themselves -- several
@@ -15875,12 +15929,26 @@ function resolveProxyTarget(url) {
   if (typeof url !== 'string') return null;
   const query = url.indexOf('?');
   if (query === -1) return null;
-  const key = new URLSearchParams(url.slice(query + 1)).get('proxy');
+  const params = new URLSearchParams(url.slice(query + 1));
+  const key = params.get('proxy');
   if (!key) return null;
-  // A target that is asked for and not allowlisted still answers here, with a
-  // null target: a socket that said which server it wanted must not quietly
-  // land in this server's own game instead.
-  return { key, target: PROXY_TARGETS_BY_URL[key] || null };
+  // The team rides on the socket's own URL because bzfs fixes it at
+  // `MsgEnter` and has no message for changing it afterwards -- there is no
+  // `MsgSetTeam` in the protocol. So picking a team is opening a connection,
+  // the same way picking a target is, and a team bzo does not recognise
+  // watches rather than guessing at a colour.
+  const asked = params.get('team');
+  return {
+    key,
+    target: PROXY_TARGETS_BY_URL[key] || null,
+    // `automatic` is the entry dialog's own first option and upstream's
+    // `AutomaticTeam`, so it travels as itself rather than being resolved
+    // here: the target runs `autoTeamSelect` on every join (`bzfs.cxx:2299`)
+    // and knows its own team sizes, which this proxy does not.
+    team: (asked === PLAYER_TEAM.AUTOMATIC || PLAYER_TEAMS.includes(asked))
+      ? asked
+      : PLAYER_TEAM.OBSERVER,
+  };
 }
 
 // One of the target's players as a bzo roster record. Everything about where a
@@ -16001,9 +16069,44 @@ function proxyMove(id, motion, physics) {
   };
 }
 
-// The speeds the *client* will use, which is what `proxyMove` divides by: this
-// server's own config with the target's map laid over it, exactly as the
-// client applies it (`applyWorldGameplay`).
+// `proxyMove` inverted: what the browser says about its own tank, in the shape
+// bzfs takes it. This is the one thing a proxied player is authoritative about
+// today -- upstream has no `positionCorrection` because a client's own
+// position is simply believed (`docs/proxy-plan.md`).
+//
+// bzo's `m` carries a forward speed as a fraction of the world's tank speed
+// rather than a velocity, because that is all its own server needs to
+// extrapolate. bzfs wants the vector, so it is rebuilt from the heading the
+// same way `proxyMove` decomposed it.
+function proxyOutboundMotion(message, physics, status) {
+  // `PlayerState::Falling` is the target's business as well as the browser's:
+  // `shotFired` skips the vertical part of its origin check for a falling
+  // tank (`bzfs.cxx:4210`), so a shot fired mid-jump is dropped without it.
+  // The browser says whether it is airborne because on a proxied connection
+  // it is the authority on that (`air` in client.js's move packet).
+  if (message.air) status |= BZFS_PLAYER_STATUS.FALLING;
+  const x = Number(message.x) || 0;
+  const y = Number(message.y) || 0;
+  const z = Number(message.z) || 0;
+  const r = Number(message.r) || 0;
+  const speed = (Number(message.fs) || 0) * physics.tankSpeed;
+  const vx = -Math.sin(r) * speed;
+  const vz = -Math.cos(r) * speed;
+  return {
+    // bzo is Y-up, bzfs is Z-up (`proxyPosition`).
+    pos: [x, -z, y],
+    velocity: [vx, -vz, Number(message.vv) || 0],
+    // A quarter turn apart (`proxyRotation`).
+    azimuth: r + Math.PI / 2,
+    angVel: (Number(message.rs) || 0) * physics.tankAngVel,
+    status,
+  };
+}
+
+// The speeds the *client* will use, which is what `proxyMove` divides by and
+// `proxyOutboundMotion` multiplies back: this server's own config with the
+// target's map laid over it, exactly as the client applies it
+// (`applyWorldGameplay`).
 function proxyPhysics(mapEntry) {
   const gameplay = mapEntry.gameplay || {};
   return {
@@ -16116,7 +16219,23 @@ function proxyGameOptions(session) {
   return decodeGameSettings(settings).gameOptionsBits;
 }
 
-function buildProxyInit(session, mapEntry, viewer) {
+// bzfs names the nearest flag by its *name* ("Identify"), where bzo's client
+// wants the abbreviation every other flag surface is keyed by. Both tables
+// come from the same upstream one, so the names line up exactly; a name that
+// does not is a flag this bzo has never heard of, and is left alone rather
+// than guessed at.
+const PROXY_FLAG_ABBREVIATIONS = new Map(
+  Object.values(FLAG_TYPES).map((type) => [type.name, type.abbreviation]),
+);
+
+// `MsgGameSettings`' own `maxShots`, or null before it has arrived.
+function proxyMaxShots(session) {
+  const settings = session.state.gameSettings;
+  if (!settings || settings.length < 30) return null;
+  return decodeGameSettings(settings).maxShots;
+}
+
+function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
   const players = [...session.state.players.values()]
     .map((player) => proxyPlayerRecord(player, session.state.motion.get(player.id)));
   const self = players.find((record) => record.id === String(session.playerId));
@@ -16129,13 +16248,17 @@ function buildProxyInit(session, mapEntry, viewer) {
     // the target's. Completion falls back to the client's local commands and
     // the callsigns it can see.
     commands: [],
-    // The target knows this viewer as an observer under the callsign it was
-    // given, and the browser is told exactly that -- including the name, which
-    // is why the entry dialog cannot rename it.
+    // The target knows this viewer under the callsign it was given and on the
+    // team it entered with, and the browser is told exactly that -- including
+    // the name, which is why the entry dialog cannot rename it.
     player: {
       ...(self || proxyPlayerRecord({
         id: session.playerId,
-        team: 5,
+        // Only ever reached before the target has answered with our own
+        // record, so an `automatic` join has no colour to name yet.
+        team: getTeamColorIndex(
+          enterTeam === PLAYER_TEAM.AUTOMATIC ? PLAYER_TEAM.OBSERVER : enterTeam,
+        ),
         wins: 0,
         losses: 0,
         tks: 0,
@@ -16167,7 +16290,13 @@ function buildProxyInit(session, mapEntry, viewer) {
     // client and so does this connection, which is what the proxy cannot do
     // for it -- the target never says where a shell stopped.
     clientTracesShots: true,
-    teamMode: resolveTeamMode(serverConfig.teamMode, mapEntry.teamMode, MAX_REAL_PLAYERS, null),
+    // The target's teams, not this instance's. bzo's own `teamMode` describes
+    // the game this server hosts, which a proxied player is not in, and the
+    // imported map's describes a world whose `-mp` line the target may have
+    // overridden on its command line. What the entry dialog has to offer is
+    // what the target would accept, which only the target can say
+    // (`teamModeFromMaximums`).
+    teamMode: teamModeFromMaximums(status?.teamMaximums, status?.maxPlayers ?? MAX_REAL_PLAYERS),
     teamScores: proxyTeamScores(session.state.teams),
     liveConfigKeys: [],
     operatorConfig: {},
@@ -16193,7 +16322,7 @@ function buildProxyInit(session, mapEntry, viewer) {
 // A proxy connection, from the handshake to the socket closing. The browser is
 // answered only after the target has answered us: an `init` that named an
 // empty world would be a lie a reload could not fix.
-async function handleProxyConnection(ws, req, key, target) {
+async function handleProxyConnection(ws, req, key, target, team = PLAYER_TEAM.OBSERVER) {
   const send = (message) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
   };
@@ -16219,10 +16348,28 @@ async function handleProxyConnection(ws, req, key, target) {
     token: pendingLogin ? pendingLogin.token : '',
   };
   log(`[PROXY] ${key}: viewer "${viewer.callsign}" connecting`
-    + ` to ${target.host}:${target.port}`
+    + ` to ${target.host}:${target.port} as ${team}`
     + `${pendingLogin ? ' with a forwarded token' : ''}`);
 
   let session = null;
+  // Reached from the browser's own message handler, which is outside the try
+  // below: what a proxied player may say depends on the team its connection
+  // entered on, and how its motion converts depends on the target's world.
+  let physics = null;
+  let playingTeam = false;
+  // What the target will accept of a shot, read off its own BZDB rather than
+  // assumed: `shotFired` compares the lifetime against its `_reloadTime` within
+  // an epsilon and drops a shot that misses without telling anyone
+  // (bzfs.cxx:4178). Both are expressions on a stock server, so they are
+  // evaluated (`evalBzdb`).
+  let shotLifetime = 0;
+  let shotSpeed = 0;
+  // `ShotUpdate::id`'s low byte is the slot, and bzfs refuses a slot outside
+  // the target's own `maxShots` (`bzfs.cxx:4896`). bzo's server hands out
+  // slots for its own game; a proxied player keeps its own count.
+  let maxShots = 1;
+  let nextShotSlot = 0;
+  let enteredTeamIndex = 0;
   ws.on('error', (err) => logError(`[PROXY] ${key}: socket error`, err));
   ws.on('close', () => {
     log(`[PROXY] ${key}: viewer "${viewer.callsign}" gone`);
@@ -16233,10 +16380,51 @@ async function handleProxyConnection(ws, req, key, target) {
     // The world first, because it is the slow half and because an `init` needs
     // it. This is the same import Map Viewer serves and the same cache: a
     // target imported within the hour costs nothing to proxy.
-    const { safeMapName } = await importProxyWorld(target);
+    // Asked for alongside the world, not after it: both are the target's own
+    // answer about the game, and the browser is told nothing until it has both.
+    const [{ safeMapName }, targetStatus] = await Promise.all([
+      importProxyWorld(target),
+      proxyTargetStatus(key, target),
+    ]);
     const mapEntry = MAP_REGISTRY.get(safeMapName);
     if (!mapEntry) throw new Error(`imported ${safeMapName} is not registered`);
     if (ws.readyState !== ws.OPEN) return;
+
+    // A team the target has no room for is refused at `MsgEnter` with a
+    // sentence of its own (`RejectTeamFull`, bzfs.cxx:2345), which would cost
+    // this browser its whole connection over a choice it could have been
+    // talked out of. Where the target has already said the team is zero, that
+    // is settled here instead and the player watches.
+    const offered = teamModeFromMaximums(
+      targetStatus?.teamMaximums, targetStatus?.maxPlayers ?? MAX_REAL_PLAYERS,
+    ).teams;
+    // Only a verified player plays. A connection carrying no global login
+    // watches, whatever team its link asked for.
+    //
+    // This is a courtesy to the target's operator rather than a restriction
+    // bzfs imposes: it would admit an unregistered player itself. What it buys
+    // them is that every proxied *player* is answerable by a BZID, so `/idban`
+    // reaches one of them instead of `/ban` reaching all of them -- which is a
+    // stronger guarantee than a native client gives (`docs/proxy.md`, "What a
+    // target operator sees"). An operator who does not want it edits their own
+    // bzo; it is a default, not a boundary.
+    //
+    // It is also the honest answer for a registered callsign, which cannot
+    // spawn without a token at all -- `playerAlive` removes one that has not
+    // identified (`bzfs.cxx:3199`). A bzo restart lands here: the session
+    // outlives it, and the single-use token held in memory does not.
+    const cannotSpawn = !viewer.token;
+    const wanted = cannotSpawn ? PLAYER_TEAM.OBSERVER : team;
+    const enterTeam = (wanted === PLAYER_TEAM.AUTOMATIC || offered.includes(wanted))
+      ? wanted
+      : PLAYER_TEAM.OBSERVER;
+    if (cannotSpawn && team !== PLAYER_TEAM.OBSERVER) {
+      log(`[PROXY] ${key}: "${viewer.callsign}" carries no global login,`
+        + ` so watching rather than ${team}`);
+    }
+    if (enterTeam !== team) {
+      log(`[PROXY] ${key}: "${viewer.callsign}" asked for ${team}, which it does not run`);
+    }
 
     session = new BzfsSession({
       host: target.host,
@@ -16244,6 +16432,13 @@ async function handleProxyConnection(ws, req, key, target) {
       callsign: viewer.callsign,
       motto: proxyMotto(req),
       version: PROXY_CLIENT_VERSION,
+      // `TeamColor` by upstream's own numbering (`global.h:59`), which is what
+      // `MsgEnter` packs and what decides whether this connection may shoot,
+      // grab or die at all: bzfs kicks an observer that tries any of them
+      // (`invalidPlayerAction`, bzfs.cxx:4352).
+      team: enterTeam === PLAYER_TEAM.AUTOMATIC
+        ? AUTOMATIC_TEAM
+        : getTeamColorIndex(enterTeam),
       // The forwarded global login, unspent. It only verifies because bzfs
       // sees this connection arrive from a private address and asks the list
       // server without one (docs/proxy.md, "A proxy runs inside its
@@ -16267,11 +16462,27 @@ async function handleProxyConnection(ws, req, key, target) {
     log(`[PROXY] ${key}: joined as id ${session.playerId},`
       + ` ${state.players.size} players, ${state.flags.filter(Boolean).length} flags,`
       + ` world ${mapEntry.fileName}`);
-    send(buildProxyInit(session, mapEntry, viewer));
+    send(buildProxyInit(session, mapEntry, viewer, targetStatus, enterTeam));
     // What the target said to us on the way in -- its own greeting, and
     // whether the callsign we gave it is registered there.
     for (const text of state.messages) {
       send({ type: 'message', src: SERVER_PLAYER, dst: ALL_PLAYERS, msgType: 'server', text, ts: Date.now() });
+    }
+    // Said once, because being quietly seated on a team you did not pick is
+    // worse than being refused out loud. A global login is spent the first
+    // time it is offered, so a bzo restart leaves the name behind and takes
+    // the proof with it.
+    if (cannotSpawn && team !== PLAYER_TEAM.OBSERVER) {
+      send({
+        type: 'message',
+        src: SERVER_PLAYER,
+        dst: ALL_PLAYERS,
+        msgType: 'server',
+        text: `Watching: playing on ${key} through this proxy needs a global`
+          + ' login, so the target knows who every player is. Sign in and'
+          + ' rejoin to play.',
+        ts: Date.now(),
+      });
     }
 
     // Only now: `init` is a snapshot, and anything that reached the browser
@@ -16279,7 +16490,13 @@ async function handleProxyConnection(ws, req, key, target) {
     // which it answers by clearing every tank it holds. The session has been
     // keeping its state through the burst either way, so what these forward
     // is only what changes from here.
-    const physics = proxyPhysics(mapEntry);
+    physics = proxyPhysics(mapEntry);
+    playingTeam = enterTeam !== PLAYER_TEAM.OBSERVER;
+    shotLifetime = evalBzdb(session.state.vars, '_reloadTime');
+    shotSpeed = evalBzdb(session.state.vars, '_shotSpeed');
+    maxShots = Math.max(1, proxyMaxShots(session) || 1);
+    const ownRecord = session.state.players.get(session.playerId);
+    enteredTeamIndex = ownRecord ? ownRecord.team : getTeamColorIndex(PLAYER_TEAM.OBSERVER);
     // Which of upstream's switches the target has on (`MsgGameSettings`, asked
     // for on the way in). Ricochet is the one a forwarded shot needs.
     const gameOptions = proxyGameOptions(session) ?? 0;
@@ -16406,6 +16623,34 @@ async function handleProxyConnection(ws, req, key, target) {
           player: proxyPlayerRecord(player, session.state.motion.get(entry.id)),
         });
       }
+    });
+
+    // Identify's answer, which the target volunteers off its own `searchFlag`
+    // on every player update it gets (`bzfs.cxx:5509`) -- so a proxied player
+    // carrying ID gets these the moment its position is going up, and bzo's
+    // own `nearFlag` request has nothing to ask for.
+    //
+    // Two things have to be filled in. bzfs sends the flag's name where bzo's
+    // client keys everything by abbreviation, and it sends no index at all,
+    // because upstream's client only wants something to print. bzo writes the
+    // answer into the flag record, so the index is found by matching the
+    // position the message carries against the flags the target has already
+    // described -- the same numbers, from the same connection.
+    session.on('nearFlag', ({ pos, name }) => {
+      const flagType = PROXY_FLAG_ABBREVIATIONS.get(name);
+      if (!flagType) return;
+      const found = session.state.flags.find((flag) => flag
+        && flag.status === FLAG_STATUS.ON_GROUND
+        && Math.abs(flag.position[0] - pos[0]) < 0.01
+        && Math.abs(flag.position[1] - pos[1]) < 0.01
+        && Math.abs(flag.position[2] - pos[2]) < 0.01);
+      if (!found) return;
+      send({
+        type: 'nearFlag',
+        index: found.index,
+        flagType,
+        position: proxyPosition(pos),
+      });
     });
 
     session.on('flags', (flags) => {
@@ -16545,6 +16790,13 @@ async function handleProxyConnection(ws, req, key, target) {
   // Said once: a player typing in a language with accents would otherwise be
   // told on every line.
   let warnedAboutChatText = false;
+  // The last state the browser reported, resent immediately before a shot so
+  // the target measures the muzzle against where the tank actually is.
+  let lastMotion = null;
+  // What this browser last told the target about being paused. bzfs holds the
+  // flag; this is only what to send next and which status bit to set.
+  let proxyPaused = false;
+  let warnedAboutShots = false;
 
   ws.on('message', (data) => {
     let message;
@@ -16567,6 +16819,35 @@ async function handleProxyConnection(ws, req, key, target) {
           globalCallsign: viewer.globalCallsign,
         },
       });
+      // Where a tank spawns is the target's to decide: `MsgAlive` goes up
+      // empty and bzfs answers with the position, which reaches the browser
+      // through the `alive` handler like any other player's. bzo's own server
+      // spawns a player as part of the join; a proxied one has to ask.
+      //
+      // Except when the answer would be an eviction. A callsign the target has
+      // registered, carried without a token, fails
+      // `accessInfo.isAllowedToEnter()` and bzfs removes the player outright
+      // for "unidentified" (`playerAlive`, bzfs.cxx:3199-3205) -- joining is
+      // allowed, spawning is not. That is a kick the browser answers by
+      // reconnecting, so asking anyway costs a join-and-part loop rather than
+      // one refusal. The target says which players are registered and which
+      // are verified (`MsgPlayerInfo`), so this is answered before it is
+      // asked, and the player is told the one thing that fixes it.
+      if (!playingTeam) return;
+      if (self.registered && !self.verified) {
+        log(`[PROXY] ${key}: "${viewer.callsign}" is registered there and not signed in`);
+        send({
+          type: 'message',
+          src: SERVER_PLAYER,
+          dst: ALL_PLAYERS,
+          msgType: 'server',
+          text: `${key} has "${viewer.callsign}" registered, so playing needs a global`
+            + ' login. Sign in and rejoin, or watch as an observer.',
+          ts: Date.now(),
+        });
+        return;
+      }
+      session.sendAlive();
       return;
     }
     // Chat goes straight out to the target, including a line that starts with
@@ -16605,6 +16886,111 @@ async function handleProxyConnection(ws, req, key, target) {
       );
       return;
     }
+    // The browser's own tank, which is the one thing a proxied player is
+    // authoritative about: bzfs believes a client's position outright, which
+    // is why it has no `positionCorrection` (`docs/proxy-plan.md`). An
+    // observer has no tank to report and bzfs would not read one from it.
+    if (message.type === 'm') {
+      if (playingTeam && physics) {
+        lastMotion = proxyOutboundMotion(
+          message,
+          physics,
+          BZFS_PLAYER_STATUS.ALIVE | (proxyPaused ? BZFS_PLAYER_STATUS.PAUSED : 0),
+        );
+        session.sendPlayerUpdate(lastMotion);
+      }
+      return;
+    }
+    // A shot is the shooter's to declare: bzfs checks it and relays, it does
+    // not decide it. Three of those checks are worth knowing about, because a
+    // shot that fails any of them is dropped without a word (`shotFired`,
+    // bzfs.cxx:4178-4221):
+    //
+    // The lifetime must be the world's `_reloadTime` within an epsilon -- the
+    // reload, not the life the flag's own shot has. The speed may not exceed
+    // `_shotSpeed` plus the tank's. And the origin has to be within
+    // `_tankSpeed * _velocityAd + 2 * _muzzleFront` of the shooter's last
+    // reported state, which is why upstream sends a player update immediately
+    // before every shot (`LocalPlayer::fireShot`) and why this does too: the
+    // browser has just moved to the muzzle it is firing from, and the target
+    // is still holding wherever the last 20Hz batch left it.
+    if (message.type === 'shoot') {
+      if (!playingTeam || !physics) return;
+      if (!Number.isFinite(shotLifetime) || !Number.isFinite(shotSpeed)) {
+        if (!warnedAboutShots) {
+          warnedAboutShots = true;
+          log(`[PROXY] ${key}: cannot fire -- _reloadTime/_shotSpeed did not evaluate`);
+        }
+        return;
+      }
+      if (lastMotion) session.sendPlayerUpdate(lastMotion);
+      const x = Number(message.x) || 0;
+      const y = Number(message.y) || 0;
+      const z = Number(message.z) || 0;
+      // A direction converts the way a position does, being a difference of
+      // two of them (`proxyOutboundMotion`).
+      const dir = [Number(message.dirX) || 0, -(Number(message.dirZ) || 0), Number(message.dirY) || 0];
+      const slot = nextShotSlot;
+      nextShotSlot = (nextShotSlot + 1) % maxShots;
+      session.sendShot({
+        slot,
+        pos: [x, -z, y],
+        velocity: dir.map((component) => component * shotSpeed),
+        // Always Null, never the flag the browser thinks it is holding. bzfs
+        // kicks for a claimed flag that differs from the one it has recorded
+        // (`checkShotMismatch`) and fills the real one in itself when the
+        // shooter is carrying something, so claiming nothing is both safe and
+        // accurate.
+        flag: '',
+        lifetime: shotLifetime,
+        team: enteredTeamIndex,
+      });
+      return;
+    }
+    // Flags are declared, not requested: upstream's client says it grabbed
+    // one, dropped one or capped with one, and bzfs checks and relays rather
+    // than deciding (`docs/proxy-plan.md`). bzo's own client already speaks in
+    // exactly those three messages -- it names the flag index it drove over
+    // and the base team it capped on -- so there is nothing to translate
+    // beyond letting them through.
+    if (message.type === 'grabFlag') {
+      const index = Number(message.index);
+      // The indices are the target's own, forwarded untouched by
+      // `proxyFlagState`, so the number the browser names is the number bzfs
+      // knows it by.
+      if (playingTeam && Number.isInteger(index) && index >= 0) session.sendGrabFlag(index);
+      return;
+    }
+    if (message.type === 'dropFlag') {
+      // bzfs takes the position the tank let go at, and the browser's last
+      // report is where it is (`ServerLink.cxx:749`).
+      if (playingTeam && lastMotion) session.sendDropFlag(lastMotion.pos);
+      return;
+    }
+    if (message.type === 'captureFlag') {
+      const team = Number(message.team);
+      // Upstream's own `TeamColor` numbering on both sides of this hop
+      // (`docs/network.md`, "Player ids"), so the base the browser names is
+      // the base bzfs scores.
+      if (playingTeam && isColorTeamIndex(team)) session.sendCaptureFlag(team);
+      return;
+    }
+    // `nearFlag` is bzo's own: its server searches for a flag under the tank
+    // and answers. A target does no such thing -- the client decides it drove
+    // over one and says so above -- so there is nothing to ask and nobody to
+    // ask it of.
+    if (message.type === 'nearFlag') return;
+    // bzo's pause is a request its own server answers by flipping a flag; a
+    // target keeps that flag itself, so the browser's toggle is applied here
+    // and declared. Without it a "paused" browser is still alive on the
+    // target -- shootable, scoreable, and no longer moving, which is worse
+    // than having no pause at all.
+    if (message.type === 'pause') {
+      if (!playingTeam) return;
+      proxyPaused = !proxyPaused;
+      session.sendPause(proxyPaused);
+      return;
+    }
     if (message.type === 'debug') {
       log(`[PROXY] ${key}: "${viewer.callsign}" ${String(message.message).slice(0, 200)}`);
     }
@@ -16639,7 +17025,7 @@ wss.on('connection', (ws, req) => {
       ws.close();
       return;
     }
-    void handleProxyConnection(ws, req, proxied.key, proxied.target);
+    void handleProxyConnection(ws, req, proxied.key, proxied.target, proxied.team);
     return;
   }
 
