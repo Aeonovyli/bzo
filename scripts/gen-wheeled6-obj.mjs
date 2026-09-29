@@ -10,6 +10,7 @@ import * as THREE from 'three';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 import { writeFileSync } from 'fs';
+import { tileTankUVsByPosition } from '../public/tank-uv.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -19,6 +20,22 @@ class OBJBuilder {
     this.vtOffset = 0;
     this.vnOffset = 0;
     this.out = '';
+  }
+
+
+  // A nav light is a single point, not a surface: it marks where render.js
+  // hangs a light on the model and has no geometry of its own. `p -1` is the
+  // OBJ spelling for "the vertex just written", which keeps a point
+  // independent of how many vertices came before it.
+  addComment(text) {
+    this.out += `\n# ${text}\n`;
+  }
+
+  addPoint(name, x, y, z) {
+    this.out += `\no ${name}\n`;
+    this.out += `v ${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)}\n`;
+    this.out += 'p -1\n';
+    this.vOffset += 1;
   }
 
   addObject(name, geo, matNames) {
@@ -184,9 +201,22 @@ builder.out = `# Wheeled6 geometry for BZO
 # Naming contract used by render.js template-driven assembly.
 `;
 
-builder.addObject('body', transformedGeometry(makeBodyGeometry(), { y: 0.18 }));
 
-builder.addObject('turret', transformedGeometry(makeTurretGeometry(), { y: 1.0, z: -0.15 }));
+// The camo-skinned parts take their texture coordinates from the shared rule
+// rather than from whatever the primitive handed back, so a patch is the same
+// size on every part of every tank. See public/tank-uv.mjs.
+function tileCamo(geometry) {
+  const position = geometry.attributes.position;
+  const normal = geometry.attributes.normal;
+  geometry.setAttribute('uv', new THREE.BufferAttribute(
+    tileTankUVsByPosition(position.array, normal ? normal.array : null), 2,
+  ));
+  return geometry;
+}
+
+builder.addObject('body', tileCamo(transformedGeometry(makeBodyGeometry(), { y: 0.18 })));
+
+builder.addObject('turret', tileCamo(transformedGeometry(makeTurretGeometry(), { y: 1.0, z: -0.15 })));
 builder.addObject('barrel', transformedGeometry(makeBarrelGeometry(), { y: 1.72, z: -1.68 }));
 
 const wheelZ = [2.1, 0, -2.1];
@@ -202,6 +232,14 @@ for (let i = 0; i < wheelZ.length; i += 1) {
     z: wheelZ[i],
   }), WHEEL_MATS);
 }
+
+// The nav lights render.js hangs on the model. Points rather than
+// geometry, and last so they cannot disturb a face index.
+builder.addComment('Navigation lights. One `p` vertex each, read by the renderer for its');
+builder.addComment('position only; see docs/tank-model-format.md.');
+builder.addPoint('lightRear', 0.0, 1.82, 1.0);
+builder.addPoint('lightPort', -0.7, 1.65, -0.1);
+builder.addPoint('lightStarboard', 0.7, 1.65, -0.1);
 
 const objText = builder.build();
 const outPath = resolve(__dirname, '../public/obj/wheeled6.obj');

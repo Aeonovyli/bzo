@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- Camo is the same size on every part of every tank. A patch is four world
+  units wherever it is drawn, the way a tread link already had a size of its
+  own, instead of each part inheriting whatever scale its geometry happened to
+  hand back. The Wheeled 6 hull was tiled about once per unit -- fine noise
+  rather than camo -- and its turret was stretched along the top and striped
+  across the ends, because the top face was given the long axis twice over
+  while the ends were given almost no span at all. Closes #148.
+
 ### Added
 - A tank stuck inside a building says so. `Sealed` appears top-centre with the
   other notices, in the warning colour, for exactly as long as the tank is
