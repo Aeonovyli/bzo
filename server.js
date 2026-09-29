@@ -185,6 +185,7 @@ const {
   isARabbitKill,
   PLAYER_TEAM,
   PLAYER_TEAMS,
+  BZFLAG_MP_TEAM_ORDER,
   teamScoreMovesOnKill,
   areFoes,
 } = require('./server/teams.cjs');
@@ -1119,6 +1120,541 @@ function statMtimeOrBlank(filePath) {
   }
 }
 
+// Upstream does not spend a column on a fact, it spends a line on a server.
+// One row says only what tells it apart -- game type, jumping, superflags,
+// ricochet, and the shot count carried by the *colour* of its description --
+// and a readout pane says everything about the one row you are looking at
+// (`ServerMenu.cxx:400-476` for the row, `:545-745` for the pane). Both
+// tables here were fifteen and fourteen columns, eight of them a single
+// boolean apiece, which is what this replaces; see docs/list-server-plan.md.
+//
+// Nothing was lost with the sortable headers: upstream has no interactive
+// sort either. Its list is always player-count descending
+// (`ServerItem::getSortFactor`), which is the order `/list` already asks for.
+// Paging is the one part deliberately not copied -- ten rows a page with
+// PageUp/PageDown is how a fixed-height HUD shows a long list, and a web page
+// scrolls.
+const GAME_STYLE_NAMES = Object.freeze({
+  ClassicCTF: 'Classic Capture-the-Flag',
+  RabbitChase: 'Rabbit Chase',
+  OpenFFA: 'Open (Teamless) Free-For-All',
+  TeamFFA: 'Free-style',
+});
+
+// `BrightColors` (src/3D/FontManager.cxx:40) -- the RGB upstream's own ANSI
+// colour codes draw as, so a row here is the colour a row in the game is.
+const ANSI_RGB = Object.freeze({
+  yellow: '#ffff00', red: '#ff0000', green: '#00ff00', blue: '#1a33ff',
+  purple: '#ff00ff', white: '#ffffff', cyan: '#00ffff',
+});
+// Upstream's dim is 0.2 of the colour (`dimFactor`, FontManager.cxx:80), which
+// for white is #333 -- at 14px on black that is not "off", it is invisible.
+// This is the one colour lifted rather than copied: still plainly unlit beside
+// a bright one, still legible as the letter it is.
+const ANSI_DIM_WHITE = '#666';
+
+// The `*` in front of a row *is* the game type -- one glyph whose colour says
+// which of the four it is, which is the whole of what upstream puts there
+// (`ServerMenu.cxx:424-441`, under its `listIcons` setting). Replay servers are
+// recognised the way upstream recognises them: 16 observer slots and 200
+// players is what a replay server advertises, not a flag it sets.
+// Rarest first, so sorting on this column brings the unusual games up.
+function listGameMark(entry) {
+  if (entry.observerMax === 16 && entry.maxPlayers === 200) {
+    return { color: ANSI_RGB.cyan, rank: 3, title: 'Replay server' };
+  }
+  if (entry.style === 'ClassicCTF') {
+    return { color: ANSI_RGB.red, rank: 2, title: 'Classic Capture-the-Flag' };
+  }
+  if (entry.style === 'RabbitChase') {
+    return { color: ANSI_RGB.white, rank: 1, title: 'Rabbit Chase' };
+  }
+  return { color: ANSI_RGB.yellow, rank: 0, title: 'Free-for-all' };
+}
+
+// The description's colour *is* the shot count: purple for zero through
+// yellow for three, then graded orange into red above that
+// (`ServerMenu.cxx:459-484`). Kept exactly, dark purple included -- it is a
+// signal in a fixed vocabulary rather than body text, and the pane spells the
+// number out anyway.
+function listShotColor(maxShots) {
+  if (!(maxShots > 0)) return '#660099';
+  if (maxShots === 1) return '#4040ff';
+  if (maxShots === 2) return '#40ff40';
+  if (maxShots === 3) return '#ffff40';
+  const shotScale = Math.min(1, Math.log10(maxShots - 3));
+  const green = Math.round(255 * 0.4 * (1 - shotScale));
+  const blue = Math.round(0.25 * 0.4 * (1 - shotScale) * 255);
+  return `rgb(255, ${green}, ${blue})`;
+}
+
+// `J F R`, bright when on and unlit when off, in the letters and colours
+// upstream uses (`ServerMenu.cxx:443-458`). `I` is bzo's own fourth letter and
+// only the bzfs list has it: whether this server already holds an import of
+// that map, which is the one fact about a row that is about *this* server
+// rather than that one.
+function listOptionLetter(text, on, onColor) {
+  return `<span class="opt" style="color:${on ? onColor : ANSI_DIM_WHITE}">${text}</span>`;
+}
+
+function listOptionLetters(bits, imported) {
+  const letter = (text, bit, onColor) => listOptionLetter(text, (bits & bit) !== 0, onColor);
+  return letter('J', GAME_OPTION_BITS.jumping, ANSI_RGB.purple)
+    + letter('F', GAME_OPTION_BITS.flags, ANSI_RGB.blue)
+    + letter('R', GAME_OPTION_BITS.ricochet, ANSI_RGB.green)
+    + (typeof imported === 'boolean'
+      ? listOptionLetter('I', imported, ANSI_RGB.cyan)
+      : '');
+}
+
+// How long a server has been up, from the timestamp the list server itself
+// recorded on that server's last `boot` report (issue #106). Coarse on
+// purpose: the interesting fact is "days" or "an hour", and a seconds-precise
+// figure would only invite reading it as more exact than a report cadence can
+// make it. Nothing at all when no boot has been observed -- a blank line is
+// honest where a zero would not be.
+function formatUptime(since, now = Date.now()) {
+  if (!Number.isFinite(since)) return '';
+  const minutes = Math.floor((now - since) / 60000);
+  if (minutes < 1) return 'just started';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+// h:mm:ss, m:ss or 0:ss, as upstream formats a time limit
+// (`ServerMenu.cxx:704-711`).
+function formatMatchDuration(seconds) {
+  if (!(seconds > 0)) return '';
+  if (seconds >= 3600) {
+    return `${Math.floor(seconds / 3600)}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}`
+      + `:${String(seconds % 60).padStart(2, '0')}`;
+  }
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+// One team's cell: nothing at all when the team is not offered, a bare count
+// when its maximum is the whole server, and count/max otherwise -- upstream's
+// own three cases (`ServerMenu.cxx:573-620`).
+function listTeamCell(count, max, maxPlayers) {
+  if (!(max > 0)) return '';
+  if (typeof count !== 'number') return `?/${max}`;
+  if (max >= maxPlayers) return String(count);
+  return `${count}/${max}`;
+}
+
+const LIST_TEAM_LABELS = Object.freeze(['Rogue', 'Red', 'Green', 'Blue', 'Purple', 'Observers']);
+
+// How wide a numeric column has to be: its own header, or its widest value,
+// whichever needs more characters. The rows are monospace, so `ch` is exact
+// and the column takes no space it is not using -- a list where nobody is
+// watching gives the observer count one character, and a server with 200
+// players widens the player column to three without anything else moving.
+function listColumnWidth(header, values) {
+  const widest = values.reduce(
+    (max, value) => Math.max(max, String(value ?? '').length), header.length,
+  );
+  return `${widest}ch`;
+}
+
+// What a section heading says it holds: how many servers, and how many people
+// are playing on them. Observers are not players and are counted nowhere here
+// -- the same line `-mp` itself draws, where the playing limit caps the tanks
+// and says nothing about who is watching (CmdLineOptions.cxx:458).
+function listHeadingCount(entries) {
+  if (!entries.length) return 'none';
+  const players = entries.reduce((sum, entry) => sum + (Number(entry.players) || 0), 0);
+  return `${entries.length} with ${players} ${players === 1 ? 'player' : 'players'}`;
+}
+
+// The readout pane for one row: upstream's own panel, in upstream's order,
+// plus the handful of fields only bzo has (`extras`).
+function renderListReadout(entry, hidden) {
+  const bits = entry.gameOptionsBits || 0;
+  const has = (bit) => (bits & bit) !== 0;
+  const counts = Array.isArray(entry.teamCounts) ? entry.teamCounts : [];
+  const maxima = Array.isArray(entry.teamMaximums) ? entry.teamMaximums : [];
+  // Every team, always, with a blank value where the team is not offered --
+  // upstream keeps the label and empties the number (`ServerMenu.cxx:573-620`),
+  // which is what stops the pane changing height as the selection moves down
+  // the list.
+  const teamRows = LIST_TEAM_LABELS.map((label, index) => `<div class="paneRow">`
+    + `<span>${label}</span>`
+    + `<span>${escapeHtml(listTeamCell(counts[index], maxima[index], entry.maxPlayers))}</span>`
+    + `</div>`).join('');
+
+  // The option words, present or absent, as upstream lists them -- a blank
+  // line for an option that is off rather than a "No" beside it. Both shake
+  // conditions show where upstream shows one: it writes the timeout and the
+  // win count into the same readout slot (`ServerMenu.cxx:650-681`, listHUD[12]
+  // twice), so the second always overwrites the first, and it takes the
+  // timeout's plural from `shakeWins`.
+  const words = [];
+  if (has(GAME_OPTION_BITS.flags)) words.push('Super Flags');
+  if (has(GAME_OPTION_BITS.antidote)) words.push('Antidote Flags');
+  if (has(GAME_OPTION_BITS.shaking) && entry.shakeTimeout > 0) {
+    const secs = (entry.shakeTimeout / 10).toFixed(1);
+    words.push(`${secs} ${entry.shakeTimeout === 10 ? 'sec' : 'secs'} To Drop Bad Flag`);
+  }
+  if (has(GAME_OPTION_BITS.shaking) && entry.shakeWins > 0) {
+    words.push(`${entry.shakeWins} ${entry.shakeWins === 1 ? 'Win' : 'Wins'} Drops Bad Flag`);
+  }
+  if (has(GAME_OPTION_BITS.noTeamKills)) words.push('No Teamkills');
+  if (has(GAME_OPTION_BITS.jumping)) words.push('Jumping');
+  if (has(GAME_OPTION_BITS.ricochet)) words.push('Ricochet');
+  if (has(GAME_OPTION_BITS.handicap)) words.push('Handicap');
+  if (has(GAME_OPTION_BITS.inertia)) words.push('Inertia');
+
+  const limits = [
+    ['Time limit', formatMatchDuration(entry.maxTime)],
+    ['Max team score', entry.maxTeamScore > 0 ? String(entry.maxTeamScore) : ''],
+    ['Max player score', entry.maxPlayerScore > 0 ? String(entry.maxPlayerScore) : ''],
+    ...(entry.extras || []),
+  ].filter(([, value]) => value)
+    .map(([label, value]) => `<div class="paneRow"><span>${escapeHtml(label)}</span><span>${value}</span></div>`)
+    .join('');
+
+  const shots = `${entry.maxShots || 0} ${entry.maxShots === 1 ? 'Shot' : 'Shots'}`;
+  // Two columns, as upstream's own panel has it: who is playing on the left,
+  // what the game is on the right (`ServerMenu.cxx:214-238`). A map overview
+  // is meant to become a third -- docs/list-server-plan.md.
+  return `<div class="pane" id="${escapeHtml(entry.id)}"${hidden ? ' hidden' : ''}>`
+    + `<p class="paneTitle">${escapeHtml(entry.desc || entry.addr)}</p>`
+    + `<div class="paneCols">`
+    + `<div class="paneCol">`
+    // Players, not people: upstream's own panel sums the observers into this
+    // (`ServerMenu.cxx:568-571`) and bzo does not, on the same line `-mp`
+    // itself draws -- see `listHeadingCount`. The limit beside it stays the
+    // one the server reports, which for a bzfs row is its own total including
+    // whatever observer slots it holds. There is no reliable way to take
+    // those back off: plenty of servers report an observer maximum equal to
+    // `maxPlayers` outright, which would leave a playing limit of zero.
+    + `<div class="paneRow"><span>Players</span>`
+    + `<span>${typeof entry.players === 'number' ? entry.players : '?'}/${entry.maxPlayers || 0}</span></div>`
+    + teamRows
+    + `</div>`
+    + `<div class="paneCol">`
+    + `<p class="paneWords">${escapeHtml(shots)} &middot; ${escapeHtml(GAME_STYLE_NAMES[entry.style] || entry.style || '')}</p>`
+    + (words.length ? `<p class="paneWords">${words.map(escapeHtml).join(' &middot; ')}</p>` : '')
+    + limits
+    + `</div>`
+    + `</div></div>`;
+}
+
+// What you can do about the selected row, which rides on the filter bar rather
+// than inside the pane: the pane says what a server *is*, and the way in wants
+// to be in one fixed place instead of moving down the page as a pane grows or
+// shrinks. Shown and hidden with its own pane, keyed off the same id.
+function renderListActions(entry, hidden) {
+  return `<div class="rowActions" id="${escapeHtml(entry.id)}-actions"${hidden ? ' hidden' : ''}>`
+    + `<a class="action" href="${escapeHtml(entry.href)}">${escapeHtml(entry.action)}</a>`
+    + (entry.actions || '')
+    + `</div>`;
+}
+
+// The local maps list, given the same shape as the two server lists above: one
+// line per map, a readout pane for the selected one, a sortable header and the
+// filter box. The row carries the three numbers the in-client View picker
+// shows in columns (`populateViewMapTable`, public/client.js) and the pane
+// carries the rest -- including what that picker only puts in a row tooltip.
+// A map overview is meant to become a third pane column, the same as for a
+// server (docs/list-server-plan.md).
+function renderMapList(listId, filterId, maps) {
+  if (!maps.length) return `<p class="muted">None.</p>`;
+  const entries = maps.map((map) => {
+    const registered = MAP_REGISTRY.get(map.fileName);
+    const stats = registered ? registered.stats : null;
+    const bzwPath = resolveMapFilePath(map.fileName);
+    return {
+      file: map.fileName,
+      hashed: map.hashed,
+      hash: registered ? registered.hash : '',
+      stats,
+      modified: bzwPath ? statMtimeOrBlank(bzwPath) : '',
+      bzwSize: bzwPath ? statSizeOrBlank(bzwPath) : '',
+      jsonSize: registered ? statSizeOrBlank(path.join(MAP_CACHE_DIR, `${registered.hash}.json`)) : '',
+    };
+  });
+
+  // `a` and `d` are the two fields the filter box's own glob looks at, so on
+  // this list typing a word matches a file name or a style. The `/` filter
+  // language is about servers and is not offered here -- there is no `?`
+  // beside this box.
+  const data = entries.map((entry) => ({
+    a: entry.file,
+    d: entry.stats ? entry.stats.style || '' : '',
+    n: entry.file.toLowerCase(),
+    o: entry.stats ? entry.stats.objects || 0 : 0,
+    fa: entry.stats ? entry.stats.faces || 0 : 0,
+    sz: entry.stats ? entry.stats.size || 0 : 0,
+  }));
+
+  const num = (value) => (Number.isFinite(value) ? String(value) : '');
+  // `random` is not a file and never gets a registry entry with stats: it is a
+  // world generated at boot, so it has no counts, no hash and no sizes, and
+  // saying "hashing…" about it would be a wait that never ends.
+  const mapStyleLabel = (entry) => {
+    if (entry.stats) return entry.stats.style || '';
+    return entry.file === 'random' ? 'generated' : 'hashing…';
+  };
+  const rows = entries.map((entry, index) => {
+    const stats = entry.stats;
+    // A map still being hashed has no cached world to show, so its row leads
+    // nowhere yet -- the background pass registers it within seconds of boot
+    // and a reload picks it up.
+    const href = entry.hashed ? `/?viewmap=${encodeURIComponent(entry.file)}` : '#maps';
+    return `<li>`
+      + `<a class="srow${index === 0 ? ' selected' : ''}" href="${escapeHtml(href)}"`
+      + ` data-pane="map-pane-${index}" data-i="${index}">`
+      + `<span class="num col-obj">${stats ? num(stats.objects) : ''}</span>`
+      + `<span class="num col-fa">${stats ? num(stats.faces) : ''}</span>`
+      + `<span class="num col-sz">${stats ? num(stats.size) : ''}</span>`
+      + `<span class="addr">${escapeHtml(entry.file)}</span>`
+      + `<span class="desc dim">${escapeHtml(mapStyleLabel(entry))}</span>`
+      + `</a></li>`;
+  }).join('\n');
+
+  const head = `<div class="shead">`
+    + `<button class="num col-obj" data-field="o" title="Obstacles in the world">Obj</button>`
+    + `<button class="num col-fa" data-field="fa" title="Mesh faces in the world">Faces</button>`
+    + `<button class="num col-sz" data-field="sz" title="World size">Size</button>`
+    + `<button class="name" data-field="n" data-text title="Map file name">Name</button>`
+    + `<button class="name" data-field="d" data-text title="Game style the map sets">Style</button>`
+    + `</div>`;
+
+  // `random` has no numbers at all, so a blank contributes nothing here and
+  // the header word is what sets each of these three.
+  const widths = `--col-obj:${listColumnWidth('Obj', data.map((entry) => entry.o || ''))};`
+    + `--col-fa:${listColumnWidth('Faces', data.map((entry) => entry.fa || ''))};`
+    + `--col-sz:${listColumnWidth('Size', data.map((entry) => entry.sz || ''))}`;
+  return `<div class="listWrap" id="${escapeHtml(listId)}" style="${widths}">`
+    + `<div class="panes">${entries
+      .map((entry, index) => renderMapReadout(entry, index, index !== 0)).join('\n')}</div>`
+    + `<div class="listBar">`
+    + `<input id="${escapeHtml(filterId)}" type="text" placeholder="Filter…">`
+    + entries.map((entry, index) => `<div class="rowActions" id="map-pane-${index}-actions"`
+      + `${index !== 0 ? ' hidden' : ''}>`
+      + (entry.hashed
+        ? `<a class="action" href="/?viewmap=${encodeURIComponent(entry.file)}">View map</a>`
+        : `<span class="muted">Still hashing</span>`)
+      + `</div>`).join('')
+    + `</div>`
+    + head
+    + `<ul class="srows">\n${rows}\n</ul>`
+    + `<script type="application/json" id="${escapeHtml(listId)}-data">`
+    + `${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`
+    + `</div>`;
+}
+
+// What the map is made of on the left, what it is on the right -- the same two
+// columns a server's pane has. Every label is always present, blank where the
+// map says nothing, so the pane keeps its height as the selection moves.
+function renderMapReadout(entry, index, hidden) {
+  const stats = entry.stats || {};
+  const counts = stats.counts || {};
+  const row = (label, value) => `<div class="paneRow"><span>${label}</span>`
+    + `<span>${escapeHtml(value === undefined || value === null ? '' : String(value))}</span></div>`;
+  const count = (value) => (value ? String(value) : '');
+  const features = ['water', 'weather', 'ground']
+    .filter((key) => stats[key])
+    .map((key) => (key === 'ground' ? 'custom ground' : key))
+    .join(', ');
+  return `<div class="pane" id="map-pane-${index}"${hidden ? ' hidden' : ''}>`
+    + `<p class="paneTitle">${escapeHtml(entry.file)}</p>`
+    + `<div class="paneCols">`
+    + `<div class="paneCol">`
+    + row('Objects', count(stats.objects))
+    + row('Faces', count(stats.faces))
+    + row('Boxes', count(counts.box))
+    + row('Pyramids', count(counts.pyramid))
+    + row('Meshes', count(counts.mesh))
+    + row('Bases', count(stats.bases))
+    + row('Teleporters', count(stats.teleporters))
+    + `</div>`
+    + `<div class="paneCol">`
+    + row('Style', stats.style || '')
+    + row('World size', count(stats.size))
+    + row('Has', features)
+    + row('Hashed', entry.file === 'random' ? 'generated at boot' : (entry.hashed ? 'yes' : 'not yet'))
+    + row('Hash', entry.hash)
+    + row('Modified', entry.modified)
+    + row('.bzw', entry.bzwSize)
+    + row('.json', entry.jsonSize)
+    + `</div>`
+    + `</div></div>`;
+}
+
+// The filter syntax reference, which is upstream's language rather than one
+// bzo invented (`ServerListFilter.cxx`) -- so this is the same table its own
+// in-client help menu prints, in the place the person typing a filter is
+// looking. Folded away until asked for: it is a page of syntax beside a box
+// most visitors will type a word into.
+function renderFilterHelp(listId) {
+  const group = (title, rows) => `<p class="helpGroup">${title}</p>`
+    + rows.map(([names, what]) => `<div class="helpRow">`
+      + `<span><code>${names}</code></span><span>${what}</span></div>`).join('');
+  return `<div class="filterHelp" id="${escapeHtml(listId)}-help" hidden>`
+    + `<p>Plain text is a glob over the address and description --`
+    + ` <code>league</code>, <code>*.org</code>, <code>bz?.</code> -- and a word`
+    + ` with no <code>*</code> or <code>?</code> in it is wrapped in both, so it`
+    + ` matches anywhere. A leading <code>/</code> starts filters instead:`
+    + ` comma-separated, combined with <em>and</em>. A second <code>/</code>`
+    + ` starts another set, and a server matching either set is shown.`
+    + ` <code>#</code> begins a comment.</p>`
+    + group('Booleans -- <code>+name</code> for on, <code>-name</code> for off', [
+      ['F ffa', 'Free-for-all with teams'],
+      ['O offa', 'Open free-for-all, no teams'],
+      ['C ctf', 'Capture-the-flag'],
+      ['R rabbit', 'Rabbit chase'],
+      ['j jump', 'Tanks can jump unaided'],
+      ['r rico', 'Shots ricochet'],
+      ['h handicap', 'Score affects tank performance'],
+      ['i inertia', 'Tanks have inertia'],
+      ['a antidote', 'Antidote flags are spawned'],
+      ['P replay', 'A replay server'],
+    ])
+    + group('Numbers -- a name, then <code>&lt;</code> <code>&lt;=</code>'
+      + ' <code>&gt;</code> <code>&gt;=</code> <code>=</code>, then a number', [
+      ['s shots', 'Active shots a tank may have'],
+      ['p players', 'Players now, observers excluded'],
+      ['f freeSlots', 'Playing slots still free'],
+      ['vt validTeams', 'Colour teams the server offers'],
+      ['mt maxTime', 'Time limit, in seconds'],
+      ['mp maxPlayers', 'The server\'s own player ceiling'],
+      ['mts maxTeamScore', 'Team score that ends the game'],
+      ['mps maxPlayerScore', 'Player score that ends the game'],
+      ['sw shakeWins', 'Kills that shed a bad flag'],
+      ['st shakeTime', 'Tenths of a second to shed a bad flag'],
+      ['Rp rp gp bp pp op', 'Players on rogue, red, green, blue, purple, observer'],
+      ['Rm rm gm bm pm om', 'That team\'s maximum'],
+      ['Rf rf gf bf pf of', 'That team\'s free slots'],
+    ])
+    + group('Patterns -- a name, then <code>)</code> for a glob or'
+      + ' <code>]</code> for a regular expression', [
+      ['a addr address', 'The address, host and port'],
+      ['d desc description', 'The description'],
+      ['ad addrdesc', 'Either one'],
+    ])
+    + `<p>A capitalised pattern name matches case-sensitively:`
+    + ` <code>d)league</code> ignores case, <code>D)League</code> does not.</p>`
+    + group('Examples', [
+      ['/p&gt;1,s&gt;1,s&lt;4', 'Two or three shots, and somebody playing'],
+      ['/+ctf,vt=2', 'Capture-the-flag between exactly two teams'],
+      ['/d)*league*', 'Leagues, by description'],
+      ['/op&gt;0', 'Somebody is watching'],
+      ['/+rabbit,+rico,s=3', 'Rabbit chase, ricochet, three shots'],
+      ['/+ctf/+rabbit', 'Either capture-the-flag or rabbit chase'],
+    ])
+    + `</div>`;
+}
+
+// The list itself: one anchor-shaped row per server, each naming the pane it
+// reveals. Selection is a class, so with scripting off every row still links
+// straight to what it did before.
+function renderServerList(listId, filterId, unsorted) {
+  if (!unsorted.length) return `<p class="muted">None.</p>`;
+  // Most players first, which is the order the `P` header starts out marked as
+  // and the only order upstream ever shows (`ServerItem::getSortFactor`). Done
+  // here rather than upstream of it so the mark cannot disagree with the rows:
+  // a bzo instance and the servers it proxies arrive grouped, and each of
+  // those is its own row with its own count.
+  const entries = [...unsorted].sort((a, b) => (b.players ?? -1) - (a.players ?? -1));
+  const bits = (entry) => entry.gameOptionsBits || 0;
+  const set = (entry, bit) => ((bits(entry) & bit) !== 0 ? 1 : 0);
+  // What sorting and the filter language judge a row by, as one JSON block
+  // beside the list rather than thirty attributes per row -- a row names its
+  // own entry with `data-i`. Short names because there is one of these per
+  // server and the public list runs to a couple of hundred.
+  const data = entries.map((entry) => ({
+    a: entry.addr || '',
+    d: entry.desc || '',
+    s: entry.maxShots || 0,
+    p: typeof entry.players === 'number' ? entry.players : 0,
+    mp: entry.maxPlayers || 0,
+    mt: entry.maxTime || 0,
+    mts: entry.maxTeamScore || 0,
+    mps: entry.maxPlayerScore || 0,
+    sw: entry.shakeWins || 0,
+    st: entry.shakeTimeout || 0,
+    tc: Array.isArray(entry.teamCounts) ? entry.teamCounts : null,
+    tm: Array.isArray(entry.teamMaximums) ? entry.teamMaximums : null,
+    g: entry.style || '',
+    rank: listGameMark(entry).rank,
+    rep: listGameMark(entry).rank === 3 ? 1 : 0,
+    j: set(entry, GAME_OPTION_BITS.jumping),
+    fl: set(entry, GAME_OPTION_BITS.flags),
+    r: set(entry, GAME_OPTION_BITS.ricochet),
+    h: set(entry, GAME_OPTION_BITS.handicap),
+    in: set(entry, GAME_OPTION_BITS.inertia),
+    an: set(entry, GAME_OPTION_BITS.antidote),
+    im: entry.imported ? 1 : 0,
+    ob: typeof entry.observers === 'number' ? entry.observers : null,
+    // What the Name header sorts by: a server with no title sorts under its
+    // address, which is what the row shows in that case anyway.
+    n: (entry.desc || entry.addr || '').toLowerCase(),
+  }));
+  // Only the bzfs list has anything to import, so only it gets the column and
+  // the header over it.
+  const hasImports = entries.some((entry) => typeof entry.imported === 'boolean');
+  const widths = `--col-p:${listColumnWidth('P', data.map((entry) => entry.p))};`
+    + `--col-o:${listColumnWidth('O', data.map((entry) => entry.ob))}`;
+  const rows = entries.map((entry, index) => {
+    const mark = listGameMark(entry);
+    const players = typeof entry.players === 'number' ? entry.players : 0;
+    return `<li>`
+      + `<a class="srow${index === 0 ? ' selected' : ''}" href="${escapeHtml(entry.href)}"`
+      + ` data-pane="${escapeHtml(entry.id)}" data-i="${index}">`
+      + `<span class="count col-p">${players}</span>`
+      // Blank rather than zero when nobody has said: a bzo instance too old to
+      // report per-team figures has no observer count to show, and a `0` there
+      // would be a claim rather than a gap.
+      + `<span class="count col-o">${typeof entry.observers === 'number' ? entry.observers : ''}</span>`
+      + `<span class="mark" style="color:${mark.color}" title="${escapeHtml(mark.title)}">*</span>`
+      + listOptionLetters(bits(entry), entry.imported)
+      + `<span class="addr">${escapeHtml(entry.addr)}</span>`
+      + `<span class="desc" style="color:${listShotColor(entry.maxShots)}">${escapeHtml(entry.desc || '')}</span>`
+      + `</a></li>`;
+  }).join('\n');
+  // One character per column, each the header for the column under it. `P`
+  // starts out the active one because the page arrives sorted by it -- which
+  // is also the only order upstream ever shows
+  // (`ServerItem::getSortFactor`).
+  const head = `<div class="shead">`
+    + `<button class="count col-p active" data-field="p" title="Players">P</button>`
+    + `<button class="count col-o" data-field="ob" title="Observers">O</button>`
+    + `<button class="mark" data-field="rank" title="Game type: yellow free-for-all, red capture-the-flag, white rabbit chase, cyan replay">*</button>`
+    + `<button class="opt" data-field="j" title="Jumping">J</button>`
+    + `<button class="opt" data-field="fl" title="Superflags">F</button>`
+    + `<button class="opt" data-field="r" title="Ricochet">R</button>`
+    + (hasImports
+      ? `<button class="opt" data-field="im" title="This server already holds an import of that map">I</button>`
+      : '')
+    + `<button class="name" data-field="n" data-text`
+    + ` title="The name, or the address when a server has none">Name &amp; Description</button>`
+    + `</div>`;
+  // One column down the left, in the order you use it: the summary of the row
+  // you picked, the filter that narrows what you are picking from, then the
+  // list. The filter belongs inside this rather than beside the heading, so
+  // the three stay together as one control.
+  return `<div class="listWrap" id="${escapeHtml(listId)}" style="${widths}">`
+    + `<div class="panes">${entries
+      .map((entry, index) => renderListReadout(entry, index !== 0)).join('\n')}</div>`
+    + `<div class="listBar">`
+    + `<input id="${escapeHtml(filterId)}" type="text" placeholder="Filter…">`
+    + `<button type="button" data-help="${escapeHtml(listId)}-help"`
+    + ` title="Filter syntax">?</button>`
+    + entries.map((entry, index) => renderListActions(entry, index !== 0)).join('')
+    + `</div>`
+    + `<p class="filterError" id="${escapeHtml(filterId)}Error" hidden></p>`
+    + renderFilterHelp(listId)
+    + head
+    + `<ul class="srows">\n${rows}\n</ul>`
+    + `<script type="application/json" id="${escapeHtml(listId)}-data">`
+    + `${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`
+    + `</div>`;
+}
+
 // `/list`: bzo servers, bzfs servers, local maps, and (bottom) this
 // instance's list-server key admin -- one page rather than the `/view` +
 // `/list-server` split that predated this, since a visitor came here for
@@ -1126,7 +1662,7 @@ function statMtimeOrBlank(filePath) {
 // ever applies to an operator, so it reads better last. See
 // docs/list-server-plan.md.
 function renderListPage({
-  servers, bzoServers, cacheAgeSeconds, imported, importError, session, admin,
+  servers, bzoServers, cacheAgeSeconds, imported, importError, session, admin, canWatch,
 }) {
   const localMaps = listAvailableMapFiles().map((fileName) => ({
     fileName,
@@ -1154,81 +1690,124 @@ function renderListPage({
     + `<a href="#bzo">bzo</a> | <a href="#bzflag">bzflag</a> | <a href="#maps">maps</a> | <a href="${keysHref}">keys</a>`
     + ` | ${identityBlock}</p>`;
 
-  const serverRows = servers.map((s) => {
-    const players = s.info && typeof s.info.players === 'number' ? String(s.info.players) : '';
-    const maxPlayers = s.info && typeof s.info.maxPlayers === 'number' ? String(s.info.maxPlayers) : '';
-    const maxShots = s.info && typeof s.info.maxShots === 'number' ? String(s.info.maxShots) : '';
-    const hasOption = (bit) => (s.info && (s.info.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
+  // Both lists normalise into one entry shape, so there is one row renderer
+  // and one pane renderer rather than a copy of each per table. `extras` are
+  // the pane lines only one of the two has, and their values are HTML the
+  // caller has already escaped -- a URL extra is a link.
+  const bzfsEntries = servers.map((s, index) => {
+    const info = s.info || {};
     const importFileName = remoteMapFileName(s.host, s.port);
-    // Always the row's own link, imported or not -- `?viewmap=` already
-    // imports on demand (`importMapForView`) the moment nothing this fresh is
-    // registered yet, so there is no state where clicking the row is wrong.
-    const viewmapHref = `/?viewmap=${encodeURIComponent(importFileName)}`;
-    const alreadyImported = MAP_REGISTRY.has(importFileName);
-    const importCell = `<form method="post" action="/list/import" class="inlineForm">`
-      + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
-      + `<input type="hidden" name="port" value="${s.port}">`
-      + `<button type="submit">${alreadyImported ? 'Re-import' : 'Import'}</button></form>`;
-    return `<tr class="clickable" data-href="${viewmapHref}"><td>${players}</td><td>${maxPlayers}</td><td>${maxShots}</td>`
-      + `<td>${escapeHtml(s.info ? s.info.style : '')}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td><td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
-      + `<td>${escapeHtml(s.title)}</td><td>${escapeHtml(s.host)}</td><td>${s.port}</td>`
-      + `<td>${importCell}</td></tr>`;
-  }).join('\n');
+    const importedPath = MAP_REGISTRY.has(importFileName)
+      ? resolveMapFilePath(importFileName)
+      : null;
+    const maxima = Array.isArray(info.teamMaximums) ? info.teamMaximums : [];
+    return {
+      id: `bzfs-pane-${index}`,
+      addr: `${s.host}:${s.port}`,
+      desc: s.title,
+      // Always the row's own link, imported or not -- `?viewmap=` already
+      // imports on demand (`importMapForView`) the moment nothing this fresh
+      // is registered yet, so there is no state where following it is wrong.
+      href: `/?viewmap=${encodeURIComponent(importFileName)}`,
+      action: 'View map',
+      style: info.style,
+      maxShots: info.maxShots,
+      gameOptionsBits: info.gameOptionsBits,
+      players: info.players,
+      maxPlayers: info.maxPlayers,
+      observers: Array.isArray(info.teamCounts) ? info.teamCounts[5] : undefined,
+      observerMax: maxima[5],
+      teamCounts: info.teamCounts,
+      teamMaximums: maxima,
+      shakeTimeout: info.shakeTimeout,
+      shakeWins: info.shakeWins,
+      maxTime: info.maxTime,
+      maxTeamScore: info.maxTeamScore,
+      maxPlayerScore: info.maxPlayerScore,
+      // What a bzo row's own second column carries (map, version, URL), in the
+      // terms a bzfs row has: where it is, and what this server holds of it.
+      // The import's own timestamp rather than a bare "yes" -- a copy fetched
+      // an hour ago is not the map that server is running now, and it is the
+      // same mtime `sweepStaleImports` ages it out by.
+      extras: [
+        ['Address', escapeHtml(`${s.host}:${s.port}`)],
+        ['Imported', escapeHtml(importedPath ? statMtimeOrBlank(importedPath) : '')],
+      ],
+      imported: MAP_REGISTRY.has(importFileName),
+      // Watching is the live game rather than the map: a real observer
+      // connection to that server (`docs/proxy.md`). The same offer the
+      // in-client View list makes on the same test (`canWatchRemoteServers`),
+      // so the two agree about who sees it -- and `?watch=` spells its target
+      // `host_port`, since a colon in a query value makes a browser offer to
+      // search for the address instead of showing it.
+      actions: (canWatch
+        ? `<a class="action" href="/?watch=${encodeURIComponent(`${s.host}_${s.port}`)}">Watch</a>`
+        : '')
+        + `<form method="post" action="/list/import" class="inlineForm">`
+        + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
+        + `<input type="hidden" name="port" value="${s.port}">`
+        + `<button type="submit">${MAP_REGISTRY.has(importFileName) ? 'Re-import' : 'Import'}</button></form>`,
+    };
+  });
 
-  // bzo's own list server (docs/list-server-plan.md): a third table, read
-  // from the designated instance's public endpoint rather than dialled the
-  // way a bzfs row above is. Clicking a row navigates the browser there
-  // directly (`location.href`) -- each one is its own origin and its own
-  // websocket, not something to import a map from.
-  // One row per game, which for an instance that proxies means one per target
-  // as well as one for itself, carrying that target's own counts, options and
-  // style rather than this instance's. The URL is the instance either way and
-  // the link is its `?proxy=` for the target, so two instances carrying one
-  // target read as two ways in rather than two servers (`docs/proxy.md`).
-  const bzoRow = (s, proxy) => {
+  // bzo's own list server (docs/list-server-plan.md): read from the designated
+  // instance's public endpoint rather than dialled the way a bzfs row above is.
+  // One entry per game, which for an instance that proxies means one per
+  // target as well as one for itself, carrying that target's own counts,
+  // options and style rather than this instance's. The URL is the instance
+  // either way and the link is its `?proxy=` for the target, so two instances
+  // carrying one target read as two ways in rather than two servers
+  // (`docs/proxy.md`).
+  const bzoEntry = (s, proxy, index) => {
     const game = proxy || s;
-    const hasOption = (bit) => ((game.gameOptionsBits & bit) !== 0 ? 'Yes' : '');
+    const maxima = Array.isArray(game.teamMaximums) ? game.teamMaximums : [];
     // The reported name is the identity (`host:port`); a link spells it the
     // way a URL should, which is the one derivation between the two.
     const href = proxy ? `${s.url}/?proxy=${encodeURIComponent(proxyUrlKey(proxy.target))}` : s.url;
-    return `<tr class="clickable" data-href="${escapeHtml(href)}"><td>${game.players}</td><td>${game.maxPlayers}</td>`
-      + `<td>${game.maxShots}</td><td>${escapeHtml(game.style)}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.jumping)}</td><td>${hasOption(GAME_OPTION_BITS.flags)}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.ricochet)}</td><td>${hasOption(GAME_OPTION_BITS.antidote)}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.handicap)}</td>`
-      + `<td>${hasOption(GAME_OPTION_BITS.noTeamKills)}</td>`
-      + `<td>${s.voiceEnabled ? 'Yes' : ''}</td>`
-      // One column, because a row is one thing or the other: a game bzo is
-      // running on a map of its own, or a real BZFlag server it is carrying.
-      // The extension is the report's business, not a reader's.
-      + `<td>${escapeHtml(proxy ? proxy.target : String(s.map || '').replace(/\.bzw$/, ''))}</td>`
-      + `<td>${escapeHtml(proxy ? (proxy.title || proxy.target) : s.title)}</td>`
-      + `<td>${escapeHtml(s.version)}</td>`
-      + `<td>${escapeHtml(s.url)}</td></tr>`;
+    const urlLink = `<a href="${escapeHtml(s.url)}">${escapeHtml(s.url)}</a>`;
+    return {
+      id: `bzo-pane-${index}`,
+      addr: proxy ? proxy.target : s.url,
+      desc: proxy ? (proxy.title || proxy.target) : s.title,
+      href,
+      action: 'Enter game',
+      style: game.style,
+      maxShots: game.maxShots,
+      gameOptionsBits: game.gameOptionsBits,
+      players: game.players,
+      maxPlayers: game.maxPlayers,
+      observers: Array.isArray(game.teamCounts) ? game.teamCounts[5] : undefined,
+      observerMax: maxima[5],
+      teamCounts: game.teamCounts,
+      teamMaximums: maxima,
+      shakeTimeout: game.shakeTimeout,
+      shakeWins: game.shakeWins,
+      maxTime: game.maxTime,
+      maxTeamScore: game.maxTeamScore,
+      maxPlayerScore: game.maxPlayerScore,
+      // A row is one thing or the other: a game bzo is running on a map of its
+      // own, or a real BZFlag server it is carrying. The map's extension is
+      // the report's business, not a reader's.
+      extras: proxy
+        ? [['BZFlag server', escapeHtml(proxy.target)], ['Carried by', urlLink]]
+        : [
+          ['Map', escapeHtml(String(s.map || '').replace(/\.bzw$/, ''))],
+          ['Version', escapeHtml(s.version || '')],
+          // Only a bzo row can have this: a bzfs server holds no key and sends
+          // no report, and the public BZFlag list carries no uptime.
+          ['Up', escapeHtml(formatUptime(s.upSince))],
+          ['Voice chat', s.voiceEnabled ? 'configured' : ''],
+          ['URL', urlLink],
+        ],
+    };
   };
-  const bzoServerRows = bzoServers.flatMap((s) => {
+  let bzoIndex = 0;
+  const bzoEntries = bzoServers.flatMap((s) => {
     const proxies = Array.isArray(s.proxies) ? s.proxies : [];
     // An instance that proxies and hosts its own game shows both: the game is
     // real and so are the targets.
-    return [bzoRow(s, null), ...proxies.map((proxy) => bzoRow(s, proxy))];
-  }).join('\n');
-
-  const mapRows = localMaps.map((m) => {
-    const entry = MAP_REGISTRY.get(m.fileName);
-    const hash = entry ? entry.hash : '';
-    const bzwPath = resolveMapFilePath(m.fileName);
-    const modified = bzwPath ? statMtimeOrBlank(bzwPath) : '';
-    const bzwSize = bzwPath ? statSizeOrBlank(bzwPath) : '';
-    const jsonSize = entry ? statSizeOrBlank(path.join(MAP_CACHE_DIR, `${entry.hash}.json`)) : '';
-    const rowAttrs = m.hashed ? ` class="clickable" data-href="/?viewmap=${encodeURIComponent(m.fileName)}"` : '';
-    return `<tr${rowAttrs}><td>${escapeHtml(m.fileName)}</td>`
-      + `<td>${m.hashed ? 'yes' : 'hashing…'}</td>`
-      + `<td>${escapeHtml(hash)}</td><td>${escapeHtml(modified)}</td>`
-      + `<td>${bzwSize}</td><td>${jsonSize}</td></tr>`;
-  }).join('\n');
+    return [bzoEntry(s, null, bzoIndex++), ...proxies.map((proxy) => bzoEntry(s, proxy, bzoIndex++))];
+  });
 
   const flash = imported
     ? `<p class="flash success">Imported <code>${escapeHtml(imported)}</code> -- it is in the local maps table below.</p>`
@@ -1294,104 +1873,166 @@ function renderListPage({
   .flash.success { background: #16321f; color: #b7e2c2; border-color: #4CAF50; }
   .flash.error { background: #3a1a17; color: #f0b8b2; border-color: #c0392b; }
   .stale { color: #f0b8b2; }
+  /* The same themed scrollbar the game's own panels use (public/styles.css):
+     accent thumb on a dark track, standard properties first and the WebKit
+     pseudo-elements for the versions that predate them. This page has its own
+     palette rather than the stylesheet's variables, so the two values are
+     spelled out. */
+  html {
+    scrollbar-width: thin;
+    scrollbar-color: #4CAF50 rgba(0, 0, 0, 0.5);
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.5); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(76, 175, 80, 0.35);
+    border: 1px solid #4CAF50;
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: #4CAF50; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  /* The list and its readout pane, side by side where there is room and
+     stacked where there is not -- the pane is the row's own detail either
+     way, so on a phone it belongs directly under the list. */
+  /* Not full-page-wide: a row is one line of text and a pane is a short
+     column of numbers, and neither reads better for being stretched across a
+     desktop monitor. */
+  .listWrap { max-width: 56rem; }
+  /* Ten rows and then a scrollbar -- upstream's own page size
+     (ServerMenu.cxx:34), which is why paging was not worth copying: a scroll
+     box holding the same ten rows costs no PageUp/PageDown. Each row is
+     exactly 1.5rem tall, so this is ten of them.
+     NOTE: no backticks in this block -- see attachTable below. */
+  .srows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 15rem;
+    overflow-y: auto;
+  }
+  /* Monospace so the J F R letters line up down the list the way they do in a
+     fixed-width HUD -- that alignment is what makes the column scannable. */
+  .srow {
+    display: flex;
+    gap: 0.45rem;
+    align-items: baseline;
+    height: 1.5rem;
+    padding: 0 0.4rem;
+    font-family: monospace;
+    white-space: nowrap;
+    text-decoration: none;
+    color: #fff;
+  }
+  .srow:hover { background: rgba(76, 175, 80, 0.15); }
+  .srow.selected { background: rgba(76, 175, 80, 0.3); outline: none; }
+  .srow .mark { font-weight: bold; }
+  .srow .addr { flex: none; }
+  /* The header sits over the row it heads: same flex geometry, same column
+     widths, and each button stripped back to the one character in it. */
+  .shead {
+    display: flex;
+    gap: 0.45rem;
+    padding: 0 0.4rem;
+    font-family: monospace;
+    border-bottom: 1px solid #4CAF50;
+  }
+  .shead button {
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 0;
+    font: inherit;
+    text-align: inherit;
+  }
+  .shead button:hover { background: none; color: #66bb6a; }
+  .shead button.active { text-decoration: underline; }
+  /* Each numeric column is exactly as wide as its widest value needs, measured
+     when the page is built (listColumnWidth) and carried as a custom property
+     on the list itself. */
+  .srow .count, .shead .count, .srow .num, .shead .num { flex: none; text-align: right; }
+  .col-p { width: var(--col-p, 2ch); }
+  .col-o { width: var(--col-o, 2ch); }
+  .col-obj { width: var(--col-obj, 4ch); }
+  .col-fa { width: var(--col-fa, 5ch); }
+  .col-sz { width: var(--col-sz, 4ch); }
+  .srow .dim { color: #999; }
+  .srow .mark, .srow .opt, .shead .mark, .shead .opt {
+    flex: none;
+    width: 1ch;
+    text-align: center;
+  }
+  .shead .name { flex: none; }
+  .srow .desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .pane { border: 1px solid #333; border-radius: 4px; padding: 0.6rem 0.8rem; }
+  .paneTitle { margin: 0 0 0.5rem; color: #4CAF50; font-weight: bold; }
+  /* Teams in the first column, the game in the second, wrapping onto one
+     column where there is no room for two. A map overview is meant to become
+     a third (docs/list-server-plan.md). */
+  .paneCols { display: flex; flex-wrap: wrap; gap: 0.5rem 2rem; align-items: flex-start; }
+  .paneCol { min-width: 0; }
+  .paneCol:first-child { flex: none; }
+  .paneCol > :first-child { margin-top: 0; }
+  .paneRow { display: flex; gap: 0.6rem; }
+  .paneRow span:first-child { color: #999; min-width: 6rem; }
+  .paneWords { margin: 0.5rem 0; color: #ccc; }
+  .filterError { margin: 0.3rem 0; color: #f0b8b2; }
+  /* The syntax reference, folded away until the "?" beside the filter asks for
+     it. Two columns: what to type, and what it means.
+     NOTE: no backticks in this block -- it lives inside server.js's own outer
+     template literal, and one here would close it. */
+  .filterHelp {
+    max-width: 44rem;
+    margin: 0.5rem 0;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid #333;
+    border-radius: 4px;
+  }
+  .filterHelp p { margin: 0.5rem 0; }
+  .filterHelp .helpGroup { color: #4CAF50; margin: 0.8rem 0 0.3rem; }
+  .filterHelp .helpRow { display: flex; gap: 0.6rem; }
+  .filterHelp .helpRow span:first-child { flex: none; width: 11rem; }
+  .filterHelp code { color: #66bb6a; }
+  /* The filter and the selected row's own buttons share one line, and wrap
+     onto a second rather than overflowing on a phone. */
+  .listBar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+  .rowActions { display: flex; gap: 0.5rem; align-items: center; }
+  .rowActions[hidden] { display: none; }
+  a.action {
+    padding: 0.2rem 0.7rem;
+    background: rgba(76, 175, 80, 0.15);
+    border: 1px solid #4CAF50;
+    border-radius: 4px;
+    color: #4CAF50;
+    text-decoration: none;
+  }
+  a.action:hover { background: rgba(76, 175, 80, 0.35); border-color: #66bb6a; }
 </style>
 </head>
 <body>
 ${navBlock}
-<h1 id="bzo">Public bzo servers</h1>
+<h1 id="bzo">Public bzo servers - ${listHeadingCount(bzoEntries)}</h1>
 <p class="muted">From the designated bzo list server, ${LIST_SERVER_URL
     ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
     : 'disabled on this instance'} --
-click a row to enter that game.</p>
-<input id="bzoServerFilter" type="text" placeholder="Filter…">
-<table id="bzoServerTable">
-<thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
-<th title="Jumping">Jump</th><th title="Superflags">Flag</th><th title="Ricochet">Rico</th>
-<th title="Antidote flag">Anti</th><th title="Handicap">Hcap</th>
-<th title="No Team Kills (friendly fire off)">TK</th>
-<th title="Voice chat has at least one ICE server configured">Voice</th>
-<th title="The map this game is on, or the BZFlag server it is proxying">Map</th>
-<th>Title</th><th>Version</th><th>URL</th></tr></thead>
-<tbody>
-${bzoServerRows}
-</tbody>
-</table>
+pick a row to read it; Enter, or the pane's own link, goes in.</p>
+${renderServerList('bzoServerList', 'bzoServerFilter', bzoEntries)}
 
-<h1 id="bzflag">Public BZFlag servers</h1>
+<h1 id="bzflag">Public BZFlag servers - ${listHeadingCount(bzfsEntries)}</h1>
 <p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
-<a href="/list">refresh</a>. Click a row to view that map; it does not enter that game.</p>
+<a href="/list">refresh</a>. Pick a row to read it; its link views that map, and does
+not enter that game.</p>
 ${flash}
-<input id="serverFilter" type="text" placeholder="Filter…">
-<table id="serverTable">
-<thead><tr><th data-sort="num">Players</th><th data-sort="num">Max</th><th data-sort="num">Shots</th><th>Style</th>
-<th title="Jumping">Jump</th><th title="Superflags">Flag</th><th title="Ricochet">Rico</th>
-<th title="Antidote flag">Anti</th><th title="Handicap">Hcap</th><th title="No Team Kills (friendly fire off)">TK</th>
-<th>Title</th><th>Host</th><th data-sort="num">Port</th><th></th></tr></thead>
-<tbody>
-${serverRows}
-</tbody>
-</table>
+${renderServerList('serverList', 'serverFilter', bzfsEntries)}
 
-<h1 id="maps">Local maps</h1>
-<p class="muted">Already in this server's <code>maps/</code>, including anything imported above. Click a row to view it.</p>
-<input id="mapFilter" type="text" placeholder="Filter…">
-<table id="mapTable">
-<thead><tr><th>File</th><th>Hashed</th><th>Hash</th><th title="A remote import expires and re-fetches once this is older than IMPORT_MAX_AGE_MS">Modified</th><th data-sort="num">.bzw size</th><th data-sort="num">.json size</th></tr></thead>
-<tbody>
-${mapRows}
-</tbody>
-</table>
+<h1 id="maps">Local maps - ${localMaps.length}</h1>
+<p class="muted">Already in this server's <code>maps/</code>, including anything imported above --
+pick a row to read it; its link views that map.</p>
+${renderMapList('mapList', 'mapFilter', localMaps)}
 
-<script>
-// A row's own data-href -- clicking anywhere on it goes to that map's
-// viewmap link, except a click on the Import/Re-import form, which needs
-// its own click (stopPropagation there would work too, but this reads
-// clearer from the row's side: "unless it's the form"). A table with no
-// data-href rows at all (the key table) just never matches, so the same
-// function serves it for sorting and filtering without also wiring
-// navigation it never asked for.
-// Global (not per-page-load scoped) so the key admin section's own script,
-// which runs later in the same page for a fetched-in table, can call it too.
-// NOTE: no backticks in this comment block -- it lives inside server.js's
-// own outer template literal, and an unescaped backtick here would close it.
-window.attachTable = function attachTable(tableId, filterId) {
-  var table = document.getElementById(tableId);
-  if (!table) return;
-  var tbody = table.tBodies[0];
-  tbody.addEventListener('click', function (e) {
-    if (e.target.closest('.inlineForm') || e.target.closest('button')) return;
-    var row = e.target.closest('tr[data-href]');
-    if (row) window.location.href = row.dataset.href;
-  });
-  Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, colIndex) {
-    var dir = 1;
-    th.addEventListener('click', function () {
-      var numeric = th.dataset.sort === 'num';
-      var rows = Array.prototype.slice.call(tbody.rows);
-      rows.sort(function (a, b) {
-        var av = a.cells[colIndex].textContent.trim();
-        var bv = b.cells[colIndex].textContent.trim();
-        if (numeric) { av = parseFloat(av); bv = parseFloat(bv); av = isNaN(av) ? -Infinity : av; bv = isNaN(bv) ? -Infinity : bv; return (av - bv) * dir; }
-        return av.localeCompare(bv) * dir;
-      });
-      dir *= -1;
-      rows.forEach(function (row) { tbody.appendChild(row); });
-    });
-  });
-  var filterInput = filterId && document.getElementById(filterId);
-  if (filterInput) {
-    filterInput.addEventListener('input', function () {
-      var q = filterInput.value.toLowerCase();
-      Array.prototype.forEach.call(tbody.rows, function (row) {
-        row.style.display = row.textContent.toLowerCase().indexOf(q) === -1 ? 'none' : '';
-      });
-    });
-  }
-};
-attachTable('serverTable', 'serverFilter');
-attachTable('bzoServerTable', 'bzoServerFilter');
-attachTable('mapTable', 'mapFilter');
-</script>
+<!-- Sorting, selection and the filter language: public/list-page.js. A plain
+     classic script, not a module, so it is defined before the key admin
+     section's own inline script below calls attachTable. -->
+<script src="/list-page.js"></script>
 
 ${renderListServerKeyAdminSection({ session, admin })}
 </body>
@@ -1415,6 +2056,11 @@ app.get('/list', async (req, res) => {
       importError: typeof req.query.error === 'string' ? req.query.error : null,
       session,
       admin: isLocalAdminHttp(req) || (session ? isAdminSession(session, ADMIN_GROUPS) : false),
+      // Not the `admin` above: `authoriseProxyRequest` wants a *signed-in*
+      // admin, because bzo will not send a remote server a name it has not
+      // verified. The address whitelist is a login stand-in for housekeeping
+      // on this instance, and there is nothing for it to stand in for here.
+      canWatch: Boolean(session) && isAdminSession(session, ADMIN_GROUPS),
     }));
   } catch (error) {
     logError('/list failed to reach the list server:', error);
@@ -2401,6 +3047,23 @@ function describeListServerKeyRow(record) {
 // Untrusted input either way -- a POST body from a reporting instance, or a
 // challenge response from one being validated -- so both paths funnel
 // through the same field-by-field parse rather than trusting either shape.
+// A whole-number count, floored at zero and capped, from a number an
+// untrusted instance sent. Used for every readout-pane field below: none of
+// them is worth trusting and none of them is worth rejecting a report over.
+function boundedReportCount(value, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.min(Math.floor(number), max);
+}
+
+// Six per-team numbers in `-mp` order, or nothing at all -- an instance too
+// old to report them shows no per-team lines rather than six zeroes, which
+// would read as "no teams offered".
+function boundedTeamArray(value) {
+  if (!Array.isArray(value) || value.length !== 6) return null;
+  return value.map((entry) => boundedReportCount(entry, 255));
+}
+
 function sanitizeListServerStatus(body) {
   const players = Number(body?.players);
   const maxPlayers = Number(body?.maxPlayers);
@@ -2425,6 +3088,24 @@ function sanitizeListServerStatus(body) {
     // the way out, where it also drops the targets that were unreachable.
     proxies: Array.isArray(body?.proxies) ? body.proxies.slice(0, MAX_REPORTED_PROXIES) : [],
     voiceEnabled: body?.voiceEnabled === true,
+    ...sanitizeListServerReadout(body),
+  };
+}
+
+// The readout-pane fields (`renderListReadout`), which a proxied target
+// reports in exactly the same shape as the instance carrying it -- so both
+// the top level above and each `proxies` entry below pass through this.
+// Ceilings are the wire's own: every one of these is a `uint16` in the ping
+// packet a bzfs row arrives as, and the two team arrays are `uint8` apiece.
+function sanitizeListServerReadout(source) {
+  return {
+    teamCounts: boundedTeamArray(source?.teamCounts),
+    teamMaximums: boundedTeamArray(source?.teamMaximums),
+    shakeTimeout: boundedReportCount(source?.shakeTimeout, 65535),
+    shakeWins: boundedReportCount(source?.shakeWins, 65535),
+    maxTime: boundedReportCount(source?.maxTime, 65535),
+    maxTeamScore: boundedReportCount(source?.maxTeamScore, 65535),
+    maxPlayerScore: boundedReportCount(source?.maxPlayerScore, 65535),
   };
 }
 
@@ -2563,6 +3244,11 @@ function listPublicListServerRows() {
         style: record.live.style,
         map: String(record.live.map || ''),
         voiceEnabled: record.live.voiceEnabled,
+        // Observed, never reported: `sanitizeListServerStatus` deliberately
+        // does not read this from a payload, because a server claiming its own
+        // uptime is the thing issue #106 said was worthless.
+        upSince: record.upSince ?? null,
+        ...sanitizeListServerReadout(record.live),
         // One entry per server this instance proxies, each describing that
         // target's own game rather than this instance's (`docs/proxy.md`).
         // A target the proxy could not reach on its last dial is left out on
@@ -2579,6 +3265,7 @@ function listPublicListServerRows() {
               maxShots: Number(proxy.maxShots) || 0,
               style: String(proxy.style || '').slice(0, 32),
               gameOptionsBits: Number(proxy.gameOptionsBits) || 0,
+              ...sanitizeListServerReadout(proxy),
             }))
           : [],
       };
@@ -2616,7 +3303,7 @@ app.post('/api/list-server/report', listServerRateLimit, (req, res) => {
     res.json({ success: true });
     return;
   }
-  listServerKeys.report(record, sanitizeListServerStatus(req.body));
+  listServerKeys.report(record, sanitizeListServerStatus(req.body), Date.now(), reason);
   res.json({ success: true });
   // After the response, not before -- a reporting instance should not wait on
   // this any more than an ordinary ADD would.
@@ -12609,6 +13296,16 @@ function computeProxyRows() {
       maxShots: status.maxShots ?? 0,
       style: status.style || '',
       gameOptionsBits: status.gameOptionsBits ?? 0,
+      // What /list's readout pane shows for the target rather than for the
+      // instance carrying it -- `queryServerStatus` already asks for all of
+      // it on the same dial.
+      teamCounts: status.teamCounts ?? null,
+      teamMaximums: status.teamMaximums ?? null,
+      shakeTimeout: status.shakeTimeout ?? null,
+      shakeWins: status.shakeWins ?? null,
+      maxTime: status.maxTime ?? 0,
+      maxTeamScore: status.maxTeamScore ?? 0,
+      maxPlayerScore: status.maxPlayerScore ?? 0,
       reachable: status.reachable === true,
       error: status.reachable ? null : (status.error || 'no response'),
     };
@@ -12616,6 +13313,14 @@ function computeProxyRows() {
 }
 
 function computeListServerStatus() {
+  // Per-team, in `-mp` order, so a bzo row's readout pane reads the same as a
+  // bzfs row's (`decodePingHex`'s `teamCounts`/`teamMaximums`). One pass:
+  // this runs on every join and part, not just the periodic report.
+  const joinedByTeam = new Map();
+  for (const player of players.values()) {
+    if (!player.joined) continue;
+    joinedByTeam.set(player.team, (joinedByTeam.get(player.team) || 0) + 1);
+  }
   return {
     proxies: computeProxyRows(),
     // Which world this is, which a row had no way to say. `random` for a
@@ -12637,6 +13342,19 @@ function computeListServerStatus() {
     // anything but a LAN typically never completes, so this is "will voice
     // actually work here" rather than "does this build have the feature."
     voiceEnabled: VOICE_ICE_SERVERS.length > 0,
+    // The rest of what /list's readout pane shows. A bzfs row gets all of
+    // this free from its ping packet, so without it a bzo row -- the one this
+    // instance knows most about -- was the thinner of the two.
+    teamCounts: BZFLAG_MP_TEAM_ORDER.map((team) => joinedByTeam.get(team) || 0),
+    teamMaximums: BZFLAG_MP_TEAM_ORDER.map((team) => TEAM_MODE.limits[team] || 0),
+    // Tenths of a second, which is the unit the ping packet's own
+    // `shakeTimeout` is in -- one wire meaning, so the pane formats one way
+    // and does not have to know which table a row came from.
+    shakeTimeout: Math.round(FLAG_SHAKE_TIMEOUT * 10),
+    shakeWins: FLAG_SHAKE_WINS,
+    maxTime: GAME_CONFIG.TIME_LIMIT,
+    maxTeamScore: GAME_CONFIG.MAX_TEAM_SCORE,
+    maxPlayerScore: GAME_CONFIG.MAX_PLAYER_SCORE,
   };
 }
 
@@ -12674,7 +13392,7 @@ function reportToListServer(reason) {
     if (reason === 'shutdown') {
       listServerKeys.unreport(self);
     } else {
-      listServerKeys.report(self, payload);
+      listServerKeys.report(self, payload, Date.now(), reason);
       listServerKeys.markChecked(self, true);
     }
     return;

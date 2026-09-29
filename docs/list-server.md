@@ -90,7 +90,12 @@ Also `map`, the world being played -- `mapFile`, or `random` for a generated
 one -- which is the `?viewmap=` name on that instance. Changing the map is a
 restart today, so the row follows on the next boot; anything that changes it
 *without* one, a rotation on a timer say, has to report as well, or the
-column quietly starts lying. And `voiceEnabled`
+column quietly starts lying. The readout pane's own fields ride along with these -- per-team counts and
+maxima in `-mp` order, the shake timeout and win count, and the time, team
+score and player score limits -- so a bzo row's pane says as much as a bzfs
+row's, which gets all of it free from its ping packet. An instance too old
+to report them shows the lines it has and leaves the rest out, rather than
+reading as a server with no teams. And `voiceEnabled`
 (`VOICE_ICE_SERVERS.length > 0`) -- not whether the
 client feature exists (it always does), but whether at least one ICE
 server is configured, since a peer connection across anything but a LAN
@@ -111,6 +116,28 @@ straight into its own registry (still keyed by URL, so a restart finds the
 same row rather than creating a new one) and is attributed to
 `listServerOwnerBzid`/`listServerOwnerCallsign` if set, or a plain "self"
 placeholder otherwise -- see "Config" below.
+
+## Uptime
+
+Issue #106. A `boot` report is the one reason that means "this server just
+started", so the list server stamps `upSince` on the key record when one
+arrives and leaves it alone on every other reason -- periodic, join, part, and
+the status that rides along with a validation. A clean shutdown calls
+`unreport`, which drops `live` and stops the clock; the next boot starts a new
+one.
+
+It is **observed, not claimed**: `sanitizeListServerStatus` deliberately does
+not read an uptime out of a payload, because a server asserting its own is the
+thing the issue said was worthless, and the key's registration date measures
+the wrong thing -- a key registered a year ago on a server restarted an hour
+ago reads a year.
+
+On the key record rather than in `live`, so it survives the list server's own
+restart, which `live` deliberately does not (see "Speeding up a restart"). It
+shows as one line in a bzo row's pane, coarse on purpose -- days, or hours and
+minutes -- since a report cadence cannot support a figure more exact than
+that. A bzfs row can never have it: that server holds no key, sends no report,
+and the public BZFlag list carries no uptime.
 
 ## Validation
 
@@ -178,16 +205,87 @@ this instance's key admin -- the key table first, the register-a-key form
 after it, since the table is what an operator came for and registering a
 new key is the occasional case.
 
-Clicking a bzo-server row navigates the browser there directly
-(`location.href`), unlike a bzfs row's Import button -- each row is its own
-origin and its own websocket, not something to import a map from. An
-instance that proxies contributes a row per target as well as its own, so
-the table is one row per *game* rather than per instance; the **Proxy**
-column names the target and is empty otherwise, and such a row's link goes
-to that instance's `?proxy=` for it. A bzo row's columns match a bzfs row's
-exactly (players/max, shots, style, the option columns, title) plus the two
-a bzfs row doesn't carry -- version and the URL itself -- so a visitor can
-see at a glance whether a listed server is running something current.
+Each of the two server lists is one line per server with a readout pane
+above it -- upstream's own server menu rather than a wide table
+(`ServerMenu.cxx`). A row carries the player and observer counts, a game-type
+`*` whose colour says which of the four it is, `J F R` for jumping,
+superflags and ricochet, and then the address and title, the title's *colour*
+being the shot count: purple for zero through yellow for three, graded orange
+into red above that. The bzfs list has a fourth letter, `I`, which is bzo's
+own: whether this server already holds an import of that map, the one fact in
+a row that is about *this* server rather than that one.
+
+The pane is two columns, as upstream's panel is: who is playing on the left
+-- the player count and each team's own count and maximum -- and what the
+game is on the right, being shots, style, the option words, the shake
+conditions, the score and time limits, and for a bzo row its map, version,
+voice and URL. A map overview is meant to become a third
+(`docs/list-server-plan.md`).
+
+A bzo row shows the team lines only if that instance reported them: an
+instance older than the release that added `teamCounts`/`teamMaximums` to a
+report has no figures to show, and its pane leaves those lines out rather
+than printing zeroes that would read as "no teams offered". Its observer
+count in the list is blank for the same reason.
+
+The filter box takes upstream's own filter language
+(`src/bzflag/ServerListFilter.cxx`), and the `?` beside it opens the whole
+syntax table -- the same one upstream's in-client help menu prints, in the
+place the person typing is looking. Plain text is a glob over address and
+description, a leading `/` starts comma-separated filters combined with
+*and*, a second `/` starts another set joined with *or*, and a filter is
+`+name`/`-name`, `name` with `< <= > >= =` and a number, or `name)glob` /
+`name]regex`. `scripts/test-server-filter.mjs` pins the bounds, which are
+exclusive the way upstream's are. Two deliberate differences: `F` is
+free-for-all here (upstream's own table gives the letter to both `ffa` and
+`favorite`, so the second wins and the documented meaning stops working, and
+bzo has no favourites to collide with), and `i` and `I` both mean inertia
+(upstream's parser takes the lowercase letter while its help page prints the
+capital). A filter naming a per-team figure leaves out any row bzo has no
+figure for, rather than counting it as zero.
+
+Clicking a row selects it rather than following it, because the pane is
+where the detail is and the bar above it holds the way in. Arrow keys move
+the selection and Enter takes it, as upstream's menu does. Ten rows show at
+a time in a scroll box, which is upstream's own page size
+(`ServerMenu.cxx:34`) and the reason its PageUp/PageDown paging was not
+worth copying. The one-character header over each column sorts by that
+column; the list arrives sorted by player count, the only order upstream
+ever shows (`ServerItem::getSortFactor`). Each heading says how many servers
+are under it and how many people are playing on them -- observers are
+counted as neither, here or anywhere else on the page.
+
+A bzo row's link enters that game directly: each row is its own origin and
+its own websocket, not something to import a map from. An instance that
+proxies contributes a row per target as well as its own, so the list is one
+row per *game* rather than per instance -- such a row names the target and
+links to that instance's `?proxy=` for it. The selected row's own buttons sit on the filter bar rather than in the pane,
+so the way in stays in one place instead of moving as a pane grows or
+shrinks. A bzfs row offers **View map** and **Import**, plus a **Watch** link
+for a signed-in admin: the same test the in-client View list makes
+(`canWatchRemoteServers`), because watching sends that server a callsign bzo
+has verified (`docs/proxy.md`).
+
+Sorting, selection and the filter parser are `public/list-page.js`, served as
+a file rather than inlined in the page: the parser is long enough that
+escaping it into `server.js`'s template literal would be the hardest part of
+reading it. What each row is judged by rides in a JSON block beside the list,
+one entry per row, so sorting and filtering never refetch anything.
+
+The local maps list below the two has the same shape, and shares the same
+code: a row carries the three numbers the in-client View picker shows in
+columns -- obstacles, mesh faces and world size -- and its pane carries the
+rest, being the style the map sets, its boxes, pyramids, meshes, bases and
+teleporters, whether it has water, weather or custom ground, and then the
+hash, the mtime and the two file sizes. Those stats are `MAP_REGISTRY`'s own
+(`entry.stats`, the same ones `getViewableMapsList` sends the client), so the
+page computes nothing to show them. Only the glob half of the filter language
+means anything on that list, which is why it has no `?` beside its box.
+`random` is a world generated at boot rather than a file, so it has no counts,
+hash or sizes and says so.
+
+With scripting off, every row is still a plain link to what it always went
+to, and the first row's pane is the one on show.
 
 Key admin only exists on the designated instance (`app.get('/list', ...)`,
 `server.js:1171`); a non-designated instance's own `/list` shows a short

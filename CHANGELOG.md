@@ -6,6 +6,63 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Changed
+- `/list` shows servers the way BZFlag's own server menu does, instead of two
+  tables fifteen and fourteen columns wide. A row is one line -- player count,
+  a game-type `*` whose colour says which of the four it is, `J F R` for
+  jumping, superflags and ricochet, then the address and a title coloured by
+  the shot count -- and a readout pane above the list carries everything about
+  the row you pick: per-team counts and maxima, shots, style, the option words,
+  the shake conditions, the score and time limits, and a bzo row's map,
+  version, voice and URL. Ten rows show at a time, which is upstream's own page
+  size, so its PageUp/PageDown paging is replaced by a scroll box. Clicking a
+  row selects it, arrow keys move the selection and Enter takes it; the pane's
+  own link is the way in. A one-character header over each column sorts by it,
+  and each heading says how many servers are under it and how many people are
+  playing on them, observers counted as neither. The pane is two columns like
+  upstream's panel -- who is playing, then what the game is -- and the
+  selected row's buttons sit on the filter bar, so the way in stays in one
+  place instead of moving as a pane grows. Refs #147.
+- A bzo server reports what the pane needs -- per-team counts and maxima, the
+  shake timeout and win count, and the time, team score and player score
+  limits -- so a bzo row says as much as a bzfs row, which gets all of it free
+  from its ping packet. An instance too old to report them shows the lines it
+  has rather than reading as a server with no teams.
+
+### Added
+- `/list`'s filter takes BZFlag's own filter language, and the `?` beside the
+  box opens the whole syntax table -- the same one upstream's in-client help
+  menu prints. Plain text is a glob over address and description; a leading
+  `/` starts comma-separated filters combined with *and*; a second `/` starts
+  another set joined with *or*; a filter is `+name`/`-name`, a name with
+  `< <= > >= =` and a number, or `name)glob` / `name]regex`. Two deliberate
+  differences from upstream: `F` is free-for-all (its own table gives the
+  letter to both `ffa` and `favorite`, so the documented meaning stops
+  working, and bzo has no favourites), and `i` and `I` both mean inertia (its
+  parser takes one and its help page prints the other). Refs #147.
+- An `O` column counts observers beside `P` for players, on both lists.
+- A bzfs row's pane names its address and, where this server holds a copy of
+  that map, when the import was fetched -- which is what a bzo row's map,
+  version and URL are for that one.
+- A bzo row's pane says how long that server has been up. The list server
+  stamps the time when a `boot` report arrives and leaves it alone on every
+  other reason, so this is its own observation rather than a server's claim
+  about itself, and it survives the list server's own restart. A clean
+  shutdown stops the clock. Closes #106.
+- The local maps list has the same shape as the two server lists: a row
+  carries the obstacle, face and world-size numbers the in-client View picker
+  shows in columns, and its pane carries the style the map sets, its boxes,
+  pyramids, meshes, bases and teleporters, whether it has water, weather or
+  custom ground, and the hash, mtime and file sizes. Nothing is computed to
+  show it -- these are the stats the map registry already keeps for the
+  client's own picker.
+- The bzfs list has an `I` column for a map this server already holds an
+  import of -- the one fact in a row that is about this server rather than
+  that one. Sortable like the rest.
+- A bzfs row offers **Watch** to a signed-in admin, beside View map and
+  Import -- the same offer the in-client View list already makes, on the same
+  test.
+
 ## [1.2.87] - 2026-09-29
 
 ### Fixed

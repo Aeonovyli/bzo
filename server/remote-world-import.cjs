@@ -158,6 +158,11 @@ function decodePingHex(hex) {
     maxPlayerScore, maxTeamScore, maxTime, maxPlayers,
     players, observerCount,
     teamMaximums: [rogueMax, redMax, greenMax, blueMax, purpleMax, observerMax],
+    // Kept rather than only summed into `players`: /list's readout pane shows
+    // a row's per-team counts beside its maxima, the way upstream's own
+    // server menu does (`ServerMenu.cxx:556-620`). Same rogue..observer
+    // order as `teamMaximums`.
+    teamCounts: [rogueCount, redCount, greenCount, blueCount, purpleCount, observerCount],
   };
 }
 
@@ -513,6 +518,15 @@ function queryServerStatus(host, port, timeout = 8000) {
           // bzfs itself tests a join against (`bzfs.cxx:2345`), which is what
           // tells a proxied entry dialog which teams the target would accept.
           teamMaximums: game.teamMaximums,
+          // Named as `decodePingHex` names it, in the same order, so /list's
+          // readout pane reads a proxied target the same way it reads a
+          // dialled-free bzfs row.
+          teamCounts: game.teamSizes,
+          // Tenths of a second, as the wire has it. Only `MsgGameSettings`
+          // carries the two, so a target too old to answer `ws` shows neither
+          // rather than a wrong zero.
+          shakeTimeout: settings ? settings.shakeTimeout : null,
+          shakeWins: settings ? settings.shakeWins : null,
         });
       } catch (err) {
         fail(err);

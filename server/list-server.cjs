@@ -93,7 +93,8 @@ function maskKey(key) {
 // one thing a listing must never do after the row is created.
 //
 // `dateRequested`/`url`/`bzid`/`callsign`/`lastChecked`/`failCount`/
-// `lastError` persist (serialize/load, the same shape sessions.cjs uses);
+// `lastError`/`upSince` persist (serialize/load, the same shape sessions.cjs
+// uses);
 // `live` -- the last report's title/description/players/maxPlayers/version/
 // gameOptionsBits/lastReportAt -- does not, the same as bzfs's own list
 // server forgets ADDs across a restart. A row with no `live` yet is a
@@ -135,6 +136,14 @@ function createKeyStore({ maxKeys = MAX_KEYS, onChange = () => {}, randomUUID = 
         lastChecked: null,
         failCount: 0,
         lastError: null,
+        // When this server was last seen to start, which only a `boot` report
+        // sets (`report` below). Issue #106: a server's *claimed* uptime is
+        // worth nothing and its registration date measures the wrong thing --
+        // a key registered a year ago on a server restarted an hour ago reads
+        // a year. This is the list server's own observation instead. On the
+        // record rather than in `live` so it survives the list server's own
+        // restarts, which `live` deliberately does not.
+        upSince: null,
         live: null,
       };
       byId.set(record.id, record);
@@ -217,8 +226,15 @@ function createKeyStore({ maxKeys = MAX_KEYS, onChange = () => {}, randomUUID = 
 
     // ADD-equivalent. `reason` distinguishes a periodic push (which also
     // gates validation, above the caller) from a bare join/part count update.
-    report(record, payload, now = Date.now()) {
+    report(record, payload, now = Date.now(), reason = null) {
       if (!record || !byId.has(record.id)) return false;
+      // Only `boot` moves the clock. Every other reason -- periodic, join,
+      // part, or the status that rides along with a validation -- is that same
+      // run of that same server still going.
+      if (reason === 'boot') {
+        record.upSince = now;
+        onChange();
+      }
       record.live = { ...payload, lastReportAt: now };
       return true;
     },
@@ -228,6 +244,10 @@ function createKeyStore({ maxKeys = MAX_KEYS, onChange = () => {}, randomUUID = 
     unreport(record) {
       if (!record || !byId.has(record.id)) return false;
       record.live = null;
+      // A clean shutdown stops the clock rather than leaving one running: the
+      // next `boot` report starts a new one.
+      record.upSince = null;
+      onChange();
       return true;
     },
 
@@ -260,6 +280,7 @@ function createKeyStore({ maxKeys = MAX_KEYS, onChange = () => {}, randomUUID = 
           bzid: record.bzid, callsign: record.callsign, url: record.url, key: record.key,
           dateRequested: record.dateRequested, lastChecked: record.lastChecked,
           failCount: record.failCount, lastError: record.lastError,
+          upSince: record.upSince ?? null,
         };
       }
       return { version: 1, keys: out };
@@ -286,6 +307,7 @@ function createKeyStore({ maxKeys = MAX_KEYS, onChange = () => {}, randomUUID = 
           lastChecked: Number.isFinite(record.lastChecked) ? record.lastChecked : null,
           failCount: Number.isInteger(record.failCount) ? record.failCount : 0,
           lastError: typeof record.lastError === 'string' ? record.lastError : null,
+          upSince: Number.isFinite(record.upSince) ? record.upSince : null,
           live: null,
         };
         if (isKeyExpired(restored, now)) continue;
