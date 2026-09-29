@@ -200,3 +200,17 @@ export function getPlayerTeamRadarColor(team) {
 export function getPlayerTeamColor(team) {
   return PLAYER_TEAM_COLORS[normalizePlayerTeam(team)];
 }
+
+// areFoes (bzfs.cxx:3042). Who may legitimately kill whom. Everyone is a foe on
+// a world with no teams, and a rogue is everyone's foe even on one that has
+// them -- which is why upstream's own `-noTeamKills` help says "Rogue is
+// excepted".
+//
+// Both ends ask it, as upstream does: bzo's server refuses a teammate's shot
+// where it decides every hit, and the client asks the same question of its own
+// tank on a proxied connection, where bzfs expects the victim to report the
+// kill.
+export function areFoes(teamA, teamB, teamsAllowed) {
+  if (!teamsAllowed) return true;
+  return teamA !== teamB || teamA === PLAYER_TEAM.ROGUE;
+}

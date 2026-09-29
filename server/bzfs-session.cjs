@@ -1009,6 +1009,23 @@ class BzfsSession {
     this.send('tp', payload);
   }
 
+  // MsgShotEnd, which upstream's victim sends about *somebody else's* shot:
+  // the one that just hit them (`playing.cxx:4169`), ended so it cannot hit
+  // again after a shield drops. So `player` is the shooter, not the sender.
+  //
+  // It is paired with dying and must not be sent alone. bzfs raises
+  // `endShotCredit` on every one of these and lowers it only when the sender
+  // dies (`bzfs.cxx:4899`) or fires a guided missile, kicking above
+  // `_endShotDetection` (default 2) -- so an end without the `MsgKilled` that
+  // pays for it disconnects the player on the third shot.
+  sendShotEnd(player, shotId, reason = 1) {
+    const payload = Buffer.alloc(5);
+    payload.writeUInt8(player, 0);
+    payload.writeInt16BE(shotId, 1);
+    payload.writeUInt16BE(reason, 3);
+    this.send('se', payload);
+  }
+
   // MsgDropFlag, which a client also declares for itself: where the tank was
   // standing when it let go (`ServerLink.cxx:749`). Sent immediately before a
   // death, because upstream's own `gotBlowedUp` drops the flag first
@@ -1038,6 +1055,29 @@ class BzfsSession {
     payload.write(String(flag).padEnd(2, '\0'), at, 2, 'ascii'); at += 2;
     if (tail) payload.writeInt32BE(phydrv, at);
     this.send('kl', payload);
+  }
+
+  // MsgGMUpdate: `GuidedMissileStrategy::sendUpdate` (:406). The missile's own
+  // state followed by the tank it is chasing -- `firingInfo.shot.pack` and then
+  // one byte of `lastTarget`. Upstream sends it only when the target changes
+  // ("only send an update when needed"), and so does bzo: everyone else steers
+  // their copy of the missile at whoever this last named, so a packet a frame
+  // would say the same thing over and over.
+  //
+  // The layout is `decodeGMUpdate` read backwards, which is how the pair is
+  // kept honest -- the same fields in the same order, including the `team`
+  // short that upstream packs and admits it never reads.
+  sendGMUpdate({ player, shotId, pos, velocity, dt = 0, team = 0, target }) {
+    const payload = Buffer.alloc(1 + 2 + 12 + 12 + 4 + 2 + 1);
+    let at = 0;
+    payload.writeUInt8(player, at); at += 1;
+    payload.writeUInt16BE(shotId & 0xffff, at); at += 2;
+    for (const value of pos) { payload.writeFloatBE(value, at); at += 4; }
+    for (const value of velocity) { payload.writeFloatBE(value, at); at += 4; }
+    payload.writeFloatBE(dt, at); at += 4;
+    payload.writeInt16BE(team, at); at += 2;
+    payload.writeUInt8(target, at);
+    this.send('gm', payload);
   }
 
   // MsgShotBegin: `FiringInfo::pack`, the declaration upstream lets a client

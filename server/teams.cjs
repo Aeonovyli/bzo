@@ -500,10 +500,10 @@ function isColorTeam(team) {
 // them -- which is why upstream's own `-noTeamKills` help says "Rogue is
 // excepted".
 //
-// Server-only. Upstream asks this on both ends -- each client refuses a
-// teammate's shot in `LocalPlayer::checkHit` and bzfs asks again to score the
-// team kill -- but bzo's server is the only thing that decides a hit, so there
-// is one copy and it lives here.
+// Both ends ask it, as upstream does: bzo's server refuses a teammate's shot
+// where it decides every hit, and the client asks the same question of its own
+// tank on a proxied connection, where bzfs expects the victim to report the
+// kill.
 function areFoes(teamA, teamB, teamsAllowed) {
   if (!teamsAllowed) return true;
   return teamA !== teamB || teamA === PLAYER_TEAM.ROGUE;

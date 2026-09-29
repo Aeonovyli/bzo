@@ -21,6 +21,7 @@ const {
   DEFAULT_LIST_SERVER,
   PROTOCOL_VERSION: BZFS_PROTOCOL_VERSION,
   GAME_OPTION_BITS,
+  GAME_STYLES,
   findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
@@ -37,6 +38,8 @@ const {
   toBzfsChatText,
   evalBzdb,
   NO_PLAYER: BZFS_NO_PLAYER,
+  SERVER_PLAYER_ID: BZFS_SERVER_PLAYER,
+  BLOWED_UP,
   PLAYER_STATUS: BZFS_PLAYER_STATUS,
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
 } = require('./server/bzfs-session.cjs');
@@ -50,6 +53,9 @@ const {
   getWorldReloadSeconds,
   getSlotReloadSeconds,
   findFreeShotSlot,
+  shotIsActive,
+  getShotTankHit,
+  shockWaveHitsTank,
 } = require('./server/shots.cjs');
 const {
   BASE_SIZE,
@@ -100,24 +106,21 @@ const {
   getMaxAngVelFactor,
   getMaxSpeedFactor,
   getShockWaveRadius,
-  cloaksTheTank,
   drivesThroughBuildings,
   canRunOver,
   isCrushedByAnyone,
   getGroundLimit,
   getFiredShotFlag,
   isZoned,
-  shotPassesThroughTank,
   togglesZoneOnTeleport,
   hidesFromRadar,
   seesThroughDisguises,
   getTankDimensionScale,
-  getTankHitRadiusScale,
   getTeamFlagAbbreviation,
   formatFlagInfo,
   isBadFlag,
   isTeamFlag,
-  usesNarrowHitBox,
+  getFlagTeamIndex,
 } = require('./server/flags.cjs');
 const {
   documentTitle,
@@ -143,7 +146,6 @@ const {
   meshFlatTopYsAt,
   isPyramidFlatTop,
   reflectShotDirection,
-  getSegmentTankHitFraction,
   TANK_HALF_LENGTH,
   TANK_HIT_HEIGHT,
   TANK_HIT_RADIUS,
@@ -14772,86 +14774,40 @@ function getShotTeam(proj) {
 // decide, because each client tests only its own tank and one shot is one hit by
 // construction.
 function findShotPlayerHit(proj, from, to, now) {
-  // GuidedMissileStrategy::checkHit (:318): "GM is not active until activation
-  // time passes (for any tank)". The tank the rule is really for is the one that
-  // fired it -- a missile locked onto a target two lengths away comes round
-  // through its own shooter.
-  if (proj.activationTime > 0
-    && ((now - proj.createdAt) / 1000) < proj.activationTime) return null;
+  if (!shotIsActive(proj, now)) return null;
+
+  // The shot as the rule sees it: everything about who fired it and what it
+  // carries, with the team already resolved, because a world weapon has no
+  // roster entry to take one from.
+  const shot = {
+    playerId: proj.playerId,
+    flag: proj.flag,
+    steals: proj.steals,
+    bounces: proj.bounces,
+    team: getShotTeam(proj),
+  };
+  const rules = {
+    noTeamKills: NO_TEAM_KILLS,
+    teamsAllowed: TEAMS_ALLOWED,
+    shotRadius: GAME_CONFIG.SHOT_RADIUS,
+  };
 
   let best = null;
   players.forEach((player) => {
-    // LocalPlayer::checkHit tests a player's own shots too -- "Don't shoot
-    // yourself!" is the Ricochet flag's own help text -- but only once one has
-    // bounced. Before that a shot leaves the muzzle beyond the hit radius and
-    // outruns the tank it came from.
-    // "my own shock wave cannot kill me ... or Thief" (LocalPlayer.cxx:1612).
-    // Unlike a ricochet, no bounce ever earns a thief its own flag back.
-    if (player.id === proj.playerId && (proj.steals || proj.bounces === 0)) return;
-    if (isObserverTeam(player.team)) return; // No tank to hit
-    if (player.paused) return; // Can't hit paused players
-    if (!player.alive) return; // Can't hit dead players
-
-    // "-noTeamKills: Players on the same team are immune to each other's shots.
-    // Rogue is excepted." Upstream refuses this on the victim's own client
-    // (LocalPlayer.cxx:1616); bzo refuses it here, where hits are decided. Your
-    // own shot still reaches you once it has bounced -- upstream excepts the
-    // shooter too (`source != this`), because a ricochet you drove into is
-    // nobody's team kill.
-    //
-    // "Thief can still take a teammate's flag" -- upstream excepts it from the
-    // guard by name (LocalPlayer.cxx:1617), because nothing about a theft is a
-    // kill and a team mate carrying the flag you want is exactly who you rob.
-    if (NO_TEAM_KILLS && !proj.steals && player.id !== proj.playerId
-      && !areFoes(getShotTeam(proj), player.team, TEAMS_ALLOWED)) return;
-
-    // `ThiefStrategy::isStoppedByHit` returns false: a thief's beam is not spent
-    // by a tank, so a tank with nothing to take does not block it. bzo stops it
-    // at the first tank it can actually rob instead, which is the one place it
-    // does not simply follow upstream -- upstream lets every client along the
-    // beam report its own theft, and the thief keeps only the last of them while
-    // bzfs zaps the rest. Robbing one tank per shot loses nothing anybody wanted
-    // and destroys nothing.
-    if (proj.steals && !getPlayerFlag(player.id)) return;
-
-    // LocalPlayer::checkHit (LocalPlayer.cxx:1630): "laser can't hit a cloaked
-    // tank". The one per-viewer rule that is not a matter of what somebody can
-    // see -- a cloaked tank is genuinely immune to a beam, so it has to be the
-    // server's answer rather than each client's. It is also the reason `CL` is a
-    // good flag rather than a cosmetic one.
-    if (proj.flag === 'L' && cloaksTheTank(getPlayerFlag(player.id)?.type ?? null)) return;
-
-    // LocalPlayer::checkHit's phantom pair (LocalPlayer.cxx:1622 and :1634): a
-    // zoned tank is only reached by a super bullet, a shock wave or another
-    // zoned tank's bullet, and a zoned bullet reaches nobody else. Upstream asks
-    // this on the victim's own client; bzo asks it here, for the same reason it
-    // decides every other kill here.
-    if (shotPassesThroughTank(proj.flag, isPlayerZoned(player))) return;
-
-    // Use extrapolated position for accurate hit detection
-    const extrapolated = player.getExtrapolatedPosition(now);
-    const playerFlagType = getPlayerFlag(player.id)?.type ?? null;
-    const fraction = getSegmentTankHitFraction(from, to, extrapolated, {
-      narrow: usesNarrowHitBox(playerFlagType),
-      radiusScale: getTankHitRadiusScale(playerFlagType),
-      shotRadius: GAME_CONFIG.SHOT_RADIUS,
-    });
-    if (fraction === null) return;
-    if (best && best.fraction <= fraction) return;
-
-    // The tank's height gate, asked where the shot entered its footprint.
-    const y = from.y + ((to.y - from.y) * fraction);
-    if (y < extrapolated.y || y > extrapolated.y + TANK_HIT_HEIGHT) return;
-
-    best = {
-      player,
-      fraction,
-      point: {
-        x: from.x + ((to.x - from.x) * fraction),
-        y,
-        z: from.z + ((to.z - from.z) * fraction),
-      },
-    };
+    const hit = getShotTankHit(shot, from, to, {
+      id: player.id,
+      team: player.team,
+      paused: player.paused,
+      alive: player.alive,
+      // Extrapolated, so the hit is tested where the tank is rather than where
+      // its last update put it.
+      position: player.getExtrapolatedPosition(now),
+      flagType: getPlayerFlag(player.id)?.type ?? null,
+      zoned: isPlayerZoned(player),
+    }, rules);
+    if (!hit) return;
+    if (best && best.fraction <= hit.fraction) return;
+    best = { player, fraction: hit.fraction, point: hit.point };
   });
   return best;
 }
@@ -15133,25 +15089,30 @@ const SHOT_END_LABEL = Object.freeze({
 // by a hit. Each one is resolved once, and the wave carries the list -- see
 // `shockWaveResolved` on the projectile.
 function applyShockWaveHits(proj, id, radius, now) {
-  const radiusSquared = radius * radius;
+  const shot = {
+    playerId: proj.playerId,
+    team: getShotTeam(proj),
+    x: proj.x,
+    y: proj.y,
+    z: proj.z,
+    radius,
+  };
+  const rules = { noTeamKills: NO_TEAM_KILLS, teamsAllowed: TEAMS_ALLOWED };
   players.forEach((player) => {
-    // "my own shock wave cannot kill me" (LocalPlayer.cxx:1612). Unlike a
-    // ricochet there is no bounce that could ever earn it.
-    if (player.id === proj.playerId) return;
-    if (isObserverTeam(player.team)) return;
-    if (player.paused) return;
-    if (!player.alive) return;
+    // A wave does not stop at a tank, so it would otherwise sweep the same one
+    // again on every tick it is still swelling. This is the only guard the
+    // shared rule does not carry: it is about this wave's history, not about
+    // whether a wave may hit a tank.
     if (proj.shockWaveResolved.has(player.id)) return;
-    // Friendly fire, as for any other shot: upstream's team-kill guard is one
-    // test in one loop over every shot the shooter owns, and a shock wave is one
-    // of them.
-    if (NO_TEAM_KILLS && !areFoes(getShotTeam(proj), player.team, TEAMS_ALLOWED)) return;
 
     const at = player.getExtrapolatedPosition(now);
-    const dx = at.x - proj.x;
-    const dy = at.y - proj.y;
-    const dz = at.z - proj.z;
-    if (((dx * dx) + (dy * dy) + (dz * dz)) > radiusSquared) return;
+    if (!shockWaveHitsTank(shot, {
+      id: player.id,
+      team: player.team,
+      paused: player.paused,
+      alive: player.alive,
+      position: at,
+    }, rules)) return;
 
     proj.shockWaveResolved.add(player.id);
     const point = { x: at.x, y: at.y, z: at.z };
@@ -16381,6 +16342,23 @@ const PROXY_DEATH_REASONS = Object.freeze([
   'shot', 'shot', 'runOver', 'shot', 'genocide', 'selfDestruct', 'water',
 ]);
 
+// The same table read the other way, for a proxied browser reporting its own
+// death. Not the inverse of the list above, which maps several reasons onto
+// `'shot'` and could not be inverted: this is the reason bzo's client can
+// actually be the first to know, each named by what upstream would have sent.
+// `shielded` is not a death at all -- it is a hit a Shield flag absorbed, which
+// upstream reports as an ended shot and a dropped flag and no kill -- so it is
+// here to be recognised rather than to be packed.
+const PROXY_KILL_REASONS = Object.freeze({
+  shot: BLOWED_UP.GOT_SHOT,
+  runOver: BLOWED_UP.GOT_RUN_OVER,
+  genocide: BLOWED_UP.GENOCIDE_EFFECT,
+  selfDestruct: BLOWED_UP.SELF_DESTRUCT,
+  water: BLOWED_UP.WATER_DEATH,
+  physicsDriver: BLOWED_UP.DEATH_TOUCH,
+  shielded: BLOWED_UP.GOT_SHOT,
+});
+
 // The one message an ordinary connection gets on open, built from a target's
 // answer to `MsgEnter` instead of from this server's own game.
 // `MsgGameSettings` as its option bits, or null before it has arrived.
@@ -16388,6 +16366,35 @@ function proxyGameOptions(session) {
   const settings = session.state.gameSettings;
   if (!settings || settings.length < 30) return null;
   return decodeGameSettings(settings).gameOptionsBits;
+}
+
+// A player id a browser named, as a number the wire can carry, or null for
+// "nobody". Its own function because `Number(null)` is 0 and 0 is a real player
+// -- so a missile told to chase nobody, or a death with no killer, would name
+// whoever holds the first slot instead.
+function proxyNamedPlayerId(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const id = Number(value);
+  return Number.isInteger(id) && id >= 0 && id < BZFS_NO_PLAYER ? id : null;
+}
+
+// The flag this connection's own tank is carrying, as the target last said --
+// the abbreviation, or null for a tank carrying nothing.
+function proxyCarriedFlagType(session) {
+  const carried = session.state.flags.find((flag) => flag
+    && flag.owner === session.playerId
+    && flag.status === FLAG_STATUS.ON_TANK);
+  return carried?.type ?? null;
+}
+
+// The target's GameType by the name `allowTeams` asks for, for the one question
+// bzo asks of it: whether colour teams exist at all, which is what decides who
+// may shoot whom. A target that has not sent its settings yet reads as TeamFFA,
+// the type upstream's own `-c`/`-offa`/`-rabbit` are all departures from.
+function proxyGameType(session) {
+  const settings = session.state.gameSettings;
+  if (!settings || settings.length < 30) return GAME_STYLES[0];
+  return GAME_STYLES[decodeGameSettings(settings).gameType] || GAME_STYLES[0];
 }
 
 // bzfs names the nearest flag by its *name* ("Identify"), where bzo's client
@@ -16456,6 +16463,15 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
       ),
       ALL_SHOTS_RICOCHET: proxyGameOptions(session) !== null
         && (proxyGameOptions(session) & GAME_OPTION_BITS.ricochet) !== 0,
+      // The two rules the client needs to decide a hit on *itself*, which is
+      // what a proxied connection asks of it: bzfs takes the victim's word for
+      // a death, so the browser answers `LocalPlayer::checkHit` and has to know
+      // what upstream's own `World::allowTeamKills` knows (`World.h:217`).
+      // Read off the live connection rather than the import, like ricochet
+      // above -- a cached world can be older than the server's own options.
+      NO_TEAM_KILLS: proxyGameOptions(session) !== null
+        && (proxyGameOptions(session) & GAME_OPTION_BITS.noTeamKills) !== 0,
+      TEAMS_ALLOWED: allowTeams(proxyGameType(session)),
       // What a native client does: `MaxUpdateTime` is one second, and
       // `isDeadReckoningWrong` returns true past it whatever the tank is doing
       // -- "otherwise always send at least one packet per second"
@@ -16572,6 +16588,11 @@ async function handleProxyConnection(ws, req, request) {
   // entered on, and how its motion converts depends on the target's world.
   let physics = null;
   let playingTeam = false;
+  // Whether the target thinks this browser's own tank is standing. Not read off
+  // `announcedAlive`, which deliberately skips our own id -- that map is about
+  // what the *browser* has been told, and our own liveness is what we tell the
+  // *target*.
+  let selfAlive = false;
   // What the target will accept of a shot, read off its own BZDB rather than
   // assumed: `shotFired` compares the lifetime against its `_reloadTime` within
   // an epsilon and drops a shot that misses without telling anyone
@@ -16760,6 +16781,7 @@ async function handleProxyConnection(ws, req, request) {
       const player = session.state.players.get(spawn.id);
       if (!player) return;
       announcedAlive.set(spawn.id, true);
+      if (spawn.id === session.playerId) selfAlive = true;
       send({
         type: 'alive',
         player: proxyPlayerRecord(player, session.state.motion.get(spawn.id)),
@@ -16768,6 +16790,19 @@ async function handleProxyConnection(ws, req, request) {
 
     session.on('killed', (death) => {
       announcedAlive.set(death.victim, false);
+      // Ask to come back. Upstream leaves a dead player dead until they press
+      // something -- `restart` is what sends `MsgAlive`
+      // (`clientCommands.cxx:379`) -- where bzo respawns on a timer and never
+      // asks, which is deliberate (`docs/proxy.md`). So the asking happens
+      // here, once, and the target does the waiting: `MsgAlive` only sets
+      // `wantsToSpawn`, and bzfs holds the spawn until the `_explodeTime` that
+      // `playerKilled` just stamped on this player has passed
+      // (`bzfs.cxx:3371`, `PlayerInfo.h:334-348`). Sending it immediately is
+      // therefore not sending it early.
+      if (death.victim === session.playerId) {
+        selfAlive = false;
+        if (playingTeam) session.sendAlive();
+      }
       const victim = session.state.players.get(death.victim);
       const killer = session.state.players.get(death.killer);
       send({
@@ -16894,6 +16929,49 @@ async function handleProxyConnection(ws, req, request) {
     // nothing to translate.
     session.on('capture', ({ id, index, team }) => {
       send({ type: 'captureFlag', playerId: String(id), index, team });
+
+      // "everyone on losing team is dead" -- and bzfs tells nobody. It calls
+      // `setDead()` on each of them and broadcasts `MsgCaptureFlag` alone
+      // (`captureFlag`, bzfs.cxx), leaving every client to reach its own
+      // conclusion. Upstream's does, in the one branch of `gotBlowedUp` that
+      // sends no `MsgKilled` back: `GotCaptured` is the target's own doing, so
+      // reporting it would be telling bzfs what it already decided.
+      //
+      // So the deaths are synthesized here, in the shape bzo's own server
+      // broadcasts them -- `captured: true`, no reason, no score -- and the
+      // browser dies from a capture through the one path it already has.
+      //
+      // The losing team is read off the *flag*, as bzfs reads it
+      // (`flag.teamIndex()`), not off the message's `team`: that one carries
+      // what the capturing client claimed, where the flag says whose it was.
+      const cappedTeam = getFlagTeamIndex(session.state.flags[index]?.type ?? null);
+      if (cappedTeam === null) return;
+      session.state.players.forEach((player) => {
+        if (player.team !== cappedTeam) return;
+        if (announcedAlive.get(player.id) === false) return;
+        announcedAlive.set(player.id, false);
+        const motion = session.state.motion.get(player.id);
+        const at = motion ? proxyPosition(motion.pos) : { x: 0, y: 0, z: 0 };
+        send({
+          type: 'killed',
+          victimId: String(player.id),
+          shooterId: String(id),
+          projectileId: null,
+          captured: true,
+          x: round2(at.x),
+          y: round2(at.y),
+          z: round2(at.z),
+        });
+      });
+
+      // And ask to come back, for the same reason a shot death does: bzfs
+      // stamped a spawn delay on everyone it just killed but set no
+      // `wantsToSpawn`, so a tank that does not ask stays down for good. The
+      // target holds the spawn until `_explodeTime` has passed by itself.
+      if (cappedTeam === enteredTeamIndex) {
+        selfAlive = false;
+        if (playingTeam) session.sendAlive();
+      }
     });
 
     // Where a shot was and how fast, for two things neither wire carries.
@@ -16962,6 +17040,12 @@ async function handleProxyConnection(ws, req, request) {
     // upstream only sends these because its own receivers re-anchor. Worth
     // revisiting if a proxied missile is seen to drift.
     session.on('gmUpdate', ({ player, target }) => {
+      // Not our own back at us. bzfs rebroadcasts a GM update to everyone
+      // including the sender (`shotUpdate`, bzfs.cxx), and on this connection
+      // the sender is the browser -- which decided the lock in the first place
+      // and is the only thing entitled to clear it. Echoing it would undo
+      // every lapse the moment it happened.
+      if (player === session.playerId) return;
       send({
         type: 'gmUpdate',
         playerId: String(player),
@@ -17152,10 +17236,25 @@ async function handleProxyConnection(ws, req, request) {
     // observer has no tank to report and bzfs would not read one from it.
     if (message.type === 'm') {
       if (playingTeam && physics) {
+        // The status says whether the tank is standing, and a dead one says so
+        // -- `DeadStatus = 0` (`PlayerState.h:24`). Every other client reads
+        // this to decide whether to draw the tank at all, so claiming `Alive`
+        // while dead would leave a corpse driving around on their screens for
+        // the whole respawn wait.
+        //
+        // The updates keep flowing while dead, which is upstream's own
+        // behaviour and not an oversight: `sendUpdate` is
+        // `myTank->isDeadReckoningWrong()` with no test of life
+        // (`playing.cxx:7412`), and it has to be -- bzfs reads `lastupdate`
+        // from `MsgPlayerUpdate` alone, so a tank that went quiet while dead
+        // would be marked not responding within `_notRespondingTime`.
+
+
         lastMotion = proxyOutboundMotion(
           message,
           physics,
-          BZFS_PLAYER_STATUS.ALIVE | (proxyPaused ? BZFS_PLAYER_STATUS.PAUSED : 0),
+          (selfAlive ? BZFS_PLAYER_STATUS.ALIVE : 0)
+            | (proxyPaused ? BZFS_PLAYER_STATUS.PAUSED : 0),
         );
         session.sendPlayerUpdate(lastMotion);
       }
@@ -17192,16 +17291,44 @@ async function handleProxyConnection(ws, req, request) {
       const dir = [Number(message.dirX) || 0, -(Number(message.dirZ) || 0), Number(message.dirY) || 0];
       const slot = nextShotSlot;
       nextShotSlot = (nextShotSlot + 1) % maxShots;
+      const firingFlag = proxyCarriedFlagType(session) || '';
+
+      // "move shot origin under tank and make it stationary"
+      // (`LocalPlayer::fireShot`, LocalPlayer.cxx:1230-1240). A wave does not
+      // fly, and the target enforces that rather than assuming it: `shotFired`
+      // zeroes both `shotSpeed` and `tankSpeed` for one, so any velocity at all
+      // fails its speed check and the shot is dropped without a word.
+      const wave = firingFlag === 'SW';
+      const origin = wave && lastMotion ? lastMotion.pos : [x, -z, y];
+
       session.sendShot({
         slot,
-        pos: [x, -z, y],
-        velocity: dir.map((component) => component * shotSpeed),
-        // Always Null, never the flag the browser thinks it is holding. bzfs
-        // kicks for a claimed flag that differs from the one it has recorded
-        // (`checkShotMismatch`) and fills the real one in itself when the
-        // shooter is carrying something, so claiming nothing is both safe and
-        // accurate.
-        flag: '',
+        pos: origin,
+        // Upstream adds the tank's own velocity here (LocalPlayer.cxx:1250)
+        // and bzo does not, so a proxied player's shells are a little slow on
+        // a native screen while the shooter is moving. Left alone rather than
+        // copied: upstream then zeroes the vertical component again unless
+        // `_shotsKeepVerticalV`, and getting half of that pair right is worse
+        // than neither. The target's speed check is an upper bound, so the
+        // slower shot passes it.
+        velocity: wave ? [0, 0, 0] : dir.map((component) => component * shotSpeed),
+        // The flag the *target* has on record for us, not the one the browser
+        // thinks it is holding and not nothing.
+        //
+        // Claiming nothing looks safe and is not. bzfs does fill the real flag
+        // into its own `firingInfo` (`shotFired`, bzfs.cxx) -- but it only
+        // re-packs the packet it rebroadcasts when `repack` is set, and that
+        // fill-in does not set it. So the buffer every other client receives,
+        // and the echo that comes back here, is the one that was sent: a shot
+        // with no flag -- an ordinary bullet by the time it reaches any client,
+        // whatever the shooter is really holding.
+        //
+        // Reading it off `session.state.flags` is what makes claiming it safe:
+        // that is bzfs's own answer echoed back, so it cannot disagree with
+        // what `checkShotMismatch` compares against. A native client claims
+        // the flag its own copy of the same messages says it holds, and races
+        // a grab or a drop exactly the same way.
+        flag: firingFlag,
         lifetime: shotLifetime,
         team: enteredTeamIndex,
       });
@@ -17253,6 +17380,46 @@ async function handleProxyConnection(ws, req, request) {
       }
       return;
     }
+    // A lock is declared, like everything else a client is authoritative about
+    // here. bzo's own server decides who a missile is chasing and broadcasts
+    // it, because there the missile is the server's; on a target the missile
+    // belongs to the browser, and upstream's own client says who it is after
+    // from the missile itself (`GuidedMissileStrategy::sendUpdate`).
+    //
+    // The browser sends one only when a missile's target changes, which is
+    // upstream's `needUpdate`, so this is not a per-frame packet.
+    if (message.type === 'lockTarget') {
+      if (!playingTeam) return;
+      const parts = typeof message.shotId === 'string' ? message.shotId.split('-') : null;
+      if (!parts || parts.length !== 2) return;
+      // Only this player's own missiles: the id carries the shooter, and a
+      // browser claiming to steer somebody else's missile would be claiming
+      // something bzfs has no reason to believe.
+      if (Number(parts[0]) !== session.playerId) return;
+      const shotId = Number(parts[1]);
+      if (!Number.isInteger(shotId) || shotId < 0) return;
+
+      const speed = Number(message.speed) || 0;
+      // The same axis swap every other outbound position takes
+      // (`proxyOutboundMotion`), applied to a direction because a direction is
+      // a difference of two positions.
+      const velocity = [
+        (Number(message.dirX) || 0) * speed,
+        -(Number(message.dirZ) || 0) * speed,
+        (Number(message.dirY) || 0) * speed,
+      ];
+      session.sendGMUpdate({
+        player: session.playerId,
+        shotId,
+        pos: [Number(message.x) || 0, -(Number(message.z) || 0), Number(message.y) || 0],
+        velocity,
+        // `lastTarget` is `NoPlayer` when a missile is chasing nobody, which is
+        // how upstream spells a lock that has lapsed.
+        target: proxyNamedPlayerId(message.targetId) ?? BZFS_NO_PLAYER,
+        team: enteredTeamIndex,
+      });
+      return;
+    }
     if (message.type === 'nearFlag') return;
     // bzo's pause is a request its own server answers by flipping a flag; a
     // target keeps that flag itself, so the browser's toggle is applied here
@@ -17263,6 +17430,99 @@ async function handleProxyConnection(ws, req, request) {
       if (!playingTeam) return;
       proxyPaused = !proxyPaused;
       session.sendPause(proxyPaused);
+      return;
+    }
+    // A death is declared, like a shot or a grab -- and on a target it is the
+    // *victim* who declares it, which is the whole reason the browser has to
+    // decide its own (`checkOwnShotHit`, client.js). bzfs asks nothing and
+    // checks nothing beyond the shot id being a real slot (`bzfs.cxx:4893`).
+    //
+    // Upstream's order, from `checkEnvironment` into `gotBlowedUp`, and every
+    // step of it earns its place:
+    //
+    //   1. `sendEndShot(killer, shotId, 1)` -- but only for a shot, and
+    //      upstream's own reason is "force shot to terminate locally
+    //      immediately ... to ensure that we don't get shot again by the same
+    //      shot after dropping our shield flag" (playing.cxx:4164-4169).
+    //   2. `sendDropFlag(position)` -- "you can't take it with you"
+    //      (playing.cxx:3893), before the kill so bzfs records where the flag
+    //      fell rather than where the tank respawns.
+    //   3. `sendKilled(...)` -- unless a Shield saved the tank, in which case
+    //      upstream sends the first two and no kill at all (:3918).
+    //
+    // The order is also what keeps the `endShot` anti-cheat balanced, which is
+    // the part that bites if it is got wrong. `MsgShotEnd` raises
+    // `endShotCredit` and notes a Shield the sender is *currently* holding as
+    // `endShotShieldCredit` (bzfs.cxx:4962-4971); `MsgKilled` lowers the credit
+    // again (:4899), and so does dropping that Shield (:3881). So an ordinary
+    // death nets zero, and a shielded save nets zero only because the shot is
+    // ended while the flag is still in hand. Drop first and the credit leaks --
+    // three saves and the target kicks the player for "wrong end shots".
+    // bzo's own client spells a suicide as its own message rather than as a
+    // death it reports, because on bzo's server it is a *request* -- the server
+    // decides it and kills the tank. A target has no such message and no such
+    // opinion: upstream's suicide is `gotBlowedUp(myTank, SelfDestruct,
+    // myTank->getId())` (playing.cxx:6966), a death the victim declares like
+    // any other. So it becomes one here rather than growing a second path.
+    if (message.type === 'killed' || message.type === 'selfDestruct') {
+      if (!playingTeam) return;
+      const reason = message.type === 'selfDestruct'
+        ? BLOWED_UP.SELF_DESTRUCT
+        : PROXY_KILL_REASONS[message.reason];
+      if (reason === undefined) return;
+
+      // `<player>-<shotId>`, the id this proxy built for the shot on its way in
+      // (`proxyShot`), handed back untouched. Parsed here because here is where
+      // that shape is decided. A death with a killer but no shot id is a shock
+      // wave, which has a shooter to credit and no bolt to name.
+      const parts = typeof message.shotId === 'string' ? message.shotId.split('-') : null;
+      const shotId = parts && parts.length === 2 ? Number(parts[1]) : -1;
+      const hasShot = Number.isInteger(shotId) && shotId >= 0;
+      const named = proxyNamedPlayerId(parts && parts.length === 2 ? parts[0] : message.killerId);
+      // Upstream's own choice of killer for each: the shooter for a shot or a
+      // wave, *yourself* for a suicide (`gotBlowedUp(myTank, SelfDestruct,
+      // myTank->getId())`), and `ServerPlayer` for water and a death pad,
+      // which nobody scores for.
+      const killer = named
+        ?? (message.type === 'selfDestruct' ? session.playerId : BZFS_SERVER_PLAYER);
+
+      // Only a shot that is *stopped* by hitting something is ended here. A
+      // laser, a thief's beam and a shock wave all pass through their victim
+      // (`isStoppedByHit`, false in those three strategies and true in the
+      // base one), and ending one would be claiming it stopped when everyone
+      // else on the target can still see it going. The browser reads that off
+      // the shot's own flag and says so.
+      if (hasShot && message.stoppedByHit !== false) session.sendShotEnd(killer, shotId, 1);
+
+      // Only if there is one to drop. bzfs reads `MsgDropFlag` against the flag
+      // it has recorded for this player and does nothing when that is none, but
+      // a drop nobody asked for is still a message claiming something happened.
+      const carried = session.state.flags.some((flag) => flag
+        && flag.owner === session.playerId && flag.status === FLAG_STATUS.ON_TANK);
+      if (carried && lastMotion) session.sendDropFlag(lastMotion.pos);
+
+      // A Shield save is the whole of it: the shot is spent and the flag is
+      // gone, and the tank is still standing.
+      if (message.reason === 'shielded') return;
+
+      session.sendKilled({
+        killer,
+        reason,
+        // bzfs sanity-checks this against the world's slot count unless the
+        // killer is `ServerPlayer`, and lets -1 through either way
+        // (bzfs.cxx:4893-4899) -- which is what a wave, a drowning and a death
+        // pad all send.
+        shotId: hasShot ? shotId : -1,
+        // `hit->getFlag()` -- the flag the *shot* carried, not the one the
+        // victim was holding (`gotBlowedUp`, playing.cxx:3886).
+        flag: typeof message.flag === 'string' ? message.flag : '',
+        // Upstream sends `myTank->getDeathPhysicsDriver()`, an index into its
+        // own driver table. bzo's client resolves a driver to the object
+        // rather than the index and has no number to send, so this says "some
+        // driver" and the target prints its own "Killed by unknown obstacle".
+        // The death still counts, which is what the message is for.
+        phydrv: -1,
+      });
       return;
     }
     if (message.type === 'debug') {
@@ -17402,9 +17662,17 @@ wss.on('connection', (ws, req) => {
   // the client two sources for the same fact -- exactly what let the
   // background map-hashing trickle silently resize the live match for issue
   // #68 in the first place, on the server side of the same mistake.
-  const clientGameConfig = Object.fromEntries(
-    Object.entries(GAME_CONFIG).filter(([key]) => key !== 'MAP_SIZE'),
-  );
+  const clientGameConfig = {
+    ...Object.fromEntries(
+      Object.entries(GAME_CONFIG).filter(([key]) => key !== 'MAP_SIZE'),
+    ),
+    // Sent for the same reason the proxy sends them, and with the same values
+    // this server decides hits by: the client holds one copy of the hit rule
+    // (`getShotTankHit`), and a rule it could only answer on one kind of
+    // connection would be two rules wearing one name.
+    NO_TEAM_KILLS,
+    TEAMS_ALLOWED,
+  };
 
   // Send initial server state in init message
   ws.send(JSON.stringify({

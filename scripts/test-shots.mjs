@@ -15,6 +15,9 @@ import {
   getSlotReloadSeconds,
   findFreeShotSlot,
   getShotSlotProgress,
+  getShotTankHit,
+  shockWaveHitsTank,
+  shotIsActive,
 } from '../public/shots.mjs';
 
 const require = createRequire(import.meta.url);
@@ -173,6 +176,125 @@ for (const value of [1, 3, '3', MAX_SHOT_SLOTS, MAX_SHOT_SLOTS + 1, 0, '0', -1, 
   assert.equal(SHOT_TAP_SPACING_MS, 100);
   assert.equal(serverLimits.SHOT_TAP_SPACING_MS, undefined,
     'the tap floor is input ergonomics and is never enforced on the wire');
+}
+
+// --- who a shot may hit -------------------------------------------------
+//
+// `LocalPlayer::checkHit`'s rules, which both ends now answer with this one
+// function: bzo's server asks it of every tank, and a proxied browser asks it
+// of its own, because bzfs takes the victim's word for a death.
+{
+  const shooter = { playerId: '7', flag: null, steals: false, bounces: 0, team: 'red' };
+  // A tank at the origin, and a shot crossing it along +x from well outside.
+  const victim = {
+    id: '3',
+    team: 'green',
+    paused: false,
+    alive: true,
+    position: { x: 0, y: 0, z: 0 },
+    flagType: null,
+    zoned: false,
+  };
+  const from = { x: -10, y: 1, z: 0 };
+  const to = { x: 10, y: 1, z: 0 };
+
+  assert.ok(getShotTankHit(shooter, from, to, victim), 'a shot across a tank hits it');
+  assert.equal(getShotTankHit(shooter, from, { x: -6, y: 1, z: 0 }, victim), null,
+    'a shot that stops short of the tank does not');
+
+  // The states that are not a tank to hit.
+  assert.equal(getShotTankHit(shooter, from, to, { ...victim, alive: false }), null,
+    'a dead tank cannot be hit');
+  assert.equal(getShotTankHit(shooter, from, to, { ...victim, paused: true }), null,
+    'a paused tank cannot be hit');
+  assert.equal(getShotTankHit(shooter, from, to, { ...victim, team: 'observer' }), null,
+    'an observer has no tank to hit');
+
+  // "Don't shoot yourself!" -- but only before it has bounced.
+  const own = { ...victim, id: shooter.playerId };
+  assert.equal(getShotTankHit(shooter, from, to, own), null,
+    'your own shot cannot hit you before it bounces');
+  assert.ok(getShotTankHit({ ...shooter, bounces: 1 }, from, to, own),
+    'and can once it has');
+
+  // `-noTeamKills`, and rogue excepted from it.
+  const mate = { ...victim, team: 'red' };
+  assert.ok(getShotTankHit(shooter, from, to, mate, { noTeamKills: false }),
+    'a team mate is shootable where team kills are allowed');
+  assert.equal(getShotTankHit(shooter, from, to, mate, { noTeamKills: true }), null,
+    'and immune where they are not');
+  assert.ok(getShotTankHit({ ...shooter, team: 'rogue' }, from, to,
+    { ...victim, team: 'rogue' }, { noTeamKills: true }),
+    'rogue is excepted, which is upstream\'s own -noTeamKills help text');
+  assert.ok(getShotTankHit(shooter, from, to, mate, { noTeamKills: true, teamsAllowed: false }),
+    'and a world with no teams has no team kills to refuse');
+
+  // A thief takes from a tank carrying something and passes through one that
+  // is not.
+  const thief = { ...shooter, flag: 'TH', steals: true };
+  assert.equal(getShotTankHit(thief, from, to, victim), null,
+    'a thief passes through a tank with nothing to take');
+  assert.ok(getShotTankHit(thief, from, to, { ...victim, flagType: 'GM' }),
+    'and stops at one carrying a flag');
+  assert.ok(getShotTankHit(thief, from, to, { ...mate, flagType: 'GM' }, { noTeamKills: true }),
+    'a thief can still rob a team mate, which no team-kill rule refuses');
+
+  // "laser can't hit a cloaked tank", and the phantom pair.
+  assert.equal(getShotTankHit({ ...shooter, flag: 'L' }, from, to,
+    { ...victim, flagType: 'CL' }), null, 'a laser cannot hit a cloaked tank');
+  assert.ok(getShotTankHit({ ...shooter, flag: 'L' }, from, to, victim),
+    'but hits an uncloaked one');
+  assert.equal(getShotTankHit(shooter, from, to, { ...victim, zoned: true }), null,
+    'an ordinary bullet passes through a zoned tank');
+  assert.ok(getShotTankHit({ ...shooter, flag: 'SB' }, from, to, { ...victim, zoned: true }),
+    'a super bullet reaches it');
+
+  // The height gate: a shot over the roof of the tank misses it.
+  assert.equal(getShotTankHit(shooter, { x: -10, y: 9, z: 0 }, { x: 10, y: 9, z: 0 }, victim),
+    null, 'a shot above the tank misses');
+
+  // A guided missile is inert until its activation time is up, which is what
+  // stops it killing its own shooter as it turns back.
+  assert.equal(shotIsActive({ activationTime: 0.5, createdAt: 1000 }, 1200), false,
+    'a missile is not active before its activation time');
+  assert.ok(shotIsActive({ activationTime: 0.5, createdAt: 1000 }, 1600),
+    'and is after it');
+  assert.ok(shotIsActive({ activationTime: 0, createdAt: 1000 }, 1000),
+    'an ordinary shot has no activation time to wait out');
+
+  // The client and server copies answer alike, which is the whole point of the
+  // pair.
+  const serverShots = require('../server/shots.cjs');
+  assert.deepEqual(
+    serverShots.getShotTankHit(shooter, from, to, victim),
+    getShotTankHit(shooter, from, to, victim),
+    'client and server disagree about a hit',
+  );
+}
+
+// --- and who a shock wave may hit ----------------------------------------
+//
+// Its own rule, because it is a sphere rather than a segment and because
+// upstream says it "can kill anything inside the radius, be it behind or in a
+// building or even zoned".
+{
+  const wave = { playerId: '7', team: 'red', x: 0, y: 0, z: 0, radius: 10 };
+  const victim = { id: '3', team: 'green', paused: false, alive: true, position: { x: 5, y: 0, z: 0 } };
+
+  assert.ok(shockWaveHitsTank(wave, victim), 'a tank inside the wave is caught');
+  assert.equal(shockWaveHitsTank(wave, { ...victim, position: { x: 15, y: 0, z: 0 } }), false,
+    'and one outside it is not');
+  assert.equal(shockWaveHitsTank(wave, { ...victim, id: wave.playerId }), false,
+    'my own shock wave cannot kill me');
+  assert.equal(shockWaveHitsTank(wave, { ...victim, alive: false }), false, 'nor a dead tank');
+  assert.equal(shockWaveHitsTank(wave, { ...victim, paused: true }), false, 'nor a paused one');
+  assert.equal(shockWaveHitsTank(wave, { ...victim, team: 'observer' }), false, 'nor an observer');
+  assert.equal(shockWaveHitsTank(wave, { ...victim, team: 'red' }, { noTeamKills: true }), false,
+    'friendly fire governs a wave like any other shot');
+
+  const serverShots = require('../server/shots.cjs');
+  assert.equal(serverShots.shockWaveHitsTank(wave, victim), shockWaveHitsTank(wave, victim),
+    'client and server disagree about a shock wave');
 }
 
 console.log('Shot slot limit tests passed');

@@ -103,6 +103,8 @@ omitted rather than sent null.
 | `pause` | -- | toggle; the server runs the countdown |
 | `selfDestruct` | -- | `/kill` on yourself |
 | `identify` | -- | toggle the lock/identify target |
+| `killed` | `reason`,`killerId`,`shotId`,`flag`,`stoppedByHit`,`deathMessage` | the client reporting its own death. Only on a proxied connection, where bzfs takes the victim's word for it -- bzo's own server decides deaths itself and ignores this |
+| `lockTarget` | `targetId`,`shotId`,`x`,`y`,`z`,`dirX`,`dirY`,`dirZ`,`speed` | a guided missile of the client's own naming who it is chasing. Proxied connections only, and only when the target changes |
 | `message` | `dst`, `msgType`, `text` | chat. `dst` is a player id, or one of the reserved ids below; `msgType` is `chat`/`action`/`team`/`admin`/... |
 | `setTankModel` | `tankModel` | change tank mid-session |
 | `queryPlayers` | -- | ask for a fresh roster |
@@ -284,7 +286,8 @@ the mapping is mostly one to one:
 | `MsgMessage` | `message` |
 | `MsgSetVar` / `MsgGameSettings` | `init.config` / `serverConfigUpdate` |
 | `MsgGetWorld` / `MsgWantWHash` | `init.world` + HTTP |
-| `MsgGMUpdate` | `gmUpdate` -- the target half only; bzo flies the missile itself rather than being told where it is |
+| `MsgGMUpdate` | `gmUpdate` inbound -- the target half only, since bzo flies the missile itself rather than being told where it is. `lockTarget` outbound, which does carry the missile's state because upstream's receivers re-anchor on it |
+| `MsgKilled` (outbound) | `killed` / `selfDestruct` -- the victim declaring it, which is bzfs's direction and the reverse of bzo's own |
 | `MsgLagPing` | `lag` (measured server-side, not answered) |
 | `MsgSuperKill` | closing the socket (it is a forced disconnect, not a kill) |
 

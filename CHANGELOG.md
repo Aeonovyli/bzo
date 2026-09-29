@@ -6,6 +6,33 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.86] - 2026-09-29
+
+### Added
+- Dying works on a proxied BZFlag server, which is most of what was still
+  missing from playing on one. All six of BZFlag's deaths count -- being shot,
+  run over, genocide, self-destruct, drowning and a death pad -- and a captured
+  team flag kills the losing team. You respawn afterwards, and a Shield still
+  saves you and costs you the flag instead of your life.
+- Guided Missile lock-on works on a proxied server. The missile curves on your
+  own screen as well as everyone else's, and the lock drops when its target
+  dies rather than following them into their next life.
+
+### Changed
+- The motto field shows which bzo a proxied connection came through, and is
+  not editable there. That line is what the far server is told, so it is not
+  yours to set; your own motto is untouched and comes back on a local game.
+
+### Fixed
+- Shots fired on a proxied server carried no flag, so every flag shot reached
+  the other players as a plain shell: a Guided Missile flew straight and
+  ricocheted off walls, a Laser was an ordinary bullet, and so on for the rest.
+- Shock waves fired on a proxied server are now fired from under the tank with
+  no velocity, as BZFlag does. A server that checks shot speeds refuses any
+  other, and drops the shot without saying so.
+- A tank that died on a proxied server went on telling that server it was
+  alive until it respawned, so other players saw it still driving around.
+
 ## [1.2.85] - 2026-09-28
 
 ### Added

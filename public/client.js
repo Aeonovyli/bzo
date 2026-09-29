@@ -207,6 +207,7 @@ import {
   getPlayerRanking,
   isColorTeam,
   isObserverTeam,
+  areFoes,
   isRabbitTeam,
   normalizePlayerTeam,
   normalizePlayerTeamSelection,
@@ -296,8 +297,12 @@ import {
   shotRicochets,
   GM_TURN_ANGLE,
   TARGETING_ANGLE,
+  LOCK_ON_ANGLE,
   pickTargetInSights,
   steerGuidedShot,
+  canRunOver,
+  getRunOverRadius,
+  getRunOverSeparation,
 } from './flags.mjs';
 import {
   normalizeShotSlotCount,
@@ -308,6 +313,8 @@ import {
   getSlotReloadSeconds,
   getShotSlotProgress,
   findFreeShotSlot,
+  getShotTankHit,
+  shockWaveHitsTank,
 } from './shots.mjs';
 import { CLIENT_VERSION } from './version.mjs';
 import {
@@ -354,6 +361,7 @@ import {
   findMeshHitFace,
   findMeshHitFaceOriented,
   resolvePhysicsDriverAt,
+  TANK_HIT_RADIUS,
   isOverFlatTop,
   getPyramidHeight,
   isPyramidFlatTop,
@@ -1245,6 +1253,7 @@ function selectRelativeDestination(direction) {
   // (`syncTankSelectorForDestination`).
   applyLoginUi();
   syncTankSelectorForDestination();
+  syncMottoForDestination();
   syncEntryActions();
 }
 
@@ -2341,9 +2350,31 @@ function isProxiedPage() {
 // maps to view. The XR panel greys its own row instead, which is that panel's
 // idiom (`mapViewXR`). The model is forced back to the default without saving
 // it, so a player's real choice is still theirs in this server's own game.
+// Whether the staged destination is somewhere this server only relays to.
+function stagedDestinationIsRemote() {
+  return selectedDestination !== DESTINATION_LOCAL;
+}
+
+// The motto a proxied or watched target will actually be told, which is not
+// the player's: the field is the attribution and nothing else, because it is
+// one of the few ways the connection announces itself (`proxyMotto`). Shown
+// rather than hidden, and read-only rather than editable, so the box says
+// what the other end will see instead of taking a value it would discard.
+function syncMottoForDestination() {
+  const input = document.getElementById('entryMottoInput');
+  if (!input) return;
+  const remote = stagedDestinationIsRemote();
+  input.disabled = remote;
+  input.value = remote ? `via ${window.location.origin}` : myPlayerMotto;
+  input.title = remote
+    ? 'A proxied connection tells the target which bzo it came through, and'
+      + ' nothing else. Your own motto is used on this server.'
+    : '';
+}
+
 function syncTankSelectorForDestination() {
   const selector = document.getElementById('tankSelector');
-  const proxied = selectedDestination !== DESTINATION_LOCAL;
+  const proxied = stagedDestinationIsRemote();
   if (selector) selector.style.display = proxied ? 'none' : '';
   // Follows the destination rather than the page, the way the team row does.
   // Staging this server from a proxied page is about to go somewhere the
@@ -2462,6 +2493,7 @@ const DEFAULT_MAP_SIZE = 800;
 let currentWorldMapSize = null;
 // `noWalls` -- read the same way and for the same reason as `currentWorldMapSize`.
 let currentWorldNoWalls = false;
+let currentWorldWaterHeight = 0;
 
 // Whichever world is actually on screen right now, live match or Map Viewer
 // preview alike -- set unconditionally at the bottom of `applyWorldData`, so
@@ -2527,6 +2559,14 @@ function applyWorldData(world) {
   // fallback only ever applies to a world that failed to fetch.
   currentWorldMapSize = Number.isFinite(world?.mapSize) ? world.mapSize : DEFAULT_MAP_SIZE;
   currentWorldNoWalls = !!world?.noWalls;
+  // Kept because a proxied connection has to decide its own water death, and
+  // upstream reads exactly this one number for it (`World::getWaterLevel`,
+  // tested against the tank's own z at `playing.cxx:4196`). Absent or zero is
+  // a world with no water, which upstream spells as a level that is not
+  // greater than zero.
+  currentWorldWaterHeight = Number.isFinite(world?.waterLevel?.height)
+    ? world.waterLevel.height
+    : 0;
   renderManager.buildGround(currentWorldMapSize, world?.groundMaterial || null);
   renderManager.setGroundGridEnabled(showDebugGeometry, currentWorldMapSize);
   renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls);
@@ -3948,8 +3988,7 @@ function openEntryDialog(name = '') {
   entryInput.value = forcedName ?? (name === '' ? myPlayerName : name);
   entryInput.disabled = forcedName !== null;
   // Staged like every other row: what is in the box is a draft until OK.
-  const mottoInput = document.getElementById('entryMottoInput');
-  if (mottoInput) mottoInput.value = myPlayerMotto;
+  syncMottoForDestination();
   entryInput.focus();
   entryDialogReturnCameraMode = cameraMode;
   cameraMode = 'overview';
@@ -3993,8 +4032,10 @@ function applyEntrySelections() {
   if (!entryInput || !snapshot) return;
 
   savePlayerName(entryInput.value);
+  // Only when it is the player's to save. On a proxied destination the box
+  // holds the attribution this server will send, not anything they typed.
   const mottoInput = document.getElementById('entryMottoInput');
-  if (mottoInput) savePlayerMotto(mottoInput.value);
+  if (mottoInput && !stagedDestinationIsRemote()) savePlayerMotto(mottoInput.value);
   // The login carries the staged destination and team already, so it lands on
   // exactly what was asked for (`startGlobalLogin`).
   if (destinationNeedsLogin(selectedDestination, getJoinTeamFields().team)) {
@@ -6982,6 +7023,7 @@ function handleServerMessage(message) {
         syncPlayerTeamSelector();
       }
       syncTankSelectorForDestination();
+      syncMottoForDestination();
 
       // A server that does not offer the observer team cannot honour the
       // spectator link, so the page joins as it otherwise would rather than
@@ -7408,7 +7450,17 @@ function handleServerMessage(message) {
     case 'shotBegin':
       // A missile arrives already locked, so the map is seeded before the shot
       // is drawn and its first step is aimed.
-      if (message.flag === 'GM') setPlayerLockTarget(message.playerId, message.target ?? null);
+      //
+      // Except my own, where this client is the one that decided the lock.
+      // That is upstream's own split: `GuidedMissileStrategy::update` reads
+      // `lastTarget` off the wire only `if (isRemote)`, and asks
+      // `myTank->getTarget()` otherwise (GuidedMissleStrategy.cxx:139-149). A
+      // target has no target field in `MsgShotBegin` to relay, so taking an
+      // answer back from it would clear the lock on every trigger pull.
+      if (message.flag === 'GM'
+        && !(clientTracesShots && message.playerId === myPlayerId)) {
+        setPlayerLockTarget(message.playerId, message.target ?? null);
+      }
       createProjectile(message);
       if (message.flag === 'GM') warnLockedOnMe(message.playerId, message.target ?? null);
       break;
@@ -7844,6 +7896,7 @@ function createProjectile(data) {
     beam.userData.lifeFactor = effects.lifeFactor;
     beam.userData.hiddenOnRadar = effects.hiddenOnRadar;
     projectiles.set(data.id, beam);
+    checkOwnBeamHit(data.id, beam);
     return;
   }
 
@@ -8010,6 +8063,7 @@ function hasGuidedShotInFlight(playerId) {
 }
 
 function handlePlayerHit(message) {
+  checkOwnGenocide(message);
   const shooterTank = tanks.get(message.shooterId);
   const victimTank = tanks.get(message.victimId);
   // A world weapon has no tank and no name of its own -- see `WORLD_WEAPON_NAME`
@@ -8256,6 +8310,11 @@ function handlePlayerRespawn(message) {
       myShotSlotFreeAt = [];
       myShotSlotReloadMs = [];
       shotJamUntil = 0;
+      // A new life is a new death to report. Cleared here rather than in the
+      // `killed` handler because the tank is not standing anywhere until it
+      // respawns, and a cleared guard with no tank would let the very next
+      // frame report the same water or death pad again.
+      reportedOwnDeath = false;
     }
     tank.position.set(message.player.x, message.player.y, message.player.z);
     tank.rotation.y = message.player.rotation;
@@ -10704,10 +10763,64 @@ function showIdentifyResult(targetId, locked) {
   showIdentifyAlert(locked ? 'Locked on' : 'Looking at', targetId);
 }
 
+// `setTarget` (playing.cxx:4390), which is upstream's own client-side answer and
+// becomes bzo's wherever the client is the one tracing shots. bzo's server
+// normally decides a lock, because a lock steers a real missile and a missile is
+// the server's -- but a target has no such message and no such opinion: upstream
+// picks its own target and tells the server afterwards, in `MsgGMUpdate`.
+//
+// Deliberately the same shape as the server's `setPlayerTarget`, down to the two
+// candidate lists and the two angles: a lock is the narrow cone and only over a
+// tank a missile could really chase, a look is the wide one and takes anything
+// the eye can pick out. `pickTargetInSights` is shared, so the sweep itself is
+// one piece of code rather than two.
+function resolveOwnLockTarget() {
+  if (!myTank) return { targetId: null, locked: false };
+  const eye = { x: myTank.position.x, z: myTank.position.z };
+  const forward = { x: -Math.sin(myTank.rotation.y), z: -Math.cos(myTank.rotation.y) };
+  const seer = isSeer();
+
+  const lockable = [];
+  const visible = [];
+  tanks.forEach((tank, playerId) => {
+    if (playerId === myPlayerId) return;
+    const state = tank.userData?.playerState;
+    if (!state || !state.alive || state.paused) return;
+    if (isObserverTeam(state.team)) return;
+    const candidate = { id: playerId, x: tank.position.x, z: tank.position.z };
+    const theirFlag = getPlayerFlagType(playerId);
+    // "can't lock on stealth" (playing.cxx:4426) -- and unlike the look below,
+    // no flag sees through it, because a missile is not looking.
+    if (!hidesFromRadar(theirFlag)) lockable.push(candidate);
+    if (seer || !hidesFromRadar(theirFlag)) visible.push(candidate);
+  });
+
+  // A lock is only worth taking while there is a missile for it to steer: `GM`
+  // in the hand, or one still in the air after the flag was dropped.
+  const canLock = getPlayerFlagType(myPlayerId) === 'GM' || hasGuidedShotInFlight(myPlayerId);
+  const locked = canLock ? pickTargetInSights(eye, forward, lockable, LOCK_ON_ANGLE) : null;
+  return {
+    targetId: locked ?? pickTargetInSights(eye, forward, visible, TARGETING_ANGLE),
+    locked: locked !== null,
+  };
+}
+
 // The identify binding, for a tank. An observer answers this on its own client
-// -- the free camera it aims with lives there -- and a tank asks the server,
-// which is where a lock has to be decided.
+// -- the free camera it aims with lives there -- a tank on bzo's own server asks
+// the server, and a tank on a proxied one answers it here, because that is where
+// upstream answers it too.
 function requestLockOn() {
+  if (clientTracesShots) {
+    const { targetId, locked } = resolveOwnLockTarget();
+    setPlayerLockTarget(myPlayerId, locked ? targetId : null);
+    // Nothing is sent here. Upstream tells the server from the *missile*, not
+    // from the key press -- `GuidedMissileStrategy::sendUpdate` fires "only
+    // when needed", which is when a missile's own target changes -- so a lock
+    // taken with nothing in the air costs no packet, and a missile fired after
+    // one announces itself on its first steer (`updateProjectiles`).
+    showIdentifyResult(targetId, locked);
+    return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   sendToServer({ type: 'identify' });
 }
@@ -13844,6 +13957,349 @@ function updateFlags(deltaTime) {
   updateAntidoteFlag();
 }
 
+// --- Reporting the local tank's own death ---------------------------------
+//
+// `checkEnvironment`'s death chain (playing.cxx:4160-4226) and `gotBlowedUp`
+// (:3874). bzo's server decides every death in its own game and tells the
+// client, which is the opposite of upstream: bzfs takes the victim's word for
+// it and never asks. So on a connection the client traces shots for, a tank
+// nobody reports dead is alive forever -- shot at, driven through water and
+// parked on death pads, with nothing happening.
+//
+// Only such a connection runs any of this. On bzo's own server these checks
+// would be a second opinion about a death the server already owns, and the two
+// would eventually disagree.
+
+// One report per life. Upstream's guard is `!tank->isAlive()`, which it can use
+// because it blows the tank up on the spot; bzo waits for the death to come
+// back round so a proxied death and a local one are drawn by the same handler,
+// and needs a flag of its own to cover the round trip.
+let reportedOwnDeath = false;
+
+// `lookupServer(tank)->sendKilled(killer, reason, shotId, flagType, phydrv)`
+// (playing.cxx:3963). The two messages upstream sends first -- ending the shot
+// and dropping the flag -- are the proxy's to send, in its order, because they
+// are bzfs messages rather than anything bzo's own server would want.
+function sendOwnDeath(report) {
+  sendToServer({ type: 'killed', ...report });
+}
+
+// Whether the local tank is something a death can happen to at all: upstream's
+// `tank->getTeam() == ObserverTeam || !tank->isAlive()` (playing.cxx:3879).
+function ownTankCanDie() {
+  if (!clientTracesShots || reportedOwnDeath) return false;
+  if (!myTank || !isMyTankAlive()) return false;
+  const team = myTank.userData?.playerState?.team;
+  return Boolean(team) && !isObserverTeam(team);
+}
+
+// The shot half of the chain, asked of one shot over the piece of its path this
+// simulation step covered. Upstream asks it of every shot every frame
+// (`LocalPlayer::checkHit`) and takes the nearest; here each shot asks for
+// itself as it is stepped, which reaches the same answer because a step this
+// short cannot hold two of them.
+//
+// Thief is the one hit that is not a death -- upstream transfers the flag and
+// leaves the tank standing (`playing.cxx:4174-4180`). bzo's proxy sends no
+// `MsgTransferFlag`, so a thief's beam is left to the target, which already
+// decides thefts for every other client watching this one.
+// `bounces` is passed rather than read off the projectile because a beam has no
+// running count: its whole path arrives at once, and how many times it has
+// bounced is simply which segment is being asked about.
+function checkOwnShotHit(shotId, projectile, from, to, bounces = null) {
+  if (!ownTankCanDie()) return false;
+  const state = myTank.userData.playerState;
+  const myFlag = getMyFlag();
+  const shotFlag = projectile.userData.flag ?? null;
+  const effects = getShotEffects(shotFlag);
+  if (effects.steals) return false;
+  const hit = getShotTankHit(
+    {
+      playerId: projectile.userData.playerId,
+      flag: shotFlag,
+      steals: false,
+      bounces: Number.isFinite(bounces)
+        ? bounces
+        : (Number.isFinite(projectile.userData.bounces) ? projectile.userData.bounces : 0),
+      team: getPlayerTeamById(projectile.userData.playerId),
+    },
+    from,
+    to,
+    {
+      id: myPlayerId,
+      team: state.team,
+      // Upstream asks `isAlive() && !isPaused()` of the local tank before it
+      // checks anything (`LocalPlayer::checkHit`); `ownTankCanDie` has the
+      // first half and this is the second.
+      paused: pauseState.paused,
+      alive: true,
+      position: { x: myTank.position.x, y: myTank.position.y, z: myTank.position.z },
+      flagType: myFlag?.type ?? null,
+      zoned: amZoned(),
+    },
+    {
+      noTeamKills: gameConfig?.NO_TEAM_KILLS === true,
+      teamsAllowed: gameConfig?.TEAMS_ALLOWED !== false,
+      shotRadius: Number.isFinite(gameConfig?.SHOT_RADIUS) ? gameConfig.SHOT_RADIUS : 0.5,
+    },
+  );
+  if (!hit) return false;
+
+  // "don't die if we had the shield flag and we've been shot" (`gotBlowedUp`,
+  // playing.cxx:3918). The flag still goes and the shot still ends -- both are
+  // before that test upstream -- so a shielded hit is reported as a hit that
+  // costs a flag rather than a life, and the tank plays on.
+  const shielded = myFlag?.type === 'SH';
+  if (!shielded) reportedOwnDeath = true;
+  sendOwnDeath({
+    reason: shielded ? 'shielded' : 'shot',
+    killerId: projectile.userData.playerId ?? null,
+    // The id the proxy itself built for this shot (`proxyShot`), handed back
+    // whole so the one place that knows its shape is the place that made it.
+    shotId,
+    flag: shotFlag,
+    // `if (hit->isStoppedByHit()) serverLink->sendEndShot(...)`
+    // (playing.cxx:4168). `ShotStrategy::isStoppedByHit` is true by default
+    // and overridden to false by exactly three strategies -- Laser, Thief and
+    // ShockWave -- which are exactly the three `getShotEffects` already
+    // describes as a beam, a theft and a wave. So the rule needs no table of
+    // its own, only the one bzo already has.
+    stoppedByHit: !(effects.beam || effects.shockwave || effects.steals),
+  });
+  return true;
+}
+
+// `GuidedMissileStrategy::sendUpdate` (GuidedMissleStrategy.cxx:406): the
+// missile tells the server who it is chasing, and only when that changes --
+// "only send an update when needed". Everyone else steers their own copy at
+// whoever it last named, so a packet a frame would repeat itself.
+//
+// Only for missiles this client owns, and only where it owns them: on bzo's own
+// server the lock is the server's and it broadcasts one for every shooter.
+function announceOwnGuidedTarget(shotId, projectile, target) {
+  if (!clientTracesShots) return;
+  if (projectile.userData.playerId !== myPlayerId) return;
+  if (projectile.userData.pendingServerAck) return;
+  const targetId = target ? target.userData?.playerState?.id ?? null : null;
+  if (projectile.userData.sentGuidedTarget === targetId) return;
+  projectile.userData.sentGuidedTarget = targetId;
+  const speed = Number.isFinite(projectile.userData.speed)
+    ? projectile.userData.speed
+    : (Number.isFinite(gameConfig?.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100);
+  sendToServer({
+    type: 'lockTarget',
+    targetId,
+    // The proxy's own id for this shot, handed back for it to unpick, exactly
+    // as a death report hands one back.
+    shotId,
+    x: projectile.position.x,
+    y: projectile.position.y,
+    z: projectile.position.z,
+    // The missile's velocity, which is what upstream packs -- direction and
+    // speed are separate here and multiplied back together on the way out.
+    dirX: projectile.userData.dirX,
+    dirY: projectile.userData.dirY,
+    dirZ: projectile.userData.dirZ,
+    speed,
+  });
+}
+
+// The sixth way to die, and the only one nothing local sets off: somebody else
+// is shot with Genocide and everybody on their team goes with them. Upstream
+// reaches it from the *killed* message rather than from any check of its own
+// ("blow up if killer has genocide flag and i'm on same team as victim",
+// playing.cxx:2657-2668), and so does this -- which is why it hangs off the
+// handler for that message and not off the frame.
+function checkOwnGenocide(message) {
+  if (!ownTankCanDie()) return;
+  // "geno only works in team games :)" -- upstream's own comment on the guard.
+  if (gameConfig?.TEAMS_ALLOWED === false) return;
+  if (message.shooterFlag !== 'G') return;
+  // `shotId >= 0`: a genocide death comes of a genocide *shot*, so a death with
+  // no bolt behind it takes nobody else with it.
+  if (!message.projectileId) return;
+  if (message.victimId === myPlayerId) return;
+  const myState = myTank.userData.playerState;
+  // A rogue has no team to be wiped out with.
+  if (myState.team === PLAYER_TEAM.ROGUE) return;
+  const victimTeam = tanks.get(message.victimId)?.userData?.playerState?.team ?? null;
+  if (victimTeam !== myState.team) return;
+
+  reportedOwnDeath = true;
+  sendOwnDeath({
+    reason: 'genocide',
+    killerId: message.shooterId ?? null,
+    shotId: null,
+    flag: 'G',
+    // The bolt that did it is the victim's to end, not every teammate's: one
+    // shot, one `MsgShotEnd`, however many tanks it took down with it.
+    stoppedByHit: false,
+  });
+}
+
+// A beam, which is neither traced nor stepped either: its whole path exists the
+// moment it is fired, and upstream's own laser crosses it in so little time that
+// the segment its `checkHit` finds active is the first one, on the first frame.
+// So it is asked once, over every segment in order, and the first tank-crossing
+// wins -- which is the nearest, because the segments are already in flight
+// order and each one starts where the last stopped against a wall.
+//
+// Nothing is removed on a hit: a laser and a thief's beam both pass through
+// (`isStoppedByHit`), which is also why neither reports a shot to end.
+// `expireLockTargets` (server.js), for the connection that has no server doing
+// it. A lock lapses when its target stops being lockable -- dead, paused, gone
+// or under `ST` -- or when there is nothing left for it to steer, `GM` gone
+// from the hand and the last missile out of the air. Upstream makes that
+// permanent rather than momentary: `GuidedMissleStrategy.cxx:165` sets
+// `lastTarget = NoPlayer`, and dropping the flag clears it outright
+// (`playing.cxx:3826`, "drop lock if i had GM").
+//
+// Permanence is the point. `getLockTargetTank` already refuses a dead target,
+// so the bracket goes out either way -- but the stored id would outlive the
+// death and come back the moment that tank respawned, steering at somebody
+// nobody had aimed at. This acts on that same answer rather than keeping a
+// second copy of the question.
+//
+// A missile still in the air when the lock lapses says so on its next step,
+// because `announceOwnGuidedTarget` sends a change to null like any other.
+function expireOwnLockTarget() {
+  if (!clientTracesShots) return;
+  if (!playerLockTargets.has(myPlayerId)) return;
+  if (getLockTargetTank(myPlayerId)) return;
+  setPlayerLockTarget(myPlayerId, null);
+}
+
+function checkOwnBeamHit(id, beam) {
+  if (!ownTankCanDie()) return;
+  const segments = Array.isArray(beam.userData.segments) ? beam.userData.segments : [];
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    if (!segment?.from || !segment?.to) continue;
+    // The segment index is the bounce count: a beam's path is cut into a new
+    // segment at each ricochet, so reaching segment 1 is exactly what "has
+    // bounced once" means -- which is the rule that decides whether a beam may
+    // come back and hit the tank that fired it.
+    if (checkOwnShotHit(id, beam, segment.from, segment.to, i)) return;
+  }
+}
+
+// A wave, which is neither traced nor stepped: it sits where it was fired and
+// swells, so it is asked once a frame at whatever radius it has reached. It
+// also never stops at a tank (`ShockWaveStrategy::isStoppedByHit` is false), so
+// there is no shot to end -- only a death to report, and `reportedOwnDeath`
+// already keeps a wave that is still swelling from reporting it twice.
+function checkOwnShockWaveHit(projectile, radius) {
+  if (!ownTankCanDie()) return;
+  const state = myTank.userData.playerState;
+  if (!shockWaveHitsTank(
+    {
+      playerId: projectile.userData.playerId,
+      team: getPlayerTeamById(projectile.userData.playerId),
+      x: projectile.position.x,
+      y: projectile.position.y,
+      z: projectile.position.z,
+      radius,
+    },
+    {
+      id: myPlayerId,
+      team: state.team,
+      paused: pauseState.paused,
+      alive: true,
+      position: { x: myTank.position.x, y: myTank.position.y, z: myTank.position.z },
+    },
+    {
+      noTeamKills: gameConfig?.NO_TEAM_KILLS === true,
+      teamsAllowed: gameConfig?.TEAMS_ALLOWED !== false,
+    },
+  )) return;
+
+  // A Shield saves a tank from a wave exactly as it does from a bullet --
+  // `gotBlowedUp`'s test is on the reason being `GotShot`, which a wave is,
+  // and not on what kind of shot it was (playing.cxx:3918).
+  const shielded = getMyFlag()?.type === 'SH';
+  if (!shielded) reportedOwnDeath = true;
+  sendOwnDeath({
+    reason: shielded ? 'shielded' : 'shot',
+    killerId: projectile.userData.playerId ?? null,
+    shotId: null,
+    flag: projectile.userData.flag ?? null,
+    stoppedByHit: false,
+  });
+}
+
+// The rest of the chain, in upstream's own order and with upstream's own
+// `else if` between them: a tank dies once per check, of the first thing that
+// killed it. Run-over is upstream's fourth and is not here -- it asks the
+// steamroller radius of every other tank every frame, and wants its own pass.
+function checkOwnEnvironmentDeath() {
+  if (!ownTankCanDie()) return;
+  const driver = resolvePhysicsDriverAt(
+    lastMotionObstacle,
+    myTank.position.x,
+    myTank.position.y,
+    myTank.position.z,
+  );
+  if (driver && driver.death) {
+    reportedOwnDeath = true;
+    sendOwnDeath({ reason: 'physicsDriver', deathMessage: driver.death });
+    return;
+  }
+  // `(waterLevel > 0.0f) && (myTank->getPosition()[2] <= waterLevel)`
+  // (playing.cxx:4196). bzo's y is upstream's z.
+  if (currentWorldWaterHeight > 0 && myTank.position.y <= currentWorldWaterHeight) {
+    reportedOwnDeath = true;
+    sendOwnDeath({ reason: 'water' });
+    return;
+  }
+  checkOwnRunOver();
+}
+
+// Upstream's fourth and last branch (playing.cxx:4199-4224): a Steamroller
+// crushes what it touches, and anybody at all crushes a burrowed tank. The same
+// three shared rules bzo's server squashes people by (`canRunOver`,
+// `getRunOverRadius`, `getRunOverSeparation`), asked the other way round --
+// here the local tank is the victim and every other tank is a candidate roller.
+function checkOwnRunOver() {
+  if (!ownTankCanDie()) return;
+  const myState = myTank.userData.playerState;
+  const myFlagType = getMyFlag()?.type ?? null;
+  // Upstream reads the *victim's* own pause further up the chain rather than
+  // in this loop, and `ownTankCanDie` is not that -- so it is asked here, as
+  // the shot path asks it.
+  if (pauseState.paused) return;
+
+  for (const [playerId, tank] of tanks) {
+    if (playerId === myPlayerId) continue;
+    const state = tank.userData?.playerState;
+    if (!state || !state.alive || state.paused) continue;
+    if (isObserverTeam(state.team)) continue;
+    // "Squashing is a kill like any other, so friendly fire governs it" --
+    // upstream's guard is in this very loop (playing.cxx:4212).
+    if (gameConfig?.NO_TEAM_KILLS === true
+      && !areFoes(state.team, myState.team, gameConfig?.TEAMS_ALLOWED !== false)) continue;
+
+    const rollerFlag = getPlayerFlag(playerId);
+    const rollerFlagType = rollerFlag?.type ?? null;
+    if (!canRunOver(
+      rollerFlagType,
+      myFlagType,
+      tank.position.y,
+      isZoned(rollerFlagType, rollerFlag?.zoned === true),
+    )) continue;
+
+    const separation = getRunOverSeparation(
+      myTank.position.x - tank.position.x,
+      myTank.position.y - tank.position.y,
+      myTank.position.z - tank.position.z,
+    );
+    if (separation >= getRunOverRadius(myFlagType, rollerFlagType, TANK_HIT_RADIUS)) continue;
+
+    reportedOwnDeath = true;
+    sendOwnDeath({ reason: 'runOver', killerId: playerId, shotId: null, flag: null });
+    return;
+  }
+}
+
 function updateProjectiles(deltaTime) {
   const clampedDelta = Math.min(0.1, Math.max(0, Number.isFinite(deltaTime) ? deltaTime : 0));
   projectileSimAccumulator += clampedDelta;
@@ -13872,6 +14328,7 @@ function updateProjectiles(deltaTime) {
       // little wide of where it really is, and the server still decides the hit.
       if (projectile.userData.guided) {
         const target = getLockTargetTank(projectile.userData.playerId);
+        announceOwnGuidedTarget(id, projectile, target);
         const steered = steerGuidedShot(
           {
             x: projectile.userData.dirX,
@@ -13937,6 +14394,10 @@ function updateProjectiles(deltaTime) {
             { x: reflected.x - traced.direction.x, y: reflected.y - traced.direction.y, z: reflected.z - traced.direction.z }
           );
           traced.direction = reflected;
+          // A shot only becomes able to hit its own shooter once it has
+          // bounced (`getShotTankHit`), so every bounce is counted wherever
+          // one happens -- a teleporter frame as much as a wall.
+          projectile.userData.bounces = (projectile.userData.bounces || 0) + 1;
           frameBounceStart = {
             x: impact.x + (normal.x * SHOT_BOUNCE_CLEARANCE),
             y: impact.y + (normal.y * SHOT_BOUNCE_CLEARANCE),
@@ -13997,6 +14458,15 @@ function updateProjectiles(deltaTime) {
         ricochet: ownRicochet,
         justTeleported: frameBounceStart ? false : traced.teleports > 0,
       });
+      // Did it hit me? Asked over the segment this step actually covered, and
+      // before the shot is retired against geometry below -- `step` already
+      // ends at whatever building stopped it, so a tank standing behind that
+      // wall is outside the segment and cannot be hit through it.
+      if (checkOwnShotHit(id, projectile, { x: startX, y: startY, z: startZ }, { x: step.x, y: step.y, z: step.z })) {
+        removeProjectile(id, 0, step.x, step.y, step.z);
+        return;
+      }
+
       // Where the server owns the shot it says where it stopped, and this
       // leaves an ordinary stop to it. Where the client owns it, this is the
       // only thing that will: a building or the ground ends the shot right
@@ -14013,6 +14483,7 @@ function updateProjectiles(deltaTime) {
       projectile.userData.dirY = step.dirY;
       projectile.userData.dirZ = step.dirZ;
       if (step.bounces > 0) {
+        projectile.userData.bounces = (projectile.userData.bounces || 0) + step.bounces;
         // SegmentedShotStrategy plays SFX_RICOCHET at the start of the new
         // segment and throws the effect along the change in direction.
         renderManager.playSound('ricochet', projectile.position);
@@ -14071,6 +14542,7 @@ function updateProjectiles(deltaTime) {
       : getShotLifetimeSeconds(projectile.userData.flag ?? null);
     const radius = getShockWaveRadius((frameEpochMs - createdAt) / 1000, lifetimeSeconds);
     projectile.userData.shockWaveRadius = radius;
+    checkOwnShockWaveHit(projectile, radius);
     renderManager.updateShotShockWave(projectile, radius, getShockWaveAlpha(radius));
   });
 
@@ -16789,6 +17261,11 @@ function animate(frameTime) {
   }
 
   updateProjectiles(deltaTime);
+  // After the shots, because upstream's own chain is an `else if` behind them:
+  // a tank that was shot this frame does not also drown (`checkEnvironment`,
+  // playing.cxx:4162-4197).
+  checkOwnEnvironmentDeath();
+  expireOwnLockTarget();
   checkFlagGrab();
   checkNearFlag();
   updateFlagShake(deltaTime);

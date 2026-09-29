@@ -5,6 +5,15 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
+import { getSegmentTankHitFraction, TANK_HIT_HEIGHT } from './collision.mjs';
+import {
+  cloaksTheTank,
+  getTankHitRadiusScale,
+  shotPassesThroughTank,
+  usesNarrowHitBox,
+} from './flags.mjs';
+import { areFoes, isObserverTeam } from './teams.mjs';
+
 // Keep client-side allocations bounded even when the server configuration
 // arrives through an untrusted WebSocket payload.
 export const MAX_SHOT_SLOTS = 64;
@@ -179,3 +188,117 @@ export function getShotSlotProgress(slotFreeAt, slot, reloadMs, now) {
 // jitter actually lands in. See the shot slots above for the rule that *is*
 // enforced.
 export const SHOT_TAP_SPACING_MS = 100;
+
+// GuidedMissileStrategy::checkHit (:318): "GM is not active until activation
+// time passes (for any tank)". The tank the rule is really for is the one that
+// fired it -- a missile locked onto a target two lengths away comes round
+// through its own shooter.
+export function shotIsActive(shot, now) {
+  if (!(shot.activationTime > 0)) return true;
+  return ((now - shot.createdAt) / 1000) >= shot.activationTime;
+}
+
+// LocalPlayer::checkHit (LocalPlayer.cxx:1596), as one question about one tank:
+// may this shot hit it, and if so where. Upstream asks it on the victim's own
+// client because bzfs takes the victim's word for a death; bzo's server asks it
+// of every tank because bzo decides hits itself. Both are here so the two can
+// never answer differently -- which matters most on a proxied connection, where
+// the same client is playing by upstream's rule and bzo's at once.
+//
+// What a flag *means* arrives resolved: `flagType` is the victim's flag, and
+// the caller is whichever side already knows it.
+export function getShotTankHit(shot, from, to, tank, rules = {}) {
+  const { noTeamKills = false, teamsAllowed = true, shotRadius = 0.5 } = rules;
+
+  // LocalPlayer::checkHit tests a player's own shots too -- "Don't shoot
+  // yourself!" is the Ricochet flag's own help text -- but only once one has
+  // bounced. Before that a shot leaves the muzzle beyond the hit radius and
+  // outruns the tank it came from.
+  // "my own shock wave cannot kill me ... or Thief" (LocalPlayer.cxx:1612).
+  // Unlike a ricochet, no bounce ever earns a thief its own flag back.
+  if (tank.id === shot.playerId && (shot.steals || shot.bounces === 0)) return null;
+  if (isObserverTeam(tank.team)) return null; // No tank to hit
+  if (tank.paused) return null; // Can't hit paused players
+  if (!tank.alive) return null; // Can't hit dead players
+
+  // "-noTeamKills: Players on the same team are immune to each other's shots.
+  // Rogue is excepted." Upstream refuses this on the victim's own client
+  // (LocalPlayer.cxx:1616). Your own shot still reaches you once it has
+  // bounced -- upstream excepts the shooter too (`source != this`), because a
+  // ricochet you drove into is nobody's team kill.
+  //
+  // "Thief can still take a teammate's flag" -- upstream excepts it from the
+  // guard by name (LocalPlayer.cxx:1617), because nothing about a theft is a
+  // kill and a team mate carrying the flag you want is exactly who you rob.
+  if (noTeamKills && !shot.steals && tank.id !== shot.playerId
+    && !areFoes(shot.team, tank.team, teamsAllowed)) return null;
+
+  // `ThiefStrategy::isStoppedByHit` returns false: a thief's beam is not spent
+  // by a tank, so a tank with nothing to take does not block it. bzo stops it
+  // at the first tank it can actually rob instead, which is the one place it
+  // does not simply follow upstream -- upstream lets every client along the
+  // beam report its own theft, and the thief keeps only the last of them while
+  // bzfs zaps the rest. Robbing one tank per shot loses nothing anybody wanted
+  // and destroys nothing.
+  if (shot.steals && !tank.flagType) return null;
+
+  // LocalPlayer::checkHit (LocalPlayer.cxx:1630): "laser can't hit a cloaked
+  // tank". The one per-viewer rule that is not a matter of what somebody can
+  // see -- a cloaked tank is genuinely immune to a beam. It is also the reason
+  // `CL` is a good flag rather than a cosmetic one.
+  if (shot.flag === 'L' && cloaksTheTank(tank.flagType ?? null)) return null;
+
+  // LocalPlayer::checkHit's phantom pair (LocalPlayer.cxx:1622 and :1634): a
+  // zoned tank is only reached by a super bullet, a shock wave or another
+  // zoned tank's bullet, and a zoned bullet reaches nobody else.
+  if (shotPassesThroughTank(shot.flag, tank.zoned)) return null;
+
+  const fraction = getSegmentTankHitFraction(from, to, tank.position, {
+    narrow: usesNarrowHitBox(tank.flagType ?? null),
+    radiusScale: getTankHitRadiusScale(tank.flagType ?? null),
+    shotRadius,
+  });
+  if (fraction === null) return null;
+
+  // The tank's height gate, asked where the shot entered its footprint.
+  const y = from.y + ((to.y - from.y) * fraction);
+  if (y < tank.position.y || y > tank.position.y + TANK_HIT_HEIGHT) return null;
+
+  return {
+    fraction,
+    point: {
+      x: from.x + ((to.x - from.x) * fraction),
+      y,
+      z: from.z + ((to.z - from.z) * fraction),
+    },
+  };
+}
+
+// `ShockWaveStrategy::checkHit` (ShockWaveStrategy.cxx:107), with the guards
+// `LocalPlayer::checkHit` puts in front of it. A wave is its own shape of hit
+// and gets its own rule rather than a mode of the one above: it is a sphere
+// rather than a segment, and upstream's own comment says why the rest of the
+// tests do not apply to it -- "a shock wave can kill anything inside the
+// radius, be it behind or in a building or even zoned".
+//
+// `radius` is the wave's current one, which is a function of its age
+// (`getShockWaveRadius`) and so is the caller's to compute.
+export function shockWaveHitsTank(shot, tank, rules = {}) {
+  const { noTeamKills = false, teamsAllowed = true } = rules;
+
+  // "my own shock wave cannot kill me" (LocalPlayer.cxx:1612). Unlike a
+  // ricochet there is no bounce that could ever earn it.
+  if (tank.id === shot.playerId) return false;
+  if (isObserverTeam(tank.team)) return false;
+  if (tank.paused) return false;
+  if (!tank.alive) return false;
+  // Friendly fire, as for any other shot: upstream's team-kill guard is one
+  // test in one loop over every shot the shooter owns, and a shock wave is one
+  // of them.
+  if (noTeamKills && !areFoes(shot.team, tank.team, teamsAllowed)) return false;
+
+  const dx = tank.position.x - shot.x;
+  const dy = tank.position.y - shot.y;
+  const dz = tank.position.z - shot.z;
+  return ((dx * dx) + (dy * dy) + (dz * dz)) <= (shot.radius * shot.radius);
+}

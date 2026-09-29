@@ -297,8 +297,83 @@ server's own greeting -- rather than from anything bzo holds.
 | `MsgMessage` | `message` |
 | `MsgLagPing` | answered, not forwarded |
 
-The browser sends only chat. Everything else a client can say is about
-playing, and is dropped rather than answered.
+And back the other way. Everything a browser declares about its own tank is
+forwarded, because bzfs is client-authoritative for exactly those things: it
+checks what a client says and relays it, rather than deciding it.
+
+| From the browser | To the target |
+|---|---|
+| `m` | `MsgPlayerUpdate`, at the target's own `MaxUpdateTime` |
+| `shoot` | `MsgShotBegin`, preceded by a position update |
+| `grabFlag` / `dropFlag` / `captureFlag` | `MsgGrabFlag` / `MsgDropFlag` / `MsgCaptureFlag` |
+| `tp` | `MsgTeleport`, by upstream's own face numbering |
+| `pause` | `MsgPause` |
+| `killed` / `selfDestruct` | `MsgShotEnd`, `MsgDropFlag`, `MsgKilled` -- see below |
+| `lockTarget` | `MsgGMUpdate` |
+| `message` | `MsgMessage`, converted to ASCII |
+| `identify`, `nearFlag` | answered by the browser itself, not sent |
+
+**A shot claims the flag the target has on record for it.** bzfs corrects a
+shot's flag in its own table but rebroadcasts the packet it was sent unless
+something else already repacked it (`shotFired`, bzfs.cxx), so a shot that
+claims nothing reaches every other client as an ordinary bullet whatever the
+shooter is holding. The claim is read off this connection's own flag state,
+which is bzfs's answer echoed back, so it cannot disagree with the check that
+kicks for a mismatch. A shock wave also fires from under the tank with no
+velocity, which the target enforces by refusing any other.
+
+`identify` and `nearFlag` are the two bzo asks its own server and a target has
+no message for: bzo decides a lock and searches for a flag underfoot, where
+upstream's client decides both for itself and says so afterwards. So on a
+proxied connection the browser answers them, with the same shared code the
+server would have used (`pickTargetInSights`, `collision.mjs`).
+
+**A guided missile's lock is the browser's, and it must not read it back.**
+This is the trap the whole outbound half sets: the target relays what it is
+told, so anything the client decided arrives back looking like an answer.
+Three places have to refuse it. `MsgShotBegin` carries no target field for
+anybody -- `FiringInfo::pack` is time, shot, flag and lifetime -- so the echo
+of your own shot would clear the lock it was fired under. bzfs rebroadcasts a
+`MsgGMUpdate` to the sender as well, so the echo of your own lock would undo
+the next lapse. And `lastTarget` is `NoPlayer`, 255, never absent: a missile
+chasing nobody still writes that byte.
+
+The lock lapses the way upstream's does and as permanently: a target that dies
+or takes `ST` is dropped outright rather than followed again if it comes back
+(`GuidedMissleStrategy.cxx:168`). A missile already in the air says so on its
+next step, which is also the only thing that ever sends a target -- upstream
+sends from the missile rather than from the key press, and so a lock taken
+with nothing in the air costs no packet at all.
+
+## Dying is the browser's to declare
+
+bzo is server-authoritative and bzfs is the reverse, and nowhere is the gap
+wider than here: **bzfs never decides that a tank died.** It takes the
+victim's word for it (`playing.cxx:3967`) and asks nothing. A tank nobody
+reports dead stays alive forever -- shot at, driven through water and parked
+on death pads, with nothing happening.
+
+So a proxied browser runs upstream's own `LocalPlayer::checkHit` and
+`checkEnvironment` against its own tank, and reports all six deaths upstream
+sends: a shot, a run-over, genocide, self-destruct, water and a death pad. The
+rules are not a second copy -- `getShotTankHit` and `shockWaveHitsTank`
+(`shots.mjs`) are the very functions this server decides its own game's hits
+with, asked of one tank instead of every tank.
+
+Three details of the order, which is upstream's and is load-bearing:
+
+- **The shot is ended first**, so that dropping a Shield flag cannot leave the
+  same shot free to hit again (`playing.cxx:4164`). Only a shot that is
+  *stopped* by hitting something: a laser, a thief's beam and a shock wave all
+  pass through their victim, and ending one would claim it stopped while
+  everyone else can still see it going.
+- **The flag drops before the kill**, so bzfs records where it fell rather than
+  where the tank respawns.
+- **A Shield sends the first two and no kill at all.** That also balances the
+  `endShot` anti-cheat exactly: `MsgShotEnd` raises `endShotCredit` and notes a
+  Shield held at that moment, `MsgKilled` lowers it again, and so does dropping
+  that Shield. Drop first and the credit leaks -- three saves and the target
+  kicks the player for "wrong end shots".
 
 **Chat out is converted to ASCII.** bzfs reads a message a byte at a time and
 asks `TextUtils::isVisible` of each (`isSpamOrGarbage`, `bzfs.cxx:4474`),
@@ -397,22 +472,17 @@ prints it as plain text without creating a session.
 
 ## What is not supported
 
-- **Playing.** A proxied browser watches. Nothing a client says about moving,
-  shooting or grabbing is forwarded, because bzfs is client-authoritative for
-  exactly those things and bzo's client has never had to say them. That is the
-  bulk of `docs/proxy-plan.md`.
-- **A shell's path.** Tracing a shot against the world is client-side work
-  upstream, and bzo's client does it only for a beam, which arrives with no
-  segments and is traced where it is drawn. A shell still passes through a
-  wall it should have stopped at.
+- **Voice.** Nothing about it crosses. Voice never touches the bzfs wire, so a
+  proxied player is in a match with people they cannot be heard by; what that
+  should mean is in `docs/proxy-plan.md`.
+- **A dead-and-waiting state.** bzo respawns on a timer and never asks;
+  upstream leaves a dead player dead until they press something. A proxied
+  player dies and comes back without being consulted.
 - **A reconnect stays verified.** bzflag.org answers a token once, so the
   browser's next connection rejoins under the same callsign but unverified --
   which a registered callsign earns bzfs's "You must use global
   authentication" for. Holding the bzfs connection across a browser reconnect
-  is what fixes it, and it is in `docs/proxy-plan.md` with the rest of play.
-- **Choosing a target anywhere but in the URL.** The `proxies` map may name
-  as many as an operator likes, but a player reaches one by link: there is no
-  picker in the entry dialog and no row on `/list`.
+  is what fixes it, and it is in `docs/proxy-plan.md`.
 - **An operator surface that knows it is proxied.** A proxied admin is shown
   bzo's own operator panel because the target says they are an admin. It is
   display only -- those messages are dropped -- but it should not be offered.

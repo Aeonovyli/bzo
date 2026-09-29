@@ -26,68 +26,15 @@ zones, no world weapons, no bases, no clock, because none of it is simulated
 for a proxied connection. What is per-target is a world to serve and a
 connection to dial, and both of those already work.
 
-## What death costs that the rest did not
+## Coming back from the dead
 
-bzo is server-authoritative: the client sends inputs and the server decides.
-bzfs is the other way round for exactly the things left -- the victim decides
-it died and says so (`playing.cxx:3967`).
+Death itself is built (`docs/proxy.md`, "Dying is the browser's to declare"),
+and so is the respawn: the proxy asks for one the moment it sees its own
+player die, and bzfs holds the spawn for `_explodeTime` by itself. What is
+left is the *other* wait, which is not about dying at all.
 
-Position, shots and flags turned out to cost almost nothing, because bzo's
-client already spoke in the messages upstream declares and the proxy was
-dropping them. **Death is not like that.** It is the one conclusion the
-client has never had to reach, so the estimate for it should not be read down
-from how cheaply the others landed.
-
-## Every way a proxied tank dies
-
-Six of them, and the client owns all six. `gotBlowedUp` sends `MsgKilled` for
-exactly `GotShot`, `GotRunOver`, `GenocideEffect`, `SelfDestruct`,
-`WaterDeath` and `DeathTouch` (`playing.cxx:3963-3967`); the other two reasons
-it knows are the ones it must stay quiet about. `GotKilledMsg` is bzfs telling
-the client, so echoing it would be a loop, and `GotCaptured` is the target's
-own conclusion from `MsgCaptureFlag` -- a capture kills the team at bzfs.
-
-bzo decides five of the six server-side today and the client sends only the
-sixth. `killPlayer` is called with `PHYSICS_DRIVER` and `WATER` from the
-motion step (`server.js`), `RUN_OVER` from the roller check and `GENOCIDE`
-from the shot code, and hits come out of the shot simulation; `selfDestruct`
-is the single client to server death message that exists. So the client
-already carries the geometry for all of it -- `collision.mjs` is the shared
-file, and it runs the same physics-driver and water tests for prediction --
-and none of the callers.
-
-Three details that bite:
-
-- **The outbound message is not the inbound one.** What a client sends is
-  killer, reason, shot id and the *killer's* flag, with the physics driver
-  appended only for `DeathTouch` (`ServerLink.cxx:757-774`). There is no
-  victim field -- bzfs takes the victim from the connection -- so
-  `decodeKilled`'s layout is the broadcast's and not a template for a sender.
-- **A wrong one is a kick, not a shrug.** `invalidPlayerAction(..., "die")`
-  removes the player outright for a death claimed as an observer or before
-  first spawn (`bzfs.cxx:4352-4374`, `4874`). Paused is the one exception, so
-  that self destruct works. A mode flag that leaks one `killed` from a
-  watching browser ejects it from the match.
-- **The flag drops first.** `gotBlowedUp` sends `MsgDropFlag` at the victim's
-  position before the kill (`playing.cxx:3898`), so the order on the wire is
-  drop then killed, not killed alone.
-
-## A dead-and-waiting state, and the rejoin cooldown
-
-Upstream leaves a dead player dead until they act. On death bzfs sets
-`setSpawnDelay(_explodeTime)` (`bzfs.cxx:3371`); the client's `restart`
-command sends `MsgAlive` (`clientCommands.cxx:379`), guarded by not-game-over,
-not-observer, not-alive and not-exploding. bzo instead respawns on a timer and
-never asks.
-
-So a proxied player needs somewhere to sit between dying and asking again,
-with a prompt. It cannot be built before there is a way to die, and it is not
-from nothing: the roam camera already knows how to sit somewhere and look
-around.
-
-Separately there is a real cooldown, and it is for re-entering the *server*
-rather than for dying. `RejoinList` adds a player on part if they had ever
-spawned (`bzfs.cxx:2943`) and refuses `MsgAlive` for `_rejoinTime` seconds
+`RejoinList` adds a player on part if they had ever spawned
+(`bzfs.cxx:2943`) and refuses `MsgAlive` for `_rejoinTime` seconds
 (`bzfs.cxx:4851`), which defaults to `_explodeTime` and is locked
 (`global.cxx:126`). It exists to stop quitting to dodge a shot.
 
@@ -97,7 +44,9 @@ straight into the rejoin list -- so a mobile network blip is
 indistinguishable from quit-dodging and benches the player through no fault
 of their own. The proxy must hold the bzfs connection open across a browser
 reconnect, keyed on the session, rather than tearing it down and re-entering.
-A design constraint, not a refinement.
+
+That is the same fix a reconnect needs to stay verified -- bzflag.org answers
+a token once -- so the two are one piece of work rather than two.
 
 ## A row on the list server
 
@@ -188,36 +137,16 @@ first, it needs both ends of a bzo pair updated before a row appears, and
 every step before it is cheaper against one hardcoded loopback target than
 against a registry.
 
-1. **Death.** The one conclusion the client has never had to reach. Its shape
-   is settled in "Every way a proxied tank dies" above; what is not settled is
-   the hit test, which lives in `server.js` rather than in the shared
-   `collision.mjs` and tests every tank rather than only your own -- upstream
-   never has that to decide, because each client tests one tank by
-   construction.
-
-   **`MsgShotEnd` belongs here, not with the senders below.** It is not what
-   stops a shot at a wall -- each client traces and expires its own copy, and
-   no message says so. Upstream sends it from two places only
-   (`playing.cxx:4169`, `GuidedMissleStrategy.cxx:464`): the victim ending
-   *the shot that hit them* -- `hit->getPlayer()`, somebody else's shot id --
-   so it cannot hit again after a shield drops, and a guided missile ending.
-
-   The anti-cheat shows the same shape. `endShotCredit` rises on every
-   `MsgShotEnd` and falls only when the sender **dies** (`bzfs.cxx:4899`) or
-   fires a GM, and above `_endShotDetection` (default 2) the player is kicked.
-   So ends and deaths are paired by construction, and sending ends without the
-   `MsgKilled` that pays for them would disconnect the player on the third
-   shot.
-
-   The **rejoin cooldown** and **holding the bzfs connection across a browser
-   reconnect** belong with it: both are about a player who leaves and comes
-   back, which only matters once leaving can happen by dying.
+1. **Holding the bzfs connection across a browser reconnect**, above. It is
+   what a proxied player loses most visibly today -- a network blip costs
+   verification and benches them on the rejoin list -- and death, which makes
+   leaving and coming back an ordinary event, is now built.
 
 2. **Voice**, above. No protocol work, and the largest thing a proxied player
    is missing that has nothing to do with dying.
 
-3. **The senders still missing.** `MsgTeleport`, for the effect at both ends.
-   `MsgExit`, to announce leaving rather than dropping the socket.
+3. **`MsgExit`**, to announce leaving rather than dropping the socket. The
+   last sender missing.
 
    Untested rather than missing: shot slots cycle up to the target's
    `maxShots` without enforcing reload timing, so `addShot` may refuse one
