@@ -7270,6 +7270,18 @@ function handleServerMessage(message) {
       applyPlayerMoveMessage(message, message.type === 'pt');
       break;
 
+    // `MsgTeleport` from a proxied target: who went through, with no position.
+    // bzo's own `pt` above carries one because this server decides where a
+    // tank lands; a target decides for itself and the player updates either
+    // side of this already move the tank. So this is the sound and nothing
+    // else, which is all upstream's own handler does (`playing.cxx:3085`) --
+    // see the note in `applyPlayerMoveMessage` for why there is no effect.
+    case 'teleport': {
+      const tank = tanks.get(message.playerId);
+      if (tank) renderManager.playSound('teleport', tank.position);
+      break;
+    }
+
     // One WebSocket frame per tick carrying every other tank's move instead
     // of one frame per move (server.js batches `pendingMoveBroadcasts` in
     // `gameLoop`). The sender's own id can appear here -- unlike plain 'pm',

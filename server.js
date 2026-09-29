@@ -17046,6 +17046,16 @@ async function handleProxyConnection(ws, req, request) {
     // A watcher never is -- no token means no `playerList` permission -- so
     // this stays empty for one and the roster simply carries no address, the
     // same as it does on this server for a non-admin.
+    // A tank went through a teleporter. bzo's own `pt` carries a position
+    // because its server decides the landing; a target's does not, and one is
+    // not needed -- the player updates either side already move the tank, and
+    // upstream's own handler plays a sound and nothing else
+    // (`playing.cxx:3085`). Without this a proxied screen shows a tank simply
+    // appearing somewhere else, silently.
+    session.on('teleport', ({ id }) => {
+      send({ type: 'teleport', playerId: String(id) });
+    });
+
     session.on('adminInfo', (info) => {
       for (const entry of info) {
         const player = session.state.players.get(entry.id);
@@ -17278,6 +17288,20 @@ async function handleProxyConnection(ws, req, request) {
     // and answers. A target does no such thing -- the client decides it drove
     // over one and says so above -- so there is nothing to ask and nobody to
     // ask it of.
+    // A teleport is declared, like a grab or a shot. bzo's client already
+    // works out which faces it went between and says so -- the proxy was
+    // dropping it -- and bzo's face ids are upstream's numbering exactly
+    // (`teleporterIndex * 2 + face`), on a world imported from this very
+    // target, so the numbers mean the same thing at both ends.
+    if (message.type === 'tp') {
+      const from = Number(message.fromFaceId);
+      const to = Number(message.toFaceId);
+      if (playingTeam && Number.isInteger(from) && Number.isInteger(to)
+        && from >= 0 && to >= 0) {
+        session.sendTeleport(from, to);
+      }
+      return;
+    }
     if (message.type === 'nearFlag') return;
     // bzo's pause is a request its own server answers by flipping a flag; a
     // target keeps that flag itself, so the browser's toggle is applied here

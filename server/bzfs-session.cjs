@@ -170,6 +170,15 @@ function decodeShotBegin(payload) {
   };
 }
 
+// MsgTeleport: who went through, and the two faces they went between
+// (`sendTeleport`, bzfs.cxx:4339). No position -- a receiver already has one
+// from the player updates either side of it, and upstream's own handler does
+// nothing with the faces but play a sound (`playing.cxx:3085`).
+function decodeTeleport(payload) {
+  const r = new Reader(payload);
+  return { id: r.u8(), from: r.u16(), to: r.u16() };
+}
+
 // MsgAdminInfo: a count, then one record per player of `sizeOfIP`, the player
 // id, and the address itself (`packAdminInfo`, GameKeeper.cxx:201). Sent only
 // to players holding `playerList` (`sendIPUpdate`, bzfs.cxx:619), so a
@@ -709,6 +718,9 @@ class BzfsSession {
       case 'se':
         this.emit('shotEnd', decodeShotEnd(payload));
         break;
+      case 'tp':
+        this.emit('teleport', decodeTeleport(payload));
+        break;
       case 'ai': {
         const info = decodeAdminInfo(payload);
         // Merged onto the player record the way `MsgPlayerInfo` merges
@@ -986,6 +998,17 @@ class BzfsSession {
     this.send('pa', payload);
   }
 
+  // MsgTeleport, which a client declares like the rest: the two faces it went
+  // between (`ServerLink.cxx:821`), with no player id -- bzfs takes that from
+  // the connection and adds it on the way out. It relays rather than decides,
+  // checking only that both faces exist (`bzfs.cxx:5003`).
+  sendTeleport(from, to) {
+    const payload = Buffer.alloc(4);
+    payload.writeUInt16BE(from, 0);
+    payload.writeUInt16BE(to, 2);
+    this.send('tp', payload);
+  }
+
   // MsgDropFlag, which a client also declares for itself: where the tank was
   // standing when it let go (`ServerLink.cxx:749`). Sent immediately before a
   // death, because upstream's own `gotBlowedUp` drops the flag first
@@ -1109,5 +1132,6 @@ module.exports = {
   decodeShotEnd,
   decodeGMUpdate,
   decodeAdminInfo,
+  decodeTeleport,
   decodeMessage,
 };
