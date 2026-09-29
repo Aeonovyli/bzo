@@ -230,6 +230,16 @@ can refuse them, and that is the intended end state rather than a gap. A
 proxy that could not be refused would be the problem; being announced is what
 makes refusing it possible.
 
+**bzo's own anti-cheat does not run here, and cannot.** A proxied connection
+is not in this server's game: nothing on this side simulates a shot, decides a
+hit or validates a position, because bzfs does all of that and believes its
+clients. So a proxy hands anyone a BZFlag client they can modify in devtools.
+BZFlag's client is open source too, but editing JavaScript and recompiling C++
+are not the same bar, and pretending otherwise would be worse than saying it.
+
+Nothing on this side can close that, so the answer is accountability instead
+of enforcement, which is the rule below.
+
 **Only a verified player plays.** A connection carrying no global login joins
 as an observer whatever team its link asked for, and is told why. bzfs would
 admit it as a player itself -- this is the proxy's courtesy, not the target's
