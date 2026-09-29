@@ -215,8 +215,24 @@ function makeTurretGeometry() {
   return lathe;
 }
 
+// BZFlag's `_muzzleHeight` (global.cxx) is 1.57, and a shot leaves the tank
+// there. render.js reads the muzzle off this barrel's own foremost vertices
+// rather than assuming it, so the barrel *is* where the shot and its flare
+// come from -- a barrel modelled higher or longer than upstream's puts every
+// shot somewhere the game does not think it is.
+const MUZZLE_HEIGHT = 1.57;
+// Half the tank's 6.0 length. render.js clamps the muzzle to
+// MAX_MUZZLE_FORWARD, which is this plus 0.1, so a barrel reaching past here
+// would have its flare drawn behind its own tip.
+const MUZZLE_FORWARD = 3.0;
+// The barrel keeps the end it is seated in the turret by, at z -0.08, and
+// reaches forward to the muzzle from there.
+const BARREL_REAR_Z = -0.08;
+const BARREL_LENGTH = BARREL_REAR_Z + MUZZLE_FORWARD;
+const BARREL_CENTRE_Z = (BARREL_REAR_Z - MUZZLE_FORWARD) / 2;
+
 function makeBarrelGeometry() {
-  const barrel = new THREE.CylinderGeometry(0.16, 0.20, 3.2, 12, 1, false);
+  const barrel = new THREE.CylinderGeometry(0.16, 0.20, BARREL_LENGTH, 12, 1, false);
   barrel.rotateX(Math.PI / 2);
   barrel.computeVertexNormals();
   return barrel;
@@ -298,7 +314,8 @@ builder.addObject('turret', transformedGeometry(makeTurretGeometry(), {
   sy: 1.15,
   sz: 1.18,
 }));
-builder.addObject('barrel', transformedGeometry(makeBarrelGeometry(), { x: 0, y: 1.72, z: -1.68 }));
+builder.addObject('barrel', transformedGeometry(makeBarrelGeometry(),
+  { x: 0, y: MUZZLE_HEIGHT, z: BARREL_CENTRE_Z }));
 
 const wheelZ = Array.from({ length: 4 }, (_, index) => wheelCenterZStart - (index * wheelCenterZStep));
 for (let i = 0; i < wheelZ.length; i += 1) {

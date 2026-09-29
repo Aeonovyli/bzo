@@ -178,8 +178,24 @@ function makeTurretGeometry() {
   return turret;
 }
 
+// BZFlag's `_muzzleHeight` (global.cxx) is 1.57, and a shot leaves the tank
+// there. render.js reads the muzzle off this barrel's own foremost vertices
+// rather than assuming it, so the barrel *is* where the shot and its flare
+// come from -- a barrel modelled higher or longer than upstream's puts every
+// shot somewhere the game does not think it is.
+const MUZZLE_HEIGHT = 1.57;
+// Half the tank's 6.0 length. render.js clamps the muzzle to
+// MAX_MUZZLE_FORWARD, which is this plus 0.1, so a barrel reaching past here
+// would have its flare drawn behind its own tip.
+const MUZZLE_FORWARD = 3.0;
+// The barrel keeps the end it is seated in the turret by, at z 0.07, and
+// reaches forward to the muzzle from there.
+const BARREL_REAR_Z = 0.07;
+const BARREL_LENGTH = BARREL_REAR_Z + MUZZLE_FORWARD;
+const BARREL_CENTRE_Z = (BARREL_REAR_Z - MUZZLE_FORWARD) / 2;
+
 function makeBarrelGeometry() {
-  const barrel = new THREE.CylinderGeometry(0.12, 0.16, 3.5, 12, 1, false);
+  const barrel = new THREE.CylinderGeometry(0.12, 0.16, BARREL_LENGTH, 12, 1, false);
   barrel.rotateX(Math.PI / 2);
   barrel.computeVertexNormals();
   return barrel;
@@ -214,10 +230,28 @@ function tileCamo(geometry) {
   return geometry;
 }
 
-builder.addObject('body', tileCamo(transformedGeometry(makeBodyGeometry(), { y: 0.18 })));
+// BZFlag's `_tankWidth` is 2.8, and that is the box the server slides a tank
+// along a wall with. This hull was modelled 3.15 across, so it stood proud of
+// its own collision box and clipped into any face it slid down. The profile is
+// brought in to match rather than redrawn, which keeps its shape.
+// `_tankLength` is 6.0 and `_tankWidth` 2.8, which together are the box the
+// server slides a tank along a wall with. The hull was modelled 3.15 across
+// and 6.2 long, so it stood proud of its own collision box on three sides and
+// clipped into any face it slid down. Brought in to match rather than
+// redrawn, which keeps the shape it was given.
+const TANK_WIDTH = 2.8;
+const TANK_LENGTH = 6.0;
+const HULL_MODELLED_WIDTH = 3.15;
+const HULL_MODELLED_LENGTH = 6.2;
+builder.addObject('body', tileCamo(transformedGeometry(makeBodyGeometry(), {
+  y: 0.18,
+  sx: TANK_WIDTH / HULL_MODELLED_WIDTH,
+  sz: TANK_LENGTH / HULL_MODELLED_LENGTH,
+})));
 
 builder.addObject('turret', tileCamo(transformedGeometry(makeTurretGeometry(), { y: 1.0, z: -0.15 })));
-builder.addObject('barrel', transformedGeometry(makeBarrelGeometry(), { y: 1.72, z: -1.68 }));
+builder.addObject('barrel', transformedGeometry(makeBarrelGeometry(),
+  { y: MUZZLE_HEIGHT, z: BARREL_CENTRE_Z }));
 
 const wheelZ = [2.1, 0, -2.1];
 for (let i = 0; i < wheelZ.length; i += 1) {

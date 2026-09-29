@@ -7,6 +7,16 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 ## [Unreleased]
 
 ### Fixed
+- A shot leaves the barrel it is drawn coming out of. render.js reads the
+  muzzle off the model's own barrel tip, and every generated tank had that tip
+  modelled too high and, on Modern and Wheeled 6, further forward than the
+  clamp allows -- so the flare was drawn up to a third of a unit behind the
+  visible end of the gun and about an eighth of a unit above where BZFlag puts
+  it. All three now reach 3.0 forward at BZFlag's own 1.57 muzzle height.
+- The Wheeled 6 hull fits inside the box the server slides it along a wall
+  with. It was modelled 3.15 across and 6.2 long against a tank that is 2.8 by
+  6.0, so it stood proud of its own collision box and clipped into faces it
+  slid down.
 - Camo is the same size on every part of every tank. A patch is four world
   units wherever it is drawn, the way a tread link already had a size of its
   own, instead of each part inheriting whatever scale its geometry happened to

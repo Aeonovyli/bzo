@@ -238,9 +238,14 @@ builder.addObject('rightTreadRearCap', transformedGeometry(
 ), CAP_MATS);
 
 builder.addObject('turret', transformedGeometry(new THREE.CylinderGeometry(1, 1, 0.8, 32), { y: 1.7 }));
+// BZFlag's `_muzzleHeight` (global.cxx). render.js reads the muzzle off this
+// barrel's own foremost vertices rather than assuming it, so the barrel is
+// where the shot and its flare come from. The tip already lands at 3.0, half
+// the tank's length, which is inside the clamp render.js applies.
+const MUZZLE_HEIGHT = 1.57;
 builder.addObject('barrel', transformedGeometry(
   new THREE.CylinderGeometry(0.2, 0.2, 3, 8),
-  { x: 0, y: 1.7, z: -1.5, rx: Math.PI / 2 },
+  { x: 0, y: MUZZLE_HEIGHT, z: -1.5, rx: Math.PI / 2 },
 ));
 
 // The nav lights render.js hangs on the model. Points rather than
