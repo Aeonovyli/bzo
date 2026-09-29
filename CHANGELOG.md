@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.88] - 2026-09-29
+
 ### Changed
 - `/list` shows servers the way BZFlag's own server menu does, instead of two
   tables fifteen and fourteen columns wide. A row is one line -- player count,
@@ -22,7 +24,9 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   playing on them, observers counted as neither. The pane is two columns like
   upstream's panel -- who is playing, then what the game is -- and the
   selected row's buttons sit on the filter bar, so the way in stays in one
-  place instead of moving as a pane grows. Refs #147.
+  place instead of moving as a pane grows. Every team keeps its label with the
+  value left blank where that team is not offered, so the pane holds its height
+  as the selection moves. Refs #147.
 - A bzo server reports what the pane needs -- per-team counts and maxima, the
   shake timeout and win count, and the time, team score and player score
   limits -- so a bzo row says as much as a bzfs row, which gets all of it free
