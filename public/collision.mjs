@@ -2398,3 +2398,67 @@ export function traceShotStep({
     ground,
   };
 }
+
+// --- Shots against tanks ----------------------------------------------------
+//
+// Here rather than in the server, because both ends need it now: bzo's server
+// tests every tank to decide a hit, and a proxied client tests its own to
+// decide it died -- which is upstream's arrangement, where each client tests
+// one tank and one shot is one hit by construction (`docs/proxy-plan.md`).
+
+// The tank a shot's hit test sees: bzo's own radius, which is not upstream's
+// `_tankRadius` 4.32, and `_tankHeight` from the collision pair, which is.
+// The dimension flags scale the radius, following upstream's own basis --
+// `Player::getRadius` is `dimensionsScale[0] * _tankRadius`, the length scale on
+// the base radius -- so the factors are upstream's and the base stays bzo's.
+export const TANK_HIT_RADIUS = 2;
+export const TANK_HIT_HEIGHT = TANK_HEIGHT;
+
+// How far along a segment a shot first comes within a tank radius of one tank's
+// centre, or null if it never does. This is SegmentedShotStrategy::checkHit's
+// ray test reduced to bzo's upright cylinder: upstream tests the frame's whole
+// ray rather than sampling a point on it, which is what lets a Rapid Fire shell
+// -- 2.5 units of travel a step against a tank 4 units across -- hit the edge of
+// a tank instead of stepping past it.
+//
+// A shot that starts the segment already inside the radius strikes where it
+// started, which is what a beam fired point blank does.
+// The flag is interpreted by the caller, not here: this module is geometry and
+// holds no flag table, so what a flag *means* -- a narrow box, a scaled radius
+// -- arrives as numbers from whichever side already knows (`flags.mjs`).
+export function getSegmentTankHitFraction(from, to, tank, shape = {}) {
+  const { narrow = false, radiusScale = 1, shotRadius = 0.5 } = shape;
+  // SegmentedShotStrategy::checkHit's two shapes. Narrow is the exception and
+  // upstream says why in place: the box is "shell radius" wide rather than tank
+  // width, "so you can actually hit narrow tank head on". Its length is the
+  // tank's full length, unscaled, because Narrow does not touch that axis.
+  if (narrow) {
+    return getSegmentBoxHitFraction(
+      from.x, from.z, to.x, to.z,
+      tank.x, tank.z,
+      // getExtrapolatedPosition names the heading `r`; a tank object straight off
+      // a player names it `rotation`. Both reach here.
+      getTankLocalAngle(Number.isFinite(tank.r) ? tank.r : (tank.rotation || 0)),
+      shotRadius,
+      TANK_HALF_LENGTH
+    );
+  }
+  // Every other flag, and no flag, meets the sphere -- scaled by the length
+  // factor, which is the axis Player::getRadius reads.
+  const radius = TANK_HIT_RADIUS * radiusScale;
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const fx = from.x - tank.x;
+  const fz = from.z - tank.z;
+  const a = (dx * dx) + (dz * dz);
+  const b = (fx * dx) + (fz * dz);
+  const c = (fx * fx) + (fz * fz) - (radius * radius);
+  if (a < 1e-12) return c <= 0 ? 0 : null;
+  const discriminant = (b * b) - (a * c);
+  if (discriminant < 0) return null;
+  const root = Math.sqrt(discriminant);
+  const near = (-b - root) / a;
+  if (near > 1) return null;
+  if (near < 0) return ((-b + root) / a) < 0 ? null : 0;
+  return near;
+}
