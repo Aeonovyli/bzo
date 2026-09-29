@@ -24,6 +24,37 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   rather than camo -- and its turret was stretched along the top and striped
   across the ends, because the top face was given the long axis twice over
   while the ends were given almost no span at all. Closes #148.
+- A wheel notch scrolls the chat transcript and the scoreboard by the same
+  amount on every browser and every mouse. It used to move by whatever number
+  the browser happened to put in the event, which is pixels on some and whole
+  lines on others -- so one notch could hide most of the six-line transcript on
+  one machine and barely move it on another, and on the roster it skipped ten
+  names at a time. A notch is now two lines of chat, or exactly one roster row.
+  Closes #149.
+- Chat stays on the newest message when the panel changes size -- going
+  fullscreen with `F`, leaving it, or rotating a phone. It used to leave you a
+  couple of lines above the bottom, because a resize moves the bottom without
+  moving your place in the transcript. Someone scrolled up to read back is
+  still left where they were. Refs #149.
+- The scoreboard fits the screen at any player count. It used to grow with the
+  roster until a busy server pushed the name row, the gear and the team scores
+  off the bottom edge; now the panel stops above the chat folder and the roster
+  scrolls inside it, by wheel or by dragging it with a finger. Your place in the
+  roster survives a repaint instead of snapping back to the top every time
+  somebody scores, and the `U` hunt cursor scrolls the list along with it rather
+  than moving to a row below the fold.
+- The barrel is left out of the first-person view, as it is upstream. Nothing
+  hides it there normally: the eye sits at the tank's own centre at muzzle
+  height, inside both turret and barrel, and every face of a solid points away
+  from a camera within it. A bore is the one surface that faces the axis the
+  eye is on, so it had to be taken out by hand. A headset keeps it -- there the
+  gun is the only thing that says where the tank is pointing, and a head that
+  moves can look over it rather than along it.
+- The faces that close the hull and the turret are painted at the size the
+  faces around them are painted, measured off the part rather than assumed.
+  Upstream's coordinates index a skin rather than tile a pattern, so there is
+  no one scale to use: the body runs about 2.4 world units to a unit of texture
+  and the turret nearer 3.8.
 
 ### Added
 - The treads on BZFlag Medium and BZFlag Low run the tread pattern along the
@@ -54,27 +85,23 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   sent the third and no change to bzo can recover it. Most keyboards wire their
   keys in a matrix that cannot report some three-key combinations at all. Refs
   #146.
-
-### Fixed
-- A wheel notch scrolls the chat transcript and the scoreboard by the same
-  amount on every browser and every mouse. It used to move by whatever number
-  the browser happened to put in the event, which is pixels on some and whole
-  lines on others -- so one notch could hide most of the six-line transcript on
-  one machine and barely move it on another, and on the roster it skipped ten
-  names at a time. A notch is now two lines of chat, or exactly one roster row.
-  Closes #149.
-- Chat stays on the newest message when the panel changes size -- going
-  fullscreen with `F`, leaving it, or rotating a phone. It used to leave you a
-  couple of lines above the bottom, because a resize moves the bottom without
-  moving your place in the transcript. Someone scrolled up to read back is
-  still left where they were. Refs #149.
-- The scoreboard fits the screen at any player count. It used to grow with the
-  roster until a busy server pushed the name row, the gear and the team scores
-  off the bottom edge; now the panel stops above the chat folder and the roster
-  scrolls inside it, by wheel or by dragging it with a finger. Your place in the
-  roster survives a repaint instead of snapping back to the top every time
-  somebody scores, and the `U` hunt cursor scrolls the list along with it rather
-  than moving to a row below the fold.
+- Two more tanks again, BZFlag High and BZFlag Treads. High is upstream's own
+  full-detail tank with its casings as one piece per side, which `bzflag.obj`
+  is not -- that one was cut into bzo's three-part tread convention long ago,
+  so its belt is three objects each scaling its own way. Treads is the tank
+  upstream draws with animated treads switched on: a real belt running round
+  two drums with four road wheels a side, ported from its source because it is
+  built rather than written out. Refs #148.
+- Every part of every extracted tank is a solid in its own right, so the pieces
+  thrown when a tank explodes look like pieces of a tank from any angle. The
+  hull had no sides at all and the turret no floor -- upstream never draws
+  them, because its casing is a solid housing that covers the gap, and a real
+  belt does not. Holes that open into the part's own bulk are left alone: the
+  two tabs at the back of the hull fly with the hull, which closes them.
+- The gun on BZFlag Treads is a pipe rather than a capped rod, with a ring of
+  metal closing the wall at each end, so it reads as a barrel when it tumbles
+  past you after a kill. Medium and Low get a solid barrel instead; they are
+  there to be cheap, and a bore is a few pixels at the range they are for.
 
 ## [1.2.86] - 2026-09-29
 

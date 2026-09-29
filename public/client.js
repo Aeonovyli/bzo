@@ -4410,6 +4410,8 @@ let TANK_MODELS = [
   // from misc/tank.obj, because that file is packaged but never read by the
   // client -- what upstream draws is built in C++, one function per part per
   // level of detail. See scripts/extract-bzflag-lod-tanks.mjs.
+  { id: 'bzflag-treads', path: '/obj/bzflag-treads.obj', label: 'BZFlag Treads' },
+  { id: 'bzflag-high', path: '/obj/bzflag-high.obj', label: 'BZFlag High' },
   { id: 'bzflag-medium', path: '/obj/bzflag-medium.obj', label: 'BZFlag Medium' },
   { id: 'bzflag-low', path: '/obj/bzflag-low.obj', label: 'BZFlag Low' },
 ];
@@ -10266,6 +10268,30 @@ function updateTankDimensions(deltaTime) {
     // person is the `devDriving` half of that test, so it keeps the cut.
     const crossingScale = getTankDimensionScale(viewedFlag);
     const inCockpit = isTankInCockpit(playerId);
+    // Upstream draws your own tank in first person -- Display Treads on, which
+    // is the branch that skips `setOnlyShadows` -- and you still see no turret
+    // and no barrel. Nothing hides them: the eye sits at the tank's own centre
+    // at muzzle height (playing.cxx:5996), which is inside both, and every
+    // face of a solid points away from a camera within it.
+    //
+    // A bored barrel breaks that, and only that. The inside of the bore is the
+    // one surface on the tank that faces its own axis, and the axis is where
+    // the eye is -- so the pipe that reads correctly on a tank coming at you
+    // turns into a tube you are looking along on your own. It is taken out of
+    // the cockpit view rather than unbored, so it still reads as a pipe
+    // everywhere it is seen from outside, which is where it was wanted.
+    //
+    // This covers an observer in FPS or drive-FP as well as your own tank,
+    // which is the same view of the same problem: upstream puts the roaming
+    // first-person eye at the watched tank's own muzzle height too.
+    //
+    // Except in a headset, where the barrel is kept. bzo forces first person
+    // on entering VR, and there the gun is the only thing in the world that
+    // says where the tank is pointing -- there is no crosshair on a screen to
+    // fall back on. A head that moves can look over the barrel rather than
+    // along it, which is the thing a fixed screen camera cannot do.
+    const ownBarrel = tank.userData.barrel;
+    if (ownBarrel) ownBarrel.visible = !inCockpit || isXREnabled();
     renderManager.setTankCrossingPlane(
       tank,
       tank.visible && drivesThroughBuildings(viewedFlag, viewedZoned)

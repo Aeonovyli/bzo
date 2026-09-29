@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 import { writeFileSync } from 'fs';
 import { tileTankUVsByPosition } from '../public/tank-uv.mjs';
+import { UPSTREAM_TANK, fitGeometryAxes, navLightPositions, navLightSpot, surfaceUnderPoint } from '../public/tank-dimensions.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BODY_WIDTH = 1.755;
@@ -19,6 +20,11 @@ const BODY_WIDTH = 1.755;
 // ── OBJ builder with cumulative global vertex counters ────────────────────────
 class OBJBuilder {
   constructor() {
+    // Every triangle written so far, so a nav light can be sat on the deck
+    // it is over rather than at a remembered height.
+    this.surface = [];
+    // What each named part spans, so nav lights can be placed against it.
+    this.bounds = new Map();
     this.vOffset  = 0; // global position count so far
     this.vtOffset = 0; // global UV count so far
     this.vnOffset = 0; // global normal count so far
@@ -36,6 +42,21 @@ class OBJBuilder {
     this.out += `\n# ${text}\n`;
   }
 
+  addPointOnSurface(name, x, z, clearance = 0.03) {
+    // Walks in toward the middle if the chosen spot is over fresh air.
+    for (let step = 0; step <= 20; step += 1) {
+      const t = step / 20;
+      const atX = x * (1 - t);
+      const atZ = z * (1 - t);
+      const surface = surfaceUnderPoint(this.surface, atX, atZ);
+      if (surface !== null) {
+        this.addPoint(name, atX, surface + clearance, atZ);
+        return;
+      }
+    }
+    throw new Error(`${name} at ${x},${z} is over empty space`);
+  }
+
   addPoint(name, x, y, z) {
     this.out += `\no ${name}\n`;
     this.out += `v ${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)}\n`;
@@ -45,6 +66,19 @@ class OBJBuilder {
 
   addObject(name, geo, matNames) {
     const pos = geo.attributes.position;
+    // Triangles, three vertices at a time -- so an indexed geometry has to
+    // be walked through its index or the triples are not its triangles.
+    const order = geo.index ? geo.index.array : null;
+    const corners = order ? order.length : pos.count;
+    for (let i = 0; i < corners; i += 1) {
+      const vertex = order ? order[i] : i;
+      this.surface.push([pos.getX(vertex), pos.getY(vertex), pos.getZ(vertex)]);
+    }
+    geo.computeBoundingBox();
+    this.bounds.set(name, {
+      min: [geo.boundingBox.min.x, geo.boundingBox.min.y, geo.boundingBox.min.z],
+      max: [geo.boundingBox.max.x, geo.boundingBox.max.y, geo.boundingBox.max.z],
+    });
     const nor = geo.attributes.normal;
     const uv  = geo.attributes.uv;
     const indexed = geo.index !== null;
@@ -205,19 +239,25 @@ function tileCamo(geometry) {
   return geometry;
 }
 
-builder.addObject('body', tileCamo(transformedGeometry(new THREE.BoxGeometry(BODY_WIDTH, 1, 4), { y: 0.8 })));
+// Upstream's hull runs nearly the whole length of the tank; this one stopped
+// two units short at each end, leaving the tracks standing out past it.
+builder.addObject('body', tileCamo(fitGeometryAxes(
+  transformedGeometry(new THREE.BoxGeometry(BODY_WIDTH, 1, 4), { y: 0.8 }),
+  UPSTREAM_TANK.body, { z: 'both', y: 'min' },
+)));
 
 builder.addObject('leftTreadMiddle', transformedGeometry(
   makeTreadMiddleGeometry(),
   { x: -treadCenterOffset, y: treadCapRadius },
 ), BOX_MATS);
 
-builder.addObject('leftTreadFrontCap', transformedGeometry(
+// The barrel points -Z, so -Z is forward and the cap at +Z is the rear one.
+builder.addObject('leftTreadRearCap', transformedGeometry(
   makeTreadCapGeometry(0),
   { x: -treadCenterOffset, y: treadCapRadius, z: treadMiddleLength / 2, rx: Math.PI / 2, rz: Math.PI / 2 },
 ), CAP_MATS);
 
-builder.addObject('leftTreadRearCap', transformedGeometry(
+builder.addObject('leftTreadFrontCap', transformedGeometry(
   makeTreadCapGeometry(Math.PI),
   { x: -treadCenterOffset, y: treadCapRadius, z: -treadMiddleLength / 2, rx: Math.PI / 2, rz: Math.PI / 2 },
 ), CAP_MATS);
@@ -227,34 +267,47 @@ builder.addObject('rightTreadMiddle', transformedGeometry(
   { x: treadCenterOffset, y: treadCapRadius },
 ), BOX_MATS);
 
-builder.addObject('rightTreadFrontCap', transformedGeometry(
+builder.addObject('rightTreadRearCap', transformedGeometry(
   makeTreadCapGeometry(0),
   { x: treadCenterOffset, y: treadCapRadius, z: treadMiddleLength / 2, rx: Math.PI / 2, rz: Math.PI / 2 },
 ), CAP_MATS);
 
-builder.addObject('rightTreadRearCap', transformedGeometry(
+builder.addObject('rightTreadFrontCap', transformedGeometry(
   makeTreadCapGeometry(Math.PI),
   { x: treadCenterOffset, y: treadCapRadius, z: -treadMiddleLength / 2, rx: Math.PI / 2, rz: Math.PI / 2 },
 ), CAP_MATS);
 
-builder.addObject('turret', transformedGeometry(new THREE.CylinderGeometry(1, 1, 0.8, 32), { y: 1.7 }));
+// Upstream's turret footprint and height, so a turret reads the same size
+// across models. The underside stays where this model puts it.
+builder.addObject('turret', fitGeometryAxes(
+  transformedGeometry(new THREE.CylinderGeometry(1, 1, 0.8, 32), { y: 1.7 }),
+  UPSTREAM_TANK.turret, { x: 'both', z: 'both', y: 'min' },
+));
 // BZFlag's `_muzzleHeight` (global.cxx). render.js reads the muzzle off this
 // barrel's own foremost vertices rather than assuming it, so the barrel is
 // where the shot and its flare come from. The tip already lands at 3.0, half
 // the tank's length, which is inside the clamp render.js applies.
 const MUZZLE_HEIGHT = 1.57;
-builder.addObject('barrel', transformedGeometry(
-  new THREE.CylinderGeometry(0.2, 0.2, 3, 8),
-  { x: 0, y: MUZZLE_HEIGHT, z: -1.5, rx: Math.PI / 2 },
+// Upstream's gun reaches past the hull and the tracks; fitted to its span
+// so it does, rather than stopping flush with them.
+builder.addObject('barrel', fitGeometryAxes(
+  transformedGeometry(
+    new THREE.CylinderGeometry(0.2, 0.2, 3, 8),
+    { x: 0, y: MUZZLE_HEIGHT, z: -1.5, rx: Math.PI / 2 },
+  ),
+  UPSTREAM_TANK.barrel, { z: 'both', y: 'both' },
 ));
 
 // The nav lights render.js hangs on the model. Points rather than
 // geometry, and last so they cannot disturb a face index.
 builder.addComment('Navigation lights. One `p` vertex each, read by the renderer for its');
 builder.addComment('position only; see docs/tank-model-format.md.');
-builder.addPoint('lightRear', 0.0, 2.12, 1.0);
-builder.addPoint('lightPort', -0.9, 2.12, -0.1);
-builder.addPoint('lightStarboard', 0.9, 2.12, -0.1);
+const navLights = navLightPositions(builder.bounds);
+const navTurret = builder.bounds.get('turret');
+for (const [name, spot] of Object.entries(navLights)) {
+  const [lx, lz] = navLightSpot(builder.surface, spot, navTurret);
+  builder.addPointOnSurface(name, lx, lz);
+}
 
 const objText = builder.build();
 const outPath = resolve(__dirname, '../public/obj/simple.obj');
