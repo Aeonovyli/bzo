@@ -7,6 +7,15 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 ## [Unreleased]
 
 ### Added
+- A tank stuck inside a building says so. `Sealed` appears top-centre with the
+  other notices, in the warning colour, for exactly as long as the tank is
+  inside the wall -- a state rather than a message, so it clears the moment the
+  tank is out. A Phantom Zone tank inside a wall is zoned rather than sealed,
+  as upstream has it. Closes #140.
+- `/mv` places a tank holding Oscillation Overthruster exactly where it is
+  asked to, instead of resolving its height to the nearest surface. Inside the
+  wall is where a phased tank is supposed to be able to sit, and it is how the
+  sealed state is reached on purpose.
 - The debug panel counts the keys the browser is delivering, and the most it
   has delivered at once. Holding a combination that does not work and reading
   the peak says which half of the machine to blame: three keys means the

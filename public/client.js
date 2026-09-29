@@ -134,6 +134,7 @@ import {
   getHudAlertColor,
   setHudAlert,
   updateAlertHud,
+  updateFiringStatusHud,
   FLAG_HELP_SECONDS,
   getActiveFlagHelp,
   setFlagHelp,
@@ -9732,6 +9733,24 @@ function amInsideBuilding() {
   return insideBuildings.length > 0;
 }
 
+// LocalPlayer::setDesiredSpeed's firing-status switch (LocalPlayer.cxx:835),
+// reduced to the one state bzo has nothing else saying. Upstream's other four
+// are already answered here: Deceased and Loading by the shot-slot bars, Ready
+// by their being full, and Zoned by its own message when the flag toggles.
+//
+// The order is upstream's own and matters. A dead tank reports Deceased before
+// the building is even looked at, so a tank that died inside a wall is not
+// sealed, it is dead; and a Phantom Zone tank inside a wall is Zoned rather
+// than Sealed, which is why being zoned is asked here and not just assumed to
+// be somebody else's business. `!isObserver()` is upstream's `!roaming` guard,
+// and it is also what keeps this from contradicting the roaming label sharing
+// the column with it.
+function getFiringStatusText() {
+  if (isObserver() || !isMyTankAlive()) return '';
+  if (amInsideBuilding() && !amZoned()) return 'Sealed';
+  return '';
+}
+
 // The solid the local tank's box is inside of, or null. One line of its own,
 // because the loop is `findTankObstacle` in the shared `collision` pair and the
 // server calls the same one: this only says which world to look at and what the
@@ -17452,6 +17471,7 @@ function animate(frameTime) {
     renderManager.deathFollowTarget = null;
   }
   updateAlertHud();
+  updateFiringStatusHud(getFiringStatusText());
   updateFlagHelp();
   updateFlagHelpHud();
   updateDeathCameraHudVisibility();

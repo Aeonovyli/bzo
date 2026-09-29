@@ -10472,8 +10472,22 @@ defineCommand('/mv', COMMAND_TIER.OPERATOR,
     // there it falls to the ground where the tank fits and climbs where it does
     // not, so `/mv 0,0` lands on the grass on `hix` and on top of the centre
     // block on `fountains`.
+    //
+    // Except for a tank that drives through buildings, which is placed exactly
+    // where it was asked to go. Resolving the altitude for one of those would
+    // refuse the only placement worth asking for -- being inside the wall is
+    // where an Oscillation Overthruster tank is *supposed* to be able to sit,
+    // and it is the one way to reach the sealed state on purpose. The tank
+    // still falls out of it the moment the flag goes.
+    const phased = isPlayerPhased(subject);
     let y;
-    if (parsed.y !== null
+    if (phased && parsed.y !== null) {
+      y = parsed.y;
+    } else if (phased) {
+      // No height given still means the ground, which is where a tank driving
+      // in through the side of a building would be.
+      y = 0;
+    } else if (parsed.y !== null
       && !checkCollision(parsed.x, parsed.y, parsed.z, 2, { rotation, suppressLog: true })) {
       y = parsed.y;
     } else {

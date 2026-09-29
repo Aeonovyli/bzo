@@ -1872,6 +1872,7 @@ body.no-jumping #altimeter {
 }
 
 .alertHudLine,
+#firingStatus,
 #roamStatus {
   font-size: clamp(1.2rem, 3.2vmin, 2.1rem);
   font-weight: bold;
@@ -1882,6 +1883,16 @@ body.no-jumping #altimeter {
 /* messageColor, which is what renderStatus uses for the roaming label. */
 #roamStatus {
   color: #cfd8e6;
+  display: none;
+}
+
+/* warningColor, which is what renderStatus leaves the status in for Sealed --
+   upstream's is pure red, and this is the softer red bzo already warns in
+   (HUD_ALERT_WARNING_COLOR in hud.js), so the HUD has one warning colour
+   rather than two. Shown by hud.js, which is
+   also why there is no rule making it visible here. */
+#firingStatus {
+  color: #ff5a4a;
   display: none;
 }
 

@@ -639,6 +639,11 @@
   <canvas id="shotStatus"></canvas>
   <div id="hudNotices">
     <div id="roamStatus" role="status" aria-live="polite"></div>
+    <!-- The other half of upstream's top-centre status string, whose roaming
+         half is the line above. Mutually exclusive with it, exactly as
+         renderStatus is: upstream guards the firing status with `!roaming` and
+         appends the roaming label in its place. -->
+    <div id="firingStatus" role="status" aria-live="polite"></div>
     <div id="alertHud" role="status" aria-live="assertive"></div>
   </div>
   <div id="crosshair">

@@ -395,6 +395,38 @@ export function getHudAlertColor(warning) {
   return warning ? HUD_ALERT_WARNING_COLOR : HUD_ALERT_COLOR;
 }
 
+// HUDRenderer::renderStatus (HUDRenderer.cxx:1016). Upstream prints this
+// top-centre, on one line with the match clock and between the score in the
+// top-left corner and the held flag's name in the top-right. bzo has already
+// taken that line apart -- the clock moved into the scoreboard panel and the
+// roaming label into `#roamStatus` -- and this is the piece of it that was
+// still missing.
+//
+// It goes in the notices column with the alerts, which is the same top-centre
+// place upstream draws it and the same place a flag pickup already appears.
+// What it is not is one of the three alert slots: those carry events and each
+// runs a timer, and this is a state. It has to last exactly as long as the
+// tank is inside the wall, however long that is, and go the frame it leaves.
+// A timed slot would either expire while the tank was still sealed or need
+// re-arming every frame to fake it.
+let firingStatusElement;
+let lastFiringStatusText = '';
+
+// Called every frame, so it compares before it writes: the HUD is affordable
+// on a small machine because it does not touch the DOM for a value that has
+// not changed.
+export function updateFiringStatusHud(text) {
+  if (firingStatusElement === undefined) {
+    firingStatusElement = document.getElementById('firingStatus');
+  }
+  if (!firingStatusElement) return;
+  const next = text || '';
+  if (next === lastFiringStatusText) return;
+  lastFiringStatusText = next;
+  firingStatusElement.textContent = next;
+  firingStatusElement.style.display = next ? 'block' : 'none';
+}
+
 let alertHudElement;
 let lastAlertHudKey = '';
 

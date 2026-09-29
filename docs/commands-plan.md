@@ -21,6 +21,14 @@ not in `BanCommands`, not in any plugin, and there is no API call for it either.
 It is here because bzo is developed by driving it: `testSpawn` in `server.json`
 does this on join, and `/mv` is the same thing without a restart.
 
+A tank holding Oscillation Overthruster is placed exactly where it was asked
+to go, with no altitude resolved for it. Every other tank has its height
+settled the way a spawn does -- falling to the ground where it fits and
+climbing to the roof where it does not -- and resolving it for a phased tank
+would refuse the one placement worth asking for, since being inside the wall is
+where an OO tank is supposed to be able to sit and is how the sealed state is
+reached on purpose.
+
 A facing is one of the eight compass points, or an exact angle. The angle is
 bzo's own rotation in degrees rather than a compass bearing, which is the
 convention a Share View Link's `pos=` tail already carries and the reason a

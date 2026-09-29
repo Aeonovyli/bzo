@@ -35,6 +35,7 @@ import {
   SCOREBOARD_HUNT_LABEL,
   setHudAlert,
   updateAlertHud,
+  updateFiringStatusHud,
 } from '../public/hud.js';
 import { PLAYER_TEAM, getPlayerRanking } from '../public/teams.mjs';
 
@@ -501,6 +502,39 @@ assert.equal(getPlayerStatusIndicator(null), '');
   updateAlertHud();
   assert.notEqual(alertHud.children, before, 'a recoloured line repaints');
   assert.equal(alertHud.children.at(-1).children.at(-1).style.color, '#654321');
+
+  delete globalThis.document;
+}
+
+// updateFiringStatusHud, against the same kind of stub. HUDRenderer::renderStatus
+// prints this top-centre; what matters here is that it is a state and not one
+// of the timed alert slots, so it shows for exactly as long as it is passed a
+// string and goes the moment it is not.
+{
+  const firingStatus = { textContent: '', style: {} };
+  globalThis.document = {
+    getElementById: (id) => (id === 'firingStatus' ? firingStatus : null),
+  };
+
+  updateFiringStatusHud('Sealed');
+  assert.equal(firingStatus.textContent, 'Sealed');
+  assert.equal(firingStatus.style.display, 'block');
+
+  // Every frame asks, so an unchanged state must not write to the DOM again.
+  firingStatus.textContent = 'sentinel';
+  updateFiringStatusHud('Sealed');
+  assert.equal(firingStatus.textContent, 'sentinel', 'an unchanged status is left alone');
+
+  // Leaving the wall clears it rather than letting it time out.
+  updateFiringStatusHud('');
+  assert.equal(firingStatus.textContent, '');
+  assert.equal(firingStatus.style.display, 'none');
+
+  // Null and undefined mean the same as empty, so a caller with nothing to say
+  // does not have to know which spelling of nothing to use.
+  updateFiringStatusHud('Sealed');
+  updateFiringStatusHud(null);
+  assert.equal(firingStatus.style.display, 'none');
 
   delete globalThis.document;
 }
