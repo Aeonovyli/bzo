@@ -26,6 +26,12 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   while the ends were given almost no span at all. Closes #148.
 
 ### Added
+- Two more tanks, BZFlag Medium and BZFlag Low, which are upstream's own
+  cheaper tanks -- the ones it falls back to at distance. 88 and 52 triangles
+  against the stock tank's 1106. They come from the BZFlag source rather than
+  from its `misc/tank.obj`, which is packaged but never read by the client:
+  what upstream draws is built in C++, one function per part per level of
+  detail. Refs #148.
 - A tank stuck inside a building says so. `Sealed` appears top-centre with the
   other notices, in the warning colour, for exactly as long as the tank is
   inside the wall -- a state rather than a message, so it clears the moment the

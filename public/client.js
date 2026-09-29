@@ -4405,6 +4405,13 @@ let TANK_MODELS = [
   { id: 'modern', path: '/obj/modern.obj', label: 'Modern' },
   { id: 'simple', path: '/obj/simple.obj', label: 'Simple' },
   { id: 'wheeled6', path: '/obj/wheeled6.obj', label: 'Wheeled 6' },
+  // Upstream's own two cheaper tanks, which it falls back to at distance and
+  // bzo had no equivalent of. Extracted from the BZFlag source rather than
+  // from misc/tank.obj, because that file is packaged but never read by the
+  // client -- what upstream draws is built in C++, one function per part per
+  // level of detail. See scripts/extract-bzflag-lod-tanks.mjs.
+  { id: 'bzflag-medium', path: '/obj/bzflag-medium.obj', label: 'BZFlag Medium' },
+  { id: 'bzflag-low', path: '/obj/bzflag-low.obj', label: 'BZFlag Low' },
 ];
 let selectedTankModelId = localStorage.getItem('tankModelId') || DEFAULT_TANK_MODEL_ID;
 let tankPreviewCard = null;
