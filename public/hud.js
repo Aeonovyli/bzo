@@ -585,7 +585,8 @@ export function updateDebugDisplay({
   gamepadInfo,
   renderStats,
   framePhases,
-  voice
+  voice,
+  heldKeys
 }) {
   const debugContent = document.getElementById('debugContent');
   if (!debugContent) return;
@@ -605,6 +606,18 @@ export function updateDebugDisplay({
   }
   html += `<div><span class="label">Camera:</span><span class="value">${cameraMode ?? ''}</span></div>`;
   html += `<div><span class="label">Obs/Clouds:</span><span class="value">${OBSTACLES?.length ?? ''}/${clouds?.length ?? ''}</span></div>`;
+
+  // #146. Two rows: what the browser is delivering right now, and the most it
+  // has ever delivered at once. The peak is the one that answers the question,
+  // because the combination that fails is exactly the one a player cannot hold
+  // and read at the same time. `` ` `` clears it for the next attempt.
+  if (heldKeys) {
+    const codes = (list) => (list.length
+      ? list.map((code) => code.replace(/[^A-Za-z0-9]/g, '')).join(' ')
+      : 'none');
+    html += `<div><span class="label">Keys Held:</span><span class="value">${heldKeys.held.length} ${codes(heldKeys.held)}</span></div>`;
+    html += `<div><span class="label">Keys Peak:</span><span class="value">${heldKeys.peak} ${codes(heldKeys.peakCodes)}</span></div>`;
+  }
   if (renderStats) {
     html += `<div><span class="label">Draws/Tris:</span><span class="value">${formatCount(renderStats.calls)}/${formatCount(renderStats.triangles)}</span></div>`;
     // The window in brackets is what the program count did over the last

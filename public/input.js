@@ -71,6 +71,49 @@ function syncVirtualInput() {
 
 // Held, not an edge: a guided missile will lock while it is down, and the
 // observer's roaming target already makes its own edge out of the hold.
+// #146: holding left and back together is reported to swallow jump. That is
+// either the keyboard or bzo, and the two look identical from inside the game:
+// most cheap keyboards wire their keys in a matrix that cannot report certain
+// three-key combinations at all, so the third keydown is never delivered to
+// anything, and bzo's own key state only ever shows what arrived.
+//
+// So this counts the raw events instead. In capture, on `window`, ahead of
+// every dialog and text-field guard the gameplay handler returns early on, and
+// with no filtering of its own -- what it reports is what the browser handed
+// over, nothing else. Hold the three keys and read the peak: 3 means the
+// keyboard is fine and the key was dropped downstream, 2 means the keyboard
+// never sent the third and no amount of work in bzo can find it.
+const heldKeyCodes = new Set();
+let peakHeldCount = 0;
+let peakHeldCodes = [];
+
+export function getHeldKeyDebug() {
+  return { held: [...heldKeyCodes], peak: peakHeldCount, peakCodes: peakHeldCodes };
+}
+
+// So a second combination can be tried without the first one's peak standing
+// over it. Called when the debug panel is switched on.
+export function resetHeldKeyPeak() {
+  peakHeldCount = heldKeyCodes.size;
+  peakHeldCodes = [...heldKeyCodes];
+}
+
+function trackHeldKeys() {
+  window.addEventListener('keydown', (e) => {
+    // An auto-repeat is the same key still down, not another one.
+    if (e.repeat) return;
+    heldKeyCodes.add(e.code);
+    if (heldKeyCodes.size > peakHeldCount) {
+      peakHeldCount = heldKeyCodes.size;
+      peakHeldCodes = [...heldKeyCodes];
+    }
+  }, { capture: true });
+  window.addEventListener('keyup', (e) => heldKeyCodes.delete(e.code), { capture: true });
+  // A keyup that lands on another window never arrives, and the key it belongs
+  // to would read as held for the rest of the session.
+  window.addEventListener('blur', () => heldKeyCodes.clear());
+}
+
 export function setPointerIdentify(pressed) {
   pointerIdentify = Boolean(pressed);
   syncVirtualInput();
@@ -1750,6 +1793,7 @@ function bindHudElements() {
   }
 
   if (!keyboardListenerAttached) {
+    trackHeldKeys();
     document.addEventListener('keydown', (e) => {
       const activeElement = document.activeElement;
       const chatInput = hudContext.getChatInput ? hudContext.getChatInput() : null;
@@ -1775,6 +1819,7 @@ function bindHudElements() {
       } else if (e.key === 'f' || e.key === 'F') {
         toggleFullscreen();
       } else if (e.code === 'Backquote') {
+        resetHeldKeyPeak();
         // Matched on `code`, not `key`: the console key is where a layout puts
         // it, and on AZERTY or QWERTZ this one does not produce a backtick at
         // all. `I` is reserved for upstream's `identify`.

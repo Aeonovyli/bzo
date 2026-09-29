@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The debug panel counts the keys the browser is delivering, and the most it
+  has delivered at once. Holding a combination that does not work and reading
+  the peak says which half of the machine to blame: three keys means the
+  keyboard sent all three and the game lost one, two means the keyboard never
+  sent the third and no change to bzo can recover it. Most keyboards wire their
+  keys in a matrix that cannot report some three-key combinations at all. Refs
+  #146.
+
 ### Fixed
 - A wheel notch scrolls the chat transcript and the scoreboard by the same
   amount on every browser and every mouse. It used to move by whatever number

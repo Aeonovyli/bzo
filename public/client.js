@@ -95,6 +95,7 @@ import {
   refreshSettingsMenu,
   registerGameplayInputReset,
   setGameplayKeyState,
+  getHeldKeyDebug,
   setInputContext,
   syncInputContextFromUi,
   toggleOperatorPanel,
@@ -5696,7 +5697,8 @@ function getDebugState() {
     gamepadInfo: getGamepadInfo(),
     renderStats: withProgramWindow(renderManager.getRenderStats()),
     framePhases: getFramePhaseReport(),
-    voice: getVoiceDebugState()
+    voice: getVoiceDebugState(),
+    heldKeys: getHeldKeyDebug()
   };
 }
 
