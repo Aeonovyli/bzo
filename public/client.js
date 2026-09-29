@@ -2981,6 +2981,11 @@ function restoreChatCache() {
 }
 
 
+// Whether chat is following the newest message. Kept as the panel is scrolled
+// rather than measured when it is wanted, because the moment it is wanted --
+// after a resize -- the panel has already changed size and cannot answer.
+let chatPinnedToBottom = true;
+
 // A few px of slack: a fractional `scrollHeight` from sub-pixel line heights
 // would otherwise read as "not at the bottom" forever.
 function isChatScrolledToBottom(el) {
@@ -6357,6 +6362,35 @@ function init() {
   // every name between. It gets the same capped notch chat gets, which is why
   // the cap lives in one place and not in each. Listening on the element rather
   // than by coordinate, because here the element can afford to be asked.
+  // Reading the newest message means staying on the newest message when the
+  // panel changes size -- going fullscreen with `F`, leaving it, rotating a
+  // phone, or crossing the breakpoint that takes chat from six lines to three.
+  //
+  // A resize does not move `scrollTop`; it moves the bottom. A shorter panel
+  // has a larger maximum scroll, so the same offset that was the bottom before
+  // is now a couple of lines above it, and because the offset itself never
+  // changed the browser fires no scroll event to notice it by. That is why
+  // this is remembered rather than measured after the fact: by the time the
+  // resize is observable the panel is already the wrong size to ask.
+  //
+  // Re-pinned in a frame callback so the question is asked of the finished
+  // layout -- the observer runs before the new line count has been laid out,
+  // and `scrollHeight` at that moment is still the old one.
+  const chatMessagesEl = document.getElementById('chatMessages');
+  if (chatMessagesEl) {
+    chatMessagesEl.addEventListener('scroll', () => {
+      chatPinnedToBottom = isChatScrolledToBottom(chatMessagesEl);
+    }, { passive: true });
+    if (typeof ResizeObserver === 'function') {
+      new ResizeObserver(() => {
+        if (!chatPinnedToBottom) return;
+        requestAnimationFrame(() => {
+          if (chatPinnedToBottom) scrollChatToNewest();
+        });
+      }).observe(chatMessagesEl);
+    }
+  }
+
   const scoreboardListEl = document.getElementById('scoreboardList');
   if (scoreboardListEl) {
     scoreboardListEl.addEventListener('wheel', (e) => {

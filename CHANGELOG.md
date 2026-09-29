@@ -23,6 +23,11 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   one machine and barely move it on another, and on the roster it skipped ten
   names at a time. A notch is now two lines of chat, or exactly one roster row.
   Closes #149.
+- Chat stays on the newest message when the panel changes size -- going
+  fullscreen with `F`, leaving it, or rotating a phone. It used to leave you a
+  couple of lines above the bottom, because a resize moves the bottom without
+  moving your place in the transcript. Someone scrolled up to read back is
+  still left where they were. Refs #149.
 - The scoreboard fits the screen at any player count. It used to grow with the
   roster until a busy server pushed the name row, the gear and the team scores
   off the bottom edge; now the panel stops above the chat folder and the roster
