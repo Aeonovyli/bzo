@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.87] - 2026-09-29
+
 ### Fixed
 - A shot leaves the barrel it is drawn coming out of. render.js reads the
   muzzle off the model's own barrel tip, and every generated tank had that tip
