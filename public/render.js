@@ -6823,6 +6823,28 @@ class RenderManager {
     const group = new THREE.Group();
     const textures = [];
 
+    // A tread that is one casing rather than a band with two caps bolted on.
+    // `ltread`/`rtread` alias to all three roles in TANK_PART_ALIASES, so all
+    // three resolve to the same mesh -- which is the signal, and also the
+    // reason this cannot simply fall through: cloning that one mesh three
+    // times would draw the whole casing three times over, once wearing each of
+    // the three materials.
+    //
+    // This is what upstream's medium and low tanks are. They have no animated
+    // tread at all: `partFunctions` fills their LeftCasing and RightCasing
+    // from medium_ltread.cxx and low_ltread.cxx, and the animated belt is high
+    // geometry that upstream only builds when animatedTreads is on. The two
+    // material groups come from the extractor -- the belt first, then the side
+    // plates -- so the pattern runs along the track and the flat sides take
+    // the tread's end texture, which nothing scrolls.
+    if (parts.middle && parts.middle === parts.frontCap) {
+      const beltTexture = repeating(treadTextureRotated);
+      const beltMaterial = new THREE.MeshLambertMaterial({ map: beltTexture });
+      group.add(this._cloneTemplateMesh(parts.middle, [beltMaterial, treadCapMatSide]));
+      textures.push(beltTexture);
+      return { group, textures };
+    }
+
     const middleTexture = repeating(treadTextureRotated);
     const middleMaterial = new THREE.MeshLambertMaterial({ map: middleTexture });
     group.add(this._cloneTemplateMesh(parts.middle, [

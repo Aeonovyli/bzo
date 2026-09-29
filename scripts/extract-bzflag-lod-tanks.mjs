@@ -143,6 +143,9 @@ function readPart(file) {
 }
 
 // bzo's own part names, which TANK_PART_ALIASES in client.js matches on.
+// `ltread`/`rtread` are the one-piece spelling: they alias to the middle band
+// and to both caps at once, which is how render.js recognises a tread that is
+// a single casing rather than a band with two caps bolted on.
 const PART_NAMES = {
   body: 'body',
   turret: 'turret',
@@ -150,6 +153,97 @@ const PART_NAMES = {
   ltread: 'ltread',
   rtread: 'rtread',
 };
+
+// One tread tile per this many world units, matching TREAD_UNITS_PER_TILE in
+// render.js. Two copies of the number would let the LOD tanks' tread links
+// come out a different size from every other tank's.
+const TREAD_UNITS_PER_TILE = 6.4;
+
+// The casing's two materials, in the order render.js binds them: the band the
+// tread pattern runs along, then the flat plates on either side of it.
+const TREAD_MATERIAL = 'tread';
+const TREAD_SIDE_MATERIAL = 'treadSide';
+
+// A face pointing along the tank's width is a side plate; anything else is on
+// the belt. Upstream draws the whole casing from one tank skin, so its own
+// texture coordinates index an atlas bzo does not have and cannot be reused.
+const isSideFace = (normal) => Math.abs(normal[0]) >= Math.max(Math.abs(normal[1]), Math.abs(normal[2]));
+
+// Texture coordinates for one casing.
+//
+// The belt is a loop, so the pattern has to advance by the same amount per
+// unit of track all the way round -- an angle measured about the middle would
+// spend most of its range rounding the two ends and bunch the links there.
+// So `u` is arc length around the casing's own silhouette: the outline is
+// sampled by angle once, turned into a running total of distance, and each
+// vertex reads its distance back out of that table. `v` runs across the width.
+//
+// The side plates are not on the belt and do not move with it. They take a
+// flat mapping of the same silhouette, at the same units per tile, and the
+// renderer gives them the tread's end texture, which never scrolls.
+function casingUVs(triangles) {
+  const vertices = triangles.flat();
+  const ys = vertices.map((vertex) => vertex.position[1]);
+  const zs = vertices.map((vertex) => vertex.position[2]);
+  const xs = vertices.map((vertex) => vertex.position[0]);
+  const centreY = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const centreZ = (Math.min(...zs) + Math.max(...zs)) / 2;
+  const minX = Math.min(...xs);
+  const widthX = (Math.max(...xs) - minX) || 1;
+
+  // The silhouette, as the furthest point from the middle at each angle.
+  const SAMPLES = 180;
+  const radius = new Array(SAMPLES).fill(0);
+  const angleOf = (y, z) => {
+    const a = Math.atan2(y - centreY, z - centreZ);
+    return a < 0 ? a + (Math.PI * 2) : a;
+  };
+  for (const vertex of vertices) {
+    const [, y, z] = vertex.position;
+    const bucket = Math.min(SAMPLES - 1, Math.floor((angleOf(y, z) / (Math.PI * 2)) * SAMPLES));
+    const r = Math.hypot(y - centreY, z - centreZ);
+    if (r > radius[bucket]) radius[bucket] = r;
+  }
+  // A bucket no vertex landed in borrows its neighbours, so the outline has no
+  // gaps to integrate across.
+  for (let i = 0; i < SAMPLES; i += 1) {
+    if (radius[i] > 0) continue;
+    let back = i;
+    let forward = i;
+    while (radius[(back + SAMPLES) % SAMPLES] === 0) back -= 1;
+    while (radius[forward % SAMPLES] === 0) forward += 1;
+    radius[i] = (radius[(back + SAMPLES) % SAMPLES] + radius[forward % SAMPLES]) / 2;
+  }
+
+  // Running total of distance around that outline.
+  const arc = new Array(SAMPLES + 1).fill(0);
+  const step = (Math.PI * 2) / SAMPLES;
+  for (let i = 0; i < SAMPLES; i += 1) {
+    const a = i * step;
+    const b = (i + 1) * step;
+    const ra = radius[i];
+    const rb = radius[(i + 1) % SAMPLES];
+    const ay = centreY + (ra * Math.sin(a));
+    const az = centreZ + (ra * Math.cos(a));
+    const by = centreY + (rb * Math.sin(b));
+    const bz = centreZ + (rb * Math.cos(b));
+    arc[i + 1] = arc[i] + Math.hypot(by - ay, bz - az);
+  }
+
+  const distanceAt = (y, z) => {
+    const a = angleOf(y, z) / step;
+    const i = Math.min(SAMPLES - 1, Math.floor(a));
+    return arc[i] + ((arc[i + 1] - arc[i]) * (a - i));
+  };
+
+  return (vertex) => {
+    const [x, y, z] = vertex.position;
+    if (isSideFace(vertex.normal)) {
+      return [z / TREAD_UNITS_PER_TILE, y / TREAD_UNITS_PER_TILE];
+    }
+    return [distanceAt(y, z) / TREAD_UNITS_PER_TILE, (x - minX) / widthX];
+  };
+}
 
 function buildObj(parts, label) {
   let out = `# BZFlag ${label} tank, extracted from the BZFlag source tree by\n`;
@@ -159,8 +253,20 @@ function buildObj(parts, label) {
   const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
 
   for (const [part, triangles] of Object.entries(parts)) {
+    const isCasing = part === 'ltread' || part === 'rtread';
+    // A casing's texture coordinates are bzo's, not upstream's: upstream draws
+    // the whole tank from one skin and its own coordinates index an atlas bzo
+    // does not have.
+    const uvOf = isCasing ? casingUVs(triangles) : ((vertex) => vertex.texcoord);
+    // The belt faces are written first and the side plates after, so each ends
+    // up one run of faces the loader can turn into one material group.
+    const ordered = isCasing
+      ? [...triangles].sort((left, right) =>
+        Number(isSideFace(left[0].normal)) - Number(isSideFace(right[0].normal)))
+      : triangles;
+
     out += `\no ${PART_NAMES[part]}\n`;
-    const flat = triangles.flat();
+    const flat = ordered.flat();
     for (const vertex of flat) {
       out += `v ${vertex.position.map((n) => n.toFixed(6)).join(' ')}\n`;
       for (let axis = 0; axis < 3; axis += 1) {
@@ -168,10 +274,19 @@ function buildObj(parts, label) {
         bounds.max[axis] = Math.max(bounds.max[axis], vertex.position[axis]);
       }
     }
-    for (const vertex of flat) out += `vt ${vertex.texcoord.map((n) => n.toFixed(6)).join(' ')}\n`;
+    for (const vertex of flat) out += `vt ${uvOf(vertex).map((n) => n.toFixed(6)).join(' ')}\n`;
     for (const vertex of flat) out += `vn ${vertex.normal.map((n) => n.toFixed(6)).join(' ')}\n`;
-    for (let i = 0; i < flat.length; i += 3) {
-      const a = vOffset + i + 1;
+
+    let material = null;
+    for (let i = 0; i < ordered.length; i += 1) {
+      if (isCasing) {
+        const wanted = isSideFace(ordered[i][0].normal) ? TREAD_SIDE_MATERIAL : TREAD_MATERIAL;
+        if (wanted !== material) {
+          material = wanted;
+          out += `usemtl ${material}\n`;
+        }
+      }
+      const a = vOffset + (i * 3) + 1;
       out += `f ${a}/${a}/${a} ${a + 1}/${a + 1}/${a + 1} ${a + 2}/${a + 2}/${a + 2}\n`;
     }
     vOffset += flat.length;

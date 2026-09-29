@@ -26,6 +26,12 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   while the ends were given almost no span at all. Closes #148.
 
 ### Added
+- The treads on BZFlag Medium and BZFlag Low run the tread pattern along the
+  track by arc length, so a link is the same size as on every other tank, and
+  their flat side plates take the tread's end texture, which nothing scrolls.
+  Upstream has no animated tread at these levels of detail at all -- the belt
+  is high geometry it only builds when `animatedTreads` is on, and what these
+  carry is its static casing.
 - Two more tanks, BZFlag Medium and BZFlag Low, which are upstream's own
   cheaper tanks -- the ones it falls back to at distance. 88 and 52 triangles
   against the stock tank's 1106. They come from the BZFlag source rather than
