@@ -6144,7 +6144,7 @@ function init() {
   // Prevent iOS scrolling/bounce on fullscreen (web app mode)
   document.addEventListener('touchmove', (e) => {
     // Allow touch on specific elements (chat, controls overlay, etc.)
-    const allowedSelectors = ['#chatInput', '#chatWindow', '#controlsOverlay', '#settingsHud', '#audioOverlay', '#helpPanel', '#entryDialog', '#operatorOverlay'];
+    const allowedSelectors = ['#chatInput', '#chatWindow', '#controlsOverlay', '#settingsHud', '#audioOverlay', '#helpPanel', '#entryDialog', '#operatorOverlay', '#scoreboardList'];
     const isAllowed = allowedSelectors.some(sel => {
       const el = document.querySelector(sel);
       return el && (e.target === el || (e.target && el.contains(e.target)));
@@ -6239,6 +6239,71 @@ function init() {
     });
   }
 
+  // The roster above and the chat folder below divide one screen between them,
+  // and chat is as tall as its lines and its tab strip make it. The CSS can
+  // reserve chat's 33vh ceiling and keep the two from overlapping, but chat is
+  // at that ceiling only when it is full, so the rest of the time the roster
+  // stops short of a band of screen nothing is using. Publishing chat's
+  // measured height lets the roster's `max-height` end exactly one
+  // `--hud-edge-gap` above it, whatever size chat currently is.
+  //
+  // A ResizeObserver rather than a per-frame read: this changes when a line
+  // arrives or a tab opens, which is thousands of frames apart, and the roster
+  // is laid out by CSS from the variable either way.
+  const chatWindowEl = document.getElementById('chatWindow');
+  if (chatWindowEl && typeof ResizeObserver === 'function') {
+    const publishChatHeight = () => {
+      const height = Math.round(chatWindowEl.getBoundingClientRect().height);
+      document.documentElement.style.setProperty('--chat-height', `${height}px`);
+    };
+    new ResizeObserver(publishChatHeight).observe(chatWindowEl);
+    publishChatHeight();
+  }
+
+  // A notch is not a number of pixels. `deltaMode` says what the number in
+  // `deltaY` means -- pixels, whole lines, or whole pages -- and browsers do
+  // not agree: a pixel browser sends about 100 per notch, a line browser sends
+  // 3, the OS's own three-lines-per-notch. Chat is six lines tall
+  // (`#chatMessages` in styles.css), so an unconverted value is wrong in both
+  // directions at once: 100 is nearly the whole panel and 3 is three pixels.
+  //
+  // Converted, a notch can still be most of a short panel, so it is also
+  // capped -- and the cap is what stops a notch skipping past unread rows on a
+  // mouse whose own notch is several hundred pixels. These two are the whole
+  // knob: raise one for a longer throw, lower it for a shorter one.
+  //
+  // A panel is capped in whatever it is made of. Chat is made of text, so it
+  // moves in lines; the roster is made of rows, and a roster capped in lines
+  // would land a fraction of a row past where it started every time. Half the
+  // panel caps it instead on a panel too short for even that, because a notch
+  // that moves more than half can carry a line off the top that was never on
+  // screen long enough to read.
+  const WHEEL_NOTCH_LINES = 2;
+  const WHEEL_NOTCH_ROWS = 1;
+  const wheelScrollPixels = (e, el, unitPx = 0, unitCount = WHEEL_NOTCH_LINES) => {
+    const style = window.getComputedStyle(el);
+    const unit = unitPx
+      || parseFloat(style.lineHeight)
+      || (parseFloat(style.fontSize) * 1.25)
+      || 16;
+    let delta = e.deltaY;
+    if (e.deltaMode === 1) delta *= unit;
+    else if (e.deltaMode === 2) delta *= el.clientHeight;
+    const cap = Math.max(unit, Math.min(unit * unitCount, el.clientHeight / 2));
+    return Math.max(-cap, Math.min(cap, delta));
+  };
+
+  // A roster row's height, measured rather than assumed: it is the font, the
+  // padding and the margin together, and all three are viewport-derived.
+  const scoreboardRowHeight = (list) => {
+    const [first, second] = list.children;
+    if (!first) return 0;
+    if (second) {
+      return second.getBoundingClientRect().top - first.getBoundingClientRect().top;
+    }
+    return first.getBoundingClientRect().height;
+  };
+
   // Chat scrolls like Debug and Help now (`#chatMessages` is `overflow-y:
   // auto` in styles.css) whenever something lets a pointer event reach it --
   // while chat is active, the scrollbar itself, and PageUp/PageDown/End
@@ -6260,7 +6325,7 @@ function init() {
       if (rect.width > 0 && rect.height > 0
         && e.clientX >= rect.left && e.clientX <= rect.right
         && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-        messagesDiv.scrollTop += e.deltaY;
+        messagesDiv.scrollTop += wheelScrollPixels(e, messagesDiv);
         e.preventDefault();
         return;
       }
@@ -6283,6 +6348,47 @@ function init() {
       }
     }
   }, { passive: false });
+
+  // The roster scrolls too, and unlike chat it takes pointer events already, so
+  // the browser was scrolling it natively -- at the mouse's own notch, which on
+  // a mouse that sends a few hundred pixels jumped ten-odd rows and skipped
+  // every name between. It gets the same capped notch chat gets, which is why
+  // the cap lives in one place and not in each. Listening on the element rather
+  // than by coordinate, because here the element can afford to be asked.
+  const scoreboardListEl = document.getElementById('scoreboardList');
+  if (scoreboardListEl) {
+    scoreboardListEl.addEventListener('wheel', (e) => {
+      if (scoreboardListEl.scrollHeight <= scoreboardListEl.clientHeight) return;
+      scoreboardListEl.scrollTop += wheelScrollPixels(
+        e, scoreboardListEl, scoreboardRowHeight(scoreboardListEl), WHEEL_NOTCH_ROWS,
+      );
+      e.preventDefault();
+    }, { passive: false });
+
+    // A finger. `body` is `touch-action: none` and the guard in `init` cancels
+    // any touchmove that is not on the short allowlist, both so a drag across
+    // the battlefield aims instead of scrolling the page -- which between them
+    // also stopped the browser ever scrolling the roster natively. The roster
+    // is on that allowlist now, and `touch-action: pan-y` (styles.css) is what
+    // lets a vertical drag there be a scroll while every other direction stays
+    // the game's.
+    let rosterTouchY = null;
+    scoreboardListEl.addEventListener('touchstart', (e) => {
+      rosterTouchY = e.touches.length === 1 ? e.touches[0].clientY : null;
+    }, { passive: true });
+    scoreboardListEl.addEventListener('touchmove', (e) => {
+      if (rosterTouchY === null || e.touches.length !== 1) return;
+      if (scoreboardListEl.scrollHeight <= scoreboardListEl.clientHeight) return;
+      const y = e.touches[0].clientY;
+      // The content follows the finger, so the offset moves against it.
+      scoreboardListEl.scrollTop -= y - rosterTouchY;
+      rosterTouchY = y;
+      e.preventDefault();
+    }, { passive: false });
+    const endRosterTouch = () => { rosterTouchY = null; };
+    scoreboardListEl.addEventListener('touchend', endRosterTouch, { passive: true });
+    scoreboardListEl.addEventListener('touchcancel', endRosterTouch, { passive: true });
+  }
 
   // The wheel's answer, for a finger. `#chatMessages` keeps `pointer-events:
   // none` while chat is idle so a drag over it still reaches the battlefield,

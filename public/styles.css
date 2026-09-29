@@ -83,6 +83,19 @@ html, body {
      stays, because drawing under the cutout is now the point. */
   --hud-edge: 10px;
 
+  /* The tallest the chat folder is allowed to get, and so the strip along the
+     bottom of the screen that no other panel may reach into. Chat is centred at
+     95vw, which passes under the scoreboard's corner of the screen, so the
+     roster has to stop above this rather than run to the bottom edge. Named
+     because both of them subtract it and a second copy would drift.
+
+     This is the fallback the roster reserves before anything has measured chat.
+     What it normally subtracts is `--chat-height`, chat's real height, written
+     by client.js -- chat is at its maximum only when it is full, and reserving
+     the maximum the rest of the time leaves a band of dead screen between the
+     two panels. */
+  --chat-max-height: 33vh;
+
   /* The chat's palette. Named here rather than written at each rule because the
      XR chat panel paints the same chat onto a canvas and reads these back with
      getComputedStyle -- two lists of colours would drift the moment one of them
@@ -196,7 +209,7 @@ canvas {
   bottom: var(--hud-edge);
   transform: translateX(-50%);
   width: 95vw;
-  max-height: 33vh;
+  max-height: var(--chat-max-height);
   color: var(--chat-text);
   /* The line count is sized off this, so a fixed 16px asked for 120px of
      a 135px budget on a short screen and squeezed the tab row out entirely. */
@@ -482,7 +495,7 @@ body.chat-active #chatInput {
     width: 98vw;
     max-width: 98vw;
     min-width: 0;
-    max-height: 33vh;
+    max-height: var(--chat-max-height);
     font-size: 12px;
     left: 50%;
     right: auto !important;
@@ -670,6 +683,18 @@ body {
   border-radius: 10px;
   box-sizing: border-box;
   background: var(--color-panel-bg);
+  /* The roster is as long as the server is busy, and on a full server that is
+     longer than the screen. Bounding the panel to the viewport and letting the
+     list inside it scroll keeps the name row, the gear and the team scores --
+     everything a player operates -- on screen at any player count, instead of
+     the panel growing off the bottom edge and taking them with it. The column
+     is what gives the list a height to be `flex: 1` of. */
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh
+    - var(--chat-height, var(--chat-max-height))
+    - (2 * var(--hud-edge))
+    - var(--hud-edge-gap));
 }
 
 @media (max-width: 900px), (max-width: 600px) {
@@ -780,6 +805,12 @@ body {
 #scoreboard {
   border-top: 1px solid #444;
   padding-top: 1vw;
+  /* Passes the panel's bounded height down to the list: a flex item's default
+     `min-height: auto` would let the list win the argument and overflow the
+     panel anyway. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* Collapsed by the chevron in the button row above (issue #145). What stays is
@@ -835,9 +866,19 @@ body.scoreboard-collapsed #mainhud {
   border-bottom: 1px solid #333;
 }
 
+/* The one part of the panel that scrolls. The rows take pointer events already
+   -- clicking one watches that player -- so the wheel and a touch drag scroll
+   it natively here, with none of the coordinate hit-testing the chat transcript
+   needs to work around its `pointer-events: none`. */
 #scoreboardList {
   font-size: var(--hud-font-body);
-  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* The one place on the HUD where a vertical drag is a scroll rather than the
+     game's. `body` is `touch-action: none` so that a drag anywhere else aims. */
+  touch-action: pan-y;
 }
 
 #teamScoreboard {

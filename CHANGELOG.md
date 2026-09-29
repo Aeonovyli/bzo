@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A wheel notch scrolls the chat transcript and the scoreboard by the same
+  amount on every browser and every mouse. It used to move by whatever number
+  the browser happened to put in the event, which is pixels on some and whole
+  lines on others -- so one notch could hide most of the six-line transcript on
+  one machine and barely move it on another, and on the roster it skipped ten
+  names at a time. A notch is now two lines of chat, or exactly one roster row.
+  Closes #149.
+- The scoreboard fits the screen at any player count. It used to grow with the
+  roster until a busy server pushed the name row, the gear and the team scores
+  off the bottom edge; now the panel stops above the chat folder and the roster
+  scrolls inside it, by wheel or by dragging it with a finger. Your place in the
+  roster survives a repaint instead of snapping back to the top every time
+  somebody scores, and the `U` hunt cursor scrolls the list along with it rather
+  than moving to a row below the fold.
+
 ## [1.2.86] - 2026-09-29
 
 ### Added

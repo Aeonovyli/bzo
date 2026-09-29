@@ -1322,7 +1322,14 @@ export function updateScoreboard({
   writeScoreboardHeader(columns, rabbitChase, tier, huntSelecting);
   const scoreboardList = document.getElementById('scoreboardList');
   if (!scoreboardList) return;
+  // The roster scrolls now (styles.css), and every repaint rebuilds it from
+  // nothing -- which empties it, and an empty element's `scrollTop` is 0. A
+  // player reading the bottom of a full server's roster would be thrown back to
+  // the top by the next score anybody anywhere scored. So the offset is carried
+  // across the rebuild.
+  const previousScrollTop = scoreboardList.scrollTop;
   scoreboardList.innerHTML = '';
+  let huntCursorEntry = null;
   const playerData = rows;
 
   // The panel's title is the player's own name, and it now carries the colour
@@ -1366,6 +1373,7 @@ export function updateScoreboard({
     if (player.color) {
       entry.style.color = colorToCSS(player.color);
     }
+    if (player.huntCursor) huntCursorEntry = entry;
     // Name and flag are one item, so the row's spacing pushes the score away
     // from the pair rather than the flag away from the name.
     const labelSpan = document.createElement('span');
@@ -1445,6 +1453,28 @@ export function updateScoreboard({
     });
     scoreboardList.appendChild(entry);
   });
+
+  scoreboardList.scrollTop = previousScrollTop;
+
+  // `U` walks the hunt cursor down a roster that is now taller than the box it
+  // sits in, so the row it lands on can be below the fold. Moving a cursor to
+  // somewhere the player cannot see is the same as not moving it, so the list
+  // follows the cursor -- by the smallest amount that puts the row back inside,
+  // which leaves the view alone whenever the cursor is already visible.
+  //
+  // Measured against the box rather than `offsetTop`: `#mainhud` is
+  // `position: fixed`, so it, and not the list, is a row's `offsetParent`.
+  // `scrollIntoView` is the other way to ask, but it is free to scroll every
+  // scrollable ancestor including the page, and the page here is the game.
+  if (huntCursorEntry) {
+    const listRect = scoreboardList.getBoundingClientRect();
+    const rowRect = huntCursorEntry.getBoundingClientRect();
+    if (rowRect.top < listRect.top) {
+      scoreboardList.scrollTop -= listRect.top - rowRect.top;
+    } else if (rowRect.bottom > listRect.bottom) {
+      scoreboardList.scrollTop += rowRect.bottom - listRect.bottom;
+    }
+  }
 }
 
 // HUDRenderer::addMarker and the block that draws the markers
