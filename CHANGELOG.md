@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.93] - 2026-09-30
+
 ### Changed
 - A mesh travels as flat typed arrays rather than a list of face objects.
   A parsed face cost about 2,134 bytes against the arrays' 93, and the
