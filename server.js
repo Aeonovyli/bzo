@@ -8916,11 +8916,58 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // every `define` in it, however late) has been read -- `group` may name a
   // `define` the file states later, the same deferred resolution upstream
   // gives it.
+
+  // Whether a definition places nothing a tank or a shot can hit, resolved
+  // once per definition rather than once per instance -- the whole point is
+  // to avoid resolving 1,939 copies to find out (issue #153). A definition
+  // that is entirely passable can be carried as a template plus a transform
+  // apiece, because the only thing that reads its geometry is the renderer.
+  //
+  // Both flags, not either: something shots pass through but tanks do not is
+  // still collision geometry, and so is the reverse.
+  const definePassability = new Map();
+  function isPassableDefine(defName) {
+    const cached = definePassability.get(defName);
+    if (cached !== undefined) return cached;
+    // Guards recursion the same way `resolveDefine`'s own `visiting` does: a
+    // definition reached while deciding about itself cannot make the answer
+    // any more passable than the rest of it already is.
+    definePassability.set(defName, true);
+    const members = resolveDefine(defName, new Set());
+    const definedMeshes = resolveDefineMeshes(defName, new Set());
+    // A box or a pyramid carries the flags itself. A mesh carries them per
+    // face -- `passable` sits inside the `face` block, beside its `matref`,
+    // which is how every flower in `bmbz.ducatileague.org:5180` is written --
+    // so a mesh is passable when the mesh says so or when every one of its
+    // faces does. An empty mesh collides with nothing either way.
+    const meshPassable = (mesh) => (mesh.driveThrough && mesh.shootThrough)
+      || (Array.isArray(mesh.faces)
+        && mesh.faces.every((face) => face.driveThrough && face.shootThrough));
+    const passable = members.every((m) => m.driveThrough && m.shootThrough)
+      && definedMeshes.every(meshPassable);
+    definePassability.set(defName, passable);
+    return passable;
+  }
+
   const topGroupOrdinals = new Map();
+  let passableInstances = 0;
+  let passableInstanceFaces = 0;
+  let passableInstanceRadarFaces = 0;
   for (const request of groupInstanceRequests) {
     const ordinal = topGroupOrdinals.get(request.groupDefName) || 0;
     topGroupOrdinals.set(request.groupDefName, ordinal + 1);
     const instanceLabel = request.name || `${request.groupDefName}#${ordinal}`;
+    if (isPassableDefine(request.groupDefName)) {
+      passableInstances += 1;
+      for (const mesh of resolveDefineMeshes(request.groupDefName, new Set())) {
+        passableInstanceFaces += mesh.faces ? mesh.faces.length : 0;
+        // What the radar would lose by not expanding this instance: it keeps
+        // only upward faces (`getRadarMeshObstacles`), so a definition of
+        // vertical billboards costs it nothing.
+        passableInstanceRadarFaces += mesh.faces
+          ? mesh.faces.filter((f) => f.plane && f.plane[1] > 0 && !f.noRadar).length : 0;
+      }
+    }
     const members = resolveDefine(request.groupDefName, new Set());
     const placed = applyGroupInstanceTransform(members, request, instanceLabel);
     // A teleporter only becomes a real, linkable placement here, at the
@@ -8945,6 +8992,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     // reaches `meshes` the same way a box/pyramid one reaches `obstacles`.
     const definedMeshes = resolveDefineMeshes(request.groupDefName, new Set());
     meshes.push(...definedMeshes.map((m) => applyGroupInstanceTransformToMesh(m, request, instanceLabel)));
+  }
+  // What issue #153's first stage would carry as a template and a transform
+  // rather than as a copy apiece. Logged while that is being built, so the
+  // saving is measured on real maps rather than assumed.
+  if (passableInstances > 0) {
+    log(`${mapLabel}: ${passableInstances} of ${groupInstanceRequests.length} group `
+      + `instance(s) place nothing solid, expanding to ${passableInstanceFaces} face(s), `
+      + `${passableInstanceRadarFaces} of them on the radar`);
   }
   if (unknownGroupDefs.size > 0) {
     warn(
