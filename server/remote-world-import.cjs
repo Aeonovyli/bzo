@@ -391,10 +391,19 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
           if (code === 'sk' || code === 'rj') throw new Error(`server sent ${code} requesting settings`);
         }
 
+        // The same `MsgWantWHash` `queryServerStatus` asks for, kept rather
+        // than discarded: an import triggered by somebody viewing a map is a
+        // download the world tracker would otherwise repeat on its next check,
+        // because it would still be holding the hash from before
+        // (`server/bzfs-worlds.cjs`).
         sendFrame(socket, 'wh');
+        let worldHash = '';
         for (;;) {
-          const { code } = await readFrame();
-          if (code === 'wh') break;
+          const { code, payload } = await readFrame();
+          if (code === 'wh') {
+            worldHash = payload.toString('ascii').replace(/\0.*$/, '');
+            break;
+          }
           if (code === 'cu') continue; // cache URL offered; we always pull direct
           if (code === 'sk' || code === 'rj') throw new Error(`server sent ${code} requesting world hash`);
         }
@@ -429,7 +438,13 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
           }
         }
 
-        succeed({ worldDatabase: Buffer.concat(parts), gameSettings, queryGame, variables });
+        succeed({
+          worldDatabase: Buffer.concat(parts),
+          gameSettings,
+          queryGame,
+          variables,
+          worldHash: /^[pt][0-9a-f]{32}$/.test(worldHash) ? worldHash : '',
+        });
       } catch (err) {
         fail(err);
       }

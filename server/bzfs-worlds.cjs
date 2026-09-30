@@ -239,6 +239,29 @@ function createBzfsWorldTracker(deps) {
 
   return {
     observe,
+    // An import somebody else caused -- a `?viewmap=` link, the Operator
+    // panel, the `/list` form. It cost the same download this tracker would
+    // have made, so recording it here both keeps the picture current and
+    // pushes the next check a full cycle out.
+    noteImport(host, port, worldHash) {
+      if (!host || !port) return;
+      const key = serverKey(host, port);
+      const record = records.get(key) || {};
+      // The listed fingerprint too, where this server is on the list at all:
+      // without it the next refresh reads a record whose fingerprint does not
+      // match and marks it due again, which is the check this just paid for.
+      const server = listed.get(key);
+      records.set(key, {
+        ...record,
+        fingerprint: server ? listEntryFingerprint(server) : record.fingerprint,
+        worldHash: worldHash || record.worldHash || '',
+        checkedAt: Date.now(),
+        error: null,
+        errorAt: null,
+        dueNow: false,
+      });
+      save();
+    },
     start() {
       if (timer) return;
       load();

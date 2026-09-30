@@ -2684,8 +2684,13 @@ async function performRemoteMapImport(host, port, timeout) {
 // and the address bzo reaches it on is private (`docs/proxy.md`).
 async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
   const { host, port, dialHost = host, dialPort = port } = listedServer;
-  const { worldDatabase, gameSettings, queryGame, variables } =
+  const { worldDatabase, gameSettings, queryGame, variables, worldHash } =
     await fetchWorldFromServer(dialHost, dialPort, timeout || IMPORT_WORLD_TIMEOUT_MS);
+  // Whatever caused this import -- the tracker's own schedule, an operator, or
+  // somebody following a `?viewmap=` link -- the world tracker learns the hash
+  // it just paid for, so its next check is a dial rather than this download
+  // over again.
+  bzfsWorlds.noteImport(host, port, worldHash);
   const tree = parseWorldDatabase(worldDatabase);
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
