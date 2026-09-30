@@ -218,6 +218,7 @@ const {
 } = require('./server/list-server.cjs');
 const mapOverview = require('./server/map-overview.cjs');
 const { createBzfsWorldTracker } = require('./server/bzfs-worlds.cjs');
+const { createMapIndex } = require('./server/map-index.cjs');
 const {
   createLagTracker,
   formatLagStats,
@@ -374,6 +375,23 @@ const CONFIG_PATH = process.env.SERVER_CONFIG_PATH
   : path.join(__dirname, 'server.json');
 const EXAMPLE_CONFIG_PATH = path.join(__dirname, 'example-server.json');
 
+// The expensive things this server computes: parsed worlds and their overview
+// pictures, the index naming them, and the world hashes the BZFlag tracker has
+// collected. Expensive because rebuilding them means downloading every listed
+// server's world again, which is the one part no amount of local CPU replaces
+// -- the brotli sidecars stay with the image, since recompressing is only CPU. Beside the config file, the same
+// way `RUNTIME_MAPS_DIR` sits beside it -- which puts it on the mounted volume
+// in Docker (`/data/cache` for `/data/server.json`) rather than inside the
+// image, where an upgrade would throw all of it away and make the next boot
+// re-download every listed server's world. Unchanged for a source checkout,
+// whose config is `server.json` in this directory.
+//
+// `CACHE_PATH` overrides it, for an operator who wants this on a different
+// disk from the config -- it is the larger of the two by far.
+const CACHE_DIR = process.env.CACHE_PATH
+  ? path.resolve(process.env.CACHE_PATH)
+  : path.join(path.dirname(CONFIG_PATH), 'cache');
+
 // Cache policy. Markup, styles and scripts must revalidate on every load: the
 // client/server protocol is lockstep, so a client older than the running server
 // is a desync, not a stale pixel. Only content that cannot change behaviour --
@@ -440,6 +458,12 @@ app.use(assetRateLimit);
 // the same thing. `cache/` is derived from `public/` and Three's build
 // directory and is not in git.
 const precompress = require('./server/precompress.cjs');
+// Beside the image's own files, not on the volume with `CACHE_DIR`: these
+// sidecars are compressed copies of `public/`, they are built at image build
+// time so a container needs nothing writable at runtime (see the Dockerfile),
+// and a new image brings its own. The map sidecars underneath them are the
+// one runtime-written part, and re-compressing those after an upgrade costs
+// CPU rather than another download of every world.
 precompress.configure({ cacheDir: path.join(__dirname, 'cache', 'br') });
 app.use(precompress.middleware({ cacheControl: setStaticHeaders }));
 
@@ -461,7 +485,7 @@ app.use('/vendor/three', express.static(threeBuildDir, {
 // hash, so a response can promise it will never change. `setStaticHeaders`
 // (above) is what actually applies that promise, so it agrees with the
 // brotli sidecar `precompress.middleware()` serves for the same path.
-const MAP_CACHE_DIR = path.join(__dirname, 'cache', 'maps');
+const MAP_CACHE_DIR = path.join(CACHE_DIR, 'maps');
 app.use('/maps', express.static(MAP_CACHE_DIR, { setHeaders: setStaticHeaders }));
 
 // The overview pictures this instance has drawn for *other* bzo instances'
@@ -472,7 +496,18 @@ app.use('/maps', express.static(MAP_CACHE_DIR, { setHeaders: setStaticHeaders })
 // server ever writes here; every other instance points an `<img>` at this
 // route on the designated one, so the drawing happens once for everybody and
 // the algorithm can change in one place.
-const OVERVIEW_CACHE_DIR = path.join(__dirname, 'cache', 'overviews');
+// Which map file produced which cached world, so a restart knows what it
+// already holds before the boot pass has re-read any of it
+// (`server/map-index.cjs`).
+const mapIndex = createMapIndex({
+  statePath: path.join(CACHE_DIR, 'map-index.json'),
+  mapCacheDir: MAP_CACHE_DIR,
+  log,
+  logError,
+});
+mapIndex.load();
+
+const OVERVIEW_CACHE_DIR = path.join(CACHE_DIR, 'overviews');
 try {
   fs.mkdirSync(OVERVIEW_CACHE_DIR, { recursive: true });
 } catch (error) {
@@ -2425,13 +2460,19 @@ let remoteServerListCache = { at: 0, servers: [] };
 // callbacks fire on its own timer rather than at construction, which is why it
 // can name things defined much further down this file.
 const bzfsWorlds = createBzfsWorldTracker({
-  statePath: path.join(__dirname, 'cache', 'bzfs-worlds.json'),
+  statePath: path.join(CACHE_DIR, 'bzfs-worlds.json'),
   queryServerStatus: (host, port) => queryServerStatus(host, port),
   importWorld: (host, port) =>
     performRemoteMapImport(host, port, IMPORT_WORLD_BACKGROUND_TIMEOUT_MS),
   // The registry rather than the file: a map is only viewable, and only has a
   // picture, once it has been parsed and registered.
-  isImported: (host, port) => MAP_REGISTRY.has(remoteMapFileName(host, port)),
+  // The registry once the boot pass has read a map back, and the on-disk
+  // index before that -- otherwise every restart re-downloads whatever the
+  // tracker reaches while the pass is still working through the list.
+  isImported: (host, port) => {
+    const fileName = remoteMapFileName(host, port);
+    return MAP_REGISTRY.has(fileName) || mapIndex.has(fileName, resolveMapFilePath(fileName));
+  },
   log,
   logError,
 });
@@ -9518,6 +9559,9 @@ function registerMapFile(
     overviewUrl: hasOverview ? overviewUrl : null,
   };
   MAP_REGISTRY.set(fileName, registered);
+  // So the next boot knows this file is already parsed and drawn without
+  // having to parse it again to find out.
+  mapIndex.note(fileName, hash, resolveMapFilePath(fileName));
   return registered;
 }
 
@@ -9551,6 +9595,9 @@ function sweepMapCache() {
     }
   }
   if (removed > 0) log(`Removed ${removed} stale map cache file(s) from ${MAP_CACHE_DIR}`);
+  // The index names map files rather than cache files, so it is pruned
+  // against the registry the sweep above was built from.
+  mapIndex.prune(new Set(MAP_REGISTRY.keys()));
 
   // precompress's own sweep (server/precompress.cjs) can't catch this mid-
   // process: its `expected` set only ever grows, reset solely by the

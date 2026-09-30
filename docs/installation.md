@@ -69,6 +69,12 @@ Use `--platform linux/arm64` on ARM hosts if you want to pin that explicitly.
 - Persist server settings and runtime config by mounting `/data` (already done in
   `compose.yml`).
 - `SERVER_CONFIG_PATH` defaults to `/data/server.json`.
+- `/data` holds three things, all of which want to survive an image upgrade:
+  `server.json`, the maps in `/data/maps`, and `/data/cache`. The cache is
+  where parsed worlds, their overview pictures and the world hashes bzo has
+  collected from other servers live -- rebuilding it means downloading every
+  listed server's world again, which is why it is not inside the image.
+  `CACHE_PATH` moves it elsewhere; it is much the largest of the three.
 - The container runs as UID/GID `1000:1000`; for bind mounts, ensure the host
   `./data` directory is writable by that user (for example `chown -R 1000:1000 ./data`).
 
