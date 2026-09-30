@@ -4769,6 +4769,79 @@ class RenderManager {
   // wall/cap split to fold a colour into -- see `docs/bzw-plan.md`'s "Mesh
   // geometry" for what is still missing (collision, radar, a `define`'s own
   // meshes placed per `group` instance).
+  // A definition placed by `group` instances, carried as the template plus a
+  // transform apiece rather than a copy apiece (#153). Only definitions
+  // nothing collides with arrive this way, so the geometry here is never
+  // anything the server also holds in `OBSTACLES`.
+  //
+  // Each template is built once and every placement is a `THREE.Mesh` over
+  // that same `BufferGeometry` and material, so the vertices are uploaded to
+  // the GPU once however many instances there are. Each placement is still
+  // its own draw call; batching them is a later step.
+  //
+  // The transform mirrors the server's own `transformGroupPoint`: scale in
+  // the map's axis order, spin about the vertical, then shift. three.js
+  // applies scale, then rotation, then position, which is that same order --
+  // and `rotation.y` turns x toward -z exactly as the server's matrix does,
+  // so the angle needs no negation here.
+  setMeshInstances(templates = null, instances = null) {
+    if (!this.scene || !templates || !instances || !instances.length) return;
+    const built = new Map();
+    for (const [name, templateMeshes] of Object.entries(templates)) {
+      const objects = [];
+      (templateMeshes || []).forEach((meshObs, i) => {
+        const object = this._buildMeshObject(meshObs, i);
+        if (object) objects.push(object);
+      });
+      built.set(name, objects);
+    }
+    // Grouped by definition, because one `InstancedMesh` draws every
+    // placement of one template in a single call. A field of 1,905 flowers
+    // is five draw calls rather than 1,905, which is the whole point on a
+    // client that runs out of CPU before it runs out of GPU.
+    const byDefine = new Map();
+    for (const instance of instances) {
+      if (!built.has(instance.define)) continue;
+      const list = byDefine.get(instance.define) || [];
+      list.push(instance);
+      byDefine.set(instance.define, list);
+    }
+
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scaleVector = new THREE.Vector3();
+    const yAxis = new THREE.Vector3(0, 1, 0);
+    for (const [name, placements] of byDefine) {
+      for (const prototype of built.get(name)) {
+        const batch = new THREE.InstancedMesh(
+          prototype.geometry, prototype.material, placements.length,
+        );
+        placements.forEach((instance, i) => {
+          const scale = Array.isArray(instance.scale) ? instance.scale : [1, 1, 1];
+          position.set(instance.x || 0, instance.y || 0, instance.z || 0);
+          quaternion.setFromAxisAngle(yAxis, instance.spin || 0);
+          // The map's `size` is x, depth, height; the scene's y is up, so the
+          // second and third swap -- the same swap `transformGroupPoint`
+          // makes. Composing scale, then rotation, then position is that same
+          // order as well.
+          scaleVector.set(scale[0] || 1, scale[2] || 1, scale[1] || 1);
+          batch.setMatrixAt(i, matrix.compose(position, quaternion, scaleVector));
+        });
+        batch.instanceMatrix.needsUpdate = true;
+        // Its own bounding sphere over every placement, not the template's --
+        // without it the batch would be culled against geometry sitting at
+        // the definition's own local origin and vanish as soon as that point
+        // left the view.
+        if (batch.computeBoundingSphere) batch.computeBoundingSphere();
+        batch.castShadow = prototype.castShadow;
+        batch.receiveShadow = prototype.receiveShadow;
+        this.worldGroup.add(this._tagDraws(batch, 'mesh'));
+        this.meshObjects.push(batch);
+      }
+    }
+  }
+
   setMeshes(meshes = []) {
     if (!this.scene) return;
     this.clearMeshes();

@@ -2842,7 +2842,8 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
   registerMapFile(
     safeMapName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
     mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather, mapData.groundMaterial,
-    mapData.serverOptions.gameplay
+    mapData.serverOptions.gameplay,
+    { templates: mapData.meshTemplates, instances: mapData.meshInstances }
   );
   return { safeMapName, byteLength: worldDatabase.length };
 }
@@ -8943,30 +8944,58 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     const meshPassable = (mesh) => (mesh.driveThrough && mesh.shootThrough)
       || (Array.isArray(mesh.faces)
         && mesh.faces.every((face) => face.driveThrough && face.shootThrough));
+    // A spinning mesh (`angvel`) turns about a pivot the renderer wraps it
+    // in, and that pivot is placed per instance -- a template carries one
+    // local frame and cannot say where each placement's pivot went. Left
+    // expanded until the instance path learns to spin, which is the whole
+    // reason `bzo.bzw`'s SpinTank must not be shared.
     const passable = members.every((m) => m.driveThrough && m.shootThrough)
-      && definedMeshes.every(meshPassable);
+      && definedMeshes.every(meshPassable)
+      && definedMeshes.every((mesh) => !mesh.angvel);
     definePassability.set(defName, passable);
     return passable;
   }
 
   const topGroupOrdinals = new Map();
+  // A definition's geometry held once, in its own local frame, and the
+  // placements that share it (#153). Only definitions nothing collides with
+  // land here -- see `isPassableDefine` above -- so collision, the radar and
+  // the overview all go on reading `obstacles` and `meshes` as before.
+  const meshTemplates = new Map();
+  const meshInstances = [];
   let passableInstances = 0;
-  let passableInstanceFaces = 0;
-  let passableInstanceRadarFaces = 0;
   for (const request of groupInstanceRequests) {
     const ordinal = topGroupOrdinals.get(request.groupDefName) || 0;
     topGroupOrdinals.set(request.groupDefName, ordinal + 1);
     const instanceLabel = request.name || `${request.groupDefName}#${ordinal}`;
-    if (isPassableDefine(request.groupDefName)) {
-      passableInstances += 1;
-      for (const mesh of resolveDefineMeshes(request.groupDefName, new Set())) {
-        passableInstanceFaces += mesh.faces ? mesh.faces.length : 0;
-        // What the radar would lose by not expanding this instance: it keeps
-        // only upward faces (`getRadarMeshObstacles`), so a definition of
-        // vertical billboards costs it nothing.
-        passableInstanceRadarFaces += mesh.faces
-          ? mesh.faces.filter((f) => f.plane && f.plane[1] > 0 && !f.noRadar).length : 0;
+    // Carried as a template and a transform rather than expanded (#153).
+    // Only where nothing about this instance makes its copy different from
+    // any other's: an instance naming its own material, tint or physics
+    // driver is a distinct thing wearing the same geometry, and sharing one
+    // template between them would be wrong rather than merely awkward.
+    const instanceIsPlain = !request.materialOverride && !request.tint
+      && !request.phydrv && !request.driveThrough && !request.shootThrough
+      && !request.ricochet;
+    if (instanceIsPlain && isPassableDefine(request.groupDefName)) {
+      if (!meshTemplates.has(request.groupDefName)) {
+        // Local space, once. `finalizeMeshGeometry` gives each face the plane
+        // the renderer's planar-UV fallback needs; a template never placed
+        // has none, which is why an unexpanded definition needs it here
+        // rather than at placement.
+        const templateMeshes = resolveDefineMeshes(request.groupDefName, new Set())
+          .map((mesh) => finalizeMeshGeometry({ ...mesh, faces: mesh.faces.map((f) => ({ ...f })) }));
+        meshTemplates.set(request.groupDefName, templateMeshes);
       }
+      meshInstances.push({
+        define: request.groupDefName,
+        x: request.x,
+        y: request.baseY,
+        z: request.z,
+        spin: request.spin,
+        scale: request.scale,
+      });
+      passableInstances += 1;
+      continue;
     }
     const members = resolveDefine(request.groupDefName, new Set());
     const placed = applyGroupInstanceTransform(members, request, instanceLabel);
@@ -8997,9 +9026,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // rather than as a copy apiece. Logged while that is being built, so the
   // saving is measured on real maps rather than assumed.
   if (passableInstances > 0) {
+    const templateFaces = [...meshTemplates.values()]
+      .reduce((sum, list) => sum + list.reduce((n, m) => n + (m.faces ? m.faces.length : 0), 0), 0);
     log(`${mapLabel}: ${passableInstances} of ${groupInstanceRequests.length} group `
-      + `instance(s) place nothing solid, expanding to ${passableInstanceFaces} face(s), `
-      + `${passableInstanceRadarFaces} of them on the radar`);
+      + `instance(s) share ${meshTemplates.size} template(s) of ${templateFaces} face(s) `
+      + 'rather than a copy apiece');
   }
   if (unknownGroupDefs.size > 0) {
     warn(
@@ -9341,6 +9372,12 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   const teleporterGraph = buildTeleporterLinks();
   return {
     obstacles,
+    // A definition's geometry once, and the placements sharing it -- only
+    // definitions nothing collides with, so these are never in `obstacles`
+    // and nothing but the renderer reads them (#153). Plain objects rather
+    // than the `Map`, since this goes into the world JSON as it stands.
+    meshTemplates: Object.fromEntries(meshTemplates),
+    meshInstances,
     teleporterGraph,
     teamMode,
     serverOptions,
@@ -9459,6 +9496,11 @@ let mapWeather = null;
 // no server-side reader, it only rides along in the live map's own JSON
 // (`registerMapFile`) for the client to texture the ground plane itself.
 let mapGroundMaterial = null;
+// The live map's own `group` templates and placements (#153). Like `weather`
+// and `groundMaterial` above, no server-side reader: nothing collides with
+// them, so they only ride along in the map's JSON for the client to draw.
+let mapMeshTemplates = {};
+let mapMeshInstances = [];
 if (MAP_SOURCE === 'random') {
   OBSTACLES = generateObstacles();
   TELEPORTER_GRAPH = { teleporters: [], links: [] };
@@ -9490,6 +9532,8 @@ if (MAP_SOURCE === 'random') {
   if (mapWaterLevel) log(`Map option waterLevel: height=${mapWaterLevel.height}`);
   mapWeather = mapData.weather || null;
   if (mapWeather) log(`Map option _rainType: ${mapWeather.type}`);
+  mapMeshTemplates = mapData.meshTemplates || {};
+  mapMeshInstances = mapData.meshInstances || [];
   mapGroundMaterial = mapData.groundMaterial || null;
   if (mapGroundMaterial) {
     log(`Map option -gndtex: ${mapGroundMaterial.texture || mapGroundMaterial.textureUrl}`);
@@ -9566,7 +9610,7 @@ function deriveMapGameplay(gameplay) {
 
 function registerMapFile(
   fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel, weather,
-  groundMaterial, gameplay
+  groundMaterial, gameplay, instancing = null
 ) {
   // Seeded from the map's own geometry (not from `fileName`, so a map that is
   // renamed but not edited still lands on the same clouds and the same hash)
@@ -9616,6 +9660,13 @@ function registerMapFile(
     // `announceWorldMessages` in client.js.
     messages: Array.isArray(messages) ? messages : [],
   };
+  // Only when a map actually places something this way. Adding empty fields
+  // to every other map would reissue every hash for nothing -- the entry is
+  // what the hash is taken over.
+  if (instancing && instancing.instances && instancing.instances.length) {
+    entry.meshTemplates = instancing.templates;
+    entry.meshInstances = instancing.instances;
+  }
   const json = JSON.stringify(entry);
   const hash = crypto.createHash('sha256').update(json).digest('hex').slice(0, 12);
   const url = `/maps/${hash}.json`;
@@ -9788,7 +9839,8 @@ const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
   )
   : registerMapFile(
     MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls,
-    mapWaterLevel, mapWeather, mapGroundMaterial, mapServerOptions.gameplay
+    mapWaterLevel, mapWeather, mapGroundMaterial, mapServerOptions.gameplay,
+    { templates: mapMeshTemplates, instances: mapMeshInstances }
   );
 
 // A Map Viewer's requested map file, checked against what this process has
@@ -9848,7 +9900,8 @@ function hashRemainingMapsInBackground() {
         if (registerMapFile(
           fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
           mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather, mapData.groundMaterial,
-          mapData.serverOptions.gameplay
+          mapData.serverOptions.gameplay,
+          { templates: mapData.meshTemplates, instances: mapData.meshInstances }
         )) {
           converted += 1;
         }

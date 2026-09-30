@@ -2549,6 +2549,14 @@ function applyWorldData(world) {
   // knows how to draw.
   renderManager.setObstacles(OBSTACLES.filter((obs) => obs.type !== 'mesh'));
   renderManager.setMeshes(OBSTACLES.filter((obs) => obs.type === 'mesh'));
+  // Definitions a map places many times and nothing collides with, carried as
+  // the template plus a transform apiece (#153). Absent from a world an older
+  // server sent, and from a map that places nothing that way, in which case
+  // this does nothing and every such definition arrived expanded into
+  // `OBSTACLES` as before.
+  renderManager.setMeshInstances(
+    world && world.meshTemplates, world && world.meshInstances,
+  );
 
   if (world && world.teleporterGraph && typeof world.teleporterGraph === 'object') {
     TELEPORTER_GRAPH = world.teleporterGraph;
