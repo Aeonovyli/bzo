@@ -8,24 +8,51 @@ references are paths under `$HOME/bzflag/`.
 
 ## An overview image per map
 
-Cheaper than it sounds, and the cost is not the drawing. bzo already turns
-obstacles into two-dimensional shapes for the radar
-(`public/radar-geometry.mjs`), and a map is already stored as JSON. An **SVG**
-built from that needs no canvas library, no raster and no GPU, is small
-enough to inline, and caches by the hash the map already has.
+Built for local maps (`server/map-overview.cjs`), and drawn into the third
+column of the maps list's pane. What is left is coverage of *servers*.
 
-There is somewhere to put it: the readout pane is two columns already -- who
-is playing, then what the game is -- and a third is meant for this. The bzfs
-list's `I` column says which rows have an import at all, so a row whose
-picture could be drawn without fetching anything is already distinguishable
-from one whose could not.
+The picture is a rendering at a known size rather than a vector copy of the
+map: obstacles are rasterised onto a 256-cell grid and that grid is re-encoded
+as merged rectangles, so the output is bounded by the target size and not by
+the map. `ahs3_Paradise_Valley` has 81332 mesh faces and a 74 MB JSON, and its
+picture is 37 KB, 10 KB brotli, in about 300 ms. The rest of the local maps
+land between 2 and 12 KB compressed. Sub-pixel detail disappears because the
+grid has nowhere to put it, which is the trimming the panel's own LOD does in
+`RADAR_MESH_FOOTPRINT_PIXELS` terms.
 
-What needs deciding is coverage. An image for a remote server needs its world
-imported first, and importing every listed server on a schedule means the
-list server connects to all of them, repeatedly. That is scanning behaviour
-and it should be chosen deliberately rather than arrived at. The alternative
-is what already happens: import on demand, and a server nobody has looked at
-has no picture yet.
+Three rules were not obvious and each came from a map that broke without it:
+
+- **Elevation carries by opacity, from a datum.** The datum is the altitude
+  the map is played at, taken as a low percentile of surface area rather than
+  the lowest surface anywhere, so a pit or a mesh's own skirt does not become
+  the floor. Bands above it roughly double in width, because relief near tank
+  height is what a map is read by. Flat occupancy in one colour drew a terrain
+  map as a solid rectangle, and evenly spaced bands drew `ahs3_INCOMING`,
+  whose whole layout stands under 12 units, as one flat shape.
+- **Only up-facing surfaces.** A mesh is usually a closed solid, so a terrain
+  has an underside as well as a top, and taking either drew a heightfield as
+  the sheet sealing its bottom. The winding tells which is which and agrees
+  with the map's own normals wherever it has them.
+- **A roof is skipped.** `ahs3_INCOMING` is a domed arena whose dome holds 40%
+  of the map's surface from 86 units up, and keeping each cell's highest
+  surface drew the dome and nothing else. One altitude far above the datum
+  holding a quarter of the map is a lid; it is skipped, but only where
+  something else is under it, so a mountain that is all there is still draws.
+  The figure separates cleanly from real terrain, whose busiest high altitude
+  is 11%.
+
+**bzo rows are built** -- the designated instance draws them, keyed on the
+`mapHash` a report now carries, and `docs/list-server.md` describes it.
+
+**Built** -- `server/bzfs-worlds.cjs`, and `docs/list-server.md` describes it.
+A bzfs row's picture is its import's own overview, since an import is
+registered like any other map and `registerMapFile` has already drawn one.
+What the tracker owns is deciding when an import has gone stale, as cheaply as
+the question allows.
+
+The sweep only runs on the designated instance, and every other instance reads
+its rows -- pictures included -- from the one merged list
+(`docs/list-server.md`, "One list, not two").
 
 ## Watch: what is left of it
 
@@ -105,11 +132,7 @@ Worth adding if either becomes one.
 
 ## Order of work
 
-1. **SVG overviews**, into the pane's third column, with the scanning question
-   answered rather than assumed. Both server lists and the maps list have a
-   pane waiting for one.
-
-2. **Presence and history**, behind the database decision, which availability-
+1. **Presence and history**, behind the database decision, which availability-
    over-a-window is the test for.
 
 Watch is built (above), ahead of this order rather than in it: it was wanted

@@ -497,10 +497,41 @@ function queryServerStatus(host, port, timeout = 8000) {
           if (code === 'gs') { gameSettings = payload; break; }
           if (code === 'sk' || code === 'rj') throw new Error(`server sent ${code} requesting settings`);
         }
+
+        // `MsgWantWHash`, which is what tells bzo whether this server's world
+        // is the one it already has a picture of, without downloading it
+        // (issue #147). Answered before `MsgEnter` like everything else here
+        // (`bzfs.cxx`'s `!isCompletelyAdded()` switch), so it costs one more
+        // frame on a dial that is happening anyway.
+        //
+        // The payload is a prefix byte and a hex MD5 of the compiled world
+        // database (`bzfs.cxx:1211`): `p` for a world read from a file, which
+        // is stable across that server's restarts and identical on two
+        // servers serving the same map, and `t` for a generated one, which
+        // rerolls on every boot. The prefix is kept rather than stripped --
+        // "this world will never be the same twice" is the more useful half
+        // of the answer.
+        sendFrame(socket, 'wh');
+        let worldHash = '';
+        for (;;) {
+          const { code, payload } = await readFrame();
+          if (code === 'wh') {
+            worldHash = payload.toString('ascii').replace(/\0.*$/, '');
+            break;
+          }
+          // A cache URL is an offer to fetch the world over HTTP instead; the
+          // hash is what this dial came for and arrives either way.
+          if (code === 'cu') continue;
+          if (code === 'sk' || code === 'rj') throw new Error(`server sent ${code} requesting world hash`);
+        }
+
         const game = decodeQueryGame(queryGame);
         const settings = gameSettings.length >= 30 ? decodeGameSettings(gameSettings) : null;
         succeed({
           full: playerId === 0xff,
+          // Only ever `p...`/`t...` as bzfs spells it, bounded because it
+          // becomes a lookup key: anything else is no answer at all.
+          worldHash: /^[pt][0-9a-f]{32}$/.test(worldHash) ? worldHash : '',
           // Observers are the sixth team and are not playing, which is the
           // same line `maxPlayers` draws (CmdLineOptions.cxx:458).
           players: game.teamSizes.slice(0, 5).reduce((sum, size) => sum + size, 0),

@@ -216,6 +216,8 @@ const {
   isKeyStale: isListServerKeyStale,
   createKeyStore: createListServerKeyStore,
 } = require('./server/list-server.cjs');
+const mapOverview = require('./server/map-overview.cjs');
+const { createBzfsWorldTracker } = require('./server/bzfs-worlds.cjs');
 const {
   createLagTracker,
   formatLagStats,
@@ -372,7 +374,7 @@ function setStaticHeaders(res, filePath) {
   // to change -- checked first because this same function is also the
   // `cacheControl` callback `precompress.middleware()` uses for its brotli
   // responses, and the two representations of a map file must agree.
-  if (filePath.startsWith(MAP_CACHE_DIR)) {
+  if (filePath.startsWith(MAP_CACHE_DIR) || filePath.startsWith(OVERVIEW_CACHE_DIR)) {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     return;
   }
@@ -446,6 +448,22 @@ app.use('/vendor/three', express.static(threeBuildDir, {
 // brotli sidecar `precompress.middleware()` serves for the same path.
 const MAP_CACHE_DIR = path.join(__dirname, 'cache', 'maps');
 app.use('/maps', express.static(MAP_CACHE_DIR, { setHeaders: setStaticHeaders }));
+
+// The overview pictures this instance has drawn for *other* bzo instances'
+// worlds (issue #147), kept apart from `MAP_CACHE_DIR` because that directory
+// is swept against `MAP_REGISTRY` and none of these is a map this server
+// holds. Named for the reporting instance's own map hash, which is a content
+// hash, so the same immutable promise applies. Only the designated list
+// server ever writes here; every other instance points an `<img>` at this
+// route on the designated one, so the drawing happens once for everybody and
+// the algorithm can change in one place.
+const OVERVIEW_CACHE_DIR = path.join(__dirname, 'cache', 'overviews');
+try {
+  fs.mkdirSync(OVERVIEW_CACHE_DIR, { recursive: true });
+} catch (error) {
+  logError(`Could not create overview cache directory at ${OVERVIEW_CACHE_DIR}:`, error);
+}
+app.use('/overviews', express.static(OVERVIEW_CACHE_DIR, { setHeaders: setStaticHeaders }));
 // Where precompress.cjs's own sidecar for a `/maps/<hash>.json` response
 // lands -- `cache/br/<urlPath minus its leading slash>...`, see `consider()`.
 const MAP_CACHE_BR_DIR = path.join(__dirname, 'cache', 'br', 'maps');
@@ -1317,9 +1335,13 @@ function renderListReadout(entry, hidden) {
 
   const shots = `${entry.maxShots || 0} ${entry.maxShots === 1 ? 'Shot' : 'Shots'}`;
   // Two columns, as upstream's own panel has it: who is playing on the left,
-  // what the game is on the right (`ServerMenu.cxx:214-238`). A map overview
-  // is meant to become a third -- docs/list-server-plan.md.
+  // what the game is on the right (`ServerMenu.cxx:214-238`), and for a row
+  // that can have one, the world's overview picture third. `null` is a world
+  // no picture has been drawn for yet and gets the waiting mark; `undefined`
+  // is a row outside the scheme altogether -- a bzfs row off the public list
+  // -- and gets no column, the bzfs table having none of these anywhere.
   return `<div class="pane" id="${escapeHtml(entry.id)}"${hidden ? ' hidden' : ''}>`
+    + `<div class="paneMain"><div class="paneBody">`
     + `<p class="paneTitle">${escapeHtml(entry.desc || entry.addr)}</p>`
     + `<div class="paneCols">`
     + `<div class="paneCol">`
@@ -1339,6 +1361,10 @@ function renderListReadout(entry, hidden) {
     + (words.length ? `<p class="paneWords">${words.map(escapeHtml).join(' &middot; ')}</p>` : '')
     + limits
     + `</div>`
+    + `</div></div>`
+    + (entry.overviewUrl === undefined
+      ? ''
+      : renderOverview(entry.overviewUrl, entry.desc || entry.addr))
     + `</div></div>`;
 }
 
@@ -1358,8 +1384,8 @@ function renderListActions(entry, hidden) {
 // filter box. The row carries the three numbers the in-client View picker
 // shows in columns (`populateViewMapTable`, public/client.js) and the pane
 // carries the rest -- including what that picker only puts in a row tooltip.
-// A map overview is meant to become a third pane column, the same as for a
-// server (docs/list-server-plan.md).
+// The pane's third column is the map's own overview picture
+// (`server/map-overview.cjs`).
 function renderMapList(listId, filterId, maps) {
   if (!maps.length) return `<p class="muted">None.</p>`;
   const entries = maps.map((map) => {
@@ -1371,6 +1397,7 @@ function renderMapList(listId, filterId, maps) {
       hashed: map.hashed,
       hash: registered ? registered.hash : '',
       stats,
+      overviewUrl: registered ? registered.overviewUrl : null,
       modified: bzwPath ? statMtimeOrBlank(bzwPath) : '',
       bzwSize: bzwPath ? statSizeOrBlank(bzwPath) : '',
       jsonSize: registered ? statSizeOrBlank(path.join(MAP_CACHE_DIR, `${registered.hash}.json`)) : '',
@@ -1391,13 +1418,10 @@ function renderMapList(listId, filterId, maps) {
   }));
 
   const num = (value) => (Number.isFinite(value) ? String(value) : '');
-  // `random` is not a file and never gets a registry entry with stats: it is a
-  // world generated at boot, so it has no counts, no hash and no sizes, and
-  // saying "hashing…" about it would be a wait that never ends.
-  const mapStyleLabel = (entry) => {
-    if (entry.stats) return entry.stats.style || '';
-    return entry.file === 'random' ? 'generated' : 'hashing…';
-  };
+  // A row is only here once it is registered, or while the background pass is
+  // still working through the list -- which is the one case with no stats to
+  // read a style off.
+  const mapStyleLabel = (entry) => (entry.stats ? entry.stats.style || '' : 'hashing…');
   const rows = entries.map((entry, index) => {
     const stats = entry.stats;
     // A map still being hashed has no cached world to show, so its row leads
@@ -1423,8 +1447,8 @@ function renderMapList(listId, filterId, maps) {
     + `<button class="name" data-field="d" data-text title="Game style the map sets">Style</button>`
     + `</div>`;
 
-  // `random` has no numbers at all, so a blank contributes nothing here and
-  // the header word is what sets each of these three.
+  // A map still being hashed has no numbers at all, so a blank contributes
+  // nothing here and the header word is what sets each of these three.
   const widths = `--col-obj:${listColumnWidth('Obj', data.map((entry) => entry.o || ''))};`
     + `--col-fa:${listColumnWidth('Faces', data.map((entry) => entry.fa || ''))};`
     + `--col-sz:${listColumnWidth('Size', data.map((entry) => entry.sz || ''))}`;
@@ -1447,9 +1471,24 @@ function renderMapList(listId, filterId, maps) {
     + `</div>`;
 }
 
+// The overview picture for a pane, or the app's own mark where there is not
+// one yet -- a map is registered by a background trickle, so the first visitor
+// after a boot can reach the page before the picture for a given map exists.
+// The mark rather than a word: the slot is a picture, and a picture that says
+// "not yet" without making anyone read anything is what belongs in it.
+function renderOverview(url, label) {
+  if (!url) {
+    return `<div class="overview overviewWaiting">`
+      + `<img src="/favicon.svg" alt="" width="64" height="64"></div>`;
+  }
+  return `<div class="overview"><img src="${escapeHtml(url)}" width="256"`
+    + ` height="256" alt="Overview of ${escapeHtml(label)}" loading="lazy"></div>`;
+}
+
 // What the map is made of on the left, what it is on the right -- the same two
-// columns a server's pane has. Every label is always present, blank where the
-// map says nothing, so the pane keeps its height as the selection moves.
+// columns a server's pane has -- and the overview picture beside them. Every
+// label is always present, blank where the map says nothing, so the pane keeps
+// its height as the selection moves.
 function renderMapReadout(entry, index, hidden) {
   const stats = entry.stats || {};
   const counts = stats.counts || {};
@@ -1461,6 +1500,7 @@ function renderMapReadout(entry, index, hidden) {
     .map((key) => (key === 'ground' ? 'custom ground' : key))
     .join(', ');
   return `<div class="pane" id="map-pane-${index}"${hidden ? ' hidden' : ''}>`
+    + `<div class="paneMain"><div class="paneBody">`
     + `<p class="paneTitle">${escapeHtml(entry.file)}</p>`
     + `<div class="paneCols">`
     + `<div class="paneCol">`
@@ -1482,6 +1522,8 @@ function renderMapReadout(entry, index, hidden) {
     + row('.bzw', entry.bzwSize)
     + row('.json', entry.jsonSize)
     + `</div>`
+    + `</div></div>`
+    + renderOverview(entry.overviewUrl, entry.file)
     + `</div></div>`;
 }
 
@@ -1664,10 +1706,20 @@ function renderServerList(listId, filterId, unsorted) {
 function renderListPage({
   servers, bzoServers, cacheAgeSeconds, imported, importError, session, admin, canWatch,
 }) {
-  const localMaps = listAvailableMapFiles().map((fileName) => ({
-    fileName,
-    hashed: fileName === 'random' || MAP_REGISTRY.has(fileName),
-  }));
+  // `random` is in `listAvailableMapFiles` because it is a map an operator can
+  // *serve* -- the instruction to generate a world, which the Operator panel's
+  // own chooser needs. It is only a map anyone can *view* when it is the world
+  // this server is actually playing, which is the one case `LIVE_MAP_ENTRY`
+  // registers it for. Listed otherwise, its row linked to `?viewmap=random`
+  // and the client dropped the request on the floor -- `availableViewMaps` is
+  // `MAP_REGISTRY`, so the name was never in it and the link fell through to
+  // an ordinary join (issue #152).
+  const localMaps = listAvailableMapFiles()
+    .filter((fileName) => fileName !== 'random' || MAP_REGISTRY.has('random'))
+    .map((fileName) => ({
+      fileName,
+      hashed: MAP_REGISTRY.has(fileName),
+    }));
 
   // One nav line at the very top: a jump link to each section below, then
   // this instance's own login state last -- it authenticates this instance's
@@ -1697,9 +1749,8 @@ function renderListPage({
   const bzfsEntries = servers.map((s, index) => {
     const info = s.info || {};
     const importFileName = remoteMapFileName(s.host, s.port);
-    const importedPath = MAP_REGISTRY.has(importFileName)
-      ? resolveMapFilePath(importFileName)
-      : null;
+    const imported = MAP_REGISTRY.get(importFileName);
+    const importedPath = imported ? resolveMapFilePath(importFileName) : null;
     const maxima = Array.isArray(info.teamMaximums) ? info.teamMaximums : [];
     return {
       id: `bzfs-pane-${index}`,
@@ -1710,6 +1761,18 @@ function renderListPage({
       // is registered yet, so there is no state where following it is wrong.
       href: `/?viewmap=${encodeURIComponent(importFileName)}`,
       action: 'View map',
+      // The picture of this server's world, when this instance holds an import
+      // of it: an import is parsed and registered like any other map, so it
+      // already has an overview drawn beside its JSON and there is nothing
+      // extra to fetch or draw. `null` rather than `undefined` on a row with
+      // no import -- the waiting mark, since following the row imports on
+      // demand and the next visit has the picture.
+      // This instance's own import first -- same origin, and it is the world
+      // this server would actually show you. Otherwise whatever the list
+      // server said, which is an absolute URL on the designated instance and
+      // is how a server bzo has never imported still has a picture.
+      overviewUrl: (imported && imported.overviewUrl && `/maps/${imported.hash}.svg`)
+        || s.overviewUrl || null,
       style: info.style,
       maxShots: info.maxShots,
       gameOptionsBits: info.gameOptionsBits,
@@ -1788,6 +1851,12 @@ function renderListPage({
       // A row is one thing or the other: a game bzo is running on a map of its
       // own, or a real BZFlag server it is carrying. The map's extension is
       // the report's business, not a reader's.
+      // A proxy row gets the waiting mark rather than the carrying instance's
+      // picture: its world is the *target's* world, a real BZFlag one, which
+      // the list server has to import before it can draw anything
+      // (docs/list-server-plan.md). So `null` -- "none yet" -- and never
+      // `s.overviewUrl`, which belongs to a different game on the same host.
+      overviewUrl: proxy ? null : (s.overviewUrl || null),
       extras: proxy
         ? [['BZFlag server', escapeHtml(proxy.target)], ['Carried by', urlLink]]
         : [
@@ -1965,13 +2034,33 @@ function renderListPage({
   .srow .desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .pane { border: 1px solid #333; border-radius: 4px; padding: 0.6rem 0.8rem; }
   .paneTitle { margin: 0 0 0.5rem; color: #4CAF50; font-weight: bold; }
+  /* Everything a pane says on the left -- its title and both columns of words
+     -- and the overview picture to the right of the lot. The text block is the
+     one that flexes, so a long line of game words wraps inside its own column
+     instead of growing the row until the picture drops underneath it. The
+     picture only goes below on a screen too narrow to hold both. */
+  .paneMain { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; align-items: flex-start; }
+  .paneBody { flex: 1 1 20rem; min-width: 0; }
   /* Teams in the first column, the game in the second, wrapping onto one
-     column where there is no room for two. A map overview is meant to become
-     a third (docs/list-server-plan.md). */
+     column where there is no room for two. */
   .paneCols { display: flex; flex-wrap: wrap; gap: 0.5rem 2rem; align-items: flex-start; }
   .paneCol { min-width: 0; }
   .paneCol:first-child { flex: none; }
+  .paneCol:nth-child(2) { flex: 1 1 14rem; }
   .paneCol > :first-child { margin-top: 0; }
+  /* The picture is square and drawn for 256 pixels, but it is an SVG, so a
+     narrow screen may shrink it without it going soft. Pushed to the right
+     edge of the pane, so it sits against the border rather than floating
+     wherever the text happens to end. */
+  .overview { flex: none; margin-left: auto; }
+  .overview img { display: block; width: 256px; height: auto; max-width: 100%;
+    border: 1px solid #333; border-radius: 4px; }
+  /* Nothing to show yet: the app's own mark, dimmed, in a box the same size as
+     the picture that will replace it, so the pane does not jump. */
+  .overviewWaiting { width: 256px; aspect-ratio: 1; display: grid;
+    place-items: center; border: 1px solid #333; border-radius: 4px;
+    background: #12140f; }
+  .overviewWaiting img { width: 64px; height: 64px; border: 0; opacity: 0.35; }
   .paneRow { display: flex; gap: 0.6rem; }
   .paneRow span:first-child { color: #999; min-width: 6rem; }
   .paneWords { margin: 0.5rem 0; color: #ccc; }
@@ -2042,16 +2131,15 @@ ${renderListServerKeyAdminSection({ session, admin })}
 app.get('/list', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
-    const [servers, bzoServers] = await Promise.all([
-      getRemoteServerList().then((list) => [...list]
-        .sort((a, b) => (b.info?.players ?? -1) - (a.info?.players ?? -1))),
-      getBzoServerList().then((list) => [...list].sort((a, b) => (b.players ?? -1) - (a.players ?? -1))),
-    ]);
+    const lists = await getDisplayServerLists();
+    const servers = [...lists.bzfs]
+      .sort((a, b) => (b.info?.players ?? -1) - (a.info?.players ?? -1));
+    const bzoServers = [...lists.bzo].sort((a, b) => (b.players ?? -1) - (a.players ?? -1));
     const session = sessionFromRequest(req);
     res.type('html').send(renderListPage({
       servers,
       bzoServers,
-      cacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
+      cacheAgeSeconds: lists.bzfsCacheAgeSeconds,
       imported: typeof req.query.imported === 'string' ? req.query.imported : null,
       importError: typeof req.query.error === 'string' ? req.query.error : null,
       session,
@@ -2304,30 +2392,73 @@ const RUNTIME_MAPS_DIR = process.env.MAPS_PATH
 const REMOTE_SERVER_LIST_TTL_MS = 5 * 60 * 1000;
 let remoteServerListCache = { at: 0, servers: [] };
 
+// Keeps each listed BZFlag server's world import fresh enough for its row on
+// `/list` to have a picture, and no fresher (`server/bzfs-worlds.cjs`). The
+// callbacks fire on its own timer rather than at construction, which is why it
+// can name things defined much further down this file.
+const bzfsWorlds = createBzfsWorldTracker({
+  statePath: path.join(__dirname, 'cache', 'bzfs-worlds.json'),
+  queryServerStatus: (host, port) => queryServerStatus(host, port),
+  importWorld: (host, port) => performRemoteMapImport(host, port),
+  // The registry rather than the file: a map is only viewable, and only has a
+  // picture, once it has been parsed and registered.
+  isImported: (host, port) => MAP_REGISTRY.has(remoteMapFileName(host, port)),
+  log,
+  logError,
+});
+
 async function getRemoteServerList() {
   if (Date.now() - remoteServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
     return remoteServerListCache.servers;
   }
   const servers = await fetchServerList(DEFAULT_LIST_SERVER, BZFS_PROTOCOL_VERSION);
   remoteServerListCache = { at: Date.now(), servers };
+  // The one place the list is actually refreshed, so the one place worth
+  // handing to the world tracker (`server/bzfs-worlds.cjs`): a row that is new
+  // or whose listed configuration has changed becomes due for a world check
+  // ahead of its daily schedule.
+  bzfsWorlds.observe(servers);
   return servers;
 }
 
 // bzo's own list server's public read endpoint (docs/list-server-plan.md),
 // for `/list`'s third table. Same cache shape as `getRemoteServerList` and
 // the same reason: shared across every visitor rather than one fetch each.
-let bzoServerListCache = { at: 0, servers: [] };
+let bzoServerListCache = { at: 0, lists: { bzfs: [], bzo: [], bzfsCacheAgeSeconds: 0 } };
 
-async function getBzoServerList() {
-  if (!LIST_SERVER_URL) return [];
-  // The designated instance already holds this in-process -- no reason to
-  // round-trip HTTPS to itself for its own `/list`, and no reason to cache
-  // it either: unlike the fetch below, reading the registry costs nothing,
-  // and caching it would only add a window where a fresher report already
-  // landed but `/list` still shows the stale snapshot.
-  if (IS_DESIGNATED_LIST_SERVER) return listPublicListServerRows();
+// Both lists for `/list`, in one call where one call will do.
+//
+// The designated instance reads its own registry in-process and fetches the
+// public list itself, as it always did. Every other instance asks the
+// designated one for both at once: the bzo rows it alone holds, and the bzfs
+// rows with each row's picture already named. Fetching the public list
+// separately as well would be asking a second party for something the first
+// already sent, fresher, and then matching the two by `host:port` across
+// copies that aged apart.
+//
+// **Falling back is the point of keeping the direct fetch.** With no list
+// server configured, or one that cannot be reached, or one too old to carry
+// the bzfs half, this goes upstream itself and the page is exactly what it
+// was before any of this -- minus the pictures, which were never the reason
+// anyone came.
+//
+// `getRemoteServerList` stays the authority for the *import* check
+// (`performRemoteMapImport`) whatever happens here. A relayed list must not
+// be able to authorise this server into dialling a host upstream never
+// listed.
+async function getDisplayServerLists() {
+  if (IS_DESIGNATED_LIST_SERVER || !LIST_SERVER_URL) {
+    return {
+      bzfs: await getRemoteServerList().catch((error) => {
+        logError('/list could not reach the BZFlag list server:', error);
+        return remoteServerListCache.servers;
+      }),
+      bzo: LIST_SERVER_URL ? listPublicListServerRows() : [],
+      bzfsCacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
+    };
+  }
   if (Date.now() - bzoServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
-    return bzoServerListCache.servers;
+    return bzoServerListCache.lists;
   }
   try {
     const response = await fetch(`${LIST_SERVER_URL}/api/list-server/list`, {
@@ -2336,12 +2467,26 @@ async function getBzoServerList() {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
-    const servers = Array.isArray(body.servers) ? body.servers : [];
-    bzoServerListCache = { at: Date.now(), servers };
-    return servers;
+    const bzo = Array.isArray(body.servers) ? body.servers : [];
+    const bzfs = Array.isArray(body.bzfs) && body.bzfs.length
+      ? body.bzfs
+      : await getRemoteServerList();
+    const lists = {
+      bzfs,
+      bzo,
+      bzfsCacheAgeSeconds: Number.isFinite(body.bzfsCacheAgeSeconds)
+        ? body.bzfsCacheAgeSeconds : 0,
+    };
+    bzoServerListCache = { at: Date.now(), lists };
+    return lists;
   } catch (error) {
     logError(`/list could not reach the bzo list server at ${LIST_SERVER_URL}:`, error.message || error);
-    return bzoServerListCache.servers;
+    const cached = bzoServerListCache.lists;
+    return {
+      bzfs: cached.bzfs.length ? cached.bzfs : await getRemoteServerList().catch(() => []),
+      bzo: cached.bzo,
+      bzfsCacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
+    };
   }
 }
 
@@ -2666,7 +2811,24 @@ server.listen(PORT, LISTEN_HOST, () => {
         .catch((error) => logError(`[LISTSERVER] boot poll failed for ${record.url}: ${error.message}`));
     }
   }
+  // Only the designated instance keeps BZFlag worlds fresh, for the same
+  // reason it is the only one that draws bzo rows' pictures: every instance
+  // doing it would mean every instance dialling every listed server, which is
+  // the multiplication the list server exists to avoid. A non-designated
+  // instance still shows a picture for any world it has imported on demand.
+  if (BZFS_WORLD_THUMBNAILS && IS_DESIGNATED_LIST_SERVER) {
+    log('[WORLDS] keeping BZFlag world imports fresh for /list thumbnails');
+    bzfsWorlds.start();
+  }
 });
+
+// Whether this instance keeps the listed BZFlag servers' world imports fresh
+// so their `/list` rows have pictures (`server/bzfs-worlds.cjs`). On by
+// default, and only ever active on the designated list server. Off is for an
+// operator who does not want this server making outbound connections to
+// servers they have no relationship with -- the rows still get pictures for
+// whatever has been imported on demand, just not ahead of being asked.
+const BZFS_WORLD_THUMBNAILS = serverConfig.bzfsWorldThumbnails !== false;
 
 // `adminGroups` in `server.json`: the global groups this server would grant
 // admin to. The list server answers about no group it was not asked about, so
@@ -3083,6 +3245,10 @@ function sanitizeListServerStatus(body) {
     // so a field dropped here is a field that instance can never show: this is
     // the only thing that writes `live` for a server reporting over HTTP.
     map: typeof body?.map === 'string' ? body.map.slice(0, 120) : '',
+    // Exactly the shape `registerMapFile` produces, because it becomes a file
+    // name here. Anything else is dropped rather than cleaned: a hash that
+    // needed cleaning is not a hash.
+    mapHash: /^[0-9a-f]{12}$/.test(body?.mapHash) ? body.mapHash : '',
     // Bounded here rather than trusted, since this is the edge an untrusted
     // instance reports at; `listPublicListServerRows` shapes each row again on
     // the way out, where it also drops the targets that were unreachable.
@@ -3109,6 +3275,110 @@ function sanitizeListServerReadout(source) {
   };
 }
 
+// How much world JSON this instance will pull from another to draw its
+// picture, and how long it will wait. The largest map bzo has locally is 74 MB
+// of JSON (7.5 MB of `.bzw`, 81332 mesh faces), so the ceiling has to clear
+// that or the maps most worth looking at are the ones with no picture. Past
+// either limit there is simply no overview, which is the same state a row has
+// before its first fetch.
+//
+// The timeout is generous because the transfer may not be compressed: brotli
+// takes that map to about 14 MB, but a sidecar is built in the background on
+// the far side and "a missing sidecar is not an error"
+// (`server/precompress.cjs`), so a first fetch can get all 74 MB. Nothing
+// waits on this -- it is fire-and-forget, once per world hash -- so a long
+// ceiling costs nothing and a short one would just mean no picture.
+const OVERVIEW_WORLD_MAX_BYTES = 96 * 1024 * 1024;
+const OVERVIEW_FETCH_TIMEOUT_MS = 120000;
+
+// One fetch per hash at a time. A boot-time poll validates every recently
+// active key at once, and several instances running the same world would
+// otherwise each start their own download of it.
+const inFlightOverviews = new Map();
+
+function overviewPathForHash(hash) {
+  return path.join(OVERVIEW_CACHE_DIR, `${hash}.svg`);
+}
+
+// The public URL of a drawn overview, for `listPublicListServerRows` to hand
+// to every instance's `/list`. `LIST_SERVER_URL` rather than this instance's
+// own `publicUrl`: they are the same string on the designated instance (that
+// is what `IS_DESIGNATED_LIST_SERVER` means), and naming the one every reader
+// was already configured with keeps the row's URL and the row's origin the
+// same thing.
+// The absolute URL of a local map's own overview, for a row this server is
+// publishing to other instances. `LIST_SERVER_URL` for the same reason
+// `instanceOverviewUrl` uses it: on the designated instance it is this
+// server's own public URL, and it is the string every reader already holds.
+function instanceMapOverviewUrl(mapFileName) {
+  const registered = MAP_REGISTRY.get(mapFileName);
+  if (!registered || !registered.overviewUrl) return null;
+  return `${LIST_SERVER_URL}/maps/${registered.hash}.svg`;
+}
+
+function instanceOverviewUrl(hash) {
+  if (!/^[0-9a-f]{12}$/.test(hash || '')) return null;
+  if (fs.existsSync(overviewPathForHash(hash))) {
+    return `${LIST_SERVER_URL}/overviews/${hash}.svg`;
+  }
+  // The designated instance's own row: its world is a local map, so the
+  // picture is already beside the map's JSON and there is nothing to fetch or
+  // redraw. Same hash either way -- the reported hash *is* `MAP_REGISTRY`'s.
+  if (fs.existsSync(path.join(MAP_CACHE_DIR, `${hash}.json`))) {
+    return `${LIST_SERVER_URL}/maps/${hash}.svg`;
+  }
+  return null;
+}
+
+// Draws the overview for one reporting instance's world, once. The world comes
+// from that instance's own `/maps/<hash>.json` -- public, immutable and
+// already brotli-compressed by `server/precompress.cjs`, so this needs no new
+// endpoint on the far side and costs it a cached file read.
+//
+// The hash is **rechecked here** rather than taken on trust: it is a SHA-256
+// of the exact bytes `/maps/` serves (`registerMapFile`), so hashing what
+// arrives and comparing proves the JSON is the world the report named. Without
+// that, an instance could have its own picture filed under another instance's
+// hash. It is why the report carries a hash and not a URL.
+async function ensureInstanceOverview(instanceUrl, hash) {
+  if (!/^[0-9a-f]{12}$/.test(hash || '')) return;
+  const filePath = overviewPathForHash(hash);
+  if (fs.existsSync(filePath)) return;
+  // A world this server already holds as a local map needs no download and no
+  // second copy of the picture: `instanceOverviewUrl` serves that map's own
+  // `/maps/<hash>.svg`. Two instances playing the same map as this one land
+  // here, since the hash is the same wherever the same build parses the same
+  // world.
+  if (fs.existsSync(path.join(MAP_CACHE_DIR, `${hash}.json`))) return;
+  if (inFlightOverviews.has(hash)) return inFlightOverviews.get(hash);
+
+  const work = (async () => {
+    const worldUrl = new URL(`maps/${hash}.json`, `${instanceUrl}/`).toString();
+    const response = await fetch(worldUrl, {
+      headers: { 'User-Agent': BZO_USER_AGENT, 'Accept-Encoding': 'br, gzip' },
+      signal: AbortSignal.timeout(OVERVIEW_FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > OVERVIEW_WORLD_MAX_BYTES) {
+      throw new Error(`world JSON is ${body.length} bytes, over the limit`);
+    }
+    const actual = crypto.createHash('sha256').update(body).digest('hex').slice(0, 12);
+    if (actual !== hash) throw new Error(`world hashes to ${actual}, not the reported ${hash}`);
+    const svg = mapOverview.buildMapOverviewSvg(JSON.parse(body.toString('utf8')));
+    fs.writeFileSync(filePath, svg);
+    precompress.consider(`/overviews/${hash}.svg`, filePath, Buffer.from(svg));
+    log(`[LISTSERVER] drew the overview for ${instanceUrl}'s world ${hash}`);
+  })().catch((error) => {
+    log(`[LISTSERVER] no overview for ${instanceUrl}'s world ${hash}: ${error.message}`);
+  }).finally(() => {
+    inFlightOverviews.delete(hash);
+  });
+
+  inFlightOverviews.set(hash, work);
+  return work;
+}
+
 async function validateListServerKey(record) {
   const nonce = crypto.randomBytes(16).toString('hex');
   try {
@@ -3130,6 +3400,13 @@ async function validateListServerKey(record) {
       listServerKeys.report(record, sanitizeListServerStatus(body.status));
     }
     log(`[LISTSERVER] validated ${record.url}`);
+    // Only from here, which is the boot/periodic path and the daily poll --
+    // never from a bare join or part, on the same rule that keeps an active
+    // game from costing an outbound round trip per player. A world already
+    // drawn returns immediately, so the usual case is a file check.
+    if (record.live?.mapHash) {
+      ensureInstanceOverview(record.url, record.live.mapHash);
+    }
   } catch (error) {
     listServerKeys.markChecked(record, false, error.message);
     log(`[LISTSERVER] could not validate ${record.url}: ${error.message}`);
@@ -3243,6 +3520,11 @@ function listPublicListServerRows() {
         maxShots: record.live.maxShots,
         style: record.live.style,
         map: String(record.live.map || ''),
+        // Where that instance's overview picture is, or null while this
+        // server has not drawn one yet. An absolute URL on the designated
+        // instance, stated here rather than assembled by each reader: this is
+        // the only server that knows which pictures exist.
+        overviewUrl: instanceOverviewUrl(record.live.mapHash),
         voiceEnabled: record.live.voiceEnabled,
         // Observed, never reported: `sanitizeListServerStatus` deliberately
         // does not read this from a payload, because a server claiming its own
@@ -3312,13 +3594,44 @@ app.post('/api/list-server/report', listServerRateLimit, (req, res) => {
   }
 });
 
-// The public read endpoint every instance's `/list` third table fetches from
-// the designated one. Only rows that have reported at least once (`live`) --
-// a registered-but-never-run key names nobody to list.
-app.get('/api/list-server/list', (req, res) => {
+// The public read endpoint every other instance's `/list` reads. It carries
+// **both** lists: the bzo rows this server holds registrations for, and the
+// public BZFlag list it already fetches and caches for its own page. One call
+// where there were two, and the reason is not the round trip -- it is that
+// only this server knows which rows have a picture, and joining that to a
+// bzfs list each reader fetched separately would mean matching two copies of
+// a list that aged apart.
+//
+// Only bzo rows that have reported at least once (`live`) -- a
+// registered-but-never-run key names nobody to list.
+app.get('/api/list-server/list', async (req, res) => {
   if (!requireDesignatedListServer(req, res)) return;
   res.set('Cache-Control', 'no-store');
-  res.json({ servers: listPublicListServerRows() });
+  let bzfs = [];
+  try {
+    bzfs = await getRemoteServerList();
+  } catch (error) {
+    // The bzo half is this server's own registry and always available; the
+    // bzfs half is somebody else's service. A reader that gets one and not
+    // the other falls back to fetching upstream itself, which is what it did
+    // before this endpoint carried the list at all.
+    logError('/api/list-server/list could not reach the BZFlag list server:', error);
+  }
+  res.json({
+    servers: listPublicListServerRows(),
+    bzfs: bzfs.map((server) => ({
+      host: server.host,
+      port: server.port,
+      title: server.title,
+      info: server.info,
+      // The picture of that server's world, when this instance holds an
+      // import of it (`server/bzfs-worlds.cjs` keeps them fresh). Absolute,
+      // because the reader is another origin -- and stated here rather than
+      // derived, since this is the only server that knows.
+      overviewUrl: instanceMapOverviewUrl(remoteMapFileName(server.host, server.port)),
+    })),
+    bzfsCacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
+  });
 });
 
 // The signed-challenge target every instance (designated or not) answers on,
@@ -9123,6 +9436,27 @@ function registerMapFile(
     return null;
   }
   precompress.consider(url, filePath, Buffer.from(json));
+
+  // The overview picture, beside the JSON and under the same hash
+  // (`server/map-overview.cjs`, issue #147). Written here rather than on
+  // demand because it is the same content-addressed artefact the JSON is: a
+  // map registers once, the picture costs a few hundred milliseconds at the
+  // worst map bzo has, and a hash that exists always has a picture rather
+  // than sometimes having one. `/list`'s pane and the View picker read it as
+  // an ordinary static file; a failure here is not worth failing a map over,
+  // so it is logged and the map registers without one.
+  const overviewUrl = `/maps/${hash}.svg`;
+  const overviewPath = path.join(MAP_CACHE_DIR, `${hash}.svg`);
+  let hasOverview = false;
+  try {
+    const svg = mapOverview.buildMapOverviewSvg(entry);
+    fs.writeFileSync(overviewPath, svg);
+    precompress.consider(overviewUrl, overviewPath, Buffer.from(svg));
+    hasOverview = true;
+  } catch (error) {
+    logError(`Could not build map overview for ${fileName}:`, error);
+  }
+
   // Outside `entry`, not inside it: this runs every time the file is
   // (re-)registered, including on an unchanged re-import, and folding it into
   // the hashed JSON would make an identical map hash differently call to
@@ -9136,6 +9470,9 @@ function registerMapFile(
     // than per request, because the View dialog asks for the whole list every
     // time it opens.
     stats: summariseMap(entry),
+    // Whether the overview above got written, so `/list` can show the app's
+    // own mark in the pane instead of an image that would not load.
+    overviewUrl: hasOverview ? overviewUrl : null,
   };
   MAP_REGISTRY.set(fileName, registered);
   return registered;
@@ -9147,7 +9484,13 @@ function registerMapFile(
 // the background trickle below has registered everything this process ever
 // will, so a file mid-registration is never mistaken for an orphan.
 function sweepMapCache() {
-  const expected = new Set(Array.from(MAP_REGISTRY.values(), (entry) => `${entry.hash}.json`));
+  // The overview picture is hashed with its map, so it belongs to the same
+  // entry and survives the same sweep.
+  const expected = new Set();
+  for (const entry of MAP_REGISTRY.values()) {
+    expected.add(`${entry.hash}.json`);
+    expected.add(`${entry.hash}.svg`);
+  }
   let removed = 0;
   let entries;
   try {
@@ -13326,6 +13669,14 @@ function computeListServerStatus() {
     // Which world this is, which a row had no way to say. `random` for a
     // generated one, as `MAP_SOURCE` itself spells it.
     map: MAP_SOURCE,
+    // The live world's content hash, so the list server can draw this
+    // instance's overview picture (issue #147). Just the hash, never a URL:
+    // the list server derives `<this instance's registered url>/maps/<hash>
+    // .json` from the URL it already validated, so a report can name a world
+    // to fetch but can never name a host to fetch it from. `/maps/` is public
+    // and immutable already, and the hash is what makes the answer checkable
+    // -- see `ensureInstanceOverview`.
+    mapHash: LIVE_MAP_ENTRY ? LIVE_MAP_ENTRY.hash : '',
     title: serverConfig.serverName || '',
     description: serverConfig.description || '',
     players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,

@@ -6,6 +6,72 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.90] - 2026-09-30
+
+### Added
+- Every local map has an overview picture, drawn into a third column of its
+  row's pane on `/list`. It is an SVG built from the same geometry the radar
+  panel draws, cached beside the map's JSON under the same hash, and it is a
+  rendering at a known size rather than a vector copy of the map -- obstacles
+  are rasterised onto a 256-cell grid and that grid re-encoded as merged
+  rectangles, so the file is bounded by the picture and not by the world.
+  `ahs3_Paradise_Valley`, 81332 mesh faces and 74 MB of JSON, draws in about
+  300 ms and lands at 10 KB brotli; the rest are between 2 and 12 KB.
+  Elevation carries as opacity above a datum -- the altitude the map is
+  actually played at, so a map played 200 units up does not read as uniformly
+  high and a terrain covering the whole world does not fill the frame. Bases
+  keep their team's radar colour and a map's painted surfaces keep their own,
+  shaded towards the panel's neutral the way the radar shades them. A map the
+  background trickle has not reached yet shows the app's own mark, dimmed,
+  rather than a word. Part of #147.
+- Every bzo server row on `/list` carries its world's overview picture too,
+  drawn by the designated list server rather than by each instance, so the
+  algorithm lives in one place and every row is redrawn by the next version of
+  it. A report names the world by content hash and never by URL -- the list
+  server fetches `<the url already on file for that key>/maps/<hash>.json`,
+  which is public, immutable and brotli-compressed already, and rechecks the
+  hash against what arrives before drawing. A world it already holds needs no
+  fetch, so its own row and any row playing one of its own maps get a picture
+  at once. A bzfs row and a proxied target still have none: that needs the
+  world imported first. Part of #147.
+- A BZFlag server row on `/list` shows its world's picture once this instance
+  holds an import of it, which needed nothing new: an import is registered like
+  any other map, so it already has an overview drawn beside its JSON. A row with
+  no import shows the waiting mark, and following the row imports on demand. The
+  server probe also asks `MsgWantWHash` now and reports the answer, which is
+  what will tell bzo whether an import has gone stale without downloading the
+  world again -- `p` for a world from a file, stable across that server's
+  restarts, `t` for a generated one. Both that and the world download are
+  answered before `MsgEnter`, so neither needs a login or an observer slot.
+  Part of #147.
+- The designated list server keeps those imports fresh on its own, so a BZFlag
+  row has a picture before anyone asks for it. It rechecks a server's world
+  hash every 24 hours, or sooner if the public list entry is new or its listed
+  configuration changed, and downloads the world only when the hash says the
+  import is stale or missing -- so a server whose map never changes is never
+  downloaded twice. One server per 30-second tick and at most one import a
+  minute, so a list bzo has never seen fills in over hours rather than all at
+  once; a server that refused or timed out is left alone for six hours.
+  `bzfsWorldThumbnails: false` turns it off. Part of #147.
+- An instance now gets both server lists from the designated one in a single
+  call, where it used to fetch the public BZFlag list itself and the bzo list
+  separately. The saving is not the round trip: only the list server knows
+  which rows have a picture, and joining that to a list each reader fetched for
+  itself would mean matching two copies that aged apart. With no list server
+  configured or one it cannot reach, an instance goes upstream as before.
+  Part of #147.
+
+### Fixed
+- `/list`'s local maps no longer offer `random` on a server playing a map
+  file. It was listed as viewable and its row linked to `?viewmap=random`, but
+  the client checks the request against the maps the server has actually
+  registered, so the name was never there and the link fell through to an
+  ordinary join. `random` is a map an operator can *serve* -- the instruction
+  to generate a world, which the Operator panel's chooser still offers -- and
+  it is a map anyone can *view* only while it is the world being played, which
+  is when it holds a registry entry, real counts and an overview of its own.
+  Closes #152.
+
 ## [1.2.89] - 2026-09-30
 
 ### Added

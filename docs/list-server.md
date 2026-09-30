@@ -219,8 +219,108 @@ The pane is two columns, as upstream's panel is: who is playing on the left
 -- the player count and each team's own count and maximum -- and what the
 game is on the right, being shots, style, the option words, the shake
 conditions, the score and time limits, and for a bzo row its map, version,
-voice and URL. A map overview is meant to become a third
-(`docs/list-server-plan.md`).
+voice and URL. A bzo row's own game has the world's overview picture as a
+third column; a bzfs row and a proxy row do not, because drawing one needs
+that server's world imported first (`docs/list-server-plan.md`).
+
+**The designated instance draws every bzo row's picture**, rather than each
+instance drawing its own and reporting it. Not because an instance could not
+-- it has the world in memory and `server/map-overview.cjs` right there -- but
+because one drawer means the algorithm can change in one place and every row
+is redrawn by the next version rather than by whenever each operator upgrades.
+It also means the list server never takes finished markup from a keyholder,
+which same-origin SVG makes worth avoiding.
+
+A report carries `mapHash`, the live world's content hash, and never a URL:
+the list server derives `<the url already on file for that key>/maps/<hash>
+.json` -- public, immutable and brotli-compressed already -- so a report can
+name a world to fetch but never a host to fetch it from. The hash is
+**rechecked** against what arrives, since it is a SHA-256 of exactly the bytes
+`/maps/` serves; without that an instance could have its own picture filed
+under another's hash. A world the list server already holds locally needs no
+fetch at all, which is how its own row and any row playing the same map as one
+of its own get a picture immediately. Pictures live in `cache/overviews/`,
+served from `/overviews/<hash>.svg` and pointed at by an absolute
+`overviewUrl` on each public row, so every other instance's `/list` embeds one
+`<img>` and nothing else.
+
+## One list, not two
+
+`GET /api/list-server/list` carries **both** lists: the bzo rows this server
+holds registrations for, and the public BZFlag list it already fetches and
+caches for its own page, each bzfs row naming its picture. Every other
+instance makes one call and renders both tables from it
+(`getDisplayServerLists`).
+
+The round trip saved is not the point. Only the designated instance knows
+which rows have a picture, and joining that to a bzfs list each reader fetched
+for itself would mean matching two copies of a list that aged apart.
+
+Falling back is why the direct fetch stays. With no list server configured, one
+that cannot be reached, or one too old to carry the bzfs half, an instance goes
+upstream itself and the page is what it always was, minus the pictures.
+
+`getRemoteServerList` remains the authority for the *import* check
+(`performRemoteMapImport`) whatever happens here: a relayed list must not be
+able to authorise this server into dialling a host upstream never listed.
+
+## Keeping BZFlag worlds fresh
+
+`server/bzfs-worlds.cjs`, on the designated instance only -- the same reason it
+is the only one drawing bzo rows' pictures: every instance doing this would
+mean every instance dialling every listed server. `bzfsWorldThumbnails: false`
+in `server.json` turns it off, for an operator who would rather this server
+made no outbound connections to servers they have no relationship with; rows
+still get a picture for whatever has been imported on demand.
+
+There is nothing extra to draw. An import is parsed and registered like any
+other map, so its overview is already beside its JSON and the row points at
+`/maps/<hash>.svg`. What the tracker decides is *when an import has gone
+stale*, using three signals, cheapest first:
+
+1. **The public list entry**, refreshed every few minutes anyway, so it costs
+   nothing. A server never seen before is new; one whose listed configuration
+   has changed -- title, style, shot count, option bits, per-team maxima, the
+   score and time limits, but deliberately not the live player counts -- may
+   have changed map with it, and becomes due ahead of its schedule. It is a
+   guess, and safe to be one: it only ever makes a check happen *sooner*.
+2. **`MsgWantWHash`**, one short connection and four frames on a socket that
+   never enters the game, answering "is this the same world?" exactly. bzfs
+   answers it, and `MsgGetWorld`, before `MsgEnter` (`bzfs.cxx`'s
+   `!isCompletelyAdded()` switch), so neither the hash nor the download needs a
+   login, a callsign or an observer slot. A `p` hash is stable across that
+   server's restarts and identical on two servers serving the same map; a `t`
+   one is a generated world and rerolls every boot.
+3. **The world itself**, the only expensive signal, fetched only when the hash
+   says the import is stale or missing.
+
+With no signal at all a server is rechecked every 24 hours. That floor is what
+makes a weak fingerprint safe -- a map change it misses delays a redraw by a
+day rather than losing it -- and it makes "your thumbnail will update
+tomorrow" a true answer. There is no uptime to use instead: bzfs's only
+`uptime` is a `$uptime` substitution inside server-message text
+(`bzfs.cxx:2050`), absent from the ping packet, `MsgQueryGame` and
+`MsgGameSettings`. The hash is the better question anyway, since a restart onto
+the same map is the common case and says nothing about the picture.
+
+Two different servers running the *same* world still get two pictures, even
+though they report the same bzfs world hash. Measured on `1vs1.catay.be:5157`
+and `:5158`, whose worlds are byte-identical: the parsed JSON differs in one
+field, the dropped-feature `-srvmsg` line, because it names the map file and an
+import's file name carries `host_port`. One duplicate in the first 42 hashed
+servers, so a few kilobytes, and not worth chasing. If the rate rises the fix
+is to key the picture on a hash of its own inputs -- obstacles and world size
+-- rather than on the whole map JSON hash, which includes fields the drawing
+never reads. Two bzo *instances* running the same map file do share, since
+their file names match.
+
+One server per 30-second tick and at most one import a minute, so a list bzo
+has never seen fills in over hours rather than downloading every world on it at
+once. In the steady state a couple of hundred listed servers is about ten short
+dials an hour and no downloads. A server that refused, timed out or sent
+something unusable is left alone for six hours rather than retried on the next
+tick. State lives in `cache/bzfs-worlds.json`, a regeneratable cache: losing it
+costs one dial per server, not one download.
 
 A bzo row shows the team lines only if that instance reported them: an
 instance older than the release that added `teamCounts`/`teamMaximums` to a
@@ -283,6 +383,12 @@ page computes nothing to show them. Only the glob half of the filter language
 means anything on that list, which is why it has no `?` beside its box.
 `random` is a world generated at boot rather than a file, so it has no counts,
 hash or sizes and says so.
+
+Its pane's third column is the map's overview picture, an SVG drawn from the
+same geometry the radar panel draws and cached beside the map's JSON under the
+same hash (`server/map-overview.cjs`). A map is registered by a background
+trickle, so a visitor can reach the page before a given map's picture exists;
+that pane shows the app's own mark, dimmed, rather than a word.
 
 With scripting off, every row is still a plain link to what it always went
 to, and the first row's pane is the one on show.
