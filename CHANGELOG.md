@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.89] - 2026-09-30
+
+### Added
+- Chat lines carry the time they arrived, `[17:02:41]` in front of the words
+  the way BZFlag's own `controlPanelTimestamp` writes it. It is always on here
+  rather than off by default, because bzo's transcript survives a reload: the
+  top of the window is chat from before the tab came back, and the stamp is
+  what tells it apart from what was just said. A line from another day -- what
+  a tab left open overnight leaves in its scrollback -- carries the date as
+  well, which is upstream's second timestamp format. A narrow transcript drops
+  the clock, where nine characters in front of every line would wrap it, and
+  keeps the dated stamps, which are the few lines it is there for;
+  `/savemsgs -t` still writes both. Narrow is measured on the panel rather than
+  on the screen, so opening the debug panel or the virtual controls -- which is
+  what takes a 900px window's chat down to 550 -- drops the clock as a phone
+  does. Closes #150.
+
+### Fixed
+- One `--- reloaded ---` divider after a reload rather than one per reload. The
+  divider marks where this reload happened, so it is no longer kept in the
+  cached transcript that the next one restores.
+
 ## [1.2.88] - 2026-09-29
 
 ### Changed

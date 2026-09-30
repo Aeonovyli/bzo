@@ -8,6 +8,12 @@
 // natively and keeps the whole scrollback instead -- see `updateChatWindow`).
 const CHAT_VISIBLE_MESSAGES = 6;
 const CHAT_SCROLLBACK_LIMIT = 600;
+// `[HH:MM:SS] `. A stamp longer than this is `formatChatTimestamp` having
+// added the date, which is how a line from another day is told apart without
+// re-deriving the day where it is drawn. Up here with the rest of the chat's
+// constants because `updateChatWindow` paints the first debug line while this
+// module is still being evaluated.
+const CHAT_TIME_ONLY_LENGTH = 11;
 const CHAT_MIN_WIDTH_WITH_DEBUG = 560;
 const CHAT_DEBUG_PANEL_RESERVE = 352;
 // A chat destination that is not a player is one of upstream's reserved
@@ -340,6 +346,8 @@ import {
 } from './compose.mjs';
 import {
   CHAT_CACHE_TABS,
+  CHAT_RELOAD_DIVIDER,
+  formatChatTimestamp,
   formatTranscript,
   packChatCache,
   transcriptFilename,
@@ -2900,11 +2908,6 @@ function addChatEntry(tabIds, text, kind = CHAT_KIND_MISC, segments = null) {
   if (uniqueTabIds.some((tabId) => CHAT_CACHE_TABS.includes(tabId))) scheduleChatCacheSave();
   chatWindowDirty = true;
 }
-
-// Where a reload happened, so the line above it is not read as something that
-// just arrived. Upstream has nothing to copy here: its window never restarts
-// under it.
-const CHAT_RELOAD_DIVIDER = '--- reloaded ---';
 
 // `sessionStorage` rather than `localStorage`, because the transcript belongs
 // to the tab -- which is the thing that reloads. Two tabs on the same origin
@@ -17164,10 +17167,27 @@ function updateChatWindow() {
   chatMessagesDiv.innerHTML = '';
 
   const activeMessages = chatState.messages[chatState.activeTab] || [];
+  // One clock reading for the whole repaint: what "today" means is the same for
+  // every line in it, and a line drawn either side of midnight can wait for the
+  // next repaint to grow its date.
+  const now = Date.now();
   activeMessages.forEach((msg) => {
     const div = document.createElement('div');
     div.className = `chat-line chat-kind-${msg.kind || CHAT_KIND_CHAT}`;
     if (isHighlightMatch(msg.text)) div.classList.add('chat-highlight');
+    // The stamp is a span of its own rather than part of the text, so the
+    // narrow layouts can drop it (`.chat-time` in styles.css) without the line
+    // it belongs to changing, and so nothing that reads a line -- the cache,
+    // `/savemsgs`, the highlight test, the XR panel -- has to know it is there.
+    const stamp = formatChatTimestamp(msg.ts, now);
+    if (stamp) {
+      const time = document.createElement('span');
+      // A stamp carrying a date is marked as such, because it is the one a
+      // narrow screen keeps: see `.chat-time` in styles.css.
+      time.className = stamp.length > CHAT_TIME_ONLY_LENGTH ? 'chat-time chat-time-date' : 'chat-time';
+      time.textContent = stamp;
+      div.appendChild(time);
+    }
     if (msg.segments) {
       // A segment with no colour inherits the line's, which is the kind's own
       // CSS rule -- so only the runs that need a colour carry one. Through
@@ -17182,7 +17202,9 @@ function updateChatWindow() {
         div.appendChild(span);
       });
     } else {
-      div.textContent = msg.text;
+      // Appended rather than set as the line's `textContent`, which would take
+      // the stamp with it.
+      div.appendChild(document.createTextNode(msg.text));
     }
     chatMessagesDiv.appendChild(div);
   });

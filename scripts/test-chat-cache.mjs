@@ -13,6 +13,8 @@ import {
   CHAT_CACHE_LIMIT,
   CHAT_CACHE_TABS,
   CHAT_CACHE_VERSION,
+  CHAT_RELOAD_DIVIDER,
+  formatChatTimestamp,
   formatTranscript,
   formatTranscriptTimestamp,
   packChatCache,
@@ -141,6 +143,48 @@ function makeTabs() {
   const mixed = formatTranscript([{ text: 'old' }], { timestamps: true, savedAt: at });
   assert.ok(mixed.endsWith('old\n'));
   assert.equal(formatTranscript([], { savedAt: at }).endsWith('\n\n'), true);
+}
+
+// The stamp the chat window draws: upstream's mode 1 for a line from today,
+// mode 2 once the line is from another day, and nothing at all for a line that
+// came back from a cache with no timestamp in it.
+{
+  const now = new Date(2026, 8, 29, 9, 0, 0).getTime();
+  assert.equal(formatChatTimestamp(new Date(2026, 8, 29, 7, 5, 9).getTime(), now), '[07:05:09] ');
+  assert.equal(formatChatTimestamp(new Date(2026, 8, 29, 0, 0, 0).getTime(), now), '[00:00:00] ');
+  assert.equal(
+    formatChatTimestamp(new Date(2026, 8, 28, 23, 59, 59).getTime(), now),
+    '[2026-09-28 23:59:59] ',
+  );
+  // A year apart is still just another day.
+  assert.equal(
+    formatChatTimestamp(new Date(2025, 8, 29, 9, 0, 0).getTime(), now),
+    '[2025-09-29 09:00:00] ',
+  );
+  assert.equal(formatChatTimestamp(null, now), '');
+  assert.equal(formatChatTimestamp(undefined, now), '');
+}
+
+// The reload divider belongs to the reload that drew it. It is not written
+// down, and one restored from a cache written before that was true is dropped
+// on the way back in, so a tab reloaded all morning shows one divider and not
+// a column of them.
+{
+  const { messages, add } = makeTabs();
+  add(['chat', 'all'], 'hello');
+  add(['all', 'misc'], CHAT_RELOAD_DIVIDER, { kind: 'misc' });
+  add(['chat', 'all'], 'still here');
+  const { lines } = packChatCache(messages);
+  assert.deepEqual(lines.map((line) => line.text), ['hello', 'still here']);
+
+  const stale = {
+    v: CHAT_CACHE_VERSION,
+    lines: [
+      { text: CHAT_RELOAD_DIVIDER, kind: 'misc', tabs: ['all'] },
+      { text: 'hello', kind: 'chat', tabs: ['all'] },
+    ],
+  };
+  assert.deepEqual(unpackChatCache(stale).map((line) => line.text), ['hello']);
 }
 
 console.log('chat cache tests passed');

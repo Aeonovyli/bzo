@@ -121,6 +121,11 @@ html, body {
   /* The admin channel. Upstream marks it in yellow, which is the colour it also
      gives a ServerPlayer callsign (playing.cxx:1332). */
   --chat-kind-admin: #ffd54f;
+  /* The timestamp in front of a line. Dimmer than any kind's colour, because
+     it is the same nine characters on every line and the line is what is being
+     read; upstream draws it in the line's own colour, which it can afford when
+     it is off by default. */
+  --chat-time: #8b9aa5;
   --chat-tab-idle: #ddd;
   --chat-tab-active: #fff;
   --chat-tab-unread: #ff8a80;
@@ -251,6 +256,14 @@ canvas {
    (`::-webkit-scrollbar` above) and wheel/touch scrolling both come from this
    `overflow-y`, the same as `#debugHud` and every dialog already using it. */
 #chatMessages {
+  /* A container, so the stamp rule below can ask how wide the transcript
+     actually is. Viewport width is the wrong question: at the same 900px the
+     panel is the width of the screen on its own, 600 of it with the virtual
+     controls out and 500 with the debug panel open, and it is the panel's
+     width that decides whether a clock in front of every line costs a wrap.
+     Safe on this box because its width comes from the column it is in, never
+     from the lines inside it -- they wrap to it. */
+  container-type: inline-size;
   flex: 1 1 auto;
   min-height: 0;
   max-height: calc(6 * 1.25em + 0.4em);
@@ -301,6 +314,31 @@ canvas {
 
 #chatMessages .chat-line.chat-kind-direct-out {
   color: var(--chat-kind-direct-out);
+}
+
+/* When a line arrived, in front of it. The window is monospace, so the stamps
+   line up into a column on their own and the words start at the same place on
+   every line. `pre` rather than the line's own `pre-wrap`, so a line long
+   enough to wrap breaks in its words and not through the middle of a clock. */
+#chatMessages .chat-line .chat-time {
+  color: var(--chat-time);
+  white-space: pre;
+}
+
+/* Nine characters of clock in front of every line is most of a phone's chat
+   panel and a good part of a narrowed one, and what it costs is a wrap on
+   lines that fitted -- so under this width the clock goes. The transcript is
+   worth more than the second each line landed on, and `/savemsgs -t` still
+   writes it.
+
+   The date stays at every width. A line from another day is the one thing the
+   stamp is there for -- chat restored from the cache, which otherwise only
+   looks current -- and there are a handful of those at the top of a
+   scrollback, not one per line, so they can have the room. */
+@container (max-width: 640px) {
+  .chat-line .chat-time:not(.chat-time-date) {
+    display: none;
+  }
 }
 
 /* /highlight (ControlPanel.cxx:546-556): upstream redraws a matched line

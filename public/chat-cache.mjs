@@ -38,6 +38,21 @@ export const CHAT_CACHE_LIMIT = 200;
 // and evict the chat this exists for.
 export const CHAT_CACHE_TABS = Object.freeze(['all', 'chat', 'server', 'misc']);
 
+// Where a reload happened, so the line above it is not read as something that
+// just arrived. Upstream has nothing to copy here: its window never restarts
+// under it.
+export const CHAT_RELOAD_DIVIDER = '--- reloaded ---';
+
+// The divider says "the tab came back here", which is true of this reload and
+// of no other, so it is not written down: cached, it would come back above the
+// one the next reload draws, and a tab reloaded all morning would restore a
+// column of them. Tested on the text because that is all the cache keeps of a
+// line; a player who says exactly this is not cached saying it, which is a
+// cheaper price than a flag on every entry in every tab.
+function isReloadDivider(entry) {
+  return String(entry?.text ?? '') === CHAT_RELOAD_DIVIDER;
+}
+
 // A line is one object shared by every tab it appears in, so which tabs those
 // are is found by identity, and the order comes from `seq` -- the counter
 // client.js stamps each entry with. Ordering on `ts` instead would shuffle the
@@ -48,7 +63,7 @@ export function packChatCache(messagesByTab, limit = CHAT_CACHE_LIMIT) {
     const list = messagesByTab?.[tab];
     if (!Array.isArray(list)) return;
     list.forEach((entry) => {
-      if (!entry) return;
+      if (!entry || isReloadDivider(entry)) return;
       let record = seen.get(entry);
       if (!record) {
         record = { entry, tabs: [] };
@@ -88,7 +103,7 @@ export function unpackChatCache(saved, limit = CHAT_CACHE_LIMIT) {
   const lines = saved.lines.slice(Math.max(0, saved.lines.length - limit));
   const restored = [];
   lines.forEach((line) => {
-    if (!line || typeof line.text !== 'string') return;
+    if (!line || typeof line.text !== 'string' || isReloadDivider(line)) return;
     const tabs = Array.isArray(line.tabs)
       ? [...new Set(line.tabs.filter((tab) => CHAT_CACHE_TABS.includes(tab)))]
       : [];
@@ -104,14 +119,38 @@ export function unpackChatCache(saved, limit = CHAT_CACHE_LIMIT) {
   return restored;
 }
 
+const pad = (value, width = 2) => String(value).padStart(width, '0');
+
 // `/savemsgs -t`, which is upstream's `[%04d-%02d-%02d %02d:%02d:%02d] `
 // (`ControlPanelMessage::formatTimestamp` mode 2), in local time as upstream's
 // own is.
 export function formatTranscriptTimestamp(ms) {
   const at = new Date(ms);
-  const pad = (value, width = 2) => String(value).padStart(width, '0');
   return `[${pad(at.getFullYear(), 4)}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
     + ` ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}] `;
+}
+
+// What the chat window puts in front of a line. Upstream offers three
+// timestamps and defaults to none, because its window never restarts and every
+// line in it arrived while you were watching. bzo's did not: a reload fills the
+// transcript from the cache, so the top of the window is a mix of what was said
+// before the tab went away and what has been said since, and a line that says
+// nothing about when it landed is the one thing the cache cannot supply.
+//
+// So the stamp is always on, and it is the shorter of upstream's two -- mode 1,
+// `[%02d:%02d:%02d] ` -- until the line is from another day, which is what a
+// tab left open overnight leaves at the top of the scrollback. Then it is mode
+// 2, the same date upstream writes, because "17:02" on its own is exactly the
+// line that reads as new when it is a day old.
+export function formatChatTimestamp(ms, nowMs = Date.now()) {
+  if (!Number.isFinite(ms)) return '';
+  const at = new Date(ms);
+  const now = new Date(nowMs);
+  const sameDay = at.getFullYear() === now.getFullYear()
+    && at.getMonth() === now.getMonth()
+    && at.getDate() === now.getDate();
+  if (!sameDay) return formatTranscriptTimestamp(ms);
+  return `[${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}] `;
 }
 
 // The same instant without the brackets, which is what both the file's header
