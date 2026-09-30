@@ -238,8 +238,14 @@ name a world to fetch but never a host to fetch it from. The hash is
 **rechecked** against what arrives, since it is a SHA-256 of exactly the bytes
 `/maps/` serves; without that an instance could have its own picture filed
 under another's hash. A world the list server already holds locally needs no
-fetch at all, which is how its own row and any row playing the same map as one
-of its own get a picture immediately. Pictures live in `cache/overviews/`,
+fetch at all, which is how its own row gets a picture immediately. Another
+instance playing the same map file usually does not hit that: a map's hash
+covers its clouds, and cloud altitude is `maxObstacleTopY` plus the *server's*
+own jump apex, so two instances with different jump or gravity settings hash
+the same map differently. Measured -- `hix.bzw` is `c5aaf2140a11` here and
+`4c47040a1bba` on an instance without Wings, identical in every field but
+`clouds`. The hash is right, since the JSON really does differ; the cost is one
+fetch and one drawing per instance rather than a shared one. Pictures live in `cache/overviews/`,
 served from `/overviews/<hash>.svg` and pointed at by an absolute
 `overviewUrl` on each public row, so every other instance's `/list` embeds one
 `<img>` and nothing else.
@@ -311,8 +317,7 @@ import's file name carries `host_port`. One duplicate in the first 42 hashed
 servers, so a few kilobytes, and not worth chasing. If the rate rises the fix
 is to key the picture on a hash of its own inputs -- obstacles and world size
 -- rather than on the whole map JSON hash, which includes fields the drawing
-never reads. Two bzo *instances* running the same map file do share, since
-their file names match.
+never reads, and that would fix the two-instances case above as well.
 
 One server per 30-second tick and at most one import a minute, so a list bzo
 has never seen fills in over hours rather than downloading every world on it at
