@@ -953,11 +953,16 @@ entry for. Do not "fix" that -- telling two team mates apart on the radar is
 the same job as telling them apart at a distance in the world, and the blip is
 the easier of the two to read a colour off.
 
-A base's own square is drawn in its team's radar colour and an obstacle a map
-painted is drawn in the colour the map gave it, both shaded towards the panel's
-neutral grey by the same fraction: a surface on the panel has to keep reading as
+An obstacle a map painted is drawn in the colour the map gave it, shaded
+towards the panel's neutral grey: a surface on the panel has to keep reading as
 ground rather than as a tank. `getObstacleRadarFillStyle` is the one place that
 decides, and `getRadarShadedFill` the one place that shades.
+
+A base is not a surface there at all. Upstream draws it after every obstacle as
+an outline in the team's radar colour (`RadarRenderer::renderBasesAndTeles`, a
+`GL_LINE_LOOP`), and so does bzo, unshaded -- on the panel (`getRadarBases`)
+and in the overview pictures (`baseOutlines` in `server/map-overview.cjs`). A
+filled base hid the players and the flag standing on it.
 
 Outside team mode that colour comes from the whole wheel. Inside it, the server
 shades team mates apart within a band around the team colour

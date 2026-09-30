@@ -105,19 +105,25 @@ function shadeTowardsNeutral(red, green, blue) {
 
 const NEUTRAL_FILL = `rgb(${NEUTRAL_RGB.join(',')})`;
 
-// A base is drawn in its team's radar colour, as it is on the panel
-// (`getObstacleRadarFillStyle`) -- on a capture-the-flag map the four corners
-// are most of what makes a thumbnail recognisable.
-function baseFill(team) {
+// A base is an outline in its team's own radar colour, as upstream draws it
+// (`RadarRenderer::renderBasesAndTeles`, a `GL_LINE_LOOP` in
+// `Team::getRadarColor`) and as the panel does (`drawRadarBaseOutlines`):
+// filled, it hid the players and the flag standing on it. Unshaded, since an
+// outline has no area to read as ground.
+function baseStroke(team) {
   const name = getTeamFromColorIndex(Number(team));
   const colour = name ? getPlayerTeamRadarColor(name) : null;
   if (!Number.isFinite(colour)) return NEUTRAL_FILL;
-  return shadeTowardsNeutral(
-    ((colour >> 16) & 0xff) / 0xff,
-    ((colour >> 8) & 0xff) / 0xff,
-    (colour & 0xff) / 0xff,
-  );
+  return `#${colour.toString(16).padStart(6, '0')}`;
 }
+
+// Bumped whenever a change here would draw an existing world differently. A
+// picture is drawn once and kept under its world's hash, so without this an
+// old drawing would be served for as long as its world stayed listed; the
+// server clears the directory once when this differs from what drew it.
+const OVERVIEW_STYLE = 2;
+
+const BASE_OUTLINE_WIDTH = 1.5;
 
 // A `color` on a mesh or a painted box, as the panel reads it. An array of
 // floats is what the parser leaves behind; anything else is left to neutral
@@ -130,7 +136,6 @@ function tintFill(colour) {
 }
 
 function obstacleFill(obs) {
-  if (obs.kind === 'base') return baseFill(obs.team);
   return tintFill(obs.capColor) || tintFill(obs.wallColor) || tintFill(obs.color)
     || NEUTRAL_FILL;
 }
@@ -146,7 +151,8 @@ function walkSurfaces(obstacles, mapSize, size, visit) {
     // A material's `noradar` keeps an obstacle off the panel, so it keeps it
     // out of the picture too -- the same whole-obstacle reading
     // `getRadarObstacles` makes, bzo having no per-face radar pass to skip.
-    if (!obs || obs.noRadar) continue;
+    // A base is drawn last, as an outline (`baseOutlines`).
+    if (!obs || obs.noRadar || obs.kind === 'base') continue;
     const fill = obstacleFill(obs);
     if (obs.type === 'mesh') {
       // Read out of the mesh's flat arrays, which by this point are the only
@@ -217,6 +223,22 @@ function walkSurfaces(obstacles, mapSize, size, visit) {
 // as-is mirrors every angle that is not a multiple of 90 degrees -- an
 // obstacle's own `bounds` cannot catch it, being the same either way, but
 // `hix.bzw`'s corner-to-centre walls land on the wrong diagonal.
+// Every base's outline, over everything else -- upstream's order too: its
+// bases follow the boxes, pyramids and meshes (`RadarRenderer::renderObstacles`).
+function baseOutlines(obstacles, mapSize, size) {
+  const half = mapSize / 2;
+  const toPixel = (value) => ((value + half) / mapSize) * size;
+  let out = '';
+  for (const obs of obstacles) {
+    if (!obs || obs.noRadar || obs.kind !== 'base') continue;
+    const points = footprintCorners(obs, toPixel)
+      .map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+    out += `<polygon points="${points}" fill="none" stroke="${baseStroke(obs.team)}"`
+      + ` stroke-width="${BASE_OUTLINE_WIDTH}"/>`;
+  }
+  return out;
+}
+
 function footprintCorners(obs, toPixel) {
   const rotation = -(obs.rotation || 0);
   const cos = Math.cos(rotation);
@@ -448,6 +470,7 @@ function buildMapOverviewSvg(entry, options = {}) {
     + ` width="${size}" height="${size}" role="img">`
     + `<rect width="${size}" height="${size}" fill="${BACKGROUND}"/>`
     + body
+    + baseOutlines(obstacles, mapSize, size)
     + `<rect x="0.5" y="0.5" width="${size - 1}" height="${size - 1}"`
     + ` fill="none" stroke="${BORDER}"/>`
     + `</svg>`;
@@ -455,5 +478,6 @@ function buildMapOverviewSvg(entry, options = {}) {
 
 module.exports = {
   OVERVIEW_SIZE,
+  OVERVIEW_STYLE,
   buildMapOverviewSvg,
 };

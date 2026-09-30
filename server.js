@@ -518,6 +518,33 @@ try {
   logError(`Could not create overview cache directory at ${OVERVIEW_CACHE_DIR}:`, error);
 }
 app.use('/overviews', express.static(OVERVIEW_CACHE_DIR, { setHeaders: setStaticHeaders }));
+// Pictures drawn by a different `OVERVIEW_STYLE` go, once, so every world is
+// drawn again the current way as it is next met: a local map in the boot
+// pass, a bzo instance on its next report, a BZFlag world when the tracker
+// finds it has no picture.
+{
+  const stylePath = path.join(OVERVIEW_CACHE_DIR, 'style');
+  let drawnBy = null;
+  try {
+    drawnBy = fs.readFileSync(stylePath, 'utf8').trim();
+  } catch {
+    // Never recorded, which is also a different style.
+  }
+  if (drawnBy !== String(mapOverview.OVERVIEW_STYLE)) {
+    let removed = 0;
+    try {
+      for (const name of fs.readdirSync(OVERVIEW_CACHE_DIR)) {
+        if (!name.endsWith('.svg')) continue;
+        fs.unlinkSync(path.join(OVERVIEW_CACHE_DIR, name));
+        removed += 1;
+      }
+      fs.writeFileSync(stylePath, `${mapOverview.OVERVIEW_STYLE}\n`);
+    } catch (error) {
+      logError(`Could not clear ${OVERVIEW_CACHE_DIR} for a new overview style:`, error);
+    }
+    if (removed > 0) log(`[MAPS] cleared ${removed} overview(s) drawn in an older style`);
+  }
+}
 // Every picture already here, planned for brotli before anything sweeps the
 // sidecars: a picture is drawn once and then only read, so nothing else would
 // name it to `precompress` this run, and a sidecar the plan does not name is
@@ -1732,9 +1759,19 @@ function importedOverviewUrl(hostPort) {
   return parsed ? bzfsRowOverviewUrl(parsed.host, parsed.port) : null;
 }
 
+// Whether this instance draws and shows its own pictures of BZFlag worlds.
+// Only one whose server lists are its own does: the list server, or an
+// instance with none configured. Every other reads the list server's lists,
+// which name the list server's picture of each world.
+function drawsBzfsPictures() {
+  return IS_DESIGNATED_LIST_SERVER || !LIST_SERVER_URL;
+}
+
 // A BZFlag server's picture, as a path on this server, or null: the one kept
-// under its world's BZFlag hash, else a live import's own.
+// under its world's BZFlag hash, else a live import's own. Null where the
+// list server's picture is the one to show (`drawsBzfsPictures`).
 function bzfsRowOverviewUrl(host, port) {
+  if (!drawsBzfsPictures()) return null;
   const record = bzfsWorlds.recordFor(host, port);
   if (record && bzfsOverviewPath(host, port, record.worldHash)) {
     return `/overviews/bzfs-${record.worldHash}.svg`;
@@ -10235,8 +10272,13 @@ function registerMapFile(
   const overviewName = overviewNameFor(fileName, hash);
   const overviewUrl = `/overviews/${overviewName}.svg`;
   const overviewPath = path.join(OVERVIEW_CACHE_DIR, `${overviewName}.svg`);
+  // An import is a BZFlag world, whose picture only an instance drawing its
+  // own lists keeps -- unless it is the map this instance serves, which its
+  // own Local maps row shows.
+  const wantsOverview = drawsBzfsPictures() || !parseImportMapFileName(fileName)
+    || fileName === MAP_SOURCE;
   let hasOverview = fs.existsSync(overviewPath);
-  if (!hasOverview) {
+  if (!hasOverview && wantsOverview) {
     try {
       const svg = mapOverview.buildMapOverviewSvg(entry);
       fs.writeFileSync(overviewPath, svg);

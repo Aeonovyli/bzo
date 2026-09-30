@@ -15623,6 +15623,32 @@ function getRadarOpacity(playerY, baseY = 0, height = 0) {
 //
 // Sorted once per map rather than per frame, keyed on the obstacle list itself.
 let radarObstacleOrder = { source: null, list: [] };
+let radarBaseList = { source: null, list: [] };
+
+// The bases, drawn apart from the obstacles and after them: an outline in the
+// team's own radar colour, as upstream's `RadarRenderer::renderBasesAndTeles`
+// draws them (a `GL_LINE_LOOP` in `Team::getRadarColor`). Filled, a base hid
+// the players and the flag on it, which is what a base is for. Unshaded and
+// undimmed, as upstream's is -- an outline has no area to read as ground.
+function getRadarBases() {
+  if (radarBaseList.source !== OBSTACLES) {
+    radarBaseList = {
+      source: OBSTACLES,
+      list: OBSTACLES
+        .filter((obs) => obs.kind === 'base' && !obs.noRadar)
+        .map((obs) => {
+          const team = getTeamFromColorIndex(Number(obs.team));
+          const color = team ? getPlayerTeamRadarColor(team) : null;
+          return {
+            obs,
+            cullRadius: getRadarObstacleCullRadius(obs),
+            stroke: Number.isFinite(color) ? colorToCSS(color) : RADAR_NEUTRAL_FILL,
+          };
+        }),
+    };
+  }
+  return radarBaseList.list;
+}
 
 function getRadarObstacleTopY(obs) {
   return (obs.baseY || 0) + getObstacleHeight(obs);
@@ -15638,7 +15664,7 @@ function getRadarObstacles() {
       // out instead. A mesh draws through `getRadarMeshObstacles` below instead of
       // here -- it has no single footprint the way a box's `w`/`d` gives one.
       list: [...OBSTACLES]
-        .filter((obs) => !obs.noRadar && obs.type !== 'mesh')
+        .filter((obs) => !obs.noRadar && obs.type !== 'mesh' && obs.kind !== 'base')
         .sort((left, right) => getRadarObstacleTopY(left) - getRadarObstacleTopY(right))
         .map((obs) => ({ obs, cullRadius: getRadarObstacleCullRadius(obs) })),
     };
@@ -15723,6 +15749,9 @@ function getRadarMeshObstacles() {
 // a coloured surface still reads as ground rather than as a tank.
 const RADAR_NEUTRAL_FILL_RGB = [180, 180, 180];
 const RADAR_TINT_STRENGTH = 0.65;
+// A base's outline, in panel pixels. Upstream's is a one-pixel line on a panel
+// a fraction the size of this one.
+const RADAR_BASE_OUTLINE_WIDTH = 1.5;
 const RADAR_NEUTRAL_FILL = `rgb(${RADAR_NEUTRAL_FILL_RGB.join(',')})`;
 
 // How finely an obstacle's depth opacity is rounded before it decides whether
@@ -15758,31 +15787,9 @@ function getRadarShadedFill(red, green, blue) {
   return `rgb(${shade(red, neutralRed)},${shade(green, neutralGreen)},${shade(blue, neutralBlue)})`;
 }
 
-// One string per team, built the first time that team's base is drawn. The
-// radar repaints every frame over every obstacle in range, and this was three
-// rounds of arithmetic and a fresh string each time.
-const radarBaseFills = new Map();
-
-function getRadarBaseFill(teamColorIndex) {
-  const cached = radarBaseFills.get(teamColorIndex);
-  if (cached) return cached;
-
-  const team = getTeamFromColorIndex(teamColorIndex);
-  const radarColor = team ? getPlayerTeamRadarColor(team) : null;
-  const fill = Number.isFinite(radarColor)
-    ? getRadarShadedFill(
-      ((radarColor >> 16) & 0xff) / 0xff,
-      ((radarColor >> 8) & 0xff) / 0xff,
-      (radarColor & 0xff) / 0xff,
-    )
-    : RADAR_NEUTRAL_FILL;
-  radarBaseFills.set(teamColorIndex, fill);
-  return fill;
-}
-
-// Cached by the colour rather than by the obstacle, for the same reason a base's
-// is cached by its team: a map that paints fifty pads one colour cuts one
-// string, and a colour means the same fill whatever map it came from.
+// Cached by the colour rather than by the obstacle: a map that paints fifty
+// pads one colour cuts one string, and a colour means the same fill whatever
+// map it came from.
 const radarTintFills = new Map();
 
 function getRadarTintFill(tint) {
@@ -15794,11 +15801,10 @@ function getRadarTintFill(tint) {
   return fill;
 }
 
-// A base takes its team's colour and anything else takes the colour its map
-// painted it, if it painted one. The cap first: the radar looks down.
+// An obstacle takes the colour its map painted it, if it painted one. The cap
+// first: the radar looks down. A base is not filled at all (`getRadarBases`).
 function getObstacleRadarFillStyle(obs) {
   if (!obs) return RADAR_NEUTRAL_FILL;
-  if (obs.kind === 'base') return getRadarBaseFill(Number(obs.team));
   const tint = obs.capColor || obs.wallColor;
   return tint ? getRadarTintFill(tint) : RADAR_NEUTRAL_FILL;
 }
@@ -16316,6 +16322,44 @@ function updateRadar() {
   // Everything the two loops above accumulated, before the gameplay layers go
   // down over it.
   flushRadarFills();
+
+  // The bases over the obstacles, as outlines -- see `getRadarBases`. Clipped
+  // to the panel rather than polygon-clipped, so a base half off the edge does
+  // not draw the edge as part of its outline.
+  const radarBases = typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES) ? getRadarBases() : [];
+  if (radarBases.length) {
+    radarCtx.save();
+    radarCtx.beginPath();
+    radarCtx.rect(center - radarWorldHalfExtent, center - radarWorldHalfExtent,
+      radarWorldHalfExtent * 2, radarWorldHalfExtent * 2);
+    radarCtx.clip();
+    radarCtx.lineWidth = RADAR_BASE_OUTLINE_WIDTH;
+    radarCtx.lineJoin = 'miter';
+    for (const { obs, cullRadius, stroke } of radarBases) {
+      const centerRel = toRadarRelative(obs.x, obs.z);
+      if (isOutsideRadarSquare(centerRel.x, centerRel.y, cullRadius)) continue;
+      const halfW = (obs.w || 8) / 2;
+      const halfD = (obs.d || 8) / 2;
+      const rotation = getRadarObjectRotation(obs.rotation);
+      const cosR = Math.cos(rotation);
+      const sinR = Math.sin(rotation);
+      radarCtx.beginPath();
+      for (let i = 0; i < 4; i += 1) {
+        const cornerX = RADAR_BOX_CORNERS[i * 2] * halfW;
+        const cornerZ = RADAR_BOX_CORNERS[(i * 2) + 1] * halfD;
+        const relX = centerRel.x + ((cornerX * cosR) - (cornerZ * sinR));
+        const relY = centerRel.y + ((cornerX * sinR) + (cornerZ * cosR));
+        const panelX = center + ((relX / radarDistance) * radarWorldHalfExtent);
+        const panelY = center + ((relY / radarDistance) * radarWorldHalfExtent);
+        if (i === 0) radarCtx.moveTo(panelX, panelY);
+        else radarCtx.lineTo(panelX, panelY);
+      }
+      radarCtx.closePath();
+      radarCtx.strokeStyle = stroke;
+      radarCtx.stroke();
+    }
+    radarCtx.restore();
+  }
 
   // Draw projectiles (shots) within radar distance
   const shotRadarColorOf = (proj) => proj.userData?.radarColor || '#FFD700';

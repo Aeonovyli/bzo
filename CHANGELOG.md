@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A client reconnecting after a server restart no longer sets off a linear
+  and an angular drift warning. It sent its previous session's position
+  before its rejoin was confirmed, and the server judged it against a tank
+  it had not placed yet. The client now waits for the join, and the server
+  ignores a move from a connection that has not joined.
+- Team bases are outlined in their team's colour on the radar and in the
+  map pictures, as BZFlag draws them, instead of filled, so the players and
+  the flag on a base can be seen. Pictures drawn the old way are cleared
+  once at boot and redrawn as each world is next met (#156).
+- An instance reading the list server shows the list server's picture for
+  every BZFlag world and draws none of its own, except an import it is
+  serving; its own pictures are of its own maps.
+
 ## [1.2.94] - 2026-09-30
 
 ### Fixed
