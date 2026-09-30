@@ -40,8 +40,19 @@ const RECHECK_MS = 24 * 60 * 60 * 1000;
 
 // A server that refused, timed out or sent something unusable is not asked
 // again straight away. Shorter than `RECHECK_MS` because being unreachable is
-// usually the temporary one of the two.
+// usually the temporary one of the two -- but doubling per consecutive
+// failure, because the other kind exists and retrying it is pure waste. One
+// listed world is larger than `JSON.stringify` can return a string for, so it
+// fails identically every time it is fetched, and fetching it is not cheap.
+// The cap keeps even that one being retried about weekly, which is what a
+// server changing to a smaller map deserves.
 const FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const FAILURE_COOLDOWN_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+function failureCooldown(failCount) {
+  const backoff = FAILURE_COOLDOWN_MS * (2 ** Math.max(0, (failCount || 1) - 1));
+  return Math.min(backoff, FAILURE_COOLDOWN_MAX_MS);
+}
 
 // One server per tick, and a floor between the expensive half. The dials are
 // cheap enough that the tick rate is about politeness rather than load; the
@@ -49,6 +60,11 @@ const FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // never seen would otherwise download every world on it at once.
 const TICK_MS = 30 * 1000;
 const IMPORT_GAP_MS = 60 * 1000;
+
+// Once a pass is complete every following tick finds nothing due, so the
+// tidy-up it triggers is spaced out rather than run twice a minute for the
+// rest of the day.
+const PASS_COMPLETE_MIN_GAP_MS = 60 * 60 * 1000;
 
 // What the public list says about a server that is not about who happens to be
 // playing. Player and observer counts move constantly and say nothing about
@@ -80,7 +96,7 @@ function serverKey(host, port) {
 // as missing, and `log`/`logError`.
 function createBzfsWorldTracker(deps) {
   const {
-    statePath, queryServerStatus, importWorld, isImported, log, logError,
+    statePath, queryServerStatus, importWorld, isImported, onPassComplete, log, logError,
   } = deps;
   // `host:port` -> { worldHash, fingerprint, checkedAt, error, errorAt }
   const records = new Map();
@@ -89,6 +105,7 @@ function createBzfsWorldTracker(deps) {
   // do with the answer.
   let listed = new Map();
   let lastImportAt = 0;
+  let lastPassCompleteAt = 0;
   let timer = null;
   let writeTimer = null;
   let running = false;
@@ -157,7 +174,7 @@ function createBzfsWorldTracker(deps) {
     let bestAge = -Infinity;
     for (const [key, server] of listed) {
       const record = records.get(key);
-      if (record?.error && now - (record.errorAt || 0) < FAILURE_COOLDOWN_MS) continue;
+      if (record?.error && now - (record.errorAt || 0) < failureCooldown(record.failCount)) continue;
       const imported = isImported(server.host, server.port);
       let age;
       if (!record) age = Infinity;
@@ -178,7 +195,12 @@ function createBzfsWorldTracker(deps) {
       status = await queryServerStatus(server.host, server.port);
     } catch (error) {
       records.set(key, {
-        ...record, fingerprint, error: error.message, errorAt: now, dueNow: false,
+        ...record,
+        fingerprint,
+        error: error.message,
+        errorAt: now,
+        failCount: (record.failCount || 0) + 1,
+        dueNow: false,
       });
       save();
       return;
@@ -205,18 +227,30 @@ function createBzfsWorldTracker(deps) {
     lastImportAt = now;
     try {
       const { safeMapName } = await importWorld(server.host, server.port);
+      // Downloaded but not registered is a failure however well the transfer
+      // went -- a world bzo cannot parse has no picture, and treating it as
+      // done would leave it permanently due and re-fetched every tick.
+      if (!isImported(server.host, server.port)) {
+        throw new Error('world downloaded but could not be parsed');
+      }
       records.set(key, {
         worldHash: status.worldHash || '',
         fingerprint,
         checkedAt: now,
         error: null,
         errorAt: null,
+        failCount: 0,
         dueNow: false,
       });
       log(`[WORLDS] ${key} world ${status.worldHash || '(unhashed)'} imported as ${safeMapName}`);
     } catch (error) {
       records.set(key, {
-        ...record, fingerprint, error: error.message, errorAt: now, dueNow: false,
+        ...record,
+        fingerprint,
+        error: error.message,
+        errorAt: now,
+        failCount: (record.failCount || 0) + 1,
+        dueNow: false,
       });
       log(`[WORLDS] ${key} could not be imported: ${error.message}`);
     }
@@ -229,7 +263,16 @@ function createBzfsWorldTracker(deps) {
     try {
       const now = Date.now();
       const server = pickDue(now);
-      if (server) await check(server, now);
+      if (server) { await check(server, now); return; }
+      // Nothing left to ask about: every listed server has a current answer,
+      // or a failure still inside its cooldown. That is as complete as the
+      // list gets, and the moment it is safe to throw away what nothing
+      // refers to any more -- before it, a picture with no reference yet may
+      // simply be one this pass has not reached.
+      if (!listed.size || !onPassComplete) return;
+      if (now - lastPassCompleteAt < PASS_COMPLETE_MIN_GAP_MS) return;
+      lastPassCompleteAt = now;
+      await onPassComplete();
     } catch (error) {
       logError('[WORLDS] tracker tick failed:', error);
     } finally {

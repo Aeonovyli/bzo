@@ -2473,9 +2473,52 @@ const bzfsWorlds = createBzfsWorldTracker({
     const fileName = remoteMapFileName(host, port);
     return MAP_REGISTRY.has(fileName) || mapIndex.has(fileName, resolveMapFilePath(fileName));
   },
+  onPassComplete: () => purgeUnreferencedOverviews(),
   log,
   logError,
 });
+
+// What `cache/overviews/` holds that nothing points at any more: a bzo
+// instance that has changed map leaves its old world's picture behind, and
+// nothing else ever mentions that hash again.
+//
+// Only once the world tracker has a current answer for every listed server
+// (`onPassComplete`), because before that an unreferenced picture may simply
+// be one the pass has not reached. And only past `OVERVIEW_MIN_AGE_MS`, so a
+// picture drawn moments ago -- for a row whose report has not landed yet --
+// is never the one thrown away.
+const OVERVIEW_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+
+function purgeUnreferencedOverviews() {
+  // Every hash anything still refers to: the maps this server holds, and the
+  // world each bzo instance last reported playing.
+  const referenced = new Set();
+  for (const entry of MAP_REGISTRY.values()) referenced.add(entry.hash);
+  for (const record of listServerKeys.listAll()) {
+    if (record.live?.mapHash) referenced.add(record.live.mapHash);
+  }
+  const cutoff = Date.now() - OVERVIEW_MIN_AGE_MS;
+  let removed = 0;
+  let names;
+  try {
+    names = fs.readdirSync(OVERVIEW_CACHE_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const hash = name.endsWith('.svg') ? name.slice(0, -4) : null;
+    if (!hash || referenced.has(hash)) continue;
+    const filePath = path.join(OVERVIEW_CACHE_DIR, name);
+    try {
+      if (fs.statSync(filePath).mtimeMs > cutoff) continue;
+      fs.unlinkSync(filePath);
+      removed += 1;
+    } catch (error) {
+      logError(`Could not remove unreferenced overview ${name}:`, error);
+    }
+  }
+  if (removed > 0) log(`[WORLDS] removed ${removed} overview(s) nothing refers to any more`);
+}
 
 async function getRemoteServerList() {
   if (Date.now() - remoteServerListCache.at < REMOTE_SERVER_LIST_TTL_MS) {
