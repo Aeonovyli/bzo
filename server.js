@@ -293,18 +293,25 @@ function redactInstallPath(text) {
 }
 
 // Common log function: logs to console and to server.log
-function log(...args) {
-  const now = new Date();
-  const timestamp = now.toISOString();
-  // An Error stringifies to `{}`, which is how a real failure reaches the log
-  // saying nothing at all -- a world too large for `JSON.stringify` read as
-  // "Could not hash map x.bzw: {}". Its stack carries both the message and
-  // where it came from, and `redactInstallPath` below takes the paths out.
+// One line of log arguments, for both `log` and `logError` -- shared rather
+// than written twice, which is how the two drifted apart in the first place.
+//
+// An Error stringifies to `{}`, which is how a real failure reaches the log
+// saying nothing at all: a world too large for `JSON.stringify` read as
+// "Could not hash map x.bzw: {}". Its stack carries both the message and
+// where it came from, and `redactInstallPath` takes the paths back out.
+function formatLogArgs(args) {
   const render = (a) => {
     if (a instanceof Error) return a.stack || a.message || String(a);
     return typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a);
   };
-  const msg = redactInstallPath(args.map(render).join(' '));
+  return redactInstallPath(args.map(render).join(' '));
+}
+
+function log(...args) {
+  const now = new Date();
+  const timestamp = now.toISOString();
+  const msg = formatLogArgs(args);
   const logMsg = `[${timestamp}] ${msg}`;
   // Write to console
   console.log(logMsg);
@@ -315,7 +322,7 @@ function log(...args) {
 function logError(...args) {
   const now = new Date();
   const timestamp = now.toISOString();
-  const msg = redactInstallPath(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+  const msg = formatLogArgs(args);
   const logMsg = `[${timestamp}] [ERROR] ${msg}`;
   console.error(logMsg);
   fs.appendFileSync(logPath, logMsg + '\n');
@@ -1291,7 +1298,18 @@ function listColumnWidth(header, values) {
 function listHeadingCount(entries) {
   if (!entries.length) return 'none';
   const players = entries.reduce((sum, entry) => sum + (Number(entry.players) || 0), 0);
-  return `${entries.length} with ${players} ${players === 1 ? 'player' : 'players'}`;
+  return `${entries.length} with ${players} ${players === 1 ? 'player' : 'players'}`
+    + missingOverviewCount(entries);
+}
+
+// How many rows in a table are still waiting for their overview picture, said
+// only when some are. A row with `undefined` is one that is not in the scheme
+// at all and is not waiting for anything; `null` is one whose picture has not
+// been drawn yet, which for a bzfs row means nobody has imported that world
+// and for a bzo row that the list server has not fetched it.
+function missingOverviewCount(entries) {
+  const waiting = entries.filter((entry) => entry.overviewUrl === null).length;
+  return waiting ? `, ${waiting} without a map image` : '';
 }
 
 // The readout pane for one row: upstream's own panel, in upstream's order,
@@ -2121,7 +2139,9 @@ not enter that game.</p>
 ${flash}
 ${renderServerList('serverList', 'serverFilter', bzfsEntries)}
 
-<h1 id="maps">Local maps - ${localMaps.length}</h1>
+<h1 id="maps">Local maps - ${localMaps.length}${missingOverviewCount(localMaps.map(
+  (map) => ({ overviewUrl: MAP_REGISTRY.get(map.fileName)?.overviewUrl ?? null }),
+))}</h1>
 <p class="muted">Already in this server's <code>maps/</code>, including anything imported above --
 pick a row to read it; its link views that map.</p>
 ${renderMapList('mapList', 'mapFilter', localMaps)}
