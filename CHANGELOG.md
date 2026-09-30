@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.94] - 2026-09-30
+
 ### Fixed
 - Share View Link made while watching a server hands back a `?watch=` link
   to that server with `cam=` and `pos=`, not a Map Viewer link. An observer
