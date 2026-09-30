@@ -1532,6 +1532,16 @@ function renderMapList(listId, filterId, maps) {
     + `</div>`;
 }
 
+// The picture of a BZFlag server's world, when this instance holds an import
+// of it -- `null` while it does not, which is the waiting mark. Named by
+// `host:port`, as a proxy target and a bzfs row both spell it.
+function importedOverviewUrl(hostPort) {
+  const parsed = parseHostPort(hostPort);
+  if (!parsed) return null;
+  const imported = MAP_REGISTRY.get(remoteMapFileName(parsed.host, parsed.port));
+  return imported && imported.overviewUrl ? `/maps/${imported.hash}.svg` : null;
+}
+
 // The overview picture for a pane, or the app's own mark where there is not
 // one yet -- a map is registered by a background trickle, so the first visitor
 // after a boot can reach the page before the picture for a given map exists.
@@ -1912,12 +1922,11 @@ function renderListPage({
       // A row is one thing or the other: a game bzo is running on a map of its
       // own, or a real BZFlag server it is carrying. The map's extension is
       // the report's business, not a reader's.
-      // A proxy row gets the waiting mark rather than the carrying instance's
-      // picture: its world is the *target's* world, a real BZFlag one, which
-      // the list server has to import before it can draw anything
-      // (docs/list-server-plan.md). So `null` -- "none yet" -- and never
+      // A proxy row's world is the *target's* world, a real BZFlag one, so its
+      // picture is that server's -- the same import a bzfs row for the same
+      // address would show, when this instance holds one. Never
       // `s.overviewUrl`, which belongs to a different game on the same host.
-      overviewUrl: proxy ? null : (s.overviewUrl || null),
+      overviewUrl: proxy ? importedOverviewUrl(proxy.target) : (s.overviewUrl || null),
       extras: proxy
         ? [['BZFlag server', escapeHtml(proxy.target)], ['Carried by', urlLink]]
         : [
