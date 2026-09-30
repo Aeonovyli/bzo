@@ -12,6 +12,53 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   following, tracking or riding with a player, or watching a flag, is handed
   back as free roam from where the camera is, since that player may be gone
   by the time the link is opened (#160).
+- Fullscreen left on last time comes back on a phone's first tap. It was
+  asked for on the touch that grants no permission, refused, and never
+  asked again. A refused or unsupported request no longer says so in chat,
+  and the Fullscreen row reads Unavailable where the browser has no
+  fullscreen. The screen resolution after a toggle goes to the debug log
+  (#158).
+- A map too big to write as one JSON string is cached like any other. Its
+  cloud seed was taken over the whole world at once, which ran past V8's
+  string limit and left the map unviewable.
+- `/list` shows a map's picture straight after a restart, from the saved
+  map index, instead of waiting for the boot pass to read the map back.
+- A BZFlag server's picture is kept as `/overviews/bzfs-<hash>.svg`, named
+  by its world's BZFlag hash, and outlives the two-hour import it was drawn
+  from. The world tracker downloads a world again only when a poll reports
+  a different hash, where it used to re-fetch every world whose import had
+  aged out. The list JSON links only these. A picture is deleted once no
+  listed server has used it for a day, counted only over complete passes
+  and kept across restarts.
+- Every map picture, a bzo instance's, a BZFlag server's or this server's
+  own maps', is drawn once into `cache/overviews/` and served from
+  `/overviews/`, with its brotli copy under `cache/br/overviews/`. None is
+  kept beside a map's JSON any more, and one already drawn is not redrawn
+  at boot.
+- A remote import (`import-*.bzw`) is no longer parsed at boot or listed
+  under Local maps, unless it is the map being served; the bzfs list shows
+  it. It is parsed when viewed, imported or served, and a view inside the
+  hour reads the copy on disk rather than downloading it again. The boot
+  pass here went from 122 maps in about 90 seconds to 19 in 9.
+- A proxy row on an instance reading the merged list shows its target's
+  world figures and picture, as the bzfs row for the same address does.
+
+### Added
+- An H column on every `/list` list, lit when the row's world is hashed.
+  Sorting on it puts rows sharing a world together and the unhashed ones
+  last, and the filter box searches hashes: a bare word, or `hs)` / `hash]`
+  (#155).
+
+### Changed
+- `server.log` is terser: server.json's settings on one line naming only
+  what differs from the default, the listen address and client build on
+  one, an anti-cheat finding on one, and group instancing as
+  `instanced 18/22 groups, 15 templates, 52 faces` for the served map, with
+  every other map's summed onto the background pass's `Converted` line.
+  A map's load counts
+  are one line beside its cache file, and a handshake's user agent is
+  shortened to `Chrome/152 Linux` when its shape is a known one; anything
+  else is logged whole.
 
 ## [1.2.93] - 2026-09-30
 

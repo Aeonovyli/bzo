@@ -505,6 +505,7 @@ app.use('/maps', express.static(MAP_CACHE_DIR, { setHeaders: setStaticHeaders })
 const mapIndex = createMapIndex({
   statePath: path.join(CACHE_DIR, 'map-index.json'),
   mapCacheDir: MAP_CACHE_DIR,
+  overviewDir: path.join(CACHE_DIR, 'overviews'),
   log,
   logError,
 });
@@ -517,6 +518,19 @@ try {
   logError(`Could not create overview cache directory at ${OVERVIEW_CACHE_DIR}:`, error);
 }
 app.use('/overviews', express.static(OVERVIEW_CACHE_DIR, { setHeaders: setStaticHeaders }));
+// Every picture already here, planned for brotli before anything sweeps the
+// sidecars: a picture is drawn once and then only read, so nothing else would
+// name it to `precompress` this run, and a sidecar the plan does not name is
+// swept as stale.
+try {
+  for (const name of fs.readdirSync(OVERVIEW_CACHE_DIR)) {
+    if (!name.endsWith('.svg')) continue;
+    const filePath = path.join(OVERVIEW_CACHE_DIR, name);
+    precompress.consider(`/overviews/${name}`, filePath, fs.readFileSync(filePath));
+  }
+} catch (error) {
+  logError(`Could not read ${OVERVIEW_CACHE_DIR}:`, error);
+}
 // Where precompress.cjs's own sidecar for a `/maps/<hash>.json` response
 // lands -- `cache/br/<urlPath minus its leading slash>...`, see `consider()`.
 const MAP_CACHE_BR_DIR = path.join(__dirname, 'cache', 'br', 'maps');
@@ -1431,6 +1445,14 @@ function listOptionLetter(text, on, onColor) {
   return `<span class="opt" style="color:${on ? onColor : ANSI_DIM_WHITE}">${text}</span>`;
 }
 
+// Lit when the row's world has a hash, which the pane spells out. Sorting on
+// it groups rows sharing a world, and the filter box searches it (#155).
+function listHashLetter(hash) {
+  return listOptionLetter('H', Boolean(hash), ANSI_RGB.white);
+}
+const LIST_HASH_HEADER = `<button class="opt" data-field="hs" data-text`
+  + ` title="World hash: sorts rows sharing a world together, unhashed last">H</button>`;
+
 function listOptionLetters(bits, imported) {
   const letter = (text, bit, onColor) => listOptionLetter(text, (bits & bit) !== 0, onColor);
   return letter('J', GAME_OPTION_BITS.jumping, ANSI_RGB.purple)
@@ -1510,7 +1532,7 @@ function listHeadingCount(entries) {
 // and for a bzo row that the list server has not fetched it.
 function missingOverviewCount(entries) {
   const waiting = entries.filter((entry) => entry.overviewUrl === null).length;
-  return waiting ? `, ${waiting} without a map image` : '';
+  return waiting ? `, ${waiting} without image` : '';
 }
 
 // The readout pane for one row: upstream's own panel, in upstream's order,
@@ -1624,7 +1646,7 @@ function renderMapList(listId, filterId, maps) {
       hashed: map.hashed,
       hash: registered ? registered.hash : '',
       stats,
-      overviewUrl: registered ? registered.overviewUrl : null,
+      overviewUrl: localMapOverviewUrl(map.fileName),
       modified: bzwPath ? statMtimeOrBlank(bzwPath) : '',
       bzw: bzwPath ? statSizeBytes(bzwPath) : 0,
       json: registered ? statSizeBytes(path.join(MAP_CACHE_DIR, `${registered.hash}.json`)) : 0,
@@ -1632,8 +1654,8 @@ function renderMapList(listId, filterId, maps) {
     };
   });
 
-  // `a` and `d` are the two fields the filter box's own glob looks at, so on
-  // this list typing a word matches a file name or a style. The `/` filter
+  // `a`, `d` and `hs` are the fields the filter box's own glob looks at, so on
+  // this list typing a word matches a file name, a style or a hash. The `/` filter
   // language is about servers and is not offered here -- there is no `?`
   // beside this box.
   const data = entries.map((entry) => ({
@@ -1643,6 +1665,7 @@ function renderMapList(listId, filterId, maps) {
     o: entry.stats ? entry.stats.objects || 0 : 0,
     fa: entry.stats ? entry.stats.faces || 0 : 0,
     sz: entry.stats ? entry.stats.size || 0 : 0,
+    hs: entry.hash || '',
   }));
 
   const num = (value) => (Number.isFinite(value) ? String(value) : '');
@@ -1662,6 +1685,7 @@ function renderMapList(listId, filterId, maps) {
       + `<span class="num col-obj">${stats ? num(stats.objects) : ''}</span>`
       + `<span class="num col-fa">${stats ? num(stats.faces) : ''}</span>`
       + `<span class="num col-sz">${stats ? num(stats.size) : ''}</span>`
+      + listHashLetter(entry.hash)
       + `<span class="addr">${escapeHtml(entry.file)}</span>`
       + `<span class="desc dim">${escapeHtml(mapStyleLabel(entry))}</span>`
       + `</a></li>`;
@@ -1671,6 +1695,7 @@ function renderMapList(listId, filterId, maps) {
     + `<button class="num col-obj" data-field="o" title="Obstacles in the world">Obj</button>`
     + `<button class="num col-fa" data-field="fa" title="Mesh faces in the world">Faces</button>`
     + `<button class="num col-sz" data-field="sz" title="World size">Size</button>`
+    + LIST_HASH_HEADER
     + `<button class="name" data-field="n" data-text title="Map file name">Name</button>`
     + `<button class="name" data-field="d" data-text title="Game style the map sets">Style</button>`
     + `</div>`;
@@ -1704,9 +1729,55 @@ function renderMapList(listId, filterId, maps) {
 // `host:port`, as a proxy target and a bzfs row both spell it.
 function importedOverviewUrl(hostPort) {
   const parsed = parseHostPort(hostPort);
-  if (!parsed) return null;
-  const imported = MAP_REGISTRY.get(remoteMapFileName(parsed.host, parsed.port));
-  return imported && imported.overviewUrl ? `/maps/${imported.hash}.svg` : null;
+  return parsed ? bzfsRowOverviewUrl(parsed.host, parsed.port) : null;
+}
+
+// A BZFlag server's picture, as a path on this server, or null: the one kept
+// under its world's BZFlag hash, else a live import's own.
+function bzfsRowOverviewUrl(host, port) {
+  const record = bzfsWorlds.recordFor(host, port);
+  if (record && bzfsOverviewPath(host, port, record.worldHash)) {
+    return `/overviews/bzfs-${record.worldHash}.svg`;
+  }
+  return localMapOverviewUrl(remoteMapFileName(host, port));
+}
+
+// A `p` hash is bzfs's MD5 of the world and is stable across that server's
+// restarts, which is what makes it a name a picture can be kept under.
+function isBzfsWorldHash(worldHash) {
+  return /^p[0-9a-f]{32}$/i.test(worldHash || '');
+}
+
+// The picture of one BZFlag world, by its hash (issue #147): drawn once, by
+// `registerMapFile`, when an import of that world registers, and then outliving
+// the import, so every listed server keeps a picture without this server
+// keeping every world -- imports still age out on `IMPORT_MAX_AGE_MS`. A new
+// hash means a new picture, and `purgeUnreferencedOverviews` drops the old one
+// once no server names it. Returns the path when the picture is held.
+function bzfsOverviewPath(host, port, worldHash) {
+  if (!isBzfsWorldHash(worldHash)) return null;
+  const filePath = path.join(OVERVIEW_CACHE_DIR, `bzfs-${worldHash}.svg`);
+  return fs.existsSync(filePath) ? filePath : null;
+}
+
+// What a map's picture is called in `OVERVIEW_CACHE_DIR`: an import of a
+// BZFlag world by that world's own hash, which is the name anyone else knows
+// it by, and every other map by bzo's hash of it.
+function overviewNameFor(fileName, hash) {
+  const imported = parseImportMapFileName(fileName);
+  const worldHash = imported ? bzfsWorlds.recordFor(imported.host, imported.port)?.worldHash : null;
+  return isBzfsWorldHash(worldHash) ? `bzfs-${worldHash}` : hash;
+}
+
+// A local map's drawn overview, as a path on this server, or null. The
+// registry once the boot pass has read the map back, and the on-disk index
+// before that, so a restart does not leave every row waiting for a picture
+// that is already on disk.
+function localMapOverviewUrl(fileName) {
+  const registered = MAP_REGISTRY.get(fileName);
+  if (registered) return registered.overviewUrl;
+  const overview = mapIndex.overviewOf(fileName, resolveMapFilePath(fileName));
+  return overview ? `/overviews/${overview}.svg` : null;
 }
 
 // The overview picture for a pane, or the app's own mark where there is not
@@ -1774,7 +1845,7 @@ function renderFilterHelp(listId) {
     + rows.map(([names, what]) => `<div class="helpRow">`
       + `<span><code>${names}</code></span><span>${what}</span></div>`).join('');
   return `<div class="filterHelp" id="${escapeHtml(listId)}-help" hidden>`
-    + `<p>Plain text is a glob over the address and description --`
+    + `<p>Plain text is a glob over the address, description and hash --`
     + ` <code>league</code>, <code>*.org</code>, <code>bz?.</code> -- and a word`
     + ` with no <code>*</code> or <code>?</code> in it is wrapped in both, so it`
     + ` matches anywhere. A leading <code>/</code> starts filters instead:`
@@ -1814,6 +1885,7 @@ function renderFilterHelp(listId) {
       ['a addr address', 'The address, host and port'],
       ['d desc description', 'The description'],
       ['ad addrdesc', 'Either one'],
+      ['hs hash', 'The world hash the pane shows'],
     ])
     + `<p>A capitalised pattern name matches case-sensitively:`
     + ` <code>d)league</code> ignores case, <code>D)League</code> does not.</p>`
@@ -1868,6 +1940,7 @@ function renderServerList(listId, filterId, unsorted) {
     in: set(entry, GAME_OPTION_BITS.inertia),
     an: set(entry, GAME_OPTION_BITS.antidote),
     im: entry.imported ? 1 : 0,
+    hs: entry.hash || '',
     ob: typeof entry.observers === 'number' ? entry.observers : null,
     // What the Name header sorts by: a server with no title sorts under its
     // address, which is what the row shows in that case anyway.
@@ -1891,6 +1964,7 @@ function renderServerList(listId, filterId, unsorted) {
       + `<span class="count col-o">${typeof entry.observers === 'number' ? entry.observers : ''}</span>`
       + `<span class="mark" style="color:${mark.color}" title="${escapeHtml(mark.title)}">*</span>`
       + listOptionLetters(bits(entry), entry.imported)
+      + listHashLetter(entry.hash)
       + `<span class="addr">${escapeHtml(entry.addr)}</span>`
       + `<span class="desc" style="color:${listShotColor(entry.maxShots)}">${escapeHtml(entry.desc || '')}</span>`
       + `</a></li>`;
@@ -1909,6 +1983,7 @@ function renderServerList(listId, filterId, unsorted) {
     + (hasImports
       ? `<button class="opt" data-field="im" title="This server already holds an import of that map">I</button>`
       : '')
+    + LIST_HASH_HEADER
     + `<button class="name" data-field="n" data-text`
     + ` title="The name, or the address when a server has none">Name &amp; Description</button>`
     + `</div>`;
@@ -1951,7 +2026,7 @@ function renderListPage({
   // and the client dropped the request on the floor -- `availableViewMaps` is
   // `MAP_REGISTRY`, so the name was never in it and the link fell through to
   // an ordinary join (issue #152).
-  const localMaps = listAvailableMapFiles()
+  const localMaps = listLocalMapFiles()
     .filter((fileName) => fileName !== 'random' || MAP_REGISTRY.has('random'))
     .map((fileName) => ({
       fileName,
@@ -1986,12 +2061,14 @@ function renderListPage({
   const bzfsEntries = servers.map((s, index) => {
     const info = s.info || {};
     const importFileName = remoteMapFileName(s.host, s.port);
-    const imported = MAP_REGISTRY.get(importFileName);
-    const importedPath = imported ? resolveMapFilePath(importFileName) : null;
+    // The import file itself, registered or not: it is only parsed once
+    // somebody views it (`listLocalMapFiles`).
+    const importedPath = resolveMapFilePath(importFileName);
     const maxima = Array.isArray(info.teamMaximums) ? info.teamMaximums : [];
     return {
       id: `bzfs-pane-${index}`,
       addr: `${s.host}:${s.port}`,
+      hash: (s.world || publishWorldFacts(s.host, s.port) || {}).hash || '',
       desc: s.title,
       // Always the row's own link, imported or not -- `?viewmap=` already
       // imports on demand (`importMapForView`) the moment nothing this fresh
@@ -2008,8 +2085,7 @@ function renderListPage({
       // this server would actually show you. Otherwise whatever the list
       // server said, which is an absolute URL on the designated instance and
       // is how a server bzo has never imported still has a picture.
-      overviewUrl: (imported && imported.overviewUrl && `/maps/${imported.hash}.svg`)
-        || s.overviewUrl || null,
+      overviewUrl: bzfsRowOverviewUrl(s.host, s.port) || s.overviewUrl || null,
       style: info.style,
       maxShots: info.maxShots,
       gameOptionsBits: info.gameOptionsBits,
@@ -2036,7 +2112,7 @@ function renderListPage({
         // `describeImportedWorld`.
         ...(s.world ? describeRelayedWorld(s.world) : describeImportedWorld(s.host, s.port)),
       ],
-      imported: MAP_REGISTRY.has(importFileName),
+      imported: Boolean(importedPath),
       // Watching is the live game rather than the map: a real observer
       // connection to that server (`docs/proxy.md`). The same offer the
       // in-client View list makes on the same test (`canWatchRemoteServers`),
@@ -2049,7 +2125,7 @@ function renderListPage({
         + `<form method="post" action="/list/import" class="inlineForm">`
         + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
         + `<input type="hidden" name="port" value="${s.port}">`
-        + `<button type="submit">${MAP_REGISTRY.has(importFileName) ? 'Re-import' : 'Import'}</button></form>`,
+        + `<button type="submit">${importedPath ? 'Re-import' : 'Import'}</button></form>`,
     };
   });
 
@@ -2067,11 +2143,17 @@ function renderListPage({
     // The reported name is the identity (`host:port`); a link spells it the
     // way a URL should, which is the one derivation between the two.
     const href = proxy ? `${s.url}/?proxy=${encodeURIComponent(proxyUrlKey(proxy.target))}` : s.url;
+    // The bzfs row for the same address, which on an instance reading the
+    // merged list carries the figures and picture the list server measured.
+    const relayed = proxy ? servers.find((b) => `${b.host}:${b.port}` === proxy.target) : null;
     const urlLink = `<a href="${escapeHtml(s.url)}">${escapeHtml(s.url)}</a>`;
     return {
       id: `bzo-pane-${index}`,
       addr: proxy ? proxy.target : s.url,
       desc: proxy ? (proxy.title || proxy.target) : s.title,
+      hash: (proxy
+        ? (relayed?.world || publishWorldFacts(...splitHostPort(proxy.target)) || {})
+        : (s.world || {})).hash || '',
       href,
       action: 'Enter game',
       style: game.style,
@@ -2095,17 +2177,20 @@ function renderListPage({
       // picture is that server's -- the same import a bzfs row for the same
       // address would show, when this instance holds one. Never
       // `s.overviewUrl`, which belongs to a different game on the same host.
-      overviewUrl: proxy ? importedOverviewUrl(proxy.target) : (s.overviewUrl || null),
+      overviewUrl: proxy
+        ? (importedOverviewUrl(proxy.target) || relayed?.overviewUrl || null)
+        : (s.overviewUrl || null),
       extras: proxy
         ? [
           ['BZFlag server', escapeHtml(proxy.target)],
           ['Carried by', urlLink],
           // A proxy row's world is the target's, so the figures are the ones
-          // a bzfs row for the same address would show -- the same import,
-          // read the same way, the way the picture above already is. Blank
-          // until this instance has imported that server; nothing here
-          // fetches, and a proxy row is not a reason to.
-          ...describeImportedWorld(...splitHostPort(proxy.target)),
+          // a bzfs row for the same address shows -- what the list server
+          // measured, or else this instance's own import, the way the picture
+          // above is. Nothing here fetches, and a proxy row is not a reason to.
+          ...(relayed?.world
+            ? describeRelayedWorld(relayed.world)
+            : describeImportedWorld(...splitHostPort(proxy.target))),
         ]
         : [
           ['Map', escapeHtml(String(s.map || '').replace(/\.bzw$/, ''))],
@@ -2366,10 +2451,10 @@ ${flash}
 ${renderServerList('serverList', 'serverFilter', bzfsEntries)}
 
 <h1 id="maps">Local maps - ${localMaps.length}${missingOverviewCount(localMaps.map(
-  (map) => ({ overviewUrl: MAP_REGISTRY.get(map.fileName)?.overviewUrl ?? null }),
+  (map) => ({ overviewUrl: localMapOverviewUrl(map.fileName) }),
 ))}</h1>
-<p class="muted">Already in this server's <code>maps/</code>, including anything imported above --
-pick a row to read it; its link views that map.</p>
+<p class="muted">Already in this server's <code>maps/</code> -- pick a row to read it; its link
+views that map.</p>
 ${renderMapList('mapList', 'mapFilter', localMaps)}
 
 <!-- Sorting, selection and the filter language: public/list-page.js. A plain
@@ -2655,12 +2740,11 @@ const bzfsWorlds = createBzfsWorldTracker({
   queryServerStatus: (host, port) => queryServerStatus(host, port),
   importWorld: (host, port) =>
     performRemoteMapImport(host, port, IMPORT_WORLD_BACKGROUND_TIMEOUT_MS),
-  // The registry rather than the file: a map is only viewable, and only has a
-  // picture, once it has been parsed and registered.
-  // The registry once the boot pass has read a map back, and the on-disk
-  // index before that -- otherwise every restart re-downloads whatever the
-  // tracker reaches while the pass is still working through the list.
-  isImported: (host, port) => {
+  // A world with a BZFlag hash has a picture once one is saved under that
+  // hash, whether or not the import it was drawn from is still here. One with
+  // none has nothing to key a picture by, so only a live import counts.
+  hasPicture: (host, port, worldHash) => {
+    if (isBzfsWorldHash(worldHash)) return Boolean(bzfsOverviewPath(host, port, worldHash));
     const fileName = remoteMapFileName(host, port);
     return MAP_REGISTRY.has(fileName) || mapIndex.has(fileName, resolveMapFilePath(fileName));
   },
@@ -2675,40 +2759,65 @@ const bzfsWorlds = createBzfsWorldTracker({
 //
 // Only once the world tracker has a current answer for every listed server
 // (`onPassComplete`), because before that an unreferenced picture may simply
-// be one the pass has not reached. And only past `OVERVIEW_MIN_AGE_MS`, so a
-// picture drawn moments ago -- for a row whose report has not landed yet --
-// is never the one thrown away.
-const OVERVIEW_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+// be one the pass has not reached. And only once nothing has referred to it
+// for `OVERVIEW_UNUSED_MS`, counted from the first complete pass that found it
+// unused, so a server briefly off the list or a report not yet landed never
+// costs a picture. When each picture was first found unused is kept on disk,
+// because a restart must not restart the count.
+const OVERVIEW_UNUSED_MS = 24 * 60 * 60 * 1000;
+const OVERVIEW_UNUSED_PATH = path.join(CACHE_DIR, 'overviews-unused.json');
 
 function purgeUnreferencedOverviews() {
-  // Every hash anything still refers to: the maps this server holds, and the
-  // world each bzo instance last reported playing.
+  // Every picture anything still shows: this server's own maps (its local
+  // maps table, its own game among them), each bzo instance on the list, and
+  // each BZFlag server on the list.
   const referenced = new Set();
-  for (const entry of MAP_REGISTRY.values()) referenced.add(entry.hash);
-  for (const record of listServerKeys.listAll()) {
-    if (record.live?.mapHash) referenced.add(record.live.mapHash);
+  for (const entry of MAP_REGISTRY.values()) {
+    if (entry.overviewUrl) referenced.add(path.basename(entry.overviewUrl, '.svg'));
   }
-  const cutoff = Date.now() - OVERVIEW_MIN_AGE_MS;
-  let removed = 0;
+  // The bzo list as it is published: a key gone stale is off the list, so
+  // its picture's day starts.
+  for (const record of listServerKeys.listAll()) {
+    if (record.live?.mapHash && !isListServerKeyStale(record)) referenced.add(record.live.mapHash);
+  }
+  for (const worldHash of bzfsWorlds.worldHashes()) referenced.add(`bzfs-${worldHash}`);
+  const now = Date.now();
+  let unusedSince = {};
+  try {
+    unusedSince = JSON.parse(fs.readFileSync(OVERVIEW_UNUSED_PATH, 'utf8')) || {};
+  } catch {
+    // None recorded yet: every unused picture starts its day now.
+  }
   let names;
   try {
     names = fs.readdirSync(OVERVIEW_CACHE_DIR);
   } catch {
     return;
   }
+  const stillUnused = {};
+  let removed = 0;
   for (const name of names) {
     const hash = name.endsWith('.svg') ? name.slice(0, -4) : null;
     if (!hash || referenced.has(hash)) continue;
-    const filePath = path.join(OVERVIEW_CACHE_DIR, name);
+    const since = Number.isFinite(unusedSince[name]) ? unusedSince[name] : now;
+    if (now - since < OVERVIEW_UNUSED_MS) {
+      stillUnused[name] = since;
+      continue;
+    }
     try {
-      if (fs.statSync(filePath).mtimeMs > cutoff) continue;
-      fs.unlinkSync(filePath);
+      fs.unlinkSync(path.join(OVERVIEW_CACHE_DIR, name));
       removed += 1;
     } catch (error) {
       logError(`Could not remove unreferenced overview ${name}:`, error);
+      stillUnused[name] = since;
     }
   }
-  if (removed > 0) log(`[WORLDS] removed ${removed} overview(s) nothing refers to any more`);
+  try {
+    fs.writeFileSync(OVERVIEW_UNUSED_PATH, JSON.stringify(stillUnused, null, 1));
+  } catch (error) {
+    logError(`Could not write ${OVERVIEW_UNUSED_PATH}:`, error);
+  }
+  if (removed > 0) log(`[WORLDS] removed ${removed} overview(s) unused for a day`);
 }
 
 async function getRemoteServerList() {
@@ -2895,6 +3004,24 @@ const inFlightRemoteImports = new Map();
 // rather than dying on a check about a download it does not need to make.
 // `MAP_REGISTRY`, not the file alone: a map is viewable only once it has
 // been parsed and hashed (see `hashRemainingMapsInBackground`).
+// Parses and registers an import still on disk and fetched inside
+// `IMPORT_REUSE_MS`, by its mtime. Returns whether it did.
+function registerFreshImportFromDisk(fileName) {
+  const filePath = path.join(RUNTIME_MAPS_DIR, fileName);
+  try {
+    if (Date.now() - fs.statSync(filePath).mtimeMs >= IMPORT_REUSE_MS) return false;
+    const mapData = parseBZWMap(filePath, { quiet: true });
+    return Boolean(registerMapFile(
+      fileName, mapData.obstacles, mapData.teleporterGraph, mapData.teamMode, mapData.mapSize,
+      mapData.messages, mapData.noWalls, mapData.waterLevel, mapData.weather, mapData.groundMaterial,
+      mapData.serverOptions.gameplay,
+      { templates: mapData.meshTemplates, instances: mapData.meshInstances }
+    ));
+  } catch {
+    return false;
+  }
+}
+
 function reuseCachedImport(host, port) {
   const safeMapName = remoteMapFileName(host, port);
   if (!MAP_REGISTRY.has(safeMapName)) return null;
@@ -3060,6 +3187,16 @@ function ensureRuntimeMapsDir(dirPath) {
   }
 }
 
+// This server's own maps: every file in `maps/` but a remote import, unless
+// that import is the map it is serving. An import is a transient copy of a
+// BZFlag server's world, fetched to be viewed or to draw its picture and swept
+// two hours later; the bzfs list is what shows it, under that server's hash,
+// so it is neither parsed at boot nor listed as a local map.
+function listLocalMapFiles() {
+  return listAvailableMapFiles()
+    .filter((fileName) => !parseImportMapFileName(fileName) || fileName === MAP_SOURCE);
+}
+
 function listAvailableMapFiles() {
   const mapFiles = new Set();
   const mapDirs = [RUNTIME_MAPS_DIR, BUNDLED_MAPS_DIR];
@@ -3132,8 +3269,7 @@ const { host: LISTEN_HOST, port: PORT, note: listenNote } = resolveListenTarget(
 
 server.listen(PORT, LISTEN_HOST, () => {
   if (listenNote) log(`[LISTEN] ${listenNote}`);
-  log(`Server running on ${describeListenTarget(LISTEN_HOST, PORT)}`);
-  log(`Client build ${CLIENT_BUILD}`);
+  log(`Server running on ${describeListenTarget(LISTEN_HOST, PORT)}, client build ${CLIENT_BUILD}`);
   // After the port is open, never before it: the game is playable while the
   // sidecars are built, and a request that arrives first is served identity.
   //
@@ -3679,28 +3815,27 @@ function overviewPathForHash(hash) {
 // is what `IS_DESIGNATED_LIST_SERVER` means), and naming the one every reader
 // was already configured with keeps the row's URL and the row's origin the
 // same thing.
-// The absolute URL of a local map's own overview, for a row this server is
-// publishing to other instances. `LIST_SERVER_URL` for the same reason
-// `instanceOverviewUrl` uses it: on the designated instance it is this
-// server's own public URL, and it is the string every reader already holds.
-function instanceMapOverviewUrl(mapFileName) {
-  const registered = MAP_REGISTRY.get(mapFileName);
-  if (!registered || !registered.overviewUrl) return null;
-  return `${LIST_SERVER_URL}/maps/${registered.hash}.svg`;
+// The absolute URL of a BZFlag server's picture, for a row this server is
+// publishing to other instances. Only the one named by the world's BZFlag
+// hash, which is a name any reader can find that world by again; an import's
+// own picture is named by bzo's hash of a file that is gone in two hours.
+// `LIST_SERVER_URL` for the same reason `instanceOverviewUrl` uses it: on the
+// designated instance it is this server's own public URL, and it is the
+// string every reader already holds.
+function bzfsInstanceOverviewUrl(host, port) {
+  const worldHash = bzfsWorlds.recordFor(host, port)?.worldHash;
+  return bzfsOverviewPath(host, port, worldHash)
+    ? `${LIST_SERVER_URL}/overviews/bzfs-${worldHash}.svg`
+    : null;
 }
 
 function instanceOverviewUrl(hash) {
   if (!/^[0-9a-f]{12}$/.test(hash || '')) return null;
-  if (fs.existsSync(overviewPathForHash(hash))) {
-    return `${LIST_SERVER_URL}/overviews/${hash}.svg`;
-  }
-  // The designated instance's own row: its world is a local map, so the
-  // picture is already beside the map's JSON and there is nothing to fetch or
-  // redraw. Same hash either way -- the reported hash *is* `MAP_REGISTRY`'s.
-  if (fs.existsSync(path.join(MAP_CACHE_DIR, `${hash}.json`))) {
-    return `${LIST_SERVER_URL}/maps/${hash}.svg`;
-  }
-  return null;
+  // The designated instance's own world is here too: `registerMapFile` draws
+  // every local map's picture into the same directory under the same hash.
+  return fs.existsSync(overviewPathForHash(hash))
+    ? `${LIST_SERVER_URL}/overviews/${hash}.svg`
+    : null;
 }
 
 // Draws the overview for one reporting instance's world, once. The world comes
@@ -3716,13 +3851,10 @@ function instanceOverviewUrl(hash) {
 async function ensureInstanceOverview(instanceUrl, hash) {
   if (!/^[0-9a-f]{12}$/.test(hash || '')) return;
   const filePath = overviewPathForHash(hash);
+  // A world this server holds as a local map already has its picture here,
+  // which is also what catches another instance playing the same map as this
+  // one: the hash is the same wherever the same build parses the same world.
   if (fs.existsSync(filePath)) return;
-  // A world this server already holds as a local map needs no download and no
-  // second copy of the picture: `instanceOverviewUrl` serves that map's own
-  // `/maps/<hash>.svg`. Two instances playing the same map as this one land
-  // here, since the hash is the same wherever the same build parses the same
-  // world.
-  if (fs.existsSync(path.join(MAP_CACHE_DIR, `${hash}.json`))) return;
   if (inFlightOverviews.has(hash)) return inFlightOverviews.get(hash);
 
   const work = (async () => {
@@ -4006,7 +4138,7 @@ app.get('/api/list-server/list', async (req, res) => {
       // import of it (`server/bzfs-worlds.cjs` keeps them fresh). Absolute,
       // because the reader is another origin -- and stated here rather than
       // derived, since this is the only server that knows.
-      overviewUrl: instanceMapOverviewUrl(remoteMapFileName(server.host, server.port)),
+      overviewUrl: bzfsInstanceOverviewUrl(server.host, server.port),
       // What this server knows of that world, measured once here rather than
       // by every reader -- a reader holds no import of it and could not
       // measure any of this for itself.
@@ -4204,6 +4336,10 @@ const SPEED_QUANTIZATION_SLACK = 0.02;
 // the extrapolation window's absolute timestamp -- may widen past the gap the
 // server itself measured between arrivals.
 const SDT_JITTER_ALLOWANCE = 0.25;
+
+// What GAME_CONFIG holds before server.json touches it, so the startup line
+// can name only what an operator changed.
+const GAME_CONFIG_DEFAULTS = { ...GAME_CONFIG };
 
 // Optional gameplay overrides from server config
 const configTankSpeed = Number(serverConfig.tankSpeed);
@@ -4456,16 +4592,37 @@ if (!Number.isFinite(GAME_CONFIG.FOG_END)) {
   GAME_CONFIG.FOG_END = GAME_CONFIG.MAP_SIZE;
 }
 
-log(`Anti-cheat mode: ${ANTICHEAT_CONFIG.mode}`);
-log(
-  `Gameplay config: tankSpeed=${GAME_CONFIG.TANK_SPEED}, tankRotationSpeed=${GAME_CONFIG.TANK_ROTATION_SPEED}, reverseSpeedRatio=${GAME_CONFIG.REVERSE_SPEED_RATIO}, linearAcceleration=${GAME_CONFIG.LINEAR_ACCELERATION}, angularAcceleration=${GAME_CONFIG.ANGULAR_ACCELERATION}, jumpVelocity=${GAME_CONFIG.JUMP_VELOCITY}, gravity=${GAME_CONFIG.GRAVITY}, shotSpeed=${GAME_CONFIG.SHOT_SPEED}, shotRange=${GAME_CONFIG.SHOT_RANGE}, shotReloadTime=${GAME_CONFIG.SHOT_RELOAD_TIME}ms, shotDuration≈${(GAME_CONFIG.SHOT_RANGE / GAME_CONFIG.SHOT_SPEED).toFixed(2)}s, shotMaxActive=${GAME_CONFIG.SHOT_MAX_ACTIVE}, shotRadius=${GAME_CONFIG.SHOT_RADIUS}, shotTailLength=${GAME_CONFIG.SHOT_TAIL_LENGTH}, shotsKeepVerticalVelocity=${GAME_CONFIG.SHOTS_KEEP_VERTICAL_VELOCITY}`
-);
-log(
-  `Fog config: mode=${GAME_CONFIG.FOG_MODE}, density=${GAME_CONFIG.FOG_DENSITY}, start=${GAME_CONFIG.FOG_START}, end=${GAME_CONFIG.FOG_END}, color=time-of-day`
-);
-log(`Voice config: nearbyRadius=${GAME_CONFIG.VOICE_NEARBY_RADIUS}`);
-log(`Voice ICE config: ${VOICE_ICE_SERVERS.length} server entr${VOICE_ICE_SERVERS.length === 1 ? 'y' : 'ies'}`);
-log(`Map directories: runtime=${RUNTIME_MAPS_DIR}, bundled=${BUNDLED_MAPS_DIR}`);
+// One line for the whole of server.json's say: a setting at its default is
+// not named, and a map's own overrides are logged when the map loads.
+{
+  const gameplay = [
+    ['tankSpeed', 'TANK_SPEED'],
+    ['tankRotationSpeed', 'TANK_ROTATION_SPEED'],
+    ['reverseSpeedRatio', 'REVERSE_SPEED_RATIO'],
+    ['linearAcceleration', 'LINEAR_ACCELERATION'],
+    ['angularAcceleration', 'ANGULAR_ACCELERATION'],
+    ['jumpVelocity', 'JUMP_VELOCITY'],
+    ['gravity', 'GRAVITY'],
+    ['shotSpeed', 'SHOT_SPEED'],
+    ['shotRange', 'SHOT_RANGE'],
+    ['shotMaxActive', 'SHOT_MAX_ACTIVE'],
+    ['shotRadius', 'SHOT_RADIUS'],
+    ['shotTailLength', 'SHOT_TAIL_LENGTH'],
+    ['shotsKeepVerticalVelocity', 'SHOTS_KEEP_VERTICAL_VELOCITY'],
+  ].filter(([, key]) => GAME_CONFIG[key] !== GAME_CONFIG_DEFAULTS[key])
+    .map(([name, key]) => `${name}=${GAME_CONFIG[key]}`);
+  if (SHOT_RELOAD_TIME_PINNED) gameplay.push(`shotReloadTime=${GAME_CONFIG.SHOT_RELOAD_TIME}ms`);
+  const fog = GAME_CONFIG.FOG_MODE === 'none'
+    ? 'none'
+    : `${GAME_CONFIG.FOG_MODE} density=${GAME_CONFIG.FOG_DENSITY}`
+      + ` ${GAME_CONFIG.FOG_START}-${GAME_CONFIG.FOG_END}`;
+  const maps = RUNTIME_MAPS_DIR === BUNDLED_MAPS_DIR
+    ? RUNTIME_MAPS_DIR
+    : `${RUNTIME_MAPS_DIR} + bundled ${BUNDLED_MAPS_DIR}`;
+  log(`Config: anti-cheat ${ANTICHEAT_CONFIG.mode}; gameplay ${gameplay.join(', ') || 'defaults'};`
+    + ` fog ${fog}; voice radius ${GAME_CONFIG.VOICE_NEARBY_RADIUS},`
+    + ` ${VOICE_ICE_SERVERS.length} ICE; maps ${maps}`);
+}
 if (MAP_SOURCE !== 'random') {
   mapPath = resolveMapFilePath(MAP_SOURCE);
   if (!fs.existsSync(mapPath)) {
@@ -9284,6 +9441,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   const templateNames = new Map();
   const templateVariants = new Map();
   let passableInstances = 0;
+  // The counts the line below logs, returned too so a quiet caller can sum
+  // them over many maps instead.
+  let instancing = null;
   for (const request of groupInstanceRequests) {
     let instancedMeshMembers = false;
     const ordinal = topGroupOrdinals.get(request.groupDefName) || 0;
@@ -9399,15 +9559,18 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       return placed;
     }));
   }
-  // What issue #153's first stage would carry as a template and a transform
-  // rather than as a copy apiece. Logged while that is being built, so the
-  // saving is measured on real maps rather than assumed.
+  // How many group instances are drawn from a shared template rather than a
+  // copy apiece (#153).
   if (passableInstances > 0) {
     const templateFaces = [...meshTemplates.values()]
       .reduce((sum, list) => sum + list.reduce((n, m) => n + meshArrays(m).faceCount, 0), 0);
-    log(`${mapLabel}: ${passableInstances} of ${groupInstanceRequests.length} group `
-      + `instance(s) share ${meshTemplates.size} template(s) of ${templateFaces} face(s) `
-      + 'rather than a copy apiece');
+    instancing = {
+      instanced: passableInstances,
+      groups: groupInstanceRequests.length,
+      templates: meshTemplates.size,
+      faces: templateFaces,
+    };
+    if (!quiet) log(`${mapLabel}: ${formatInstancing(instancing)}`);
   }
   if (unknownGroupDefs.size > 0) {
     warn(
@@ -9736,7 +9899,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     groundMaterial: mapGroundMaterial,
     messages,
     warnedMessages,
+    instancing,
   };
+}
+
+// `instanced 18/22 groups, 15 templates, 52 faces` -- group instances drawn
+// from a shared template rather than a copy apiece (#153).
+function formatInstancing({ instanced, groups, templates, faces }) {
+  return `instanced ${instanced}/${groups} groups, ${templates} templates, ${faces} faces`;
 }
 
 // Generate random obstacles on server start
@@ -9882,17 +10052,7 @@ if (MAP_SOURCE === 'random') {
   if (mapGroundMaterial) {
     log(`Map option -gndtex: ${mapGroundMaterial.texture || mapGroundMaterial.textureUrl}`);
   }
-  log(`Loaded ${OBSTACLES.length} obstacles from ${mapPath}`);
-  const meshObstacleCount = OBSTACLES.filter((obs) => obs.type === 'mesh').length;
-  if (meshObstacleCount > 0) {
-    log(`${meshObstacleCount} of those are meshes from ${mapPath}`);
-  }
-  log(`Loaded ${TELEPORTER_GRAPH.links.length} teleporter face links from ${mapPath}`);
-  if (MAP_ZONES.length > 0) log(`Loaded ${MAP_ZONES.length} zones from ${mapPath}`);
   WORLD_WEAPONS = mapData.weapons;
-  if (WORLD_WEAPONS.length > 0) {
-    log(`Loaded ${WORLD_WEAPONS.length} world weapons from ${mapPath}`);
-  }
 }
 
 // Content-hashed, HTTP-cacheable world files, so a client fetches a map's
@@ -9989,8 +10149,18 @@ function registerMapFile(
   // -- deterministic across processes, unlike `MAP_SOURCE === 'random'`'s
   // obstacles, which are expected to roll a new hash every boot along with
   // everything else about them.
-  const seed = crypto.createHash('sha256')
-    .update(JSON.stringify({ obstacles, teleporterGraph })).digest().readUInt32BE(0);
+  //
+  // Fed one obstacle at a time, the same bytes `JSON.stringify({ obstacles,
+  // teleporterGraph })` would give: at this point a mesh still carries its
+  // faces and decoded arrays, and a big map's whole list as one string is
+  // past V8's string limit.
+  const seedHash = crypto.createHash('sha256').update('{"obstacles":[');
+  obstacles.forEach((obstacle, index) => {
+    if (index > 0) seedHash.update(',');
+    seedHash.update(JSON.stringify(obstacle) ?? 'null');
+  });
+  seedHash.update(`],"teleporterGraph":${JSON.stringify(teleporterGraph)}}`);
+  const seed = seedHash.digest().readUInt32BE(0);
   const entry = {
     obstacles,
     teleporterGraph,
@@ -10039,11 +10209,8 @@ function registerMapFile(
     entry.meshTemplates = instancing.templates;
     entry.meshInstances = instancing.instances;
   }
-  // Each mesh's geometry as flat arrays as well as face objects (issue #153),
-  // so the client can read the arrays it would otherwise build for itself and
-  // the encoding gets exercised on real maps. Both forms while this is being
-  // moved over; the objects come out once nothing reads them, which is when
-  // the size actually falls.
+  // Each mesh's geometry as flat arrays in place of its face objects (issue
+  // #153).
   attachMeshArrayPayloads(entry);
   const json = JSON.stringify(entry);
   const hash = crypto.createHash('sha256').update(json).digest('hex').slice(0, 12);
@@ -10058,24 +10225,26 @@ function registerMapFile(
   precompress.consider(url, filePath, Buffer.from(json));
   compressNewCacheFilesSoon();
 
-  // The overview picture, beside the JSON and under the same hash
-  // (`server/map-overview.cjs`, issue #147). Written here rather than on
-  // demand because it is the same content-addressed artefact the JSON is: a
-  // map registers once, the picture costs a few hundred milliseconds at the
-  // worst map bzo has, and a hash that exists always has a picture rather
-  // than sometimes having one. `/list`'s pane and the View picker read it as
-  // an ordinary static file; a failure here is not worth failing a map over,
-  // so it is logged and the map registers without one.
-  const overviewUrl = `/maps/${hash}.svg`;
-  const overviewPath = path.join(MAP_CACHE_DIR, `${hash}.svg`);
-  let hasOverview = false;
-  try {
-    const svg = mapOverview.buildMapOverviewSvg(entry);
-    fs.writeFileSync(overviewPath, svg);
-    precompress.consider(overviewUrl, overviewPath, Buffer.from(svg));
-    hasOverview = true;
-  } catch (error) {
-    logError(`Could not build map overview for ${fileName}:`, error);
+  // The overview picture (`server/map-overview.cjs`, issue #147), in the one
+  // directory every picture lives in, under the name a reader knows the world
+  // by (`overviewNameFor`). Drawn here rather than on demand because a map
+  // registers once and a hash that exists should always have a picture; drawn
+  // only when missing, because the name already says which world it is. A
+  // failure is not worth failing a map over, so it is logged and the map
+  // registers without one.
+  const overviewName = overviewNameFor(fileName, hash);
+  const overviewUrl = `/overviews/${overviewName}.svg`;
+  const overviewPath = path.join(OVERVIEW_CACHE_DIR, `${overviewName}.svg`);
+  let hasOverview = fs.existsSync(overviewPath);
+  if (!hasOverview) {
+    try {
+      const svg = mapOverview.buildMapOverviewSvg(entry);
+      fs.writeFileSync(overviewPath, svg);
+      precompress.consider(overviewUrl, overviewPath, Buffer.from(svg));
+      hasOverview = true;
+    } catch (error) {
+      logError(`Could not build map overview for ${fileName}:`, error);
+    }
   }
 
   // Outside `entry`, not inside it: this runs every time the file is
@@ -10098,7 +10267,7 @@ function registerMapFile(
   MAP_REGISTRY.set(fileName, registered);
   // So the next boot knows this file is already parsed and drawn without
   // having to parse it again to find out.
-  mapIndex.note(fileName, hash, resolveMapFilePath(fileName));
+  mapIndex.note(fileName, hash, overviewName, resolveMapFilePath(fileName));
   return registered;
 }
 
@@ -10152,13 +10321,10 @@ function attachMeshArrayPayloads(entry) {
 // the background trickle below has registered everything this process ever
 // will, so a file mid-registration is never mistaken for an orphan.
 function sweepMapCache() {
-  // The overview picture is hashed with its map, so it belongs to the same
-  // entry and survives the same sweep.
+  // Pictures are not here: they live in `OVERVIEW_CACHE_DIR` and are cleared
+  // by `purgeUnreferencedOverviews` on its own rule.
   const expected = new Set();
-  for (const entry of MAP_REGISTRY.values()) {
-    expected.add(`${entry.hash}.json`);
-    expected.add(`${entry.hash}.svg`);
-  }
+  for (const entry of MAP_REGISTRY.values()) expected.add(`${entry.hash}.json`);
   let removed = 0;
   let entries;
   try {
@@ -10295,10 +10461,11 @@ function resolveViewMapChoice(requested) {
 // sees more once this trickle catches up. `uploadMap` re-triggers this so a
 // map added mid-session becomes viewable without a restart.
 function hashRemainingMapsInBackground() {
-  const pending = listAvailableMapFiles()
+  const pending = listLocalMapFiles()
     .filter((fileName) => fileName !== 'random' && !MAP_REGISTRY.has(fileName));
   const total = pending.length;
   let converted = 0;
+  const instancing = { instanced: 0, groups: 0, templates: 0, faces: 0 };
   const step = () => {
     const fileName = pending.shift();
     if (!fileName) {
@@ -10306,7 +10473,10 @@ function hashRemainingMapsInBackground() {
       // above): still worth knowing the trickle ran and how much of it
       // landed, the same reasoning `sweepMapCache`'s own summary line below
       // already follows.
-      if (total > 0) log(`Converted ${converted} of ${total} bzw file(s) to cached json`);
+      if (total > 0) {
+        log(`Converted ${converted} of ${total} bzw file(s) to cached json`
+          + (instancing.groups > 0 ? `; ${formatInstancing(instancing)}` : ''));
+      }
       // Everyone already connected is holding whatever list this trickle had
       // reached when their `init` went out -- which, on a restart that
       // clients auto-rejoin into (see AGENTS.md), is routinely a short one.
@@ -10316,6 +10486,10 @@ function hashRemainingMapsInBackground() {
       if (converted > 0) broadcastMapList();
       sweepMapCache();
       sweepStaleImports();
+      // Where the world tracker runs it clears pictures once its own pass is
+      // complete, since only then are all of a list's hashes known. Anywhere
+      // else the registry is all that names a picture, and it is complete now.
+      if (!(BZFS_WORLD_THUMBNAILS && IS_DESIGNATED_LIST_SERVER)) purgeUnreferencedOverviews();
       precompress.start({ log }).catch((error) => logError('[BR] map hashing pass failed:', error));
       return;
     }
@@ -10334,6 +10508,9 @@ function hashRemainingMapsInBackground() {
           { templates: mapData.meshTemplates, instances: mapData.meshInstances }
         )) {
           converted += 1;
+          if (mapData.instancing) {
+            for (const key of Object.keys(instancing)) instancing[key] += mapData.instancing[key];
+          }
         }
       }
     } catch (error) {
@@ -10751,11 +10928,14 @@ function handleRabbitSpawn(player) {
   player.wasRabbit = false;
   if (rabbitPlayerId === null) anointNewRabbit();
 }
-// The live world's real object geometry, for whoever needs to read it back --
-// `LIVE_MAP_ENTRY` (above) already hashed and wrote it to
-// `MAP_CACHE_DIR`/`<hash>.json` before this line runs, so the file is there
-// to open directly instead of a multi-hundred-KB single log line.
-log(`World obstacles cached at ${path.join(MAP_CACHE_DIR, `${LIVE_MAP_ENTRY.hash}.json`)} (${LIVE_MAP_ENTRY.url})`);
+// What the live world holds, and where its real object geometry is for
+// whoever needs to read it back -- `LIVE_MAP_ENTRY` (above) already hashed and
+// wrote it to `MAP_CACHE_DIR`/`<hash>.json` before this line runs, so the file
+// is there to open directly instead of a multi-hundred-KB single log line.
+log(`${MAP_SOURCE}: obstacles/meshes/links/zones/weapons  `
+  + `${OBSTACLES.length}/${OBSTACLES.filter((obs) => obs.type === 'mesh').length}`
+  + `/${TELEPORTER_GRAPH.links.length}/${MAP_ZONES.length}/${WORLD_WEAPONS.length}`
+  + ` at ${path.join(MAP_CACHE_DIR, `${LIVE_MAP_ENTRY.hash}.json`)}`);
 
 let TELEPORTER_OBSTACLES_BY_INDEX = new Map();
 let TELEPORTER_LINKS_BY_SOURCE_FACE = new Map();
@@ -13477,14 +13657,19 @@ function reportCheat(player, kind, headline, detail = null, enforceable = true) 
   counters.lastWarningTime = Date.now();
 
   const refused = enforceable && ANTICHEAT_CONFIG.mode === 'strict';
+  // One line per finding, the detail after the headline, so a finding is
+  // one grep hit and never interleaves with another player's.
+  const parts = [headline, ...(detail ? [].concat(detail) : [])];
   log(
-    `[ANTICHEAT:${ANTICHEAT_CONFIG.mode.toUpperCase()}] "${player.name}" ${headline}`
+    `[ANTICHEAT:${ANTICHEAT_CONFIG.mode.toUpperCase()}] "${player.name}" ${parts.join(' | ')}`
     + ` | ${refused ? 'REFUSED' : 'ALLOWED'} | Warnings: ${counters.totalWarnings}`
   );
-  if (detail) {
-    for (const line of [].concat(detail)) log(`  ${line}`);
-  }
   return refused;
+}
+
+// A position and heading as the drift findings print it: `x,y,z r`.
+function formatCheatPose(x, y, z, r) {
+  return `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)} r${r.toFixed(2)}`;
 }
 
 // Every kind that fired at least once, so a new counter shows up in the summary
@@ -13554,13 +13739,14 @@ function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSe
       const likelihood = Math.min(100, (exceedAmount / maxDrift) * 100).toFixed(1);
 
       const refused = reportCheat(player, 'linearDrift',
-        `LINEAR DRIFT: ${distMoved.toFixed(2)} > ${maxDrift.toFixed(2)} (+${exceedAmount.toFixed(2)})`
-        + ` | Likelihood: ${likelihood}%`,
+        `LINEAR DRIFT ${distMoved.toFixed(2)} > ${maxDrift.toFixed(2)} (${likelihood}%)`,
         [
-          `Stored: (${player.x.toFixed(2)}, ${player.y.toFixed(2)}, ${player.z.toFixed(2)}, r=${player.rotation.toFixed(2)})`,
-          `Extrap: (${extrapolated.x.toFixed(2)}, ${extrapolated.y.toFixed(2)}, ${extrapolated.z.toFixed(2)}, r=${extrapolated.r.toFixed(2)})`,
-          `Recvd:  (${newX.toFixed(2)}, ${newY.toFixed(2)}, ${newZ.toFixed(2)}, r=${newRotation.toFixed(2)})`,
-          `Vels: fs=${player.forwardSpeed.toFixed(2)}, rs=${player.rotationSpeed.toFixed(2)}, vv=${player.verticalVelocity.toFixed(2)}, dt=${timeSinceLastUpdate.toFixed(2)}s, velChanged=${velocityChanged}`,
+          `stored ${formatCheatPose(player.x, player.y, player.z, player.rotation)}`
+          + ` extrap ${formatCheatPose(extrapolated.x, extrapolated.y, extrapolated.z, extrapolated.r)}`
+          + ` recvd ${formatCheatPose(newX, newY, newZ, newRotation)}`,
+          `fs=${player.forwardSpeed.toFixed(2)} rs=${player.rotationSpeed.toFixed(2)}`
+          + ` vv=${player.verticalVelocity.toFixed(2)} dt=${timeSinceLastUpdate.toFixed(2)}s`
+          + `${velocityChanged ? ' velChanged' : ''}`,
         ]);
       if (refused) return false;
     }
@@ -13574,12 +13760,11 @@ function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSe
       const likelihood = Math.min(100, (exceedAmount / maxRotDrift) * 100).toFixed(1);
 
       const refused = reportCheat(player, 'angularDrift',
-        `ANGULAR DRIFT: ${rotDiff.toFixed(2)} > ${maxRotDrift.toFixed(2)} (+${exceedAmount.toFixed(2)})`
-        + ` | Likelihood: ${likelihood}%`,
+        `ANGULAR DRIFT ${rotDiff.toFixed(2)} > ${maxRotDrift.toFixed(2)} (${likelihood}%)`,
         [
-          `stored: ${player.rotation.toFixed(2)}, extrapolated: ${extrapolated.r.toFixed(2)},`
-          + ` received: ${newRotation.toFixed(2)}, rs=${player.rotationSpeed.toFixed(2)},`
-          + ` dt=${timeSinceLastUpdate.toFixed(2)}s`,
+          `r stored ${player.rotation.toFixed(2)} extrap ${extrapolated.r.toFixed(2)}`
+          + ` recvd ${newRotation.toFixed(2)}`,
+          `rs=${player.rotationSpeed.toFixed(2)} dt=${timeSinceLastUpdate.toFixed(2)}s`,
         ]);
       if (refused) return false;
     }
@@ -15437,14 +15622,14 @@ function createFlags() {
 
   if (teamFlagTeams.length > 0) log(`Flags: team flags for ${teamFlagTeams.join(', ')}`);
   const zoneFlagCount = flags.filter((flag) => flag.zoneIndex !== null).length;
-  if (zoneFlagCount > 0 || skippedZoneFlags.size > 0) {
+  // A forbidden type is named once, on the forbidden list below; this names
+  // only what bzo does not have and team types, which live on bases.
+  const skippedUnforbidden = Array.from(skippedZoneFlags)
+    .filter((abbreviation) => !zoneForbiddenFlags.includes(abbreviation)).sort();
+  if (zoneFlagCount > 0 || skippedUnforbidden.length > 0) {
     log(
       `Flags: ${zoneFlagCount} zone flags from ${MAP_ZONES.length} zones`
-      + (skippedZoneFlags.size > 0
-        ? `; skipped ${skippedZoneFlags.size} type${skippedZoneFlags.size === 1 ? '' : 's'}`
-          + ` bzo does not have or the game style forbids`
-          + ` (${Array.from(skippedZoneFlags).sort().join(', ')})`
-        : '')
+      + (skippedUnforbidden.length > 0 ? `; skipped ${skippedUnforbidden.join(', ')}` : '')
     );
   }
   if (SUPER_FLAGS.count > 0) {
@@ -18300,6 +18485,40 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
   };
 }
 
+// The handshake's user agent, shortened only where its shape is one bzo
+// already knows: stock desktop and Android Chrome, desktop Firefox and iPhone
+// Safari, which say nothing past their browser, version and platform. Anything
+// else -- a headset's browser, an Edge, a webview -- is logged whole, because a
+// device nobody has seen yet is what the line is for.
+const USER_AGENT_PLATFORMS = [
+  ['X11; Linux aarch64', 'Linux arm64'],
+  ['X11; Linux x86_64', 'Linux'],
+  ['X11; Ubuntu; Linux x86_64', 'Linux'],
+  ['Windows NT 10.0; Win64; x64', 'Windows'],
+  ['Macintosh; Intel Mac OS X 10_15_7', 'Mac'],
+  ['Macintosh; Intel Mac OS X 10.15', 'Mac'],
+];
+const platformName = (text) => USER_AGENT_PLATFORMS.find(([spelled]) => spelled === text)?.[1];
+const KNOWN_USER_AGENTS = [
+  [/^Mozilla\/5\.0 \(([^)]+)\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) ((?:Headless)?Chrome)\/(\d+)\.0\.0\.0 Safari\/537\.36$/,
+    (m) => platformName(m[1]) && `${m[2]}/${m[3]} ${platformName(m[1])}`],
+  [/^Mozilla\/5\.0 \(Linux; Android 10; K\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/(\d+)\.0\.0\.0 Mobile Safari\/537\.36$/,
+    (m) => `Chrome/${m[1]} Android`],
+  [/^Mozilla\/5\.0 \(([^)]+); rv:(\d+)\.0\) Gecko\/20100101 Firefox\/\2\.0$/,
+    (m) => platformName(m[1]) && `Firefox/${m[2]} ${platformName(m[1])}`],
+  [/^Mozilla\/5\.0 \(iPhone; CPU iPhone OS [\d_]+ like Mac OS X\) AppleWebKit\/605\.1\.15 \(KHTML, like Gecko\) Version\/([\d.]+) Mobile\/15E148 Safari\/604\.1$/,
+    (m) => `Safari/${m[1]} iPhone`],
+];
+
+function shortUserAgent(userAgent) {
+  for (const [pattern, format] of KNOWN_USER_AGENTS) {
+    const match = pattern.exec(userAgent);
+    const short = match && format(match);
+    if (short) return short;
+  }
+  return userAgent;
+}
+
 // A proxy connection, from the handshake to the socket closing. The browser is
 // answered only after the target has answered us: an `init` that named an
 // empty world would be a lie a reload could not fix.
@@ -19400,7 +19619,7 @@ wss.on('connection', (ws, req) => {
     + ` host="${req.headers.host || ''}"`
     + ` cookies=${cookieNames.length > 0 ? cookieNames.join(',') : 'none'}`
     + ` secure=${req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http')}`
-    + ` ua="${req.headers['user-agent'] || ''}"`);
+    + ` ua="${shortUserAgent(req.headers['user-agent'] || '')}"`);
 
   // The cookie is where identity binds, because the cookie is what the
   // handshake carries. Everything the player is comes out of the server's own
@@ -20629,6 +20848,13 @@ wss.on('connection', (ws, req) => {
           const { host, port } = target;
           const existing = MAP_REGISTRY.get(file);
           if (existing && (Date.now() - existing.registeredAt) < IMPORT_REUSE_MS) {
+            reply(true, { viewableMaps: getViewableMapsList() });
+            break;
+          }
+          // Not parsed at boot (`listLocalMapFiles`), but a copy fetched inside
+          // the reuse window is still on disk: read it back rather than
+          // download the same world again.
+          if (!existing && registerFreshImportFromDisk(file)) {
             reply(true, { viewableMaps: getViewableMapsList() });
             break;
           }

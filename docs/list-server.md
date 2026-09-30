@@ -248,17 +248,24 @@ name a world to fetch but never a host to fetch it from. The hash is
 **rechecked** against what arrives, since it is a SHA-256 of exactly the bytes
 `/maps/` serves; without that an instance could have its own picture filed
 under another's hash. A world the list server already holds locally needs no
-fetch at all, which is how its own row gets a picture immediately. Another
+fetch at all, which is how its own row gets a picture immediately: every local
+map's picture is drawn into the same directory under the same hash. Another
 instance playing the same map file usually does not hit that: a map's hash
 covers its clouds, and cloud altitude is `maxObstacleTopY` plus the *server's*
 own jump apex, so two instances with different jump or gravity settings hash
 the same map differently. Measured -- `hix.bzw` is `c5aaf2140a11` here and
 `4c47040a1bba` on an instance without Wings, identical in every field but
 `clouds`. The hash is right, since the JSON really does differ; the cost is one
-fetch and one drawing per instance rather than a shared one. Pictures live in `cache/overviews/`,
-served from `/overviews/<hash>.svg` and pointed at by an absolute
-`overviewUrl` on each public row, so every other instance's `/list` embeds one
-`<img>` and nothing else.
+fetch and one drawing per instance rather than a shared one.
+
+Every picture lives in `cache/overviews/`, drawn once and never copied, and is
+pointed at by an absolute `overviewUrl` on each public row, so every other
+instance's `/list` embeds one `<img>` and nothing else. A bzo world is
+`/overviews/<bzo hash>.svg`; a BZFlag world is `/overviews/bzfs-<p hash>.svg`,
+named by the hash bzfs itself reports, which is the name anyone else can find
+it by. A picture is deleted once nothing has used it for a day, counted only
+while every listed server has a current hash (`purgeUnreferencedOverviews`),
+and the day is kept across restarts in `cache/overviews-unused.json`.
 
 ## One list, not two
 
@@ -290,8 +297,10 @@ made no outbound connections to servers they have no relationship with; rows
 still get a picture for whatever has been imported on demand.
 
 There is nothing extra to draw. An import is parsed and registered like any
-other map, so its overview is already beside its JSON and the row points at
-`/maps/<hash>.svg`. What the tracker decides is *when an import has gone
+other map, which draws its picture as `/overviews/bzfs-<p hash>.svg`, and the
+picture outlives the import: imports are swept after two hours, and the
+tracker counts a server as current while it holds a picture for the hash the
+server reports. What the tracker decides is *when that picture has gone
 stale*, using three signals, cheapest first:
 
 1. **The public list entry**, refreshed every few minutes anyway, so it costs
@@ -308,7 +317,7 @@ stale*, using three signals, cheapest first:
    server's restarts and identical on two servers serving the same map; a `t`
    one is a generated world and rerolls every boot.
 3. **The world itself**, the only expensive signal, fetched only when the hash
-   says the import is stale or missing.
+   says the picture is stale or missing.
 
 With no signal at all a server is rechecked every 24 hours. That floor is what
 makes a weak fingerprint safe -- a map change it misses delays a redraw by a

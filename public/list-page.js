@@ -52,7 +52,7 @@ window.attachTable = function attachTable(tableId, filterId) {
 
 // ---------------------------------------------------------------------------
 // The filter language, which is upstream's (`src/bzflag/ServerListFilter.cxx`).
-// Text with no leading slash is a glob over address and description. After a
+// Text with no leading slash is a glob over address, description and hash. After a
 // slash comes a comma-separated set of filters, combined with AND; a second
 // slash starts another set, and a server matching any set is shown (OR). A
 // filter is `+name`/`-name` for a boolean, `name<value` (`<`, `<=`, `>`, `>=`,
@@ -114,6 +114,7 @@ const PATTERN_LABELS = {
   a: 'addr', addr: 'addr', address: 'addr',
   d: 'desc', desc: 'desc', description: 'desc',
   ad: 'addrDesc', addrdesc: 'addrDesc',
+  hs: 'hash', hash: 'hash',
 };
 
 // A glob is `*` for any run and `?` for any one character; a pattern with
@@ -284,6 +285,7 @@ function checkSet(set, entry) {
   const desc = entry.d || '';
   if (set.patterns.addr && !set.patterns.addr.test(addr)) return false;
   if (set.patterns.desc && !set.patterns.desc.test(desc)) return false;
+  if (set.patterns.hash && !set.patterns.hash.test(entry.hs || '')) return false;
   if (set.patterns.addrDesc
     && !set.patterns.addrDesc.test(addr) && !set.patterns.addrDesc.test(desc)) {
     return false;
@@ -326,8 +328,8 @@ window.parseServerFilter = function parseServerFilter(source) {
     errors,
     check(entry) {
       if (orFilter && orFilter.check(entry)) return true;
-      if (headPattern
-        && !headPattern.test(entry.a || '') && !headPattern.test(entry.d || '')) {
+      if (headPattern && !headPattern.test(entry.a || '')
+        && !headPattern.test(entry.d || '') && !headPattern.test(entry.hs || '')) {
         return false;
       }
       return checkSet(sets[0], entry);
@@ -416,7 +418,13 @@ window.attachList = function attachList(listId, filterId) {
       Array.from(list.children).sort((a, b) => {
         const left = entryFor(a.firstElementChild)[field];
         const right = entryFor(b.firstElementChild)[field];
-        if (text) return String(left || '').localeCompare(String(right || '')) * factor;
+        // A blank goes to the bottom whichever way the column is sorted, so
+        // sorting on the hash puts every unhashed row at one end and leaves
+        // rows sharing a hash next to each other.
+        if (text) {
+          if (!left !== !right) return left ? -1 : 1;
+          return String(left || '').localeCompare(String(right || '')) * factor;
+        }
         return ((Number(left) || 0) - (Number(right) || 0)) * factor;
       }).forEach((item) => { list.appendChild(item); });
       Array.from(head.querySelectorAll('button')).forEach((other) => {

@@ -10,8 +10,10 @@
 //
 // There is nothing to draw here: an imported world is registered like any
 // other map, so `registerMapFile` has already drawn its overview beside its
-// JSON. What this owns is the *decision* -- whether a server's world is still
-// the one bzo holds an import of, answered as cheaply as the question allows.
+// JSON, and server.js keeps a copy under the world's BZFlag hash that outlives
+// the import. What this owns is the *decision* -- whether the picture held for
+// a server is still of the world it runs, answered as cheaply as the question
+// allows.
 //
 // Three signals, cheapest first:
 //
@@ -24,7 +26,7 @@
 //      exactly. A `p` hash is stable across that server's restarts, so the
 //      usual answer is yes and nothing further happens.
 //   3. **The world itself**, which is the only expensive one and runs only
-//      when the hash says the import is stale or missing.
+//      when the hash says the picture is stale or missing.
 //
 // With no signal at all a server is rechecked on `RECHECK_MS`. That is the
 // floor that makes a weak signal safe: a configuration change the fingerprint
@@ -91,12 +93,12 @@ function serverKey(host, port) {
 }
 
 // `deps`: `queryServerStatus(host, port, timeout)` for the hash dial,
-// `importWorld(host, port)` for the download-and-register, `isImported(host,
-// port)` so a record whose map has since been swept out of the registry counts
-// as missing, and `log`/`logError`.
+// `importWorld(host, port)` for the download-and-register, `hasPicture(host,
+// port, worldHash)` for whether a picture of that world is held -- the import
+// itself is swept after two hours, the picture is not -- and `log`/`logError`.
 function createBzfsWorldTracker(deps) {
   const {
-    statePath, queryServerStatus, importWorld, isImported, onPassComplete, log, logError,
+    statePath, queryServerStatus, importWorld, hasPicture, onPassComplete, log, logError,
   } = deps;
   // `host:port` -> { worldHash, fingerprint, checkedAt, error, errorAt }
   const records = new Map();
@@ -201,10 +203,9 @@ function createBzfsWorldTracker(deps) {
     for (const [key, server] of listed) {
       const record = records.get(key);
       if (record?.error && now - (record.errorAt || 0) < failureCooldown(record.failCount)) continue;
-      const imported = isImported(server.host, server.port);
       let age;
       if (!record) age = Infinity;
-      else if (record.dueNow || !imported) age = Infinity;
+      else if (record.dueNow || !hasPicture(server.host, server.port, record.worldHash)) age = Infinity;
       else age = now - (record.checkedAt || 0);
       if (age < RECHECK_MS) continue;
       if (age > bestAge) { bestAge = age; best = server; }
@@ -233,9 +234,9 @@ function createBzfsWorldTracker(deps) {
     }
 
     // The whole point of the dial: a `p` world that has not changed needs no
-    // download, however long ago the import was made.
+    // download, however long ago the picture was drawn.
     if (status.worldHash && status.worldHash === record.worldHash
-      && isImported(server.host, server.port)) {
+      && hasPicture(server.host, server.port, record.worldHash)) {
       records.set(key, {
         ...record, fingerprint, checkedAt: now, error: null, errorAt: null, dueNow: false,
       });
@@ -258,7 +259,7 @@ function createBzfsWorldTracker(deps) {
       // Downloaded but not registered is a failure however well the transfer
       // went -- a world bzo cannot parse has no picture, and treating it as
       // done would leave it permanently due and re-fetched every tick.
-      if (!isImported(server.host, server.port)) {
+      if (!hasPicture(server.host, server.port, status.worldHash)) {
         throw new Error('world downloaded but could not be parsed');
       }
       records.set(key, {
@@ -375,6 +376,15 @@ function createBzfsWorldTracker(deps) {
         }
       }
       if (changed) save();
+    },
+
+    // The world hash of every server on the list, so the picture cleanup
+    // keeps each one a listed server is still running. A server off the list
+    // uses nothing; the cleanup's own day of grace is what covers one that
+    // is only briefly away.
+    worldHashes() {
+      load();
+      return [...listed.keys()].map((key) => records.get(key)?.worldHash).filter(Boolean);
     },
 
     // For `/list`, so a row can say what it knows about that server's world.

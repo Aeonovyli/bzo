@@ -19,12 +19,14 @@
 // This is only an index. It is never the source of a map's contents, and a
 // wrong or stale entry costs a re-import rather than a wrong world: an entry
 // counts only while the `.bzw` it names still has the size and mtime it had
-// when the hash was computed, and only while the hashed files are still there.
+// when the hash was computed, and only while its world and picture are still
+// there.
 const fs = require('fs');
 const path = require('path');
 
-function createMapIndex({ statePath, mapCacheDir, log, logError }) {
-  // mapFileName -> { hash, mtimeMs, size }
+function createMapIndex({ statePath, mapCacheDir, overviewDir, log, logError }) {
+  // mapFileName -> { hash, overview, mtimeMs, size }, `overview` being the
+  // picture's name in `overviewDir` without its `.svg`
   let entries = new Map();
   let writeTimer = null;
 
@@ -69,13 +71,13 @@ function createMapIndex({ statePath, mapCacheDir, log, logError }) {
     },
 
     // Called as each map registers, with the file it was read from.
-    note(fileName, hash, filePath) {
+    note(fileName, hash, overview, filePath) {
       const stat = statOf(filePath);
       if (!stat) return;
       const existing = entries.get(fileName);
-      if (existing && existing.hash === hash
+      if (existing && existing.hash === hash && existing.overview === overview
         && existing.mtimeMs === stat.mtimeMs && existing.size === stat.size) return;
-      entries.set(fileName, { hash, ...stat });
+      entries.set(fileName, { hash, overview, ...stat });
       save();
     },
 
@@ -88,8 +90,14 @@ function createMapIndex({ statePath, mapCacheDir, log, logError }) {
       if (!entry) return false;
       const stat = statOf(filePath);
       if (!stat || stat.mtimeMs !== entry.mtimeMs || stat.size !== entry.size) return false;
-      return fs.existsSync(path.join(mapCacheDir, `${entry.hash}.json`))
-        && fs.existsSync(path.join(mapCacheDir, `${entry.hash}.svg`));
+      return typeof entry.overview === 'string'
+        && fs.existsSync(path.join(mapCacheDir, `${entry.hash}.json`))
+        && fs.existsSync(path.join(overviewDir, `${entry.overview}.svg`));
+    },
+
+    // The picture's name `has` vouches for, or null.
+    overviewOf(fileName, filePath) {
+      return this.has(fileName, filePath) ? entries.get(fileName).overview : null;
     },
 
     // Drops what no current map file names, so a removed map does not keep an
