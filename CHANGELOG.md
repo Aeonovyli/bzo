@@ -6,6 +6,38 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.91] - 2026-09-30
+
+### Added
+- Each `/list` heading says how many of its rows have no map image yet, when
+  any do. A BZFlag row shows the picture of the world this instance holds an
+  import of, and a proxy row shows the picture of the server it carries --
+  that target being a BZFlag server too, and often one already imported.
+
+### Changed
+- Parsed worlds, their overview pictures and the world hashes collected from
+  other servers live beside the config file now, so `/data/cache` in Docker
+  rather than inside the image, where an upgrade threw them away and the next
+  boot re-downloaded every listed server's world. `CACHE_PATH` overrides it; a
+  source checkout is unchanged. An index of which map file produced which
+  cached world rides along, so a restart knows what it holds before it has
+  re-read any of it.
+- A world download gets 45 seconds where a person is waiting and two minutes
+  where the world tracker is, having had 15 whatever asked -- which a league
+  server's map cannot finish in.
+- An import anyone triggers records the world hash it paid for, so the tracker
+  does not repeat that download and an operator can refresh their own server's
+  picture rather than waiting for the daily check.
+- A world that fails the same way every time is retried less and less often,
+  up to about weekly, rather than every six hours. An overview picture that no
+  map and no reported world names any more is removed once the tracker has a
+  current answer for every listed server and the picture is a day old.
+
+### Fixed
+- `logError` rendered an Error as `{}`, so a real failure reached the log
+  saying nothing at all. It prints the stack now, which is how the one world
+  bzo cannot parse came to say `RangeError: Invalid string length` (#153).
+
 ## [1.2.90] - 2026-09-30
 
 ### Added
