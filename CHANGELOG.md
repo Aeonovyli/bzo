@@ -6,6 +6,47 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Changed
+- A mesh travels as flat typed arrays rather than a list of face objects.
+  A parsed face cost about 2,134 bytes against the arrays' 93, and the
+  server held one per face for every map it had parsed, for the life of the
+  process. `bzo.bzw` went from 847 KB to 258 KB and a cache of twenty maps
+  from 171 MB to 32 MB. Collision, the renderer, the radar, the overview
+  picture and the map summary all read the arrays; nothing reads a face.
+- A world's sizes read `bzw/json/br  101k/330k/49k` on one line instead of
+  three, and a BZFlag server's transfer reads `sent/inflated  9k/39k`. The
+  local map table gained the brotli figure it never showed.
+
+### Added
+- A bzo server reports what its own world costs -- the `.bzw` it was read
+  from, the parsed `.json` and the brotli sidecar -- so a bzo row says what
+  a BZFlag row already said. A proxy row shows its target's figures.
+  `GET /api/list-server/list` carries exact byte counts; `/list` rounds them.
+
+### Fixed
+- Geometry placed by `group` instances casts its shadow under each
+  instance. It was drawing the whole definition once at the map's centre,
+  because an instanced batch keeps its placements in a buffer a plain mesh
+  ignores.
+- A brotli sidecar is built for a map as soon as it is imported, instead of
+  only at the next restart, and a restart no longer deletes every map's
+  sidecar before rebuilding it.
+- An overview picture keeps its brotli sidecar. The map cache sweep knew
+  only about `.json` sidecars and deleted every `.svg` one it found, so the
+  pictures were rebuilt by each pass and destroyed by the next, and always
+  served uncompressed.
+- A large world has time to arrive. The slowest listed world takes about 80
+  seconds to fetch and rebuild, against a 45-second limit, so it could
+  never be imported at all -- and in the background a timeout costs a
+  six-hour cooldown that doubles per failure, which is far worse than
+  waiting. Now three minutes where someone is watching, ten in the
+  background.
+- A physics driver named by a `define`'s own mesh faces resolves. Only
+  obstacles were walked, so a template's faces kept the bare name and
+  behaved as though they had no driver.
+- A zero-area face in a `define`'s own mesh is dropped, the way one in a
+  placed mesh already was.
+
 ## [1.2.92] - 2026-09-30
 
 ### Added

@@ -16,14 +16,21 @@
 
 import fs from 'node:fs';
 
+// Lifted out of `server.js` by text, so it is the shipping function that is
+// tested rather than a copy of it. The closing brace is found at whatever
+// indentation the declaration itself sits at: the function has lived both
+// nested inside `parseBZWMap` and at module scope, and which one it is has
+// nothing to do with what it computes.
 const src = fs.readFileSync('server.js', 'utf8');
-const start = src.indexOf('function faceMaxCrossSqr');
+const start = src.search(/^[ \t]*function faceMaxCrossSqr\b/m);
 if (start < 0) {
   console.error('FAIL server.js has no faceMaxCrossSqr');
   process.exit(1);
 }
-const body = src.slice(start, src.indexOf('\n  }\n', start) + 5);
-const faceMaxCrossSqr = eval(`(${body.replace(/^function faceMaxCrossSqr/, 'function')})`);
+const indent = /^[ \t]*/.exec(src.slice(start))[0];
+const close = `\n${indent}}\n`;
+const body = src.slice(start, src.indexOf(close, start) + close.length);
+const faceMaxCrossSqr = eval(`(${body.trim().replace(/^function faceMaxCrossSqr/, 'function')})`);
 
 // Upstream's own threshold, MeshFace.cxx:114.
 const MIN_FACE_CROSS_SQR = 1.0e-20;

@@ -101,6 +101,16 @@ client feature exists (it always does), but whether at least one ICE
 server is configured, since a peer connection across anything but a LAN
 typically never completes without one.
 
+Also `mapHash` and `world`. The hash is the content hash of the world being
+played, and it is all the list server needs to draw that instance's overview
+picture -- never a URL, so a report can name a world to fetch but never a
+host to fetch it from. `world` is what that world costs: the `.bzw` it was
+read from, the parsed `.json`, and the brotli sidecar, as exact byte counts.
+Reported rather than measured, because only the instance can see its own
+`maps/` directory, and the list server holding a copy of every world just to
+weigh it is the download this whole arrangement exists to avoid. `/list`
+rounds them for display; `GET /api/list-server/list` carries the bytes.
+
 And `proxies`: one entry per real BZFlag server this instance carries a
 browser to (`docs/proxy.md`), each carrying that target's own counts, shot
 limit, style, option bits, title and reachability -- everything a native row

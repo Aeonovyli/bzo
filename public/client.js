@@ -389,6 +389,7 @@ import {
   traceShotStep,
   WORLD_WALL_HEIGHT,
 } from './collision.mjs';
+import { meshArrays, FACE_NO_RADAR } from './mesh-arrays.mjs';
 import { resolveTankMotion } from './motion.mjs';
 import {
   TRACK_SURFACE_TOLERANCE,
@@ -5463,15 +5464,28 @@ function getMotionSurfaceOutlinePoints(obstacle) {
     const halfLength = (TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1)) + DEBUG_OUTLINE_SLACK;
     const queryY = playerY - DEBUG_OUTLINE_SLACK;
     const queryHeight = TANK_COLLISION_HEIGHT + (2 * DEBUG_OUTLINE_SLACK);
-    const face = findMeshHitFaceOriented(
+    // A face is its index in the mesh now (issue #153), and index zero is a
+    // real face and a falsy number -- so both the fallback and the "none"
+    // test compare against -1 rather than leaning on truthiness.
+    const oriented = findMeshHitFaceOriented(
       obstacle, playerX, queryY, playerZ, playerRotation, halfWidth, halfLength, queryHeight,
-    ) || findMeshHitFace(obstacle, playerX, queryY, playerZ, queryHeight, queryHeight);
-    if (!face) return null;
-    const offset = new THREE.Vector3(face.plane[0], face.plane[1], face.plane[2]).multiplyScalar(epsilon);
-    return face.vertexIndices.map((vi) => {
-      const v = obstacle.vertices[vi];
-      return new THREE.Vector3(v.x, v.y, v.z).add(offset);
-    });
+    );
+    const f = oriented >= 0
+      ? oriented
+      : findMeshHitFace(obstacle, playerX, queryY, playerZ, queryHeight, queryHeight);
+    if (f < 0) return null;
+    const arrays = meshArrays(obstacle);
+    const offset = new THREE.Vector3(
+      arrays.facePlanes[f * 4], arrays.facePlanes[(f * 4) + 1], arrays.facePlanes[(f * 4) + 2],
+    ).multiplyScalar(epsilon);
+    const outline = [];
+    for (let c = arrays.faceStart[f]; c < arrays.faceStart[f + 1]; c += 1) {
+      const v = arrays.corners[c] * 3;
+      outline.push(new THREE.Vector3(
+        arrays.vertices[v], arrays.vertices[v + 1], arrays.vertices[v + 2],
+      ).add(offset));
+    }
+    return outline;
   }
 
   const cos = Math.cos(obstacle.rotation);
@@ -9912,9 +9926,10 @@ function findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale = getMy
     if (obs.type === 'pyramid') {
       if (!pyramidIntersectsTank(obs, worldX, worldY, worldZ, rotation, 2, 0, tankScale)) continue;
     } else if (obs.type === 'mesh') {
-      if (!findMeshHitFaceOriented(obs, worldX, worldY, worldZ, rotation,
+      // `< 0` and not a truth test: face zero is a real face (issue #153).
+      if (findMeshHitFaceOriented(obs, worldX, worldY, worldZ, rotation,
         TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
-        TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1), 2)) continue;
+        TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1), 2) < 0) continue;
     } else {
       const { x: localX, z: localZ } = getColliderLocalPoint(worldX, worldZ, obs);
       if (!testOrigRectTank(
@@ -13047,12 +13062,12 @@ function traceBeamSegments(start, dir, range, ricochet) {
 
     let reason = 'range';
     let obstacle = null;
-    let obstacleFace = null;
+    let obstacleFace = -1;
     let fraction = 1;
     if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
       reason = 'obstacle';
       obstacle = impact.obstacle;
-      obstacleFace = impact.face ?? null;
+      obstacleFace = Number.isInteger(impact.face) ? impact.face : -1;
       fraction = obstacleFraction;
     } else if (groundFraction < 1) {
       reason = 'ground';
@@ -13069,7 +13084,7 @@ function traceBeamSegments(start, dir, range, ricochet) {
       end = { ...teleporterEvent.event.point };
       reason = teleporterEvent.type === 'frameHit' ? 'frame_hit' : 'teleport';
       obstacle = teleporterEvent.type === 'frameHit' ? teleporterEvent.obs : null;
-      obstacleFace = null;
+      obstacleFace = -1;
     }
 
     segments.push({ from: { ...drawFrom }, to: { ...end }, end: reason });
@@ -15639,12 +15654,13 @@ let radarMeshOrder = { source: null, list: [] };
 // A mesh's drawn faces all share one colour where every one of them states the
 // same, which is the colour its footprint can stand in with. Mixed, the panel's
 // neutral grey is the only honest answer for a shape that is several colours.
-function getRadarMeshFootprintTint(faces) {
+function getRadarMeshFootprintTint(arrays, faces) {
   let tint = null;
-  for (const { face } of faces) {
-    if (!face.color) return null;
-    if (!tint) tint = face.color;
-    else if (face.color[0] !== tint[0] || face.color[1] !== tint[1] || face.color[2] !== tint[2]) {
+  for (const { f } of faces) {
+    const { color } = arrays.materials[arrays.faceMaterial[f]];
+    if (!color) return null;
+    if (!tint) tint = color;
+    else if (color[0] !== tint[0] || color[1] !== tint[1] || color[2] !== tint[2]) {
       return null;
     }
   }
@@ -15657,17 +15673,24 @@ function getRadarMeshObstacles() {
     let widestFace = 0;
     OBSTACLES.forEach((obs) => {
       if (obs.type !== 'mesh' || !obs.bounds) return;
+      // Out of the mesh's flat arrays rather than a face object apiece
+      // (issue #153). The panel keeps only faces that point upward and are
+      // not `noradar`, both of which the arrays carry.
+      const arrays = meshArrays(obs);
       const faces = [];
-      obs.faces.forEach((face) => {
-        if (!face.plane || face.plane[1] <= 0 || face.noRadar) return;
-        widestFace = Math.max(widestFace, face.vertexIndices.length);
-        faces.push({ face, ...getRadarMeshFaceCull(obs, face) });
-      });
+      for (let f = 0; f < arrays.faceCount; f += 1) {
+        if (arrays.facePlanes[(f * 4) + 1] <= 0) continue;
+        if (arrays.faceFlags[f] & FACE_NO_RADAR) continue;
+        const cornerCount = arrays.faceStart[f + 1] - arrays.faceStart[f];
+        widestFace = Math.max(widestFace, cornerCount);
+        faces.push({ f, ...getRadarMeshFaceCull(obs, arrays, f) });
+      }
       if (!faces.length) return;
       entries.push({
         obs,
+        arrays,
         faces,
-        footprintTint: getRadarMeshFootprintTint(faces),
+        footprintTint: getRadarMeshFootprintTint(arrays, faces),
         ...getRadarMeshObstacleCull(obs),
       });
     });
@@ -16205,7 +16228,7 @@ function updateRadar() {
   if (typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES)) {
     const worldToPanelPixels = radarWorldHalfExtent / radarDistance;
     getRadarMeshObstacles().forEach((entry) => {
-      const { obs, faces, footprint, footprintTint, cullX, cullZ, cullRadius } = entry;
+      const { obs, arrays, faces, footprint, footprintTint, cullX, cullZ, cullRadius } = entry;
       // Same rejection as the obstacle loop, on the circle the cached list
       // carries for this mesh -- a spinning one's is centred on the pivot, so
       // it holds whatever angle the mesh is at this frame.
@@ -16254,22 +16277,24 @@ function updateRadar() {
         return;
       }
 
-      faces.forEach(({ face, cullRadius: faceRadius }) => {
+      faces.forEach(({ f, cullRadius: faceRadius }) => {
         if ((faceRadius * 2 * worldToPanelPixels) < RADAR_FACE_MIN_PIXELS) return;
-        const vertexCount = face.vertexIndices.length;
+        const start = arrays.faceStart[f];
+        const vertexCount = arrays.faceStart[f + 1] - start;
         const scratch = radarPolygonScratch();
         for (let i = 0; i < vertexCount; i += 1) {
-          const v = obs.vertices[face.vertexIndices[i]];
-          project(scratch, i, v.x, v.z);
+          const v = arrays.corners[start + i] * 3;
+          project(scratch, i, arrays.vertices[v], arrays.vertices[v + 2]);
         }
 
         const clippedCount = clipPolygonToRadarSquare(scratch, vertexCount, radarDistance);
         if (clippedCount < 3) return;
 
+        const { color } = arrays.materials[arrays.faceMaterial[f]];
         addRadarFill(
           getRadarClipBuffer(),
           clippedCount,
-          face.color ? getRadarTintFill(face.color) : RADAR_NEUTRAL_FILL,
+          color ? getRadarTintFill(color) : RADAR_NEUTRAL_FILL,
           opacity,
         );
       });

@@ -29,6 +29,7 @@
 
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { meshArrays } from '../public/mesh-arrays.mjs';
 
 const require = createRequire(import.meta.url);
 const C = require('../server/collision.cjs');
@@ -188,16 +189,20 @@ for (const [label, west, east] of [
 // nothing to cancel resolves to no progress at all, every frame.
 {
   const deck = slab('deck', -40, 0, -20, 20, TOP);
-  const wall = deck.faces[1];
+  // The wall is `deck.faces[1]`, and the direction test reads a mesh's flat
+  // arrays rather than its face objects now (issue #153), so it is named by
+  // index against those.
+  const deckArrays = meshArrays(deck);
+  const wall = 1;
   const along = { x: 0, y: -0.5 * STEP, z: SPEED * STEP };
   assert.equal(
-    C.meshFaceBlocksDirection(wall, along, deck, TOP),
+    C.meshFaceBlocksDirection(deckArrays, wall, along, TOP),
     false,
     'a face travelled exactly along must not block',
   );
   const into = { x: -SPEED * STEP, y: -0.5 * STEP, z: 0 };
   assert.equal(
-    C.meshFaceBlocksDirection(wall, into, deck, TOP),
+    C.meshFaceBlocksDirection(deckArrays, wall, into, TOP),
     true,
     'a face driven straight into must still block',
   );

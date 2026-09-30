@@ -25,6 +25,7 @@
 // is.
 
 const { getTeamFromColorIndex, getPlayerTeamRadarColor } = require('./teams.cjs');
+const { meshArrays, FACE_NO_RADAR, NO_INDEX } = require('./mesh-arrays.cjs');
 
 // The grid, and so the picture, in pixels square. 256 is what `/list`'s pane
 // shows and about where the rectangle encoding stops paying for itself: 512
@@ -148,19 +149,23 @@ function walkSurfaces(obstacles, mapSize, size, visit) {
     if (!obs || obs.noRadar) continue;
     const fill = obstacleFill(obs);
     if (obs.type === 'mesh') {
-      if (!Array.isArray(obs.faces) || !Array.isArray(obs.vertices)) continue;
-      for (const face of obs.faces) {
-        const indices = face.vertexIndices;
-        if (!Array.isArray(indices) || indices.length < 3) continue;
+      // Read out of the mesh's flat arrays, which by this point are the only
+      // description it carries (issue #153).
+      const arrays = meshArrays(obs);
+      for (let f = 0; f < arrays.faceCount; f += 1) {
+        const start = arrays.faceStart[f];
+        const end = arrays.faceStart[f + 1];
+        if (end - start < 3) continue;
         const vertices = [];
         let top = -Infinity;
-        for (const index of indices) {
-          const vertex = obs.vertices[index];
-          if (!vertex) { vertices.length = 0; break; }
+        for (let c = start; c < end; c += 1) {
+          const vi = arrays.corners[c] * 3;
+          const vertex = {
+            x: arrays.vertices[vi], y: arrays.vertices[vi + 1], z: arrays.vertices[vi + 2],
+          };
           vertices.push(vertex);
           if (vertex.y > top) top = vertex.y;
         }
-        if (vertices.length < 3) continue;
         // Faces standing on edge project to a line and have nothing to fill:
         // a wall's footprint is already covered by whatever caps it, and a
         // face with no area cannot be seen from above.
@@ -179,12 +184,19 @@ function walkSurfaces(obstacles, mapSize, size, visit) {
         // a mesh may be wound inconsistently and most are not normalled at
         // all.
         let up = wind > 0;
-        const normalIndex = Array.isArray(face.normalIndices) ? face.normalIndices[0] : undefined;
-        const normal = normalIndex === undefined ? null : (obs.normals || [])[normalIndex];
-        if (normal && Number.isFinite(normal.y)) up = normal.y > 0;
+        const normalIndex = arrays.cornerNormal[start];
+        if (normalIndex !== NO_INDEX) {
+          const normalY = arrays.normals[(normalIndex * 3) + 1];
+          if (Number.isFinite(normalY)) up = normalY > 0;
+        }
         if (!up) continue;
+        // A material's `noradar` keeps a face off the panel, and the picture
+        // follows the panel -- the obstacle-level flag is checked above, but
+        // the flag is per face and a mesh may hide only some of itself.
+        if ((arrays.faceFlags[f] & FACE_NO_RADAR) !== 0) continue;
+        const color = arrays.materials[arrays.faceMaterial[f]]?.color;
         visit(vertices.map((vertex) => [toPixel(vertex.x), toPixel(vertex.z)]), top,
-          face.color ? (tintFill(face.color) || fill) : fill);
+          color ? (tintFill(color) || fill) : fill);
       }
       continue;
     }

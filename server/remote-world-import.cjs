@@ -1341,6 +1341,13 @@ function parseWorldDatabase(fullBuf) {
 
   return {
     mapVersion,
+    // What bzfs actually sent and what it inflated to. The world crosses the
+    // wire deflated, with both figures stated in its own header
+    // (`bzfs.cxx:1200-1201`), so these are that server's own numbers rather
+    // than anything bzo measured -- which is what makes them comparable
+    // between one client and another.
+    compressedSize,
+    uncompressedSize,
     trailingBytes: r.remaining,
     managers: { dynamicColors, textureMatrices, materials, physicsDrivers, meshTransforms },
     world, groupDefs, links, waterLevel, waterMaterial, weapons, zones,

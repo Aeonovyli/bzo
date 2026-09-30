@@ -258,6 +258,17 @@ instead:
   `MsgWantWHash`; the idea -- skip the transfer when the client already holds
   this world -- is the same, done with ordinary HTTP caching. See AGENTS.md,
   "Hashed, cacheable world delivery".
+
+  A mesh in that world is **flat typed arrays**, not a list of face objects:
+  base64 `arrays` (and `drawArrays` where a `drawInfo` block states a second
+  geometry to draw) holding vertices, corner spans, planes, edge planes,
+  per-face flags, and indices into small side tables of materials and
+  physics drivers. `public/mesh-arrays.mjs` decodes them and is the only way
+  in -- a face is an index, and collision, the renderer, the radar and the
+  overview picture all read it that way. A parsed face object cost about
+  2,134 bytes against the arrays' 93, and the server no longer builds the
+  world with them at all: `bzo.bzw` went from 847 KB to 258 KB, and a cache
+  of twenty maps from 171 MB to 32 MB.
 - **Identity.** `/login` and a session cookie, not a token in a join message.
 - **Assets** -- textures, models, sounds -- are static files, where upstream
   has `MsgFetchResources` and `MsgCacheURL`.

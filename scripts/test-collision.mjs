@@ -1057,8 +1057,32 @@ assert.ok(Math.abs(trapped.x) < 1, 'and leaves the shot inside the corridor');
   // exactly such a face.
   const driveThroughFace = { ...driverFace, driveThrough: true };
   const driveThroughMesh = { ...mesh, faces: [driveThroughFace] };
-  assert.equal(client.findMeshFaceAt(driveThroughMesh, 0, 5, 0, 2, 2), driveThroughFace);
-  assert.equal(client.findMeshHitFace(driveThroughMesh, 0, 5, 0, 2, 2), null, 'a hit-normal query still skips it');
+  // A face is named by its index in the mesh now rather than by its object,
+  // and -1 is "no face" -- index zero being a real face and a falsy number
+  // (issue #153).
+  assert.equal(client.findMeshFaceAt(driveThroughMesh, 0, 5, 0, 2, 2), 0);
+  assert.equal(client.findMeshHitFace(driveThroughMesh, 0, 5, 0, 2, 2), -1, 'a hit-normal query still skips it');
+  assert.equal(server.findMeshFaceAt(driveThroughMesh, 0, 5, 0, 2, 2), 0, 'server agrees');
+  assert.equal(client.findMeshFaceAt(driveThroughMesh, 100, 5, 100, 2, 2), -1, 'and off the mesh is no face');
+
+  // An exact ray crossing names its face by index too. It used to hand back
+  // the face object, which `getMeshHitNormal` could not read as a face at all
+  // -- so a ricochet quietly fell back to the static touching test, which is
+  // the ambiguity passing the exact face exists to avoid. Nothing caught it,
+  // hence this.
+  const solidMesh = { ...mesh, faces: [{ ...driverFace, driveThrough: false }] };
+  const crossed = client.findMeshFaceCrossing(solidMesh, 0, 20, 0, 0, -20, 0, 0.5);
+  assert.ok(crossed, 'a ray straight down crosses the floor');
+  assert.equal(typeof crossed.face, 'number', 'and names that face by index');
+  assert.deepEqual(
+    server.findMeshFaceCrossing(solidMesh, 0, 20, 0, 0, -20, 0, 0.5),
+    crossed,
+    'server agrees',
+  );
+  // And the normal that comes back is the face's own, not the straight-up
+  // last resort the fallback gives.
+  const ricochet = client.getShotObstacleNormal(solidMesh, 0, 5, 0, 0.5, crossed.face);
+  assert.ok(Math.abs(ricochet.y) > 0.99, 'reflecting off the floor uses the floor\'s own normal');
 }
 
 console.log(`collision geometry tests passed (${checked} fuzz samples, ${solidSamples} solid, seed ${SEED})`);

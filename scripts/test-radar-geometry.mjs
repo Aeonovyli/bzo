@@ -22,6 +22,7 @@ import {
   getRadarPolygonScratch,
   isOutsideRadarSquare,
 } from '../public/radar-geometry.mjs';
+import { meshArrays } from '../public/mesh-arrays.mjs';
 
 // Deterministic PRNG so a failure is reproducible from the printed seed.
 function makeRandom(seed) {
@@ -165,8 +166,11 @@ const spinningMesh = {
     { x: 4, y: 0, z: 3 },
   ],
 };
+// The cull reads the mesh's flat arrays rather than a face object now
+// (issue #153), so a face is named by its index in them.
 const spinningFace = { vertexIndices: [0, 1, 2, 3] };
-const spinCull = getRadarMeshFaceCull(spinningMesh, spinningFace);
+spinningMesh.faces = [spinningFace];
+const spinCull = getRadarMeshFaceCull(spinningMesh, meshArrays(spinningMesh), 0);
 assert.equal(spinCull.cullX, 10);
 assert.equal(spinCull.cullZ, -4);
 for (const vertex of spinningMesh.vertices) {
@@ -183,7 +187,8 @@ const stillMesh = {
     { x: 0, y: 0, z: 6 },
   ],
 };
-const stillCull = getRadarMeshFaceCull(stillMesh, { vertexIndices: [0, 1, 2, 3] });
+stillMesh.faces = [{ vertexIndices: [0, 1, 2, 3] }];
+const stillCull = getRadarMeshFaceCull(stillMesh, meshArrays(stillMesh), 0);
 assert.equal(stillCull.cullX, 5);
 assert.equal(stillCull.cullZ, 3);
 assert.ok(Math.abs(stillCull.cullRadius - Math.hypot(5, 3)) < 1e-9);

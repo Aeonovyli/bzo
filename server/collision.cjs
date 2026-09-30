@@ -5,6 +5,15 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
+const {
+  meshArrays, FACE_SHOOT_THROUGH, FACE_DRIVE_THROUGH, NO_PHYDRV,
+} = require('./mesh-arrays.cjs');
+
+// No face answered. A face is named by its index in the mesh now rather than
+// by its object (issue #153), and index zero is a real face -- so the absent
+// case has to be a number nothing can mistake for one, and every test of it
+// is `>= 0` or `!== NO_FACE` rather than a truth test.
+const NO_FACE = -1;
 // Obstacle geometry shared by the client and the server.
 //
 // These predicates mirror upstream BZFlag so that both sides of bzo agree with
@@ -488,9 +497,20 @@ const MESH_GRAZE_TOLERANCE = 1e-6;
 // a floor a tank drives along is square to its travel, so a dot product only
 // ever says "parallel" and would let it through. It is asked the vertical
 // question instead, which is upstream's own; see the branch below.
-function meshFaceBlocksDirection(face, direction, obs, y) {
+// A face the parser could give no plane -- degenerate, or never finalized --
+// was skipped by `!face.plane` when a face was an object. In the arrays an
+// absent plane is four zeros, and a real one is always a unit normal, so the
+// two are told apart without storing a flag for it.
+function meshFaceHasPlane(arrays, f) {
+  return arrays.facePlanes[f * 4] !== 0
+    || arrays.facePlanes[(f * 4) + 1] !== 0
+    || arrays.facePlanes[(f * 4) + 2] !== 0;
+}
+
+function meshFaceBlocksDirection(arrays, f, direction, y) {
   if (!direction) return true;
-  if (Math.abs(face.plane[1]) >= MESH_FLAT_PLANE_THRESHOLD) {
+  const planeY = arrays.facePlanes[(f * 4) + 1];
+  if (Math.abs(planeY) >= MESH_FLAT_PLANE_THRESHOLD) {
     // Upstream's own pair of tests, which ask what *height* the step began at
     // and never where it is horizontally (World.cxx:335-341):
     //
@@ -511,13 +531,14 @@ function meshFaceBlocksDirection(face, direction, obs, y) {
     // faces left are the segments' end caps, which face straight back along
     // the walkway. Driving forward then resolves to a fraction of a metre
     // *backwards* every frame.
-    const faceY = obs.vertices[face.vertexIndices[0]].y;
+    const faceY = arrays.vertices[(arrays.corners[arrays.faceStart[f]] * 3) + 1];
     const startY = y - direction.y;
     const goingDown = direction.y <= 0;
-    if (face.plane[1] > 0) return goingDown && startY >= faceY - 1e-3;
+    if (planeY > 0) return goingDown && startY >= faceY - 1e-3;
     return !goingDown && startY < faceY;
   }
-  const dot = (face.plane[0] * direction.x) + (face.plane[1] * direction.y) + (face.plane[2] * direction.z);
+  const dot = (arrays.facePlanes[f * 4] * direction.x) + (planeY * direction.y)
+    + (arrays.facePlanes[(f * 4) + 2] * direction.z);
   const reach = Math.sqrt((direction.x * direction.x) + (direction.y * direction.y)
     + (direction.z * direction.z));
   return dot < -MESH_GRAZE_TOLERANCE * reach;
@@ -540,21 +561,37 @@ function findMeshHitFace(obs, x, y, z, radius, height, passField = 'driveThrough
   const { bounds } = obs;
   if (bounds && (x + radius < bounds.minX || x - radius > bounds.maxX
     || z + radius < bounds.minZ || z - radius > bounds.maxZ)) {
-    return null;
+    return NO_FACE;
   }
   const boxMins = [-radius, 0, -radius];
   const boxMaxs = [radius, height, radius];
-  for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
-    const localPoints = face.vertexIndices.map((vi) => {
-      const v = obs.vertices[vi];
-      return [v.x - x, v.y - y, v.z - z];
-    });
-    const [nx, ny, nz, d] = face.plane;
-    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
-    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return face;
+  // Read out of the mesh's flat arrays rather than its face objects (issue
+  // #153) -- the same planes and corners, at 93 bytes a face instead of 2,134
+  // and without touching an object per face on a path that runs over every
+  // face of the mesh. The face object is still what comes back, until the
+  // callers stop needing one.
+  const arrays = meshArrays(obs);
+  const pass = passField === 'shootThrough' ? FACE_SHOOT_THROUGH : FACE_DRIVE_THROUGH;
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    if (!meshFaceHasPlane(arrays, f) || (arrays.faceFlags[f] & pass)) continue;
+    if (!meshFaceBlocksDirection(arrays, f, direction, y)) continue;
+    const start = arrays.faceStart[f];
+    const end = arrays.faceStart[f + 1];
+    const localPoints = [];
+    for (let c = start; c < end; c += 1) {
+      const v = arrays.corners[c] * 3;
+      localPoints.push([
+        arrays.vertices[v] - x, arrays.vertices[v + 1] - y, arrays.vertices[v + 2] - z,
+      ]);
+    }
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const localPlane = [nx, ny, nz,
+      arrays.facePlanes[(f * 4) + 3] + (nx * x) + (ny * y) + (nz * z)];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return f;
   }
-  return null;
+  return NO_FACE;
 }
 
 // Which face a tank standing at this position is over, ignoring both
@@ -577,21 +614,28 @@ function findMeshFaceAt(obs, x, y, z, radius, height) {
   const { bounds } = obs;
   if (bounds && (x + radius < bounds.minX || x - radius > bounds.maxX
     || z + radius < bounds.minZ || z - radius > bounds.maxZ)) {
-    return null;
+    return NO_FACE;
   }
   const boxMins = [-radius, 0, -radius];
   const boxMaxs = [radius, height, radius];
-  for (const face of obs.faces) {
-    if (!face.plane) continue;
-    const localPoints = face.vertexIndices.map((vi) => {
-      const v = obs.vertices[vi];
-      return [v.x - x, v.y - y, v.z - z];
-    });
-    const [nx, ny, nz, d] = face.plane;
-    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
-    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return face;
+  const arrays = meshArrays(obs);
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    if (!meshFaceHasPlane(arrays, f)) continue;
+    const localPoints = [];
+    for (let c = arrays.faceStart[f]; c < arrays.faceStart[f + 1]; c += 1) {
+      const v = arrays.corners[c] * 3;
+      localPoints.push([
+        arrays.vertices[v] - x, arrays.vertices[v + 1] - y, arrays.vertices[v + 2] - z,
+      ]);
+    }
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const localPlane = [nx, ny, nz,
+      arrays.facePlanes[(f * 4) + 3] + (nx * x) + (ny * y) + (nz * z)];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return f;
   }
-  return null;
+  return NO_FACE;
 }
 
 // The one physics-driver lookup both the client (motion) and the server
@@ -608,14 +652,19 @@ function findMeshFaceAt(obs, x, y, z, radius, height) {
 function resolvePhysicsDriverAt(obstacle, x, y, z) {
   if (!obstacle) return null;
   if (obstacle.type === 'mesh') {
-    const face = findMeshFaceAt(obstacle, x, y, z, 2, 2);
-    return (face && face.phydrv) || obstacle.phydrv || null;
+    const f = findMeshFaceAt(obstacle, x, y, z, 2, 2);
+    if (f !== NO_FACE) {
+      const arrays = meshArrays(obstacle);
+      const index = arrays.facePhydrv[f];
+      if (index !== NO_PHYDRV) return arrays.phydrvs[index];
+    }
+    return obstacle.phydrv || null;
   }
   return obstacle.phydrv || null;
 }
 
 function meshIntersectsCylinder(obs, x, y, z, radius, height, passField = 'driveThrough', direction = null) {
-  return findMeshHitFace(obs, x, y, z, radius, height, passField, direction) !== null;
+  return findMeshHitFace(obs, x, y, z, radius, height, passField, direction) !== NO_FACE;
 }
 
 // The tank box against a mesh, face by face -- `MeshFace::inBox`
@@ -640,30 +689,36 @@ function findMeshHitFaceOriented(
   const boundingRadius = Math.hypot(halfWidth, halfLength);
   if (bounds && (x + boundingRadius < bounds.minX || x - boundingRadius > bounds.maxX
     || z + boundingRadius < bounds.minZ || z - boundingRadius > bounds.maxZ)) {
-    return null;
+    return NO_FACE;
   }
   const cos = Math.cos(rotation);
   const sin = Math.sin(rotation);
   const boxMins = [-halfWidth, 0, -halfLength];
   const boxMaxs = [halfWidth, height, halfLength];
-  for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
-    const localPoints = face.vertexIndices.map((vi) => {
-      const v = obs.vertices[vi];
-      const dx = v.x - x;
-      const dz = v.z - z;
-      return [(dx * cos) - (dz * sin), v.y - y, (dx * sin) + (dz * cos)];
-    });
-    const [nx, ny, nz, d] = face.plane;
+  const arrays = meshArrays(obs);
+  const pass = passField === 'shootThrough' ? FACE_SHOOT_THROUGH : FACE_DRIVE_THROUGH;
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    if (!meshFaceHasPlane(arrays, f) || (arrays.faceFlags[f] & pass)) continue;
+    if (!meshFaceBlocksDirection(arrays, f, direction, y)) continue;
+    const localPoints = [];
+    for (let c = arrays.faceStart[f]; c < arrays.faceStart[f + 1]; c += 1) {
+      const v = arrays.corners[c] * 3;
+      const dx = arrays.vertices[v] - x;
+      const dz = arrays.vertices[v + 2] - z;
+      localPoints.push([(dx * cos) - (dz * sin), arrays.vertices[v + 1] - y, (dx * sin) + (dz * cos)]);
+    }
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
     const localPlane = [
       (nx * cos) - (nz * sin),
       ny,
       (nx * sin) + (nz * cos),
-      d + (nx * x) + (ny * y) + (nz * z),
+      arrays.facePlanes[(f * 4) + 3] + (nx * x) + (ny * y) + (nz * z),
     ];
-    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return face;
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) return f;
   }
-  return null;
+  return NO_FACE;
 }
 
 function meshIntersectsTank(obs, x, y, z, rotation, height, slack = 0, tankScale = null, direction = null) {
@@ -672,7 +727,7 @@ function meshIntersectsTank(obs, x, y, z, rotation, height, slack = 0, tankScale
   const trim = Math.max(0, Math.min(slack, halfWidth));
   return findMeshHitFaceOriented(
     obs, x, y, z, rotation, halfWidth - trim, halfLength - trim, height, 'driveThrough', direction,
-  ) !== null;
+  ) !== NO_FACE;
 }
 
 // Every face of `obs` touching the box, rather than `findMeshHitFaceOriented`'s
@@ -694,22 +749,28 @@ function collectMeshHitFacesTank(
   const sin = Math.sin(rotation);
   const boxMins = [-halfWidth, 0, -halfLength];
   const boxMaxs = [halfWidth, height, halfLength];
-  for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
-    const localPoints = face.vertexIndices.map((vi) => {
-      const v = obs.vertices[vi];
-      const dx = v.x - x;
-      const dz = v.z - z;
-      return [(dx * cos) - (dz * sin), v.y - y, (dx * sin) + (dz * cos)];
-    });
-    const [nx, ny, nz, d] = face.plane;
+  const arrays = meshArrays(obs);
+  const pass = passField === 'shootThrough' ? FACE_SHOOT_THROUGH : FACE_DRIVE_THROUGH;
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    if (!meshFaceHasPlane(arrays, f) || (arrays.faceFlags[f] & pass)) continue;
+    if (!meshFaceBlocksDirection(arrays, f, direction, y)) continue;
+    const localPoints = [];
+    for (let c = arrays.faceStart[f]; c < arrays.faceStart[f + 1]; c += 1) {
+      const v = arrays.corners[c] * 3;
+      const dx = arrays.vertices[v] - x;
+      const dz = arrays.vertices[v + 2] - z;
+      localPoints.push([(dx * cos) - (dz * sin), arrays.vertices[v + 1] - y, (dx * sin) + (dz * cos)]);
+    }
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
     const localPlane = [
       (nx * cos) - (nz * sin),
       ny,
       (nx * sin) + (nz * cos),
-      d + (nx * x) + (ny * y) + (nz * z),
+      arrays.facePlanes[(f * 4) + 3] + (nx * x) + (ny * y) + (nz * z),
     ];
-    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) out.push({ obs, face });
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) out.push({ obs, face: f });
   }
   return out;
 }
@@ -725,15 +786,26 @@ function collectMeshHitFacesCylinder(obs, x, y, z, radius, height, passField, di
   }
   const boxMins = [-radius, 0, -radius];
   const boxMaxs = [radius, height, radius];
-  for (const face of obs.faces) {
-    if (!face.plane || face[passField] || !meshFaceBlocksDirection(face, direction, obs, y)) continue;
-    const localPoints = face.vertexIndices.map((vi) => {
-      const v = obs.vertices[vi];
-      return [v.x - x, v.y - y, v.z - z];
-    });
-    const [nx, ny, nz, d] = face.plane;
-    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
-    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) out.push({ obs, face });
+  const arrays = meshArrays(obs);
+  const pass = passField === 'shootThrough' ? FACE_SHOOT_THROUGH : FACE_DRIVE_THROUGH;
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    if (!meshFaceHasPlane(arrays, f) || (arrays.faceFlags[f] & pass)) continue;
+    if (!meshFaceBlocksDirection(arrays, f, direction, y)) continue;
+    const localPoints = [];
+    for (let c = arrays.faceStart[f]; c < arrays.faceStart[f + 1]; c += 1) {
+      const v = arrays.corners[c] * 3;
+      localPoints.push([
+        arrays.vertices[v] - x, arrays.vertices[v + 1] - y, arrays.vertices[v + 2] - z,
+      ]);
+    }
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const localPlane = [nx, ny, nz,
+      arrays.facePlanes[(f * 4) + 3] + (nx * x) + (ny * y) + (nz * z)];
+    if (testPolygonInAxisBox(localPoints, localPlane, boxMins, boxMaxs)) {
+      out.push({ obs, face: f });
+    }
   }
   return out;
 }
@@ -759,12 +831,17 @@ function collectMeshHitFacesCylinder(obs, x, y, z, radius, height, passField, di
 function pickPriorityMeshCandidate(candidates, direction) {
   if (candidates.length === 0) return null;
   const scored = candidates.map((candidate) => {
-    const { face } = candidate;
-    const isUp = face.plane[1] >= MESH_FLAT_PLANE_THRESHOLD;
+    const { obs, face: f } = candidate;
+    const arrays = meshArrays(obs);
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const isUp = ny >= MESH_FLAT_PLANE_THRESHOLD;
     const dot = direction
-      ? (direction.x * face.plane[0]) + (direction.y * face.plane[1]) + (direction.z * face.plane[2])
+      ? (direction.x * nx) + (direction.y * ny) + (direction.z * nz)
       : -1;
-    const upHeight = isUp ? candidate.obs.vertices[face.vertexIndices[0]].y : 0;
+    const upHeight = isUp
+      ? arrays.vertices[(arrays.corners[arrays.faceStart[f]] * 3) + 1] : 0;
     return { ...candidate, isUp, dot, upHeight };
   });
   scored.sort((a, b) => {
@@ -795,10 +872,17 @@ function pickPriorityMeshFace(candidates, direction) {
 // ground there can be "touching" more than one face, and array order used
 // to pick a wrong one, reflecting the shot off the bottom's normal instead
 // of the wall's. Passing `hitFace` sidesteps that rather than resolving it.
-function getMeshHitNormal(obs, x, y, z, radius, hitFace = null) {
-  const face = hitFace || findMeshHitFace(obs, x, y, z, radius, radius, 'shootThrough');
-  if (!face) return { x: 0, y: 1, z: 0 };
-  return { x: face.plane[0], y: face.plane[1], z: face.plane[2] };
+function getMeshHitNormal(obs, x, y, z, radius, hitFace = NO_FACE) {
+  // `>= 0` and not a truth test: face zero is a real face and a falsy number.
+  const f = hitFace >= 0
+    ? hitFace : findMeshHitFace(obs, x, y, z, radius, radius, 'shootThrough');
+  if (f === NO_FACE) return { x: 0, y: 1, z: 0 };
+  const arrays = meshArrays(obs);
+  return {
+    x: arrays.facePlanes[f * 4],
+    y: arrays.facePlanes[(f * 4) + 1],
+    z: arrays.facePlanes[(f * 4) + 2],
+  };
 }
 
 // A teleporter's frame and the opening inside it. The importer resolves the
@@ -1093,17 +1177,26 @@ function meshFlatTopYsAt(obs, x, z) {
   }
   const speck = 1e-3;
   const tops = [];
-  for (const face of obs.faces) {
-    if (!face.plane || face.plane[1] < MESH_FLAT_TOP_MIN_UP) continue;
+  const arrays = meshArrays(obs);
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    if (!meshFaceHasPlane(arrays, f) || ny < MESH_FLAT_TOP_MIN_UP) continue;
+    const start = arrays.faceStart[f];
+    const end = arrays.faceStart[f + 1];
     // An up-plane is horizontal to within the same fudge at both ends, so every
     // vertex of one shares a height and the first is the face's own.
-    const y = obs.vertices[face.vertexIndices[0]].y;
-    const localPoints = face.vertexIndices.map((vi) => {
-      const v = obs.vertices[vi];
-      return [v.x - x, v.y - y, v.z - z];
-    });
-    const [nx, ny, nz, d] = face.plane;
-    const localPlane = [nx, ny, nz, d + (nx * x) + (ny * y) + (nz * z)];
+    const y = arrays.vertices[(arrays.corners[start] * 3) + 1];
+    const localPoints = [];
+    for (let c = start; c < end; c += 1) {
+      const v = arrays.corners[c] * 3;
+      localPoints.push([
+        arrays.vertices[v] - x, arrays.vertices[v + 1] - y, arrays.vertices[v + 2] - z,
+      ]);
+    }
+    const nx = arrays.facePlanes[f * 4];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const localPlane = [nx, ny, nz,
+      arrays.facePlanes[(f * 4) + 3] + (nx * x) + (ny * y) + (nz * z)];
     if (testPolygonInAxisBox(
       localPoints,
       localPlane,
@@ -1330,9 +1423,13 @@ function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
     corners.push([x + cos * cornerW - sin * cornerL, z + sin * cornerW + cos * cornerL]);
   }
 
-  for (const { face } of hits) {
-    if (!face.plane) continue;
-    const [nx, ny, nz, d] = face.plane;
+  const arrays = meshArrays(obs);
+  for (const { face: f } of hits) {
+    if (!meshFaceHasPlane(arrays, f)) continue;
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const d = arrays.facePlanes[(f * 4) + 3];
     // `ZERO_TOLERANCE` and not `0` for the same reason the shot code uses it:
     // a corner sitting exactly on the face is on it, not out through it, and
     // a tank's feet are exactly on the floor it is standing on.
@@ -1639,10 +1736,12 @@ function findShotImpact(obstacles, fromX, fromY, fromZ, toX, toY, toZ, radius) {
 // inside, handing a shot's reflection the wrong face's normal. Every face a
 // mapper writes is required to be planar and convex (CustomMeshFace.cxx), so
 // this never has to handle a concave one.
-function pointInMeshFacePolygon(obs, face, px, py, pz) {
-  for (let i = 0; i < face.edgePlanes.length; i++) {
-    const [nx, ny, nz, d] = face.edgePlanes[i];
-    if (((nx * px) + (ny * py) + (nz * pz) + d) > 0.001) return false;
+function pointInMeshFacePolygon(arrays, f, px, py, pz) {
+  for (let c = arrays.faceStart[f]; c < arrays.faceStart[f + 1]; c += 1) {
+    const e = c * 4;
+    const inside = (arrays.edgePlanes[e] * px) + (arrays.edgePlanes[e + 1] * py)
+      + (arrays.edgePlanes[e + 2] * pz) + arrays.edgePlanes[e + 3];
+    if (inside > 0.001) return false;
   }
   return true;
 }
@@ -1678,9 +1777,13 @@ function findMeshFaceCrossing(obs, fromX, fromY, fromZ, toX, toY, toZ, radius) {
   const dy = toY - fromY;
   const dz = toZ - fromZ;
   let best = null;
-  for (const face of obs.faces) {
-    if (!face.plane || face.shootThrough) continue;
-    const [nx, ny, nz, d] = face.plane;
+  const arrays = meshArrays(obs);
+  for (let f = 0; f < arrays.faceCount; f += 1) {
+    if (!meshFaceHasPlane(arrays, f) || (arrays.faceFlags[f] & FACE_SHOOT_THROUGH)) continue;
+    const nx = arrays.facePlanes[f * 4];
+    const ny = arrays.facePlanes[(f * 4) + 1];
+    const nz = arrays.facePlanes[(f * 4) + 2];
+    const d = arrays.facePlanes[(f * 4) + 3];
     const denom = (nx * dx) + (ny * dy) + (nz * dz);
     if (Math.abs(denom) < 1e-9) continue; // travelling parallel to the face
     const fromDist = (nx * fromX) + (ny * fromY) + (nz * fromZ) + d;
@@ -1709,8 +1812,11 @@ function findMeshFaceCrossing(obs, fromX, fromY, fromZ, toX, toY, toZ, radius) {
     const px = fromX + (dx * t0);
     const py = fromY + (dy * t0);
     const pz = fromZ + (dz * t0);
-    if (!pointInMeshFacePolygon(obs, face, px, py, pz)) continue;
-    best = { fraction: t, obstacle: obs, face };
+    if (!pointInMeshFacePolygon(arrays, f, px, py, pz)) continue;
+    // The index, not the object: `getMeshHitNormal` takes a face index now,
+    // and handing it anything else drops it back to the static touching test
+    // -- which is the ambiguity passing the exact face is here to avoid.
+    best = { fraction: t, obstacle: obs, face: f };
   }
   return best;
 }
@@ -1879,7 +1985,7 @@ function findShotSegmentImpact(obstacles, from, to, radius) {
 // `hitFace`, for a mesh, is the face the caller's own ray sweep already
 // identified -- see `getMeshHitNormal`'s comment on why that beats
 // re-deriving it here.
-function getShotObstacleNormal(obs, x, y, z, radius, hitFace = null) {
+function getShotObstacleNormal(obs, x, y, z, radius, hitFace = NO_FACE) {
   if (obs.type === 'mesh') return getMeshHitNormal(obs, x, y, z, radius, hitFace);
 
   // Teleporter::getNormal always answers off the nearest border column,
@@ -1919,7 +2025,10 @@ function getShotObstacleNormal(obs, x, y, z, radius, hitFace = null) {
   // that never had a `from`/`to` to test, such as the debug outline's static
   // position query) this falls back to `getOrigRectNormal`'s own corner
   // guess, same as before.
-  if (Number.isInteger(hitFace)) {
+  // `>= 0` as well as integral: the absent case is `NO_FACE`, which is -1 and
+  // so is itself an integer -- reading it as a face index would reflect the
+  // shot off a quarter-turn that is not there.
+  if (Number.isInteger(hitFace) && hitFace >= 0) {
     const theta = hitFace * (Math.PI / 2);
     return rotateNormalToWorld(obs, Math.cos(theta), 0, Math.sin(theta));
   }
@@ -2198,9 +2307,13 @@ function getTankHitNormal(obs, x, y, z, rotation, toY, height, sweep = null) {
       collectMeshHitFacesCylinder(obs, queryX, low, queryZ, height, height, 'driveThrough', direction, candidates);
     }
     const best = pickPriorityMeshCandidate(candidates, direction);
-    return best
-      ? { x: best.face.plane[0], y: best.face.plane[1], z: best.face.plane[2] }
-      : { x: 0, y: 1, z: 0 };
+    if (!best) return { x: 0, y: 1, z: 0 };
+    const arrays = meshArrays(best.obs);
+    return {
+      x: arrays.facePlanes[best.face * 4],
+      y: arrays.facePlanes[(best.face * 4) + 1],
+      z: arrays.facePlanes[(best.face * 4) + 2],
+    };
   }
 
   if (crossedFlatTop(base + getObstacleHeight(obs), y, toY)) return { x: 0, y: 1, z: 0 };
@@ -2355,7 +2468,10 @@ function traceShotStep({
         remaining = 0;
         break;
       }
-      const normal = getShotObstacleNormal(impact.obstacle, hitX, hitY, hitZ, radius, impact.face ?? null);
+      const normal = getShotObstacleNormal(
+        impact.obstacle, hitX, hitY, hitZ, radius,
+        Number.isInteger(impact.face) ? impact.face : NO_FACE,
+      );
       const reflected = reflectShotDirection(dX, dY, dZ, normal);
       dX = reflected.x;
       dY = reflected.y;
@@ -2462,7 +2578,6 @@ function getSegmentTankHitFraction(from, to, tank, shape = {}) {
   if (near < 0) return ((-b + root) / a) < 0 ? null : 0;
   return near;
 }
-
 module.exports = {
   ZERO_TOLERANCE,
   collectMeshHitFacesTank,

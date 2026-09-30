@@ -220,6 +220,9 @@ const mapOverview = require('./server/map-overview.cjs');
 const { createBzfsWorldTracker } = require('./server/bzfs-worlds.cjs');
 const { createMapIndex } = require('./server/map-index.cjs');
 const {
+  encodeMeshArrays, meshArrays, meshDrawArrays,
+} = require('./server/mesh-arrays.cjs');
+const {
   createLagTracker,
   formatLagStats,
   compareByLag,
@@ -1162,17 +1165,180 @@ app.get('/api/ready', (req, res) => {
 // KB is plenty of precision for a table cell -- nobody sorting/scanning this
 // page needs the exact byte count `performRemoteMapImport`'s own log line
 // already carries.
+// Compact on purpose: these sit several to a line in a readout pane, and a
+// tenth of a kilobyte has never told anyone anything about a world.
 function formatByteSize(bytes) {
   if (!Number.isFinite(bytes)) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024) return `${bytes}b`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}k`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
 }
 
-function statSizeOrBlank(filePath) {
+// Several sizes as one field. A missing one is a dash rather than a gap, so
+// the reader can still tell which of them is missing; all missing is no
+// field at all rather than a row of dashes.
+function joinSizes(...sizes) {
+  if (!sizes.some((size) => size > 0)) return '';
+  return sizes.map((size) => (size > 0 ? formatByteSize(size) : '-')).join('/');
+}
+
+// The world facts a bzfs row carries to every other instance: bzfs's own hash
+// and how many bytes it sent, then what bzo made of it. Exact byte counts --
+// a reader that wants them rounded can round them, and one that wants to
+// compare or sum them still can.
+function publishWorldFacts(host, port) {
+  const record = bzfsWorlds.recordFor(host, port);
+  const measured = measureImportedWorld(host, port);
+  // Measured where the files are still there, remembered where they are not:
+  // an import is swept two hours after it was fetched, and the figures it had
+  // were true when taken.
+  bzfsWorlds.noteSizes(host, port, measured);
+  const facts = {
+    hash: record?.worldHash || '',
+    sent: record?.worldCompressed || 0,
+    inflated: record?.worldUncompressed || 0,
+    bzw: measured.bzw || record?.bzw || 0,
+    json: measured.json || record?.json || 0,
+    brotli: measured.brotli || record?.brotli || 0,
+  };
+  return Object.values(facts).some((value) => value) ? facts : null;
+}
+
+// What this server can measure of one imported world right now. Blank for any
+// of it whose file has gone.
+function measureImportedWorld(host, port) {
+  const fileName = remoteMapFileName(host, port);
+  const registered = MAP_REGISTRY.get(fileName);
+  const bzwPath = resolveMapFilePath(fileName);
+  return {
+    bzw: bzwPath ? statSizeBytes(bzwPath) : 0,
+    json: registered ? statSizeBytes(path.join(MAP_CACHE_DIR, `${registered.hash}.json`)) : 0,
+    brotli: registered ? brotliSizeBytes(`${registered.hash}.json`) : 0,
+  };
+}
+
+// What this instance's own live world costs, in the same terms the bzfs pane
+// reports for an imported one (issue #147): the map file it was read from,
+// the parsed world it produced, and what that world weighs on the wire once
+// brotli has it. Reported to the list server rather than measured there --
+// only the instance itself can see its own `maps/` directory, and the list
+// server holding a copy of every instance's world just to weigh it is the
+// download this whole arrangement exists to avoid.
+//
+// Raw byte counts, not formatted strings: a row is rendered where it is
+// shown, and a number survives being compared or summed.
+function measureLiveWorld() {
+  if (!LIVE_MAP_ENTRY) return null;
+  const sizeOf = (filePath) => {
+    try {
+      return fs.statSync(filePath).size;
+    } catch {
+      return 0;
+    }
+  };
+  // A generated world was never a file, so it has no `.bzw` to weigh --
+  // which is itself the honest answer for `random`.
+  const mapFilePath = MAP_SOURCE === 'random' ? null : resolveMapFilePath(MAP_SOURCE);
+  const brotliName = `${LIVE_MAP_ENTRY.hash}.json`;
+  return {
+    hash: LIVE_MAP_ENTRY.hash,
+    bzw: mapFilePath ? sizeOf(mapFilePath) : 0,
+    json: sizeOf(path.join(MAP_CACHE_DIR, `${LIVE_MAP_ENTRY.hash}.json`)),
+    brotli: sizeOf(path.join(MAP_CACHE_BR_DIR, brotliSidecarName(brotliName) || '\0')),
+  };
+}
+
+// The sidecar's own file name, which carries a content digest as well as the
+// path -- found by prefix rather than built, since there is one at most.
+function brotliSidecarName(name) {
   try {
-    return formatByteSize(fs.statSync(filePath).size);
+    const prefix = `${name}.`;
+    return fs.readdirSync(MAP_CACHE_BR_DIR)
+      .find((entry) => entry.startsWith(prefix) && entry.endsWith('.br')) || '';
   } catch {
     return '';
+  }
+}
+
+// The brotli sidecar `server/precompress.cjs` wrote for one cached file. Its
+// name carries the content digest as well as the path, so it is found by
+// prefix rather than built -- there is one at most, since a stale one is
+// swept when the digest moves.
+function brotliSizeBytes(name) {
+  const match = brotliSidecarName(name);
+  if (!match) return 0;
+  return statSizeBytes(path.join(MAP_CACHE_BR_DIR, match));
+}
+
+// A bzo instance's own reported world sizes, rendered into the same fields
+// `describeRelayedWorld` produces for a bzfs row so one template draws both.
+// `worldBytes`/`worldInflated` stay blank: those are what bzfs sent over its
+// own wire, which an instance serving its own world never had.
+function describeReportedWorld(world) {
+  if (!world) return null;
+  return {
+    hash: world.hash || '',
+    // What bzfs sent over its own wire, which an instance serving its own
+    // world never had.
+    sent: 0,
+    inflated: 0,
+    bzw: world.bzw || 0,
+    json: world.json || 0,
+    brotli: world.brotli || 0,
+  };
+}
+
+// What this server holds of one BZFlag server's world, for its row's readout
+// pane: the hash bzfs itself names it by and how many bytes it sent, then
+// what bzo made of it -- the reconstructed `.bzw`, the parsed world, and what
+// that world costs on the wire once brotli has it. A row nobody has imported
+// has none of it, which is itself the answer.
+function describeImportedWorld(host, port) {
+  return describeRelayedWorld(publishWorldFacts(host, port) || {});
+}
+
+// The same lines for an instance reading the merged list rather than holding
+// the import itself: the designated server already measured them, so they
+// arrive as text and are shown as they came.
+// `host:port` as the two things the world tracker is keyed by. A target
+// without a port is not one this server could have imported, so it gets a
+// port nothing matches rather than a guess.
+function splitHostPort(target) {
+  const text = typeof target === 'string' ? target : '';
+  const at = text.lastIndexOf(':');
+  if (at < 0) return [text, 0];
+  return [text.slice(0, at), Number.parseInt(text.slice(at + 1), 10) || 0];
+}
+
+// A bzo instance's own world, for its row. Not `describeRelayedWorld`'s
+// labels: the hash is bzo's own, not the one bzfs names a world by, and
+// "World sent"/"World inflated" describe a transfer that never happened --
+// an instance serves the world it already has.
+function describeOwnWorld(world) {
+  if (!world) return [];
+  return [
+    ['Map hash', escapeHtml(world.hash || '')],
+    ['bzw/json/br', escapeHtml(joinSizes(world.bzw, world.json, world.brotli))],
+  ];
+}
+
+function describeRelayedWorld(world) {
+  return [
+    ['BZFlag hash', escapeHtml(world.hash || '')],
+    ['sent/inflated', escapeHtml(joinSizes(world.sent, world.inflated))],
+    ['bzw/json/br', escapeHtml(joinSizes(world.bzw, world.json, world.brotli))],
+  ];
+}
+
+// Bytes, never text. A size is measured in one place, stored in one place
+// and formatted where it is shown -- so what the tracker persists and what
+// `/api/list-server/list` publishes are the exact numbers, and rounding is
+// the display's business alone. 0 for a file that is not there.
+function statSizeBytes(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return 0;
   }
 }
 
@@ -1460,8 +1626,9 @@ function renderMapList(listId, filterId, maps) {
       stats,
       overviewUrl: registered ? registered.overviewUrl : null,
       modified: bzwPath ? statMtimeOrBlank(bzwPath) : '',
-      bzwSize: bzwPath ? statSizeOrBlank(bzwPath) : '',
-      jsonSize: registered ? statSizeOrBlank(path.join(MAP_CACHE_DIR, `${registered.hash}.json`)) : '',
+      bzw: bzwPath ? statSizeBytes(bzwPath) : 0,
+      json: registered ? statSizeBytes(path.join(MAP_CACHE_DIR, `${registered.hash}.json`)) : 0,
+      brotli: registered ? brotliSizeBytes(`${registered.hash}.json`) : 0,
     };
   });
 
@@ -1590,8 +1757,7 @@ function renderMapReadout(entry, index, hidden) {
     + row('Hashed', entry.file === 'random' ? 'generated at boot' : (entry.hashed ? 'yes' : 'not yet'))
     + row('Hash', entry.hash)
     + row('Modified', entry.modified)
-    + row('.bzw', entry.bzwSize)
-    + row('.json', entry.jsonSize)
+    + row('bzw/json/br', joinSizes(entry.bzw, entry.json, entry.brotli))
     + `</div>`
     + `</div></div>`
     + renderOverview(entry.overviewUrl, entry.file)
@@ -1866,6 +2032,9 @@ function renderListPage({
       extras: [
         ['Address', escapeHtml(`${s.host}:${s.port}`)],
         ['Imported', escapeHtml(importedPath ? statMtimeOrBlank(importedPath) : '')],
+        // What this server holds of that world, and what it cost -- see
+        // `describeImportedWorld`.
+        ...(s.world ? describeRelayedWorld(s.world) : describeImportedWorld(s.host, s.port)),
       ],
       imported: MAP_REGISTRY.has(importFileName),
       // Watching is the live game rather than the map: a real observer
@@ -1928,7 +2097,16 @@ function renderListPage({
       // `s.overviewUrl`, which belongs to a different game on the same host.
       overviewUrl: proxy ? importedOverviewUrl(proxy.target) : (s.overviewUrl || null),
       extras: proxy
-        ? [['BZFlag server', escapeHtml(proxy.target)], ['Carried by', urlLink]]
+        ? [
+          ['BZFlag server', escapeHtml(proxy.target)],
+          ['Carried by', urlLink],
+          // A proxy row's world is the target's, so the figures are the ones
+          // a bzfs row for the same address would show -- the same import,
+          // read the same way, the way the picture above already is. Blank
+          // until this instance has imported that server; nothing here
+          // fetches, and a proxy row is not a reason to.
+          ...describeImportedWorld(...splitHostPort(proxy.target)),
+        ]
         : [
           ['Map', escapeHtml(String(s.map || '').replace(/\.bzw$/, ''))],
           ['Version', escapeHtml(s.version || '')],
@@ -1937,6 +2115,10 @@ function renderListPage({
           ['Up', escapeHtml(formatUptime(s.upSince))],
           ['Voice chat', s.voiceEnabled ? 'configured' : ''],
           ['URL', urlLink],
+          // What that instance says its own world costs. Reported rather
+          // than measured here -- only the instance can see its own maps
+          // directory -- and absent for one too old to be reporting it.
+          ...describeOwnWorld(s.world),
         ],
     };
   };
@@ -2763,8 +2945,17 @@ async function importProxyWorld(target) {
 // tracker (`server/bzfs-worlds.cjs`), where nothing is waiting and the only
 // cost of patience is a slot in a queue that runs all day -- the maps that
 // time out are exactly the big ones most worth having a picture of.
-const IMPORT_WORLD_TIMEOUT_MS = 45000;
-const IMPORT_WORLD_BACKGROUND_TIMEOUT_MS = 120000;
+//
+// The background figure is deliberately far past what any world should need,
+// because the two failure modes are not symmetric. Waiting costs one slot in
+// a queue with all day to spend. Giving up costs a six-hour cooldown that
+// then *doubles* per consecutive failure up to a week
+// (`failureCooldown`), so a server whose world is merely slow gets treated
+// like one that is broken, and its row keeps the blank thumbnail that made
+// it worth fetching in the first place. `bmbz.ducatileague.org:5187` is the
+// shape of the problem: 158KB of `.bzw` and a definition of 9,176 faces.
+const IMPORT_WORLD_TIMEOUT_MS = 3 * 60 * 1000;
+const IMPORT_WORLD_BACKGROUND_TIMEOUT_MS = 10 * 60 * 1000;
 
 async function performRemoteMapImport(host, port, timeout) {
   let publicServers;
@@ -2799,12 +2990,17 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
   const { host, port, dialHost = host, dialPort = port } = listedServer;
   const { worldDatabase, gameSettings, queryGame, variables, worldHash } =
     await fetchWorldFromServer(dialHost, dialPort, timeout || IMPORT_WORLD_TIMEOUT_MS);
+  const tree = parseWorldDatabase(worldDatabase);
   // Whatever caused this import -- the tracker's own schedule, an operator, or
   // somebody following a `?viewmap=` link -- the world tracker learns the hash
-  // it just paid for, so its next check is a dial rather than this download
-  // over again.
-  bzfsWorlds.noteImport(host, port, worldHash);
-  const tree = parseWorldDatabase(worldDatabase);
+  // and the sizes it just paid for, so its next check is a dial rather than
+  // this download over again. After the parse, since the two sizes are the
+  // world header's own and that is what reads them.
+  bzfsWorlds.noteImport(host, port, worldHash, {
+    byteLength: worldDatabase.length,
+    compressedSize: tree.compressedSize,
+    uncompressedSize: tree.uncompressedSize,
+  });
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
   // or timed out (see `fetchWorldFromServer`); the map imports either way.
@@ -2845,7 +3041,15 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
     mapData.serverOptions.gameplay,
     { templates: mapData.meshTemplates, instances: mapData.meshInstances }
   );
-  return { safeMapName, byteLength: worldDatabase.length };
+  // `compressedSize`/`uncompressedSize` are bzfs's own figures out of the
+  // world header, not bzo's measurement of the transfer -- the numbers
+  // another client would see for the same world.
+  return {
+    safeMapName,
+    byteLength: worldDatabase.length,
+    compressedSize: tree.compressedSize,
+    uncompressedSize: tree.uncompressedSize,
+  };
 }
 
 function ensureRuntimeMapsDir(dirPath) {
@@ -2932,7 +3136,16 @@ server.listen(PORT, LISTEN_HOST, () => {
   log(`Client build ${CLIENT_BUILD}`);
   // After the port is open, never before it: the game is playable while the
   // sidecars are built, and a request that arrives first is served identity.
-  precompress.start({ log }).catch((error) => logError(`[BR] ${error.message}`));
+  //
+  // `drain`, not `start`: the map trickle has not run yet, so the plan names
+  // only the static assets. Sweeping now would take the whole map cache's
+  // sidecars with it -- every cached world would lose its compressed copy on
+  // every restart, and have to earn it back. The sweep belongs at the end of
+  // the trickle, where the plan is complete, and that is where it happens.
+  precompress.drain({ log }).then(({ compressed, raw, br, ms }) => {
+    log(`[BR] ${compressed} asset sidecar(s) built, ${Math.round(raw / 1024)}KB -> `
+      + `${Math.round(br / 1024)}KB in ${(ms / 1000).toFixed(1)}s`);
+  }).catch((error) => logError(`[BR] ${error.message}`));
   probeAdminWhitelist().catch((error) => logError(`[ADMIN] probe failed: ${error.message}`));
   reportToListServer('boot');
   if (IS_DESIGNATED_LIST_SERVER) {
@@ -3386,6 +3599,11 @@ function sanitizeListServerStatus(body) {
     // name here. Anything else is dropped rather than cleaned: a hash that
     // needed cleaning is not a hash.
     mapHash: /^[0-9a-f]{12}$/.test(body?.mapHash) ? body.mapHash : '',
+    // Three byte counts an instance reports about its own world. Bounded and
+    // coerced rather than trusted -- this is the edge an untrusted instance
+    // reports at, and a size is only ever a display figure, so anything that
+    // is not a sane number becomes zero rather than rejecting the report.
+    world: sanitizeReportedWorld(body?.world),
     // Bounded here rather than trusted, since this is the edge an untrusted
     // instance reports at; `listPublicListServerRows` shapes each row again on
     // the way out, where it also drops the targets that were unreachable.
@@ -3400,6 +3618,24 @@ function sanitizeListServerStatus(body) {
 // the top level above and each `proxies` entry below pass through this.
 // Ceilings are the wire's own: every one of these is a `uint16` in the ping
 // packet a bzfs row arrives as, and the two team arrays are `uint8` apiece.
+// A reported world's three sizes. A byte count no larger than a terabyte,
+// which is far past any real world and still short of anything that could
+// make a row misrender.
+const MAX_REPORTED_WORLD_BYTES = 1e12;
+function sanitizeReportedWorld(world) {
+  if (!world || typeof world !== 'object') return null;
+  const size = (value) => (Number.isFinite(value) && value > 0
+    ? Math.min(Math.floor(value), MAX_REPORTED_WORLD_BYTES) : 0);
+  const hash = /^[0-9a-f]{12}$/.test(world.hash) ? world.hash : '';
+  const bzw = size(world.bzw);
+  const json = size(world.json);
+  const brotli = size(world.brotli);
+  if (!hash && !bzw && !json && !brotli) return null;
+  return {
+    hash, bzw, json, brotli,
+  };
+}
+
 function sanitizeListServerReadout(source) {
   return {
     teamCounts: boundedTeamArray(source?.teamCounts),
@@ -3662,6 +3898,11 @@ function listPublicListServerRows() {
         // instance, stated here rather than assembled by each reader: this is
         // the only server that knows which pictures exist.
         overviewUrl: instanceOverviewUrl(record.live.mapHash),
+        // Shaped the way `describeRelayedWorld` renders a bzfs row's, so
+        // both panes read the same however the figures were come by: this
+        // instance measured its own, the bzfs one was measured off an
+        // import.
+        world: describeReportedWorld(record.live.world),
         voiceEnabled: record.live.voiceEnabled,
         // Observed, never reported: `sanitizeListServerStatus` deliberately
         // does not read this from a payload, because a server claiming its own
@@ -3766,6 +4007,10 @@ app.get('/api/list-server/list', async (req, res) => {
       // because the reader is another origin -- and stated here rather than
       // derived, since this is the only server that knows.
       overviewUrl: instanceMapOverviewUrl(remoteMapFileName(server.host, server.port)),
+      // What this server knows of that world, measured once here rather than
+      // by every reader -- a reader holds no import of it and could not
+      // measure any of this for itself.
+      world: publishWorldFacts(server.host, server.port),
     })),
     bzfsCacheAgeSeconds: Math.max(0, Math.round((Date.now() - remoteServerListCache.at) / 1000)),
   });
@@ -5930,7 +6175,43 @@ function resolveBzwTextureName(rawName) {
   return null;
 }
 
+// `MeshFace::finalize` (MeshFace.cxx:80-129) picks the vertex triple with
+// the largest cross product to build a face's plane from, and a face whose
+// best triple is degenerate has no plane to make: upstream logs "invalid
+// mesh face" and sets `vertexCount` to 0, discarding the face and loading
+// the world anyway. Same test, same threshold, same outcome here -- a map
+// that draws a warning from bzfs draws one from bzo rather than loading
+// clean in one and noisy in the other.
+function faceMaxCrossSqr(vertices, indices) {
+  let max = 0;
+  for (let i = 0; i < indices.length - 2; i++) {
+    for (let j = i + 1; j < indices.length - 1; j++) {
+      const a = vertices[indices[i]];
+      const b = vertices[indices[j]];
+      if (!a || !b) continue;
+      const e2 = [a.x - b.x, a.y - b.y, a.z - b.z];
+      for (let k = j + 1; k < indices.length; k++) {
+        const c = vertices[indices[k]];
+        if (!c) continue;
+        const e1 = [c.x - b.x, c.y - b.y, c.z - b.z];
+        const cross = [
+          e1[1] * e2[2] - e1[2] * e2[1],
+          e1[2] * e2[0] - e1[0] * e2[2],
+          e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        const lenSqr = cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2];
+        if (lenSqr > max) max = lenSqr;
+      }
+    }
+  }
+  return max;
+}
+
+// Upstream's own threshold, `MeshFace.cxx:114`.
+const MIN_FACE_CROSS_SQR = 1.0e-20;
+
 function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
+  const degenerateFaceCounts = new Map();
   // Diagnostic detail about this one file -- which refs, textures, or spins
   // it dropped -- worth an operator's attention for the live map and for one
   // just imported, but not for the hundred cached maps
@@ -8576,14 +8857,19 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       // makes an arbitrarily deep nesting land in the right place.
       spinPivot: mesh.angvel ? placePoint(mesh.spinPivot || { x: 0, y: 0, z: 0 }) : mesh.spinPivot,
     };
-    finalizeMeshGeometry(placedMesh);
     // The instance's own `phydrv`/`matref` override, same rule and same
     // helper `applyGroupInstanceTransform` uses for a nested plain-obstacle
     // group whose member happens to be a mesh -- this is the direct path a
     // top-level `group <meshDefine> \n matref <name> \n end` instance
     // actually takes (`resolveDefineMeshes`, above), so it needs the same
     // application, not just the indirect one.
-    return applyGroupMeshModifiers(placedMesh, request);
+    //
+    // Before `finalizeMeshGeometry`, not after: the override replaces face
+    // objects wholesale, and finalize is meant to be the last thing that
+    // changes a mesh's faces. It touches material and physics fields only,
+    // never geometry, so which side of finalize it runs on cannot change
+    // what it produces.
+    return finalizeMeshGeometry(applyGroupMeshModifiers(placedMesh, request));
   }
 
   // A vertex pool's own axis-aligned bounding box -- `MeshObstacle::finalize`
@@ -8800,6 +9086,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     }));
   }
 
+
   // Bounds plus a per-face plane (and its edge planes), computed once a
   // mesh's vertices are in their final world positions -- a top-level mesh
   // right when it closes, or a `group`-placed one right after its own
@@ -8840,7 +9127,32 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       face.edgePlanes = computeMeshFaceEdgePlanes(mesh.vertices, face.vertexIndices, face.plane);
       finalFaces.push(face);
     }
-    mesh.faces = finalFaces;
+    // Upstream drops a zero-area face in `MeshFace::finalize` itself, and so
+    // does this -- after triangulation, so what is tested is the faces the
+    // mesh ends up with, slivers a split produced included. Here rather than
+    // in a pass over the finished obstacle list because the arrays are built
+    // from these faces and a face dropped afterwards would mean rebuilding
+    // them; a `define`'s own template meshes reach this too, and a pass over
+    // `obstacles` never saw those at all.
+    mesh.faces = finalFaces.filter((face) => {
+      const indices = face.vertexIndices || [];
+      if (indices.length >= 3
+        && faceMaxCrossSqr(mesh.vertices, indices) >= MIN_FACE_CROSS_SQR) return true;
+      const name = mesh.name || mesh.type || 'mesh';
+      degenerateFaceCounts.set(name, (degenerateFaceCounts.get(name) || 0) + 1);
+      return false;
+    });
+    // The arrays, here rather than at registration: this is the last moment
+    // a mesh's faces change, and building now is what lets them be dropped
+    // (issue #153). An instance's `matref`/`tint`/`phydrv` override runs
+    // before this, not after -- see `applyGroupInstanceTransformToMesh`.
+    //
+    // Held decoded and under their own names: `arrays` is the encoded field
+    // the wire carries, and `attachMeshArrayPayloads` is what turns one into
+    // the other.
+    mesh.arrayData = meshArrays(mesh);
+    const draw = meshDrawArrays(mesh);
+    if (draw !== mesh.arrayData) mesh.drawArrayData = draw;
     return mesh;
   }
 
@@ -9010,9 +9322,16 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         // rather than at placement. The instance's own overrides go on after,
         // exactly as `applyGroupInstanceTransformToMesh` applies them to an
         // expanded copy.
+        // The face copy stays explicit: `applyGroupMeshModifiers` makes its
+        // own only when the instance actually states an override, and
+        // `finalizeMeshGeometry` writes a plane onto each face in place --
+        // a template placed twice must not have the second placement
+        // overwrite the first's.
         const templateMeshes = resolveDefineMeshes(request.groupDefName, new Set())
-          .map((mesh) => finalizeMeshGeometry({ ...mesh, faces: mesh.faces.map((f) => ({ ...f })) }))
-          .map((mesh) => applyGroupMeshModifiers(mesh, request));
+          .map((mesh) => applyGroupMeshModifiers(
+            { ...mesh, faces: mesh.faces.map((f) => ({ ...f })) }, request,
+          ))
+          .map((mesh) => finalizeMeshGeometry(mesh));
         // A definition made of boxes and pyramids has no meshes to batch --
         // those draw through the obstacle path, which shares its geometry
         // already. Naming an empty template would put an instance on the
@@ -9085,7 +9404,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // saving is measured on real maps rather than assumed.
   if (passableInstances > 0) {
     const templateFaces = [...meshTemplates.values()]
-      .reduce((sum, list) => sum + list.reduce((n, m) => n + (m.faces ? m.faces.length : 0), 0), 0);
+      .reduce((sum, list) => sum + list.reduce((n, m) => n + meshArrays(m).faceCount, 0), 0);
     log(`${mapLabel}: ${passableInstances} of ${groupInstanceRequests.length} group `
       + `instance(s) share ${meshTemplates.size} template(s) of ${templateFaces} face(s) `
       + 'rather than a copy apiece');
@@ -9241,17 +9560,31 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     if (!driver) unresolvedPhysicsDriverRefs.add(rawRef.toLowerCase());
     return driver;
   }
+  // A mesh names its drivers in a table of its own that `facePhydrv` indexes
+  // -- a handful of entries, not one per face -- so resolving there is both
+  // less work than walking faces and the only form that still works once a
+  // mesh carries no face objects at all (issue #153).
+  const resolveArrayPhydrvs = (mesh) => {
+    for (const arrays of [mesh.arrayData, mesh.drawArrayData]) {
+      if (!arrays || !Array.isArray(arrays.phydrvs)) continue;
+      arrays.phydrvs = arrays.phydrvs.map(
+        (phydrv) => (typeof phydrv === 'string' ? resolvePhysicsDriverRef(phydrv) : phydrv),
+      );
+    }
+  };
+  const resolveMeshPhydrvs = (mesh) => resolveArrayPhydrvs(mesh);
   for (const obstacle of obstacles) {
     if (typeof obstacle.phydrv === 'string') {
       obstacle.phydrv = resolvePhysicsDriverRef(obstacle.phydrv);
     }
-    if (Array.isArray(obstacle.faces)) {
-      for (const face of obstacle.faces) {
-        if (typeof face.phydrv === 'string') {
-          face.phydrv = resolvePhysicsDriverRef(face.phydrv);
-        }
-      }
-    }
+    resolveMeshPhydrvs(obstacle);
+  }
+  // A `define`'s own template meshes are never in `obstacles` -- the client
+  // places them by transform rather than by copy (#153) -- so a pass over
+  // that list alone left their drivers as the bare names they were written
+  // with, and a face riding one behaved as though it had none.
+  for (const meshes of meshTemplates.values()) {
+    for (const mesh of meshes) resolveMeshPhydrvs(mesh);
   }
   if (unresolvedPhysicsDriverRefs.size > 0) {
     warn(
@@ -9260,53 +9593,6 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     );
   }
 
-  // `MeshFace::finalize` (MeshFace.cxx:80-129) picks the vertex triple with
-  // the largest cross product to build a face's plane from, and a face whose
-  // best triple is degenerate has no plane to make: upstream logs "invalid
-  // mesh face" and sets `vertexCount` to 0, discarding the face and loading
-  // the world anyway. Same test, same threshold, same outcome here -- a map
-  // that draws a warning from bzfs draws one from bzo rather than loading
-  // clean in one and noisy in the other.
-  function faceMaxCrossSqr(vertices, indices) {
-    let max = 0;
-    for (let i = 0; i < indices.length - 2; i++) {
-      for (let j = i + 1; j < indices.length - 1; j++) {
-        const a = vertices[indices[i]];
-        const b = vertices[indices[j]];
-        if (!a || !b) continue;
-        const e2 = [a.x - b.x, a.y - b.y, a.z - b.z];
-        for (let k = j + 1; k < indices.length; k++) {
-          const c = vertices[indices[k]];
-          if (!c) continue;
-          const e1 = [c.x - b.x, c.y - b.y, c.z - b.z];
-          const cross = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-          ];
-          const lenSqr = cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2];
-          if (lenSqr > max) max = lenSqr;
-        }
-      }
-    }
-    return max;
-  }
-
-  // Upstream's own threshold, `MeshFace.cxx:114`.
-  const MIN_FACE_CROSS_SQR = 1.0e-20;
-  const degenerateFaceCounts = new Map();
-  for (const obstacle of obstacles) {
-    if (!Array.isArray(obstacle.faces) || !Array.isArray(obstacle.vertices)) continue;
-    const kept = obstacle.faces.filter((face) => {
-      const indices = face.vertexIndices || [];
-      if (indices.length >= 3
-        && faceMaxCrossSqr(obstacle.vertices, indices) >= MIN_FACE_CROSS_SQR) return true;
-      const name = obstacle.name || obstacle.type;
-      degenerateFaceCounts.set(name, (degenerateFaceCounts.get(name) || 0) + 1);
-      return false;
-    });
-    if (kept.length !== obstacle.faces.length) obstacle.faces = kept;
-  }
   if (degenerateFaceCounts.size > 0) {
     const dropped = Array.from(degenerateFaceCounts.values()).reduce((sum, n) => sum + n, 0);
     const list = Array.from(degenerateFaceCounts.entries())
@@ -9666,6 +9952,34 @@ function deriveMapGameplay(gameplay) {
   return overlay;
 }
 
+// Builds the brotli sidecars for whatever was just written to the map cache.
+// `precompress.start()` is the wrong call here: it sweeps first, and a sweep
+// is only correct once every map has been considered -- mid-trickle it would
+// delete the sidecars of every map the pass has not reached yet. Debounced,
+// because the boot trickle registers a hundred maps back to back and this is
+// meant to be one pass over the lot rather than a hundred.
+//
+// Without it a map imported while the server is up has no sidecar until the
+// next restart, which is exactly the map whose `.json.br` size a `/list` row
+// is being asked for.
+let compressCacheTimer = null;
+function compressNewCacheFilesSoon() {
+  if (compressCacheTimer) return;
+  compressCacheTimer = setTimeout(() => {
+    compressCacheTimer = null;
+    precompress.drain({ log }).then(({
+      compressed, skipped, raw, br, ms,
+    }) => {
+      if (compressed > 0 || skipped > 0) {
+        log(`[BR] ${compressed} map sidecar(s) built, ${Math.round(raw / 1024)}KB -> `
+          + `${Math.round(br / 1024)}KB in ${(ms / 1000).toFixed(1)}s`
+          + (skipped > 0 ? `, ${skipped} not written` : ''));
+      }
+    }).catch((error) => logError('[BR] map sidecars:', error));
+  }, 5000);
+  if (compressCacheTimer.unref) compressCacheTimer.unref();
+}
+
 function registerMapFile(
   fileName, obstacles, teleporterGraph, teamMode, mapSize, messages, noWalls, waterLevel, weather,
   groundMaterial, gameplay, instancing = null
@@ -9725,6 +10039,12 @@ function registerMapFile(
     entry.meshTemplates = instancing.templates;
     entry.meshInstances = instancing.instances;
   }
+  // Each mesh's geometry as flat arrays as well as face objects (issue #153),
+  // so the client can read the arrays it would otherwise build for itself and
+  // the encoding gets exercised on real maps. Both forms while this is being
+  // moved over; the objects come out once nothing reads them, which is when
+  // the size actually falls.
+  attachMeshArrayPayloads(entry);
   const json = JSON.stringify(entry);
   const hash = crypto.createHash('sha256').update(json).digest('hex').slice(0, 12);
   const url = `/maps/${hash}.json`;
@@ -9736,6 +10056,7 @@ function registerMapFile(
     return null;
   }
   precompress.consider(url, filePath, Buffer.from(json));
+  compressNewCacheFilesSoon();
 
   // The overview picture, beside the JSON and under the same hash
   // (`server/map-overview.cjs`, issue #147). Written here rather than on
@@ -9779,6 +10100,50 @@ function registerMapFile(
   // having to parse it again to find out.
   mapIndex.note(fileName, hash, resolveMapFilePath(fileName));
   return registered;
+}
+
+// Every mesh in a world, carrying its own flat arrays beside its faces. A
+// template's meshes get them too: the client draws those without ever seeing
+// them in `obstacles`.
+function attachMeshArrayPayloads(entry) {
+  const attach = (mesh) => {
+    // A template's meshes carry no `type`, being meshes by construction; an
+    // obstacle list carries every kind, so only the meshes are taken.
+    if (!mesh || (mesh.type !== undefined && mesh.type !== 'mesh')) return;
+    if (!mesh.arrayData && (!Array.isArray(mesh.faces) || !Array.isArray(mesh.vertices))) return;
+    // Built by the same two functions the client reads them back with, so
+    // what counts as a separate draw geometry is decided in one place, and
+    // built in `finalizeMeshGeometry` where a mesh's faces settle -- rebuilt
+    // here only for a mesh that never went through it. A mesh with no
+    // separate draw geometry gets no `drawArrays`: `meshDrawArrays` hands
+    // back the collision arrays, and the two are then the same object.
+    const collision = mesh.arrayData || meshArrays(mesh);
+    const draw = mesh.drawArrayData || meshDrawArrays(mesh);
+    mesh.arrays = encodeMeshArrays(collision);
+    if (draw !== collision) mesh.drawArrays = encodeMeshArrays(draw);
+    // And now the objects they were built from go (issue #153). Nothing
+    // reads them past here -- collision, the renderer, the radar, the
+    // overview picture and the map summary all take the arrays -- and this
+    // is what the conversion was for. `MAP_REGISTRY` holds the entry for the
+    // life of the process, so a face object kept here is kept for every map
+    // this server has ever parsed: 113.8MB of a 172MB cache, at roughly
+    // 2,134 bytes a face against the arrays' 93.
+    //
+    // The vertex, normal and texcoord pools go with them: the arrays carry
+    // the same numbers, and a face index is the only way in now.
+    for (const field of [
+      'faces', 'vertices', 'normals', 'texcoords',
+      'drawFaces', 'drawVertices', 'drawNormals', 'drawTexcoords',
+    ]) delete mesh[field];
+    // The decoded arrays are the parser's own working copy; `arrays` carries
+    // the same thing on the wire, far smaller.
+    delete mesh.arrayData;
+    delete mesh.drawArrayData;
+  };
+  for (const obstacle of entry.obstacles || []) attach(obstacle);
+  for (const meshes of Object.values(entry.meshTemplates || {})) {
+    for (const mesh of meshes) attach(mesh);
+  }
 }
 
 // Anything left in `MAP_CACHE_DIR` that no current `MAP_REGISTRY` entry
@@ -9833,7 +10198,14 @@ function sweepMapCache() {
     // A sidecar is named `<source name>.<digest>.br` (`consider()`); the
     // source name is all that's expected, so the digest never has to agree
     // with anything -- only whether that source is still around at all.
-    const match = name.match(/^(.+\.json)\.[0-9a-f]+\.br$/);
+    //
+    // Both kinds, because a map hash names a world *and* its picture. A
+    // pattern that knew only about `.json` did not merely miss the pictures'
+    // sidecars -- it deleted every one of them on every sweep, since a name
+    // it cannot parse falls through to the unlink below. They were rebuilt
+    // on the next pass and deleted again on the one after, so the overviews
+    // were served uncompressed no matter how often the pass ran.
+    const match = name.match(/^(.+\.(?:json|svg))\.[0-9a-f]+\.br$/);
     if (match && expected.has(match[1])) continue;
     try {
       fs.unlinkSync(path.join(MAP_CACHE_BR_DIR, name));
@@ -13985,6 +14357,9 @@ function computeListServerStatus() {
     // and immutable already, and the hash is what makes the answer checkable
     // -- see `ensureInstanceOverview`.
     mapHash: LIVE_MAP_ENTRY ? LIVE_MAP_ENTRY.hash : '',
+    // What that world costs, so a bzo row can say the same things the bzfs
+    // pane beside it says about an imported one.
+    world: measureLiveWorld(),
     title: serverConfig.serverName || '',
     description: serverConfig.description || '',
     players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,
@@ -16617,12 +16992,12 @@ function traceShotBeam(proj, now) {
 
     let reason = 'range';
     let obstacle = null;
-    let obstacleFace = null;
+    let obstacleFace = -1;
     let fraction = 1;
     if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
       reason = 'obstacle';
       obstacle = impact.obstacle;
-      obstacleFace = impact.face ?? null;
+      obstacleFace = Number.isInteger(impact.face) ? impact.face : -1;
       fraction = obstacleFraction;
     } else if (groundFraction < 1) {
       reason = 'ground';
@@ -16641,14 +17016,14 @@ function traceShotBeam(proj, now) {
       end = { ...teleporterEvent.event.point };
       reason = teleporterEvent.type === 'frameHit' ? 'frame_hit' : 'teleport';
       obstacle = teleporterEvent.type === 'frameHit' ? teleporterEvent.obs : null;
-      obstacleFace = null;
+      obstacleFace = -1;
     }
 
     if (Math.abs(end.x) > halfMap || Math.abs(end.z) > halfMap) {
       end = findMapEdgeImpactPoint(point.x, point.y, point.z, end.x, end.y, end.z, halfMap);
       reason = 'out_of_bounds';
       obstacle = null;
-      obstacleFace = null;
+      obstacleFace = -1;
     }
 
     const tankHit = findShotPlayerHit(proj, point, end, now);
@@ -17178,7 +17553,10 @@ function summariseMap(entry) {
   for (const obstacle of obstacles) {
     if (obstacle.kind === 'base') bases += 1;
     else if (counts[obstacle.type] !== undefined) counts[obstacle.type] += 1;
-    if (Array.isArray(obstacle.faces)) faces += obstacle.faces.length;
+    // From the arrays, which by now are the mesh's own description of
+    // itself -- a count of face objects would be a count of something the
+    // world no longer carries.
+    if (obstacle.type === 'mesh' && obstacle.arrays) faces += meshArrays(obstacle).faceCount;
   }
   const teamMode = entry.teamMode || {};
   return {

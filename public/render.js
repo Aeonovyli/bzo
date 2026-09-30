@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { AnaglyphEffect } from './anaglyph.js';
+import { meshArrays, meshDrawArrays, NO_INDEX } from './mesh-arrays.mjs';
 import { xrState } from './webxr.js';
 import { markFramePhase, noteProgramCount } from './perf.js';
 import {
@@ -2463,11 +2464,26 @@ class RenderManager {
   _ensureProjectedShadowMesh(mesh) {
     const existing = mesh.userData.shadowMesh;
     if (existing) {
-      if (existing.geometry === mesh.geometry) return existing;
+      if (existing.geometry === mesh.geometry
+        && !!existing.isInstancedMesh === !!mesh.isInstancedMesh) return existing;
       this._removeProjectedShadowMesh(mesh);
     }
 
-    const shadowMesh = new THREE.Mesh(mesh.geometry, this._getProjectedShadowMaterial());
+    // An `InstancedMesh` caster casts an instanced shadow. Its own
+    // `matrixWorld` is the identity the batch sits at -- every placement is in
+    // `instanceMatrix` -- so a plain `THREE.Mesh` over the same geometry lays
+    // the whole template down once at the world origin: one large shadow in
+    // the middle of the map, and none under the objects that cast it.
+    //
+    // The buffer is shared rather than copied. `setMeshInstances` fills it
+    // once and never replaces it, and the shader's
+    // `matrixWorld * instanceMatrix * position` composes with the flattening
+    // matrix exactly as a plain caster's `matrixWorld` does, since that
+    // product is associative either way.
+    const shadowMesh = mesh.isInstancedMesh
+      ? new THREE.InstancedMesh(mesh.geometry, this._getProjectedShadowMaterial(), mesh.count)
+      : new THREE.Mesh(mesh.geometry, this._getProjectedShadowMaterial());
+    if (mesh.isInstancedMesh) shadowMesh.instanceMatrix = mesh.instanceMatrix;
     // Its placement is written straight into matrixWorld below, so Three has
     // nothing to recompute for it.
     shadowMesh.matrixAutoUpdate = false;
@@ -2593,6 +2609,7 @@ class RenderManager {
       ? this._ensureTankShadowMesh(mesh)
       : this._ensureProjectedShadowMesh(mesh);
     shadowMesh.visible = true;
+    if (shadowMesh.isInstancedMesh) shadowMesh.count = mesh.count;
     shadowMesh.matrixWorld.multiplyMatrices(projection, mesh.matrixWorld);
   }
 
@@ -4896,16 +4913,19 @@ class RenderManager {
     // surface, and where a mesh states one it is what upstream *draws* --
     // `MeshSceneNode` is built from it and the mesh's own `face` list is left
     // to collision alone (`MeshSceneNodeGenerator::getMeshNodes` is the other
-    // path, for a mesh without one). bzo splits the same way: these faces
-    // reach the screen, `meshObs.faces` reaches `collision.cjs`. A map may
+    // path, for a mesh without one). bzo splits the same way: the draw arrays
+    // reach the screen, the collision arrays reach `collision.mjs`. A map may
     // state only a `drawInfo` -- every tank model in `RatsNest.bzw` does --
     // and then there is nothing else to draw it with.
-    const drawFaces = meshObs.drawFaces || null;
-    const verts = (drawFaces && meshObs.drawVertices) || meshObs.vertices || [];
-    const norms = (drawFaces && meshObs.drawNormals) || meshObs.normals || [];
-    const texcoords = (drawFaces && meshObs.drawTexcoords) || meshObs.texcoords || [];
-    const faces = drawFaces || meshObs.faces || [];
-    if (!verts.length || !faces.length) return null;
+    //
+    // Read out of the mesh's flat arrays rather than a face object apiece
+    // (issue #153). Geometry, the corner normals and texcoords a face states,
+    // and which material it draws with all come from there; the material's own
+    // fields are the deduped descriptor the arrays carry, which is the same
+    // handful of objects this used to rebuild a key from per face.
+    // `meshDrawArrays` picks the `drawInfo` copy where there is one.
+    const arrays = meshDrawArrays(meshObs);
+    if (arrays.vertices.length === 0 || arrays.faceCount === 0) return null;
 
     const positions = [];
     const normalsOut = [];
@@ -4931,31 +4951,42 @@ class RenderManager {
     const edgeA = new THREE.Vector3();
     const edgeB = new THREE.Vector3();
 
-    faces.forEach((face) => {
-      const vertexIndices = face.vertexIndices;
-      if (!vertexIndices || vertexIndices.length < 3) return;
+    const point = (vi) => ({
+      x: arrays.vertices[vi * 3],
+      y: arrays.vertices[(vi * 3) + 1],
+      z: arrays.vertices[(vi * 3) + 2],
+    });
+
+    for (let f = 0; f < arrays.faceCount; f += 1) {
+      const start = arrays.faceStart[f];
+      const end = arrays.faceStart[f + 1];
+      const cornerCount = end - start;
+      if (cornerCount < 3) continue;
+      const face = arrays.materials[arrays.faceMaterial[f]];
       const baseVertex = positions.length / 3;
 
       // A face with no `normals` line of its own is flat-shaded off its
       // first three corners, the same plane every fan triangle below cuts
       // from -- `MeshObstacle`'s own per-face normal, for a face that never
       // asked for smoother ones.
-      const hasOwnNormals = face.normalIndices && face.normalIndices.length === vertexIndices.length;
+      const hasOwnNormals = arrays.cornerNormal[start] !== NO_INDEX;
       let flatNormalX = 0; let flatNormalY = 1; let flatNormalZ = 0;
       if (!hasOwnNormals) {
-        const p0 = verts[vertexIndices[0]];
-        const p1 = verts[vertexIndices[1]];
-        const p2 = verts[vertexIndices[2]];
-        if (p0 && p1 && p2) {
-          edgeA.set(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
-          edgeB.set(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
-          edgeA.cross(edgeB).normalize();
-          if (edgeA.lengthSq() > 0) {
-            flatNormalX = edgeA.x; flatNormalY = edgeA.y; flatNormalZ = edgeA.z;
-          }
+        const p0 = point(arrays.corners[start]);
+        const p1 = point(arrays.corners[start + 1]);
+        const p2 = point(arrays.corners[start + 2]);
+        edgeA.set(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        edgeB.set(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        edgeA.cross(edgeB).normalize();
+        if (edgeA.lengthSq() > 0) {
+          flatNormalX = edgeA.x; flatNormalY = edgeA.y; flatNormalZ = edgeA.z;
         }
       }
-      const hasOwnUvs = face.texcoordIndices && face.texcoordIndices.length === vertexIndices.length;
+      const hasOwnUvs = arrays.cornerTexcoord[start] !== NO_INDEX;
+      const facePlaneX = arrays.facePlanes[f * 4];
+      const facePlaneY = arrays.facePlanes[(f * 4) + 1];
+      const facePlaneZ = arrays.facePlanes[(f * 4) + 2];
+      const hasPlane = facePlaneX !== 0 || facePlaneY !== 0 || facePlaneZ !== 0;
 
       // A face with no `texcoords` line of its own is planar-projected
       // instead of left at a single degenerate UV -- upstream's own
@@ -4969,11 +5000,11 @@ class RenderManager {
       // (never placed by any `group`) has none, and stays at (0,0) the way
       // it always has.
       let planarUVs = null;
-      if (!hasOwnUvs && face.plane) {
-        const p0 = verts[vertexIndices[0]];
-        const p1 = verts[vertexIndices[1]];
-        if (p0 && p1) {
-          const [nx, ny, nz] = face.plane;
+      if (!hasOwnUvs && hasPlane) {
+        const p0 = point(arrays.corners[start]);
+        const p1 = point(arrays.corners[start + 1]);
+        {
+          const nx = facePlaneX; const ny = facePlaneY; const nz = facePlaneZ;
           const xLen = Math.hypot(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
           if (xLen > 0) {
             const ux = (p1.x - p0.x) / xLen;
@@ -4985,44 +5016,45 @@ class RenderManager {
             const vLen = Math.hypot(vx, vy, vz);
             if (vLen > 0) {
               const nvx = vx / vLen; const nvy = vy / vLen; const nvz = vz / vLen;
-              planarUVs = vertexIndices.map((vi) => {
-                const v = verts[vi];
-                if (!v) return [0, 0];
+              planarUVs = [];
+              for (let c = start; c < end; c += 1) {
+                const v = point(arrays.corners[c]);
                 const dx = v.x - p0.x; const dy = v.y - p0.y; const dz = v.z - p0.z;
-                return [
+                planarUVs.push([
                   ((dx * ux) + (dy * uy) + (dz * uz)) / MESH_AUTO_UV_TILE_SIZE,
                   ((dx * nvx) + (dy * nvy) + (dz * nvz)) / MESH_AUTO_UV_TILE_SIZE,
-                ];
-              });
+                ]);
+              }
             }
           }
         }
       }
 
-      vertexIndices.forEach((vertexIndex, localIndex) => {
-        const v = verts[vertexIndex];
-        positions.push(v ? v.x : 0, v ? v.y : 0, v ? v.z : 0);
+      for (let c = start; c < end; c += 1) {
+        const localIndex = c - start;
+        const v = arrays.corners[c] * 3;
+        positions.push(arrays.vertices[v], arrays.vertices[v + 1], arrays.vertices[v + 2]);
         if (hasOwnNormals) {
-          const n = norms[face.normalIndices[localIndex]];
-          normalsOut.push(n ? n.x : 0, n ? n.y : 1, n ? n.z : 0);
+          const n = arrays.cornerNormal[c] * 3;
+          normalsOut.push(arrays.normals[n], arrays.normals[n + 1], arrays.normals[n + 2]);
         } else {
           normalsOut.push(flatNormalX, flatNormalY, flatNormalZ);
         }
         if (hasOwnUvs) {
-          const t = texcoords[face.texcoordIndices[localIndex]];
-          uvsOut.push(t ? t.u : 0, t ? t.v : 0);
+          const t = arrays.cornerTexcoord[c] * 2;
+          uvsOut.push(arrays.texcoords[t], arrays.texcoords[t + 1]);
         } else if (planarUVs) {
           uvsOut.push(planarUVs[localIndex][0], planarUVs[localIndex][1]);
         } else {
           uvsOut.push(0, 0);
         }
-      });
+      }
 
       const faceIndices = [];
-      for (let t = 1; t < vertexIndices.length - 1; t++) {
+      for (let t = 1; t < cornerCount - 1; t++) {
         faceIndices.push(baseVertex, baseVertex + t, baseVertex + t + 1);
       }
-      if (!faceIndices.length) return;
+      if (!faceIndices.length) continue;
 
       const key = `${face.texture || ''}|${face.textureUrl || ''}|${(face.color || []).join(',')}`
         + `|${animIdentityKey(face.dynamicColor)}|${animIdentityKey(face.textureMatrix)}`
@@ -5149,7 +5181,7 @@ class RenderManager {
         indicesByMaterial[materialIndex] = bucket;
       }
       for (let i = 0; i < faceIndices.length; i += 1) bucket.push(faceIndices[i]);
-    });
+    }
 
     // One run per material, laid end to end. `forEach` skips the holes a
     // material whose every face was degenerate leaves behind.
@@ -5311,15 +5343,20 @@ class RenderManager {
   // already uses rather than upstream's per-face colour, same as before.
   _buildMeshInsideBuildingNode(obs) {
     const edges = [];
-    for (const face of obs.faces) {
-      const { vertexIndices } = face;
-      const n = vertexIndices.length;
-      const verts = vertexIndices.map((vi) => obs.vertices[vi]);
-      if (verts.some((v) => !v)) continue;
+    // The collision faces rather than the drawn ones: this outlines the shape
+    // the tank is actually inside of. Out of the flat arrays (issue #153).
+    const arrays = meshArrays(obs);
+    for (let f = 0; f < arrays.faceCount; f += 1) {
+      const start = arrays.faceStart[f];
+      const end = arrays.faceStart[f + 1];
+      const n = end - start;
       for (let i = 0; i < n; i += 1) {
-        const a = verts[i];
-        const b = verts[(i + 1) % n];
-        edges.push(a.x, a.y, a.z, b.x, b.y, b.z);
+        const a = arrays.corners[start + i] * 3;
+        const b = arrays.corners[start + ((i + 1) % n)] * 3;
+        edges.push(
+          arrays.vertices[a], arrays.vertices[a + 1], arrays.vertices[a + 2],
+          arrays.vertices[b], arrays.vertices[b + 1], arrays.vertices[b + 2],
+        );
       }
     }
 

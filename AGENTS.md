@@ -1496,6 +1496,33 @@ hash. This is upstream's own idea (`bzfs.cxx`'s world hash, so a client
 already holding a match's compiled world skips the transfer) done with
 ordinary HTTP caching instead of a bespoke client-side cache file.
 
+**A mesh in that entry is flat typed arrays, never face objects.** The
+parser still builds faces on the way in -- that is what a `.bzw` states --
+but `finalizeMeshGeometry` converts each mesh as its faces settle, and
+`attachMeshArrayPayloads` deletes `faces`, `vertices`, `normals`,
+`texcoords` and the four `draw*` pools once the arrays are encoded. So the
+JSON, the wire and `MAP_REGISTRY` all carry only `arrays` (plus
+`drawArrays` for a `drawInfo` mesh). `public/mesh-arrays.mjs` and
+`server/mesh-arrays.cjs` are the mirrored pair that build, encode and
+decode them, and a face is an index into them from there on -- collision,
+the renderer, the radar, the overview picture and the map summary all read
+them that way, and nothing reads a face object. A parsed face cost about
+2,134 bytes against the arrays' 93; the registry holds every map it has
+parsed for the life of the process, which is what made the difference
+worth having.
+
+What this does *not* fix is the parse peak: every face object for a whole
+map is still alive at once on the way in, because nested `group` placement
+reads a finalized mesh's faces to place it again. Issue #161 has the shape
+of that.
+
+Two consequences worth knowing. An instance's `matref`/`tint`/`phydrv`
+override must run **before** `finalizeMeshGeometry`, since it replaces face
+objects and finalize is the last thing allowed to change them. And a
+physics driver named by a face resolves on the mesh's own driver table,
+not per face -- the table is a handful of entries where the faces are
+hundreds, and it is the only form that still works with no faces to walk.
+
 `init` carries `world: { hash, url }` for the live match and `viewableMaps: [{
 file, hash, url }, ...]` for every map hashed so far -- reachable by any
 connected client, unlike the operator-only `getMaps`/`sendMapList`, because

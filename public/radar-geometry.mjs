@@ -137,25 +137,30 @@ export function getRadarMeshObstacleCull(obs) {
 // vertex the same distance from that pivot -- so centring the circle there
 // makes one radius hold for every angle the face will ever be drawn at, and the
 // cached list keeps its meaning for as long as the map does.
-export function getRadarMeshFaceCull(obs, face) {
+export function getRadarMeshFaceCull(obs, arrays, f) {
   const spins = Boolean(obs.angvel && obs.spinPivot);
+  const start = arrays.faceStart[f];
+  const end = arrays.faceStart[f + 1];
   let cullX = 0;
   let cullZ = 0;
   if (spins) {
     cullX = obs.spinPivot.x;
     cullZ = obs.spinPivot.z;
   } else {
-    face.vertexIndices.forEach((vi) => {
-      cullX += obs.vertices[vi].x;
-      cullZ += obs.vertices[vi].z;
-    });
-    cullX /= face.vertexIndices.length;
-    cullZ /= face.vertexIndices.length;
+    for (let c = start; c < end; c += 1) {
+      const v = arrays.corners[c] * 3;
+      cullX += arrays.vertices[v];
+      cullZ += arrays.vertices[v + 2];
+    }
+    cullX /= (end - start);
+    cullZ /= (end - start);
   }
   let cullRadius = 0;
-  face.vertexIndices.forEach((vi) => {
-    const v = obs.vertices[vi];
-    cullRadius = Math.max(cullRadius, Math.hypot(v.x - cullX, v.z - cullZ));
-  });
+  for (let c = start; c < end; c += 1) {
+    const v = arrays.corners[c] * 3;
+    cullRadius = Math.max(
+      cullRadius, Math.hypot(arrays.vertices[v] - cullX, arrays.vertices[v + 2] - cullZ),
+    );
+  }
   return { cullX, cullZ, cullRadius };
 }

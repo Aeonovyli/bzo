@@ -104,13 +104,20 @@ function createBzfsWorldTracker(deps) {
   // is refused for a server that is not listed, so there would be nothing to
   // do with the answer.
   let listed = new Map();
+  let loaded = false;
   let lastImportAt = 0;
   let lastPassCompleteAt = 0;
   let timer = null;
   let writeTimer = null;
   let running = false;
 
+  // Read before anything is written, whether or not the tracker is running:
+  // an import somebody triggered still records what it learned, and an
+  // operator who turned the sweep off must not thereby have the file
+  // overwritten with only what this process happened to see.
   function load() {
+    if (loaded) return;
+    loaded = true;
     let raw;
     try {
       raw = fs.readFileSync(statePath, 'utf8');
@@ -119,10 +126,27 @@ function createBzfsWorldTracker(deps) {
     }
     try {
       const parsed = JSON.parse(raw);
+      let pruned = 0;
       for (const [key, value] of Object.entries(parsed || {})) {
-        if (value && typeof value === 'object') records.set(key, value);
+        if (!value || typeof value !== 'object') continue;
+        // A size is a byte count. An older file recorded these already
+        // rounded and formatted -- "10.4 KB" -- which cannot be compared,
+        // summed or re-rounded, so it is dropped rather than carried: the
+        // next measurement of that world writes the real number, and until
+        // then a blank is the honest answer.
+        for (const field of ['bzwSize', 'jsonSize', 'brotliSize']) {
+          if (typeof value[field] === 'string') { delete value[field]; pruned += 1; }
+        }
+        for (const field of ['bzw', 'json', 'brotli']) {
+          if (value[field] !== undefined && !Number.isFinite(value[field])) {
+            delete value[field];
+            pruned += 1;
+          }
+        }
+        records.set(key, value);
       }
-      log(`[WORLDS] restored ${records.size} tracked BZFlag world(s)`);
+      log(`[WORLDS] restored ${records.size} tracked BZFlag world(s)`
+        + (pruned > 0 ? `, dropped ${pruned} size(s) recorded as text` : ''));
     } catch (error) {
       logError(`Could not read ${statePath}:`, error);
     }
@@ -131,6 +155,8 @@ function createBzfsWorldTracker(deps) {
   // Debounced, because a pass over a long list touches every record and this
   // is a cache nothing waits on.
   function save() {
+    // Never write what was never read.
+    load();
     if (writeTimer) return;
     writeTimer = setTimeout(() => {
       writeTimer = null;
@@ -226,7 +252,9 @@ function createBzfsWorldTracker(deps) {
     }
     lastImportAt = now;
     try {
-      const { safeMapName } = await importWorld(server.host, server.port);
+      const {
+        safeMapName, byteLength, compressedSize, uncompressedSize,
+      } = await importWorld(server.host, server.port);
       // Downloaded but not registered is a failure however well the transfer
       // went -- a world bzo cannot parse has no picture, and treating it as
       // done would leave it permanently due and re-fetched every tick.
@@ -235,6 +263,15 @@ function createBzfsWorldTracker(deps) {
       }
       records.set(key, {
         worldHash: status.worldHash || '',
+        // What bzfs actually sent, which is the only size anyone can compare
+        // against another client's -- everything else about this world is
+        // bzo's own rendering of it. The world crosses the wire deflated and
+        // states both figures in its own header, so all three are that
+        // server's own numbers: what arrived, what it deflated to, and what
+        // it inflates back to.
+        worldBytes: Number.isFinite(byteLength) ? byteLength : 0,
+        worldCompressed: Number.isFinite(compressedSize) ? compressedSize : 0,
+        worldUncompressed: Number.isFinite(uncompressedSize) ? uncompressedSize : 0,
         fingerprint,
         checkedAt: now,
         error: null,
@@ -286,8 +323,9 @@ function createBzfsWorldTracker(deps) {
     // panel, the `/list` form. It cost the same download this tracker would
     // have made, so recording it here both keeps the picture current and
     // pushes the next check a full cycle out.
-    noteImport(host, port, worldHash) {
+    noteImport(host, port, worldHash, sizes = null) {
       if (!host || !port) return;
+      load();
       const key = serverKey(host, port);
       const record = records.get(key) || {};
       // The listed fingerprint too, where this server is on the list at all:
@@ -298,6 +336,9 @@ function createBzfsWorldTracker(deps) {
         ...record,
         fingerprint: server ? listEntryFingerprint(server) : record.fingerprint,
         worldHash: worldHash || record.worldHash || '',
+        worldBytes: sizes?.byteLength || record.worldBytes || 0,
+        worldCompressed: sizes?.compressedSize || record.worldCompressed || 0,
+        worldUncompressed: sizes?.uncompressedSize || record.worldUncompressed || 0,
         checkedAt: Date.now(),
         error: null,
         errorAt: null,
@@ -315,8 +356,30 @@ function createBzfsWorldTracker(deps) {
       if (timer) clearInterval(timer);
       timer = null;
     },
-    // For `/list`, so a row can say why it has no picture yet.
+    // Sizes measured off files this server holds -- the reconstructed `.bzw`,
+    // the parsed world, its brotli sidecar. Remembered because the files do
+    // not last: an import is swept two hours after it was fetched
+    // (`sweepStaleImports`), and a row would otherwise lose figures that were
+    // perfectly true when taken. Only written when one actually changes, so
+    // reading a list does not keep rewriting the file.
+    noteSizes(host, port, sizes) {
+      load();
+      const key = serverKey(host, port);
+      const record = records.get(key);
+      if (!record) return;
+      let changed = false;
+      for (const [field, value] of Object.entries(sizes)) {
+        if (value && record[field] !== value) {
+          record[field] = value;
+          changed = true;
+        }
+      }
+      if (changed) save();
+    },
+
+    // For `/list`, so a row can say what it knows about that server's world.
     recordFor(host, port) {
+      load();
       return records.get(serverKey(host, port)) || null;
     },
     RECHECK_MS,

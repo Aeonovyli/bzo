@@ -205,23 +205,28 @@ function compressOne(entry) {
   });
 }
 
-// Sweeps, then works the queue. Resolves when the last sidecar is written, so a
-// build step can await it; a server calls it after `listen` and ignores it.
-async function start({ log = () => {} } = {}) {
+// Whether the cache directory can be written at all. Serving identity is a
+// correct answer, so a cache that cannot be written is said once and then
+// left alone.
+function openCache(log) {
+  if (state.disabled) return false;
   try {
     fs.mkdirSync(state.cacheDir, { recursive: true });
+    return true;
   } catch (error) {
-    // Serving identity is a correct answer, so a cache that cannot be written
-    // is said once and then left alone.
     state.disabled = true;
     log(`[BR] no sidecars: ${state.cacheDir} is not writable (${error.message})`);
-    return { compressed: 0, raw: 0, br: 0, removed: 0, ms: 0 };
+    return false;
   }
-  const removed = sweep();
-  const ready = [...state.planned.values()].filter((entry) => entry.ready).length;
-  if (state.queue.length === 0) {
-    log(`[BR] ${ready} sidecars ready, ${removed} stale removed`);
-    return { compressed: 0, raw: 0, br: 0, removed, ms: 0 };
+}
+
+// Works whatever `consider` has queued, without sweeping. This is the half a
+// caller can run at any moment: a sweep is only correct once everything that
+// will be considered has been, since it removes any sidecar the current plan
+// does not name -- mid-pass that is most of them.
+async function drain({ log = () => {} } = {}) {
+  if (!openCache(log) || state.queue.length === 0) {
+    return { compressed: 0, raw: 0, br: 0, ms: 0 };
   }
   const started = Date.now();
   const pending = state.queue.slice();
@@ -229,6 +234,13 @@ async function start({ log = () => {} } = {}) {
   let raw = 0;
   let br = 0;
   let compressed = 0;
+  // A sidecar that is not written is worth counting. `compressOne` declines
+  // one that would be no smaller than its source, and gives up on a source it
+  // cannot read or a cache it cannot write -- all of which leave the entry
+  // not ready, so the next pass queues it again. A backlog that never shrinks
+  // looks exactly like a pass doing nothing, and only this number tells the
+  // two apart.
+  let skipped = 0;
   const worker = async () => {
     for (let entry = pending.shift(); entry; entry = pending.shift()) {
       const size = await compressOne(entry);
@@ -236,15 +248,37 @@ async function start({ log = () => {} } = {}) {
         compressed += 1;
         raw += entry.size;
         br += size;
+      } else {
+        skipped += 1;
       }
     }
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-  const ms = Date.now() - started;
+  return {
+    compressed, skipped, raw, br, ms: Date.now() - started,
+  };
+}
+
+// Sweeps, then works the queue. Resolves when the last sidecar is written, so a
+// build step can await it; a server calls it after `listen` and ignores it.
+async function start({ log = () => {} } = {}) {
+  if (!openCache(log)) return { compressed: 0, raw: 0, br: 0, removed: 0, ms: 0 };
+  const removed = sweep();
+  const ready = [...state.planned.values()].filter((entry) => entry.ready).length;
+  if (state.queue.length === 0) {
+    log(`[BR] ${ready} sidecars ready, ${removed} stale removed`);
+    return { compressed: 0, raw: 0, br: 0, removed, ms: 0 };
+  }
+  const {
+    compressed, skipped, raw, br, ms,
+  } = await drain();
   log(`[BR] ${compressed} sidecars built, ${Math.round(raw / 1024)}KB -> `
     + `${Math.round(br / 1024)}KB in ${(ms / 1000).toFixed(1)}s`
-    + `, ${ready} already present, ${removed} stale removed`);
-  return { compressed, raw, br, removed, ms };
+    + `, ${ready} already present, ${removed} stale removed`
+    + (skipped > 0 ? `, ${skipped} not written` : ''));
+  return {
+    compressed, skipped, raw, br, removed, ms,
+  };
 }
 
 // Whether a failed send says the sidecar itself is gone, rather than that the
@@ -344,6 +378,7 @@ module.exports = {
   buildAll,
   configure,
   consider,
+  drain,
   eligible,
   isMissingFile,
   middleware,
