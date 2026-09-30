@@ -984,16 +984,20 @@ const autoViewPosTarget = readViewPosTarget();
 // `selectedViewMapFile` is not that map -- the entry dialog stages the first
 // map on the list into it whether or not anyone is heading for Map Viewer, so
 // reading it handed a player in a live match a link to somebody else's map.
-// `cam=` is omitted for a roam view the link format cannot name
-// (`roamViewNeedsTarget`'s own list -- TRACK/FOLLOW/FPS/FLAG all ride a
-// specific player or flag), leaving the receiving end to fall back to its own
-// default rather than claim a view this one is not actually in.
+// A page watching a remote server hands back a `?watch=` link to that server
+// instead, since the live game there is what is on screen.
+//
+// An observer riding a player or a flag (`roamViewNeedsTarget`'s list, and
+// FLAG) is handed back as free roam from where the camera is now: whoever it
+// follows may not be leading, or even present, when the link is opened.
 function buildShareViewLink() {
+  const destination = currentDestination();
+  const watching = destination.startsWith('watch:') ? destination.slice('watch:'.length) : null;
   const mapFile = isPreviewingAltWorld() ? previewedMapFile : currentMapFile;
   // A link is only worth handing over for a map this server has hashed and
   // will serve to whoever opens it -- which the served map is, but a `random`
   // world generated at startup is not.
-  if (!mapFile || !availableViewMaps.some((entry) => entry.file === mapFile)) return null;
+  if (!watching && (!mapFile || !availableViewMaps.some((entry) => entry.file === mapFile))) return null;
   const camNames = {
     [ROAM_VIEW.FREE]: 'free',
     [ROAM_VIEW.DRIVE_FP]: 'fp',
@@ -1007,10 +1011,13 @@ function buildShareViewLink() {
     'third-person': 'tp',
     overview: 'overview',
   };
-  const cam = isObserver() ? camNames[roamView] : playerCamNames[cameraMode];
+  const cam = isObserver() ? (camNames[roamView] || 'free') : playerCamNames[cameraMode];
   const deg = ((playerRotation * 180) / Math.PI).toFixed(1);
   const pos = `${playerX.toFixed(1)},${playerY.toFixed(1)},${playerZ.toFixed(1)},${deg}`;
-  const query = `viewmap=${encodeURIComponent(mapFile)}${cam ? `&cam=${cam}` : ''}&pos=${pos}`;
+  const where = watching
+    ? `watch=${encodeURIComponent(watching)}`
+    : `viewmap=${encodeURIComponent(mapFile)}`;
+  const query = `${where}${cam ? `&cam=${cam}` : ''}&pos=${pos}`;
   return `${window.location.origin}${window.location.pathname}?${query}`;
 }
 let selectedVoiceInputDeviceId = '';

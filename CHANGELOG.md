@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- Share View Link made while watching a server hands back a `?watch=` link
+  to that server with `cam=` and `pos=`, not a Map Viewer link. An observer
+  following, tracking or riding with a player, or watching a flag, is handed
+  back as free roam from where the camera is, since that player may be gone
+  by the time the link is opened (#160).
+
 ## [1.2.93] - 2026-09-30
 
 ### Changed
