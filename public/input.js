@@ -951,6 +951,7 @@ export function refreshHudButtons() {
     debugBtn: domRefs.debugBtn,
     debugEnabled: hudContext.getDebugEnabled(),
     fullscreenBtn: domRefs.fullscreenBtn,
+    fullscreenAvailable: isFullscreenAvailable(),
     cameraBtn: domRefs.cameraBtn,
     cameraMode: hudContext.isObserver() ? hudContext.getObserverViewLabel() : hudContext.getCameraMode(),
   });
@@ -1018,7 +1019,10 @@ function getSettingsMenuValue(id, item) {
     const match = item.button.title.match(/Radar range preset:\s*(.+)/i);
     return match?.[1] || 'Medium';
   }
-  if (id === 'fullscreenBtn') return document.fullscreenElement ? 'On' : 'Off';
+  if (id === 'fullscreenBtn') {
+    if (item.button.disabled) return 'Unavailable';
+    return document.fullscreenElement ? 'On' : 'Off';
+  }
   if (id === 'wireframeBtn') return wireframeEnabled ? 'On' : 'Off';
   if (id === 'installBtn') {
     const state = item.button.dataset.installState;
@@ -1182,34 +1186,43 @@ export function isFullscreenActive() {
          document.mozFullScreenElement;
 }
 
-function enterFullscreen() {
-  // iOS has no Fullscreen API in Safari; installing the app is the only way to
-  // lose the browser chrome there.
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-  if (isIOS && window.navigator.standalone !== true) {
-    hudContext.pushChatMessage('💡 iOS: Use "Share" → "Add to Home Screen" for fullscreen');
-    hudContext.updateChatWindow();
-    return false;
+// iOS has no Fullscreen API in Safari; installing the app is the only way to
+// lose the browser chrome there, so the row stays live to say so.
+function isIOSBrowserTab() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream
+    && window.navigator.standalone !== true;
+}
+
+function getFullscreenRequest() {
+  const elem = document.documentElement;
+  return elem.requestFullscreen ||
+         elem.webkitRequestFullscreen ||
+         elem.webkitEnterFullscreen ||
+         elem.mozRequestFullScreen;
+}
+
+// Whether the row and the `F` key have anything to do here. Without the API
+// they are unavailable rather than a press that announces it cannot.
+export function isFullscreenAvailable() {
+  return Boolean(getFullscreenRequest()) || isIOSBrowserTab();
+}
+
+// A refusal is the browser's to report, not the game's: it lands in the
+// console and nowhere else.
+function enterFullscreen({ explain = true } = {}) {
+  if (isIOSBrowserTab()) {
+    if (explain) {
+      hudContext.pushChatMessage('iOS: use Share, Add to Home Screen for fullscreen');
+      hudContext.updateChatWindow();
+    }
+    return;
   }
 
   const elem = document.documentElement;
-  const request = elem.requestFullscreen ||
-                 elem.webkitRequestFullscreen ||
-                 elem.webkitEnterFullscreen ||
-                 elem.mozRequestFullScreen;
+  const request = getFullscreenRequest();
+  if (!request) return;
 
-  if (!request) {
-    hudContext.pushChatMessage('⚠️ Fullscreen not supported');
-    hudContext.updateChatWindow();
-    return false;
-  }
-
-  const refused = (e) => {
-    console.warn('Fullscreen request failed:', e);
-    hudContext.pushChatMessage('⚠️ Fullscreen not supported');
-    hudContext.updateChatWindow();
-  };
-
+  const refused = (e) => console.warn('Fullscreen request failed:', e);
   try {
     // `requestFullscreen` returns a promise, so a refusal arrives as a
     // rejection rather than a throw -- a `try` alone let it escape as an
@@ -1220,10 +1233,8 @@ function enterFullscreen() {
       ? request.call(elem, Element.ALLOW_KEYBOARD_INPUT)
       : request.call(elem);
     if (result && typeof result.catch === 'function') result.catch(refused);
-    return true;
   } catch (e) {
     refused(e);
-    return false;
   }
 }
 
@@ -1242,6 +1253,7 @@ function leaveFullscreen() {
 }
 
 function toggleFullscreen() {
+  if (!isFullscreenAvailable()) return;
   if (isFullscreenActive()) {
     leaveFullscreen();
   } else {
@@ -1249,9 +1261,7 @@ function toggleFullscreen() {
   }
 
   setTimeout(() => {
-    const message = `Screen resolution: ${window.innerWidth}x${window.innerHeight}`;
-    hudContext.pushChatMessage(message);
-    hudContext.updateChatWindow();
+    window.gameDebugLog?.(`Screen resolution: ${window.innerWidth}x${window.innerHeight}`);
   }, 200);
   setTimeout(refreshHudButtons, 100);
 }
@@ -1272,6 +1282,11 @@ function rememberFullscreenPreference() {
 // activation, and no manifest setting overrides that. Restoring on the first
 // gesture -- typing a name, clicking Join -- is the closest thing to starting
 // fullscreen that a web app is allowed.
+//
+// `click` rather than `pointerdown`: a touch's pointerdown grants no
+// activation, only a mouse's does, so a phone's first tap would be refused.
+// Escape grants none either. The listeners stay until fullscreen is actually
+// entered, so a press the browser refuses leaves the next one to try again.
 function restoreFullscreenOnFirstGesture() {
   let saved = null;
   try {
@@ -1279,15 +1294,24 @@ function restoreFullscreenOnFirstGesture() {
   } catch {
     /* ignore storage errors */
   }
-  if (saved !== 'true') return;
+  if (saved !== 'true' || !getFullscreenRequest()) return;
 
-  const restore = () => {
-    window.removeEventListener('pointerdown', restore);
-    window.removeEventListener('keydown', restore);
-    if (!isFullscreenActive()) enterFullscreen();
+  const stop = () => {
+    window.removeEventListener('click', restore, true);
+    window.removeEventListener('keydown', restore, true);
+    document.removeEventListener('fullscreenchange', stop);
   };
-  window.addEventListener('pointerdown', restore);
-  window.addEventListener('keydown', restore);
+  const restore = (event) => {
+    if (event.type === 'keydown' && event.key === 'Escape') return;
+    if (isFullscreenActive()) {
+      stop();
+      return;
+    }
+    enterFullscreen({ explain: false });
+  };
+  window.addEventListener('click', restore, true);
+  window.addEventListener('keydown', restore, true);
+  document.addEventListener('fullscreenchange', stop);
 }
 
 function cameraModeLabel(mode) {

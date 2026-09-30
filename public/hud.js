@@ -526,6 +526,7 @@ export function updateHudButtons({
   debugBtn,
   debugEnabled,
   fullscreenBtn,
+  fullscreenAvailable = true,
   cameraBtn,
   cameraMode,
 }) {
@@ -539,6 +540,7 @@ export function updateHudButtons({
   // change to the mode already goes through.
   document.getElementById('controlBox')?.classList.toggle('keyboard-mode', !mouseControlEnabled);
   setActive(debugBtn, debugEnabled, 'Hide Debug HUD (`)', 'Show Debug HUD (`)');
+  if (fullscreenBtn) fullscreenBtn.disabled = !fullscreenAvailable;
   setActive(fullscreenBtn, document.fullscreenElement, 'Exit Fullscreen (F)', 'Toggle Fullscreen (F)');
   if (cameraBtn) {
     // While roaming this arrives already spelled as a view name, because an
