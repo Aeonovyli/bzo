@@ -296,7 +296,15 @@ function redactInstallPath(text) {
 function log(...args) {
   const now = new Date();
   const timestamp = now.toISOString();
-  const msg = redactInstallPath(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+  // An Error stringifies to `{}`, which is how a real failure reaches the log
+  // saying nothing at all -- a world too large for `JSON.stringify` read as
+  // "Could not hash map x.bzw: {}". Its stack carries both the message and
+  // where it came from, and `redactInstallPath` below takes the paths out.
+  const render = (a) => {
+    if (a instanceof Error) return a.stack || a.message || String(a);
+    return typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a);
+  };
+  const msg = redactInstallPath(args.map(render).join(' '));
   const logMsg = `[${timestamp}] ${msg}`;
   // Write to console
   console.log(logMsg);
@@ -2399,7 +2407,8 @@ let remoteServerListCache = { at: 0, servers: [] };
 const bzfsWorlds = createBzfsWorldTracker({
   statePath: path.join(__dirname, 'cache', 'bzfs-worlds.json'),
   queryServerStatus: (host, port) => queryServerStatus(host, port),
-  importWorld: (host, port) => performRemoteMapImport(host, port),
+  importWorld: (host, port) =>
+    performRemoteMapImport(host, port, IMPORT_WORLD_BACKGROUND_TIMEOUT_MS),
   // The registry rather than the file: a map is only viewable, and only has a
   // picture, once it has been parsed and registered.
   isImported: (host, port) => MAP_REGISTRY.has(remoteMapFileName(host, port)),
@@ -2635,7 +2644,16 @@ async function importProxyWorld(target) {
   return promise;
 }
 
-async function performRemoteMapImport(host, port) {
+// How long a world download may take. The interactive one is a person waiting
+// on a page: too short and a league server's map can never be imported at all,
+// too long and a failure looks like a hang. The background one is the world
+// tracker (`server/bzfs-worlds.cjs`), where nothing is waiting and the only
+// cost of patience is a slot in a queue that runs all day -- the maps that
+// time out are exactly the big ones most worth having a picture of.
+const IMPORT_WORLD_TIMEOUT_MS = 45000;
+const IMPORT_WORLD_BACKGROUND_TIMEOUT_MS = 120000;
+
+async function performRemoteMapImport(host, port, timeout) {
   let publicServers;
   try {
     publicServers = await getRemoteServerList();
@@ -2653,7 +2671,7 @@ async function performRemoteMapImport(host, port) {
   const safeMapName = remoteMapFileName(listedServer.host, listedServer.port);
   const existing = inFlightRemoteImports.get(safeMapName);
   if (existing) return existing;
-  const promise = performRemoteMapImportNow(listedServer, safeMapName)
+  const promise = performRemoteMapImportNow(listedServer, safeMapName, timeout)
     .finally(() => inFlightRemoteImports.delete(safeMapName));
   inFlightRemoteImports.set(safeMapName, promise);
   return promise;
@@ -2664,10 +2682,10 @@ async function performRemoteMapImport(host, port) {
 // header records. They are the same address for an import off the public list,
 // and different for a proxied target, where the name a player sees is public
 // and the address bzo reaches it on is private (`docs/proxy.md`).
-async function performRemoteMapImportNow(listedServer, safeMapName) {
+async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
   const { host, port, dialHost = host, dialPort = port } = listedServer;
   const { worldDatabase, gameSettings, queryGame, variables } =
-    await fetchWorldFromServer(dialHost, dialPort, 15000);
+    await fetchWorldFromServer(dialHost, dialPort, timeout || IMPORT_WORLD_TIMEOUT_MS);
   const tree = parseWorldDatabase(worldDatabase);
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
