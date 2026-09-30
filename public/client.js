@@ -12403,7 +12403,12 @@ function handleMotion(deltaTime) {
   // A driving observer (issue #68) resolves every bit of this exactly like a
   // playing tank -- it just never reports it. `sendObserverUpdate`, from
   // `handleRoamMotion`, is the only thing that reaches the server for it.
-  if (shouldSendUpdate && !isObserver() && ws && ws.readyState === WebSocket.OPEN) {
+  // Not before the join is confirmed, for the reason `shoot` gives: a
+  // reconnect still carries the last session's tank until the new `init`
+  // clears it, and a move from it reports the old position to a server that
+  // has none yet.
+  if (shouldSendUpdate && !isObserver() && gameplayJoinConfirmed
+    && ws && ws.readyState === WebSocket.OPEN) {
 
     // Round velocities to the precision we send to match server expectations
     // For jump packets, send the intendedForward value used for movement, not calculated forwardSpeed

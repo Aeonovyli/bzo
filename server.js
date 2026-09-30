@@ -19895,6 +19895,10 @@ wss.on('connection', (ws, req) => {
           break;
         }
         case 'm': {
+          // A connection that has not joined has no tank for a move to be
+          // about: its stored position is still the default, so judging one
+          // reports the client's previous session as drift.
+          if (!player.joined) break;
           if (isObserverTeam(player.team)) {
             applyObserverHeartbeat(player, message, ws);
             break;
