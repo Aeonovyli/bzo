@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.95] - 2026-09-30
+
 ### Fixed
 - A client reconnecting after a server restart no longer sets off a linear
   and an angular drift warning. It sent its previous session's position
