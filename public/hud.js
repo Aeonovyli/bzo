@@ -1123,8 +1123,14 @@ export function getScoreboardHuntLabel(player) {
 // be noise rather than information, and the flag keeps the scoreboard's
 // abbreviation rather than upstream's full name for the same reason -- it is the
 // form a player reads everywhere else in bzo.
-export function formatPlayerLabel({ name, nameColor = null, flag = null, mark = null }) {
-  const segments = [{ text: String(name), color: nameColor }];
+export function formatPlayerLabel({
+  name, nameColor = null, flag = null, mark = null, status = null,
+}) {
+  const segments = [];
+  // Before the name and in cyan, which is where and how the scoreboard draws
+  // it (`writePlayerLabel`) and where upstream draws it too.
+  if (status) segments.push({ text: status, color: SCOREBOARD_STATUS_COLOR });
+  segments.push({ text: String(name), color: nameColor });
   if (flag) segments.push({ text: `/${flag.label}`, color: flag.color });
   if (mark) segments.push({ text: ` ${mark.label}`, color: mark.color });
   return {

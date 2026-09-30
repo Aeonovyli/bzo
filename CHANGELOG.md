@@ -6,6 +6,43 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.92] - 2026-09-30
+
+### Added
+- A map's `group` instances are drawn from one copy of their definition
+  rather than a copy apiece, and every placement of a definition draws in a
+  single call. `bmbz.ducatileague.org:5180` -- "Mini Field of Flowers", 1,939
+  placements of 7 definitions -- expands to 1,863,750 faces and about 3.7 GB,
+  more than `JSON.stringify` can return as a string, so bzo could not load it
+  at all. It is now 1,905 placements over 5 templates of 5,344 faces, 1.07 MB
+  over the wire, less than the `.bzw` it came from. On a Jetson its 1.87 M
+  triangles draw in 121 calls and 1.37 ms, against 2,460 calls and 13.67 ms
+  placing them one by one. Across the maps here, 7,060 placements now draw
+  from 728 templates.
+- Definitions nothing collides with are carried as a template alone; a solid
+  one is still expanded, because collision on both sides reads those copies,
+  and only where it is *drawn* from changes. A definition placed in several
+  colours shares a template per colour. Part of #153, which still wants the
+  denser geometry representation and instanced collision.
+
+### Changed
+- The observer's Following/Tracking line writes a callsign the way chat and
+  the scoreboard write one: the player's own colour, the cyan `+` or `@`
+  before it, and `/FLAG` after it in the flag's colour. The words around the
+  name stay plain, being about the choice rather than the player. Closes #154.
+- The centre crosshair is gone. Upstream draws the two motion boxes and no
+  centre marker, and with no pointer lock the cursor already says where the
+  shot goes.
+
+### Fixed
+- A fullscreen request that the browser refuses no longer reaches the console
+  as an unhandled rejection. `requestFullscreen` returns a promise, so the
+  refusal never passed through the `try` that was meant to catch it, and
+  Chrome reported it as "TypeError: Permissions check failed".
+- A `keydown` carrying no `code` -- a synthetic event, or some input methods
+  -- put an `undefined` in the held-key set, which the debug readout then
+  tried to read a name off.
+
 ## [1.2.91] - 2026-09-30
 
 ### Added

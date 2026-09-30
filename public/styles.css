@@ -1871,10 +1871,9 @@ canvas {
   user-select: none;
 }
 
-/* An observer aims at nothing and reloads nothing, so the crosshair, the mouse
-   motion box, the shot status and the altimeter all go. HUDRenderer::renderRoaming
-   draws none of them either. */
-body.observing #crosshair,
+/* An observer aims at nothing and reloads nothing, so the mouse motion box,
+   the shot status and the altimeter all go. HUDRenderer::renderRoaming draws
+   none of them either. */
 body.observing #controlBox,
 body.observing #shotStatus,
 body.observing #altimeter {
@@ -1948,17 +1947,6 @@ body.observing #roamStatus {
   border-radius: 3px;
 }
 
-#crosshair {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 40px;
-  height: 40px;
-  pointer-events: none;
-  z-index: 50;
-}
-
 #shotStatus {
   position: fixed;
   top: 50%;
@@ -2022,45 +2010,9 @@ body.observing #roamStatus {
   border-color: rgba(255, 152, 0, 0.6);
 }
 
-#crosshair::before,
-#crosshair::after {
-  content: '';
-  position: absolute;
-  background: rgba(255, 255, 255, 0.8);
-  box-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
-}
-
-#crosshair::before {
-  top: 50%;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  transform: translateY(-50%);
-}
-
-#crosshair::after {
-  left: 50%;
-  top: 0;
-  width: 2px;
-  height: 100%;
-  transform: translateX(-50%);
-}
-
 @media (max-width: 900px), (max-width: 600px) {
   #shotStatus {
   }
-}
-
-#crosshair .center {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 4px;
-  height: 4px;
-  border: 2px solid rgba(255, 255, 255, 0.8);
-  border-radius: 50%;
-  box-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
 }
 
 #radar {

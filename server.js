@@ -8926,6 +8926,16 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   //
   // Both flags, not either: something shots pass through but tanks do not is
   // still collision geometry, and so is the reverse.
+  const defineSpins = new Map();
+  function definedMeshesSpin(defName) {
+    const cached = defineSpins.get(defName);
+    if (cached !== undefined) return cached;
+    defineSpins.set(defName, false);
+    const spins = resolveDefineMeshes(defName, new Set()).some((mesh) => mesh.angvel);
+    defineSpins.set(defName, spins);
+    return spins;
+  }
+
   const definePassability = new Map();
   function isPassableDefine(defName) {
     const cached = definePassability.get(defName);
@@ -8944,14 +8954,8 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     const meshPassable = (mesh) => (mesh.driveThrough && mesh.shootThrough)
       || (Array.isArray(mesh.faces)
         && mesh.faces.every((face) => face.driveThrough && face.shootThrough));
-    // A spinning mesh (`angvel`) turns about a pivot the renderer wraps it
-    // in, and that pivot is placed per instance -- a template carries one
-    // local frame and cannot say where each placement's pivot went. Left
-    // expanded until the instance path learns to spin, which is the whole
-    // reason `bzo.bzw`'s SpinTank must not be shared.
     const passable = members.every((m) => m.driveThrough && m.shootThrough)
-      && definedMeshes.every(meshPassable)
-      && definedMeshes.every((mesh) => !mesh.angvel);
+      && definedMeshes.every(meshPassable);
     definePassability.set(defName, passable);
     return passable;
   }
@@ -8963,31 +8967,72 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // the overview all go on reading `obstacles` and `meshes` as before.
   const meshTemplates = new Map();
   const meshInstances = [];
+  // `<definition>\u0000<overrides>` -> the name its template is published
+  // under, and how many distinct override sets each definition has so far.
+  const templateNames = new Map();
+  const templateVariants = new Map();
   let passableInstances = 0;
   for (const request of groupInstanceRequests) {
+    let instancedMeshMembers = false;
     const ordinal = topGroupOrdinals.get(request.groupDefName) || 0;
     topGroupOrdinals.set(request.groupDefName, ordinal + 1);
     const instanceLabel = request.name || `${request.groupDefName}#${ordinal}`;
     // Carried as a template and a transform rather than expanded (#153).
-    // Only where nothing about this instance makes its copy different from
-    // any other's: an instance naming its own material, tint or physics
-    // driver is a distinct thing wearing the same geometry, and sharing one
-    // template between them would be wrong rather than merely awkward.
-    const instanceIsPlain = !request.materialOverride && !request.tint
-      && !request.phydrv && !request.driveThrough && !request.shootThrough
-      && !request.ricochet;
-    if (instanceIsPlain && isPassableDefine(request.groupDefName)) {
-      if (!meshTemplates.has(request.groupDefName)) {
+    //
+    // An instance may name its own material, tint or physics driver, which
+    // makes its copy genuinely different from a plain one's -- so the
+    // template is keyed by the definition *and* those overrides, and every
+    // instance sharing both shares a template. On `bzo.bzw` that is the
+    // difference between 3 of its passable instances being shared and 15:
+    // its flag panels are one definition worn in several colours.
+    const overrideKey = JSON.stringify([
+      request.materialOverride || null, request.tint || null, request.phydrv || null,
+      !!request.driveThrough, !!request.shootThrough, !!request.ricochet,
+    ]);
+    // A definition holding a spinning mesh turns about a pivot placed per
+    // instance, which one local template cannot carry -- and there are seven
+    // such instances across every map bzo has seen, so they stay expanded.
+    const spins = definedMeshesSpin(request.groupDefName);
+    const passable = isPassableDefine(request.groupDefName);
+    if (!spins) {
+      const templateKey = `${request.groupDefName}\u0000${overrideKey}`;
+      let templateName = templateNames.get(templateKey);
+      if (templateName === undefined) {
+        // One name per definition per override set. The suffix only appears
+        // where a definition really is worn more than one way, so the common
+        // case stays the definition's own name.
+        const seen = templateVariants.get(request.groupDefName) || 0;
+        templateVariants.set(request.groupDefName, seen + 1);
+        templateName = seen === 0 ? request.groupDefName : `${request.groupDefName}#${seen}`;
         // Local space, once. `finalizeMeshGeometry` gives each face the plane
         // the renderer's planar-UV fallback needs; a template never placed
         // has none, which is why an unexpanded definition needs it here
-        // rather than at placement.
+        // rather than at placement. The instance's own overrides go on after,
+        // exactly as `applyGroupInstanceTransformToMesh` applies them to an
+        // expanded copy.
         const templateMeshes = resolveDefineMeshes(request.groupDefName, new Set())
-          .map((mesh) => finalizeMeshGeometry({ ...mesh, faces: mesh.faces.map((f) => ({ ...f })) }));
-        meshTemplates.set(request.groupDefName, templateMeshes);
+          .map((mesh) => finalizeMeshGeometry({ ...mesh, faces: mesh.faces.map((f) => ({ ...f })) }))
+          .map((mesh) => applyGroupMeshModifiers(mesh, request));
+        // A definition made of boxes and pyramids has no meshes to batch --
+        // those draw through the obstacle path, which shares its geometry
+        // already. Naming an empty template would put an instance on the
+        // wire that draws nothing.
+        if (templateMeshes.length === 0) {
+          templateNames.set(templateKey, null);
+          templateName = null;
+        } else {
+          templateNames.set(templateKey, templateName);
+          meshTemplates.set(templateName, templateMeshes);
+        }
       }
+      if (templateName === null) {
+        // Nothing to batch, so this instance expands exactly as it always
+        // did -- including its passable case, which has no mesh geometry to
+        // leave out either.
+        instancedMeshMembers = false;
+      } else {
       meshInstances.push({
-        define: request.groupDefName,
+        define: templateName,
         x: request.x,
         y: request.baseY,
         z: request.z,
@@ -8995,7 +9040,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         scale: request.scale,
       });
       passableInstances += 1;
-      continue;
+      // Nothing collides with a passable definition, so its copies need not
+      // exist at all. A solid one still has to be expanded -- collision on
+      // both sides reads those copies, and this changes where the geometry
+      // is *drawn* from, never what it is -- so it falls through, and the
+      // copies below are marked as already drawn by the batch.
+      if (passable) continue;
+      instancedMeshMembers = true;
+      }
     }
     const members = resolveDefine(request.groupDefName, new Set());
     const placed = applyGroupInstanceTransform(members, request, instanceLabel);
@@ -9020,7 +9072,13 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     // maps do this -- `import-Planet-MoFo.com_4202.bzw`'s "base_pillar")
     // reaches `meshes` the same way a box/pyramid one reaches `obstacles`.
     const definedMeshes = resolveDefineMeshes(request.groupDefName, new Set());
-    meshes.push(...definedMeshes.map((m) => applyGroupInstanceTransformToMesh(m, request, instanceLabel)));
+    meshes.push(...definedMeshes.map((m) => {
+      const placed = applyGroupInstanceTransformToMesh(m, request, instanceLabel);
+      // Drawn by the batch above, not one by one: the copy still exists
+      // because collision reads it, on this side and the client's.
+      if (instancedMeshMembers) placed.drawnByInstance = true;
+      return placed;
+    }));
   }
   // What issue #153's first stage would carry as a template and a transform
   // rather than as a copy apiece. Logged while that is being built, so the

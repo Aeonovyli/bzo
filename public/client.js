@@ -131,6 +131,7 @@ import {
   formatScoreboardStats,
   SCOREBOARD_TIER,
   getPlayerTeamMark,
+  getPlayerStatusIndicator,
   getScoreboardStatsHeader,
   buildScoreboardRows,
   getScoreboardHuntLabel,
@@ -604,7 +605,7 @@ const XR_MESSAGE_COLOR = '#cfd8e6';
 // The radar's side on the HUD plane. It takes the box's top-right corner, and
 // this is the size that keeps the corner nearest the gunsight where it has
 // always been while the far corner comes inside the box -- a radar large enough
-// to reach both would have its inner edge on the crosshair.
+// to reach both would have its inner edge on the gunsight.
 const XR_RADAR_PLANE_SIZE = 0.3;
 const XR_CHAT_PLANE_WIDTH = 0.9;
 // The chat canvas is laid out in pixels and the plane takes its aspect, so these
@@ -634,9 +635,9 @@ const XR_FLAG_HELP_MARGIN_PX = 32;
 const XR_FLAG_HELP_MAX_LINES = 5;
 const XR_FLAG_HELP_CANVAS_HEIGHT = 168;
 const XR_FLAG_HELP_PLANE_WIDTH = 0.8;
-// How far below the gaze axis the first line starts. Clear of the crosshair,
-// and far enough above the chat panel that a five-line help still does not
-// reach it.
+// How far below the gaze axis the first line starts. Clear of the gaze axis
+// itself, and far enough above the chat panel that a five-line help still
+// does not reach it.
 const XR_FLAG_HELP_TOP = -0.05;
 // BZFlag fires with Enter or the left mouse button and keeps the space bar for
 // dropping a flag (ActionBinding.cxx:92-95).
@@ -2548,7 +2549,12 @@ function applyWorldData(world) {
   // path instead, so each half of the split list gets only the shapes it
   // knows how to draw.
   renderManager.setObstacles(OBSTACLES.filter((obs) => obs.type !== 'mesh'));
-  renderManager.setMeshes(OBSTACLES.filter((obs) => obs.type === 'mesh'));
+  // `drawnByInstance` marks a mesh whose geometry a batch below already
+  // draws (#153). It stays in `OBSTACLES` because collision reads it; it
+  // just must not also be drawn one copy at a time.
+  renderManager.setMeshes(
+    OBSTACLES.filter((obs) => obs.type === 'mesh' && !obs.drawnByInstance),
+  );
   // Definitions a map places many times and nothing collides with, carried as
   // the template plus a transform apiece (#153). Absent from a world an older
   // server sent, and from a map that places nothing that way, in which case
@@ -4333,11 +4339,11 @@ function motionBoxAxisInput(offsetPx) {
   return Math.sign(offsetPx) * Math.min(1, beyondDeadZone / span);
 }
 
-// The crosshair, motion box, shot status and altimeter are hidden by CSS off
-// this one class, rather than by four inline styles.
+// The motion box, shot status and altimeter are hidden by CSS off this one
+// class, rather than by three inline styles.
 function updateObserverHudVisibility() {
   // Driving (issue #68) wants exactly what a playing tank's HUD shows --
-  // crosshair, shot status, the touch control box -- so it is excluded here
+  // shot status, the touch control box -- so it is excluded here
   // the same way it is from `cameraMode`/`roamFraming` above: `.observing`'s
   // CSS is what hides all of that (see styles.css), and free-roam is the only
   // one of the two with nothing to aim or reload.
@@ -4347,8 +4353,19 @@ function updateObserverHudVisibility() {
   // where a playing tank's status would go.
   const status = document.getElementById('roamStatus');
   if (status) {
-    const label = observing ? getRoamLabel() : '';
-    if (status.textContent !== label) status.textContent = label;
+    const parts = observing ? getRoamLabelParts() : { text: '', segments: [] };
+    // Rebuilt only when the words change, since this runs every frame and the
+    // line is usually the same one it was.
+    if (status.textContent !== parts.text) {
+      status.textContent = '';
+      for (const segment of parts.segments) {
+        if (!segment.text) continue;
+        const span = document.createElement('span');
+        span.textContent = segment.text;
+        if (Number.isFinite(segment.color)) span.style.color = colorToCSS(segment.color);
+        status.appendChild(span);
+      }
+    }
   }
 }
 
@@ -8343,8 +8360,6 @@ function handlePlayerHit(message) {
       camera.up.set(0, 1, 0);
       camera.lookAt(vp.x, vp.y, vp.z);
     }
-    const crosshair = document.getElementById('crosshair');
-    if (crosshair) crosshair.style.display = 'none';
   } else if (isCapture) {
     // Nothing to say: the capture itself was already announced.
   } else if (message.shooterId === myPlayerId) {
@@ -8539,8 +8554,6 @@ function handlePlayerRespawn(message) {
     // Nothing to restore: `cameraMode` was never taken away. Clearing the body
     // is what ends the death camera, and the view the player chose -- Overview
     // included -- is the one they come back to.
-    const crosshair = document.getElementById('crosshair');
-    if (crosshair) crosshair.style.display = '';
   }
 }
 // The scoreboard, assembled once for every surface that draws it. Two of them
@@ -10298,8 +10311,8 @@ function updateTankDimensions(deltaTime) {
     //
     // Except in a headset, where the barrel is kept. bzo forces first person
     // on entering VR, and there the gun is the only thing in the world that
-    // says where the tank is pointing -- there is no crosshair on a screen to
-    // fall back on. A head that moves can look over the barrel rather than
+    // says where the tank is pointing -- there is no screen HUD to fall back
+    // on. A head that moves can look over the barrel rather than
     // along it, which is the thing a fixed screen camera cannot do.
     const ownBarrel = tank.userData.barrel;
     if (ownBarrel) ownBarrel.visible = !inCockpit || isXREnabled();
@@ -11362,20 +11375,56 @@ function getRoamFraming() {
 // "Leader " when the target is the automatic one, so watching whoever is winning
 // reads differently from having picked that same player by hand.
 function getRoamLabel() {
+  return getRoamLabelParts().text;
+}
+
+// The label as `{ text, segments }`, so the name in it is written the way the
+// scoreboard and chat write one -- the player's own colour, the cyan `+`/`@`
+// before it, and `/FLAG` after it in the flag's colour (issue #154). It was a
+// plain string, which made the one place an observer reads a callsign the one
+// place a callsign said nothing.
+//
+// The words around the name stay uncoloured, and `text` is still the whole
+// line, so a surface that cannot colour anything reads exactly as before.
+function getRoamLabelParts() {
+  const plain = (text) => ({ text, segments: [{ text }] });
+  const join = (...parts) => {
+    const segments = [];
+    for (const part of parts) {
+      if (typeof part === 'string') segments.push({ text: part });
+      else if (part?.segments) segments.push(...part.segments);
+    }
+    return { text: segments.map((segment) => segment.text).join(''), segments };
+  };
+
+  const targetId = getRoamTargetId();
   const target = getRoamTargetTank();
-  const callsign = target?.userData?.playerState?.name || 'nobody';
-  const name = roamTargetId === null && target ? `Leader ${callsign}` : callsign;
-  if (roamView === ROAM_VIEW.TRACK && target) return `Tracking ${name}`;
-  if (roamView === ROAM_VIEW.FOLLOW && target) return `Following ${name}`;
-  if (roamView === ROAM_VIEW.FPS && target) return `Driving with ${name}`;
+  const state = target?.userData?.playerState;
+  const named = target
+    ? formatPlayerLabel({
+      name: state?.name || 'nobody',
+      nameColor: Number.isFinite(state?.color) ? state.color : null,
+      flag: getPlayerFlagLabel(targetId),
+      mark: getPlayerTeamMark(getPlayerTeamById(targetId)),
+      status: getPlayerStatusIndicator(state),
+    })
+    : plain('nobody');
+  // `Leader` is the automatic target rather than one picked by hand, the same
+  // distinction `ScoreboardRenderer::getLeader` draws -- a word about the
+  // choice, not part of the callsign, so it stays uncoloured.
+  const who = roamTargetId === null && target ? join('Leader ', named) : named;
+
+  if (roamView === ROAM_VIEW.TRACK && target) return join('Tracking ', who);
+  if (roamView === ROAM_VIEW.FOLLOW && target) return join('Following ', who);
+  if (roamView === ROAM_VIEW.FPS && target) return join('Driving with ', who);
   if (roamView === ROAM_VIEW.FLAG) {
     const flag = getRoamTargetFlag();
-    if (flag) return `Tracking ${describeFlag(flag)}`;
+    if (flag) return plain(`Tracking ${describeFlag(flag)}`);
   }
-  if (roamView === ROAM_VIEW.DRIVE_FP) return 'First Person';
-  if (roamView === ROAM_VIEW.DRIVE_TP) return 'Third Person';
-  if (roamView === ROAM_VIEW.OVERVIEW) return 'Overview';
-  return 'Roaming';
+  if (roamView === ROAM_VIEW.DRIVE_FP) return plain('First Person');
+  if (roamView === ROAM_VIEW.DRIVE_TP) return plain('Third Person');
+  if (roamView === ROAM_VIEW.OVERVIEW) return plain('Overview');
+  return plain('Roaming');
 }
 
 // Upstream moves the observer's own tank to the eye point every frame --
@@ -14901,9 +14950,13 @@ function updateXRHudOverlays() {
 // there is nothing to say, so a quiet session pays only the visibility flag.
 function ensureXRNoticeOverlay() {
   const alerts = getActiveHudAlerts();
-  const status = isObserver() ? getRoamLabel() : '';
+  const status = isObserver() ? getRoamLabelParts() : null;
   const lines = [];
-  if (status) lines.push({ text: status, color: XR_MESSAGE_COLOR });
+  // The panel already draws a chat line's own `segments`, so the roaming
+  // label's name arrives in the player's colour here too.
+  if (status && status.text) {
+    lines.push({ text: status.text, color: XR_MESSAGE_COLOR, segments: status.segments });
+  }
   alerts.forEach((alert) => lines.push({
     text: alert.text,
     color: getHudAlertColor(alert.warning),

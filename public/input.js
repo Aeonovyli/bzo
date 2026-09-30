@@ -102,6 +102,10 @@ function trackHeldKeys() {
   window.addEventListener('keydown', (e) => {
     // An auto-repeat is the same key still down, not another one.
     if (e.repeat) return;
+    // Not every keydown carries a `code` -- a synthetic event, and some input
+    // methods, leave it undefined -- and an undefined in this set reaches the
+    // debug readout as a key with no name to print.
+    if (!e.code) return;
     heldKeyCodes.add(e.code);
     if (heldKeyCodes.size > peakHeldCount) {
       peakHeldCount = heldKeyCodes.size;
@@ -1200,17 +1204,25 @@ function enterFullscreen() {
     return false;
   }
 
-  try {
-    if (request === elem.webkitRequestFullscreen) {
-      request.call(elem, Element.ALLOW_KEYBOARD_INPUT);
-    } else {
-      request.call(elem);
-    }
-    return true;
-  } catch (e) {
+  const refused = (e) => {
     console.warn('Fullscreen request failed:', e);
     hudContext.pushChatMessage('⚠️ Fullscreen not supported');
     hudContext.updateChatWindow();
+  };
+
+  try {
+    // `requestFullscreen` returns a promise, so a refusal arrives as a
+    // rejection rather than a throw -- a `try` alone let it escape as an
+    // unhandled rejection, which is what "TypeError: Permissions check
+    // failed" in the console was. The prefixed forms predate the promise and
+    // return nothing, hence the guard rather than an unconditional `.catch`.
+    const result = request === elem.webkitRequestFullscreen
+      ? request.call(elem, Element.ALLOW_KEYBOARD_INPUT)
+      : request.call(elem);
+    if (result && typeof result.catch === 'function') result.catch(refused);
+    return true;
+  } catch (e) {
+    refused(e);
     return false;
   }
 }

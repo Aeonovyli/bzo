@@ -815,6 +815,24 @@ group Hexagon
   position 75 95 0
 end
 
+# Three more of the same definition, in open ground, so one solid mesh
+# template is placed four ways: unturned, turned, and scaled. bzo draws every
+# placement of a definition in one call (issue #153), and these are what say
+# whether a turned or stretched one still stands where you can drive into it.
+group Hexagon
+  position -50 -125 0
+end
+
+group Hexagon
+  position 45 -75 0
+  rotation 45
+end
+
+group Hexagon
+  position -45 -85 0
+  size 1 1 1.5
+end
+
 # The third of the honeycomb, and the only one that is a single primitive:
 # `arc`'s own `divisions 6` over a full 360 degrees is a hexagonal prism,
 # and `rotation 30` starts its first vertex where the other two put theirs.
