@@ -28,7 +28,8 @@
 //   3. **The world itself**, which is the only expensive one and runs only
 //      when the hash says the picture is stale or missing.
 //
-// With no signal at all a server is rechecked on `RECHECK_MS`. That is the
+// With no signal at all a server is rechecked on `RECHECK_MS`, or on
+// `TEMP_RECHECK_MS` for a generated world. That is the
 // floor that makes a weak signal safe: a configuration change the fingerprint
 // misses delays a redraw by a day rather than losing it, which is why the
 // fingerprint can afford to be a guess.
@@ -39,6 +40,16 @@ const path = require('path');
 // what makes "your thumbnail will update tomorrow" a true answer, and at a
 // couple of hundred listed servers it is about ten short dials an hour.
 const RECHECK_MS = 24 * 60 * 60 * 1000;
+
+// A `t` world is one bzfs generated rather than read from a file, and it
+// usually changes each time that server restarts (`bzfs.cxx:1211`). Its dial
+// is the same cheap one, so it is asked hourly, and the world only comes down
+// when the hash has moved.
+const TEMP_RECHECK_MS = 60 * 60 * 1000;
+
+function recheckMs(worldHash) {
+  return /^t/i.test(worldHash || '') ? TEMP_RECHECK_MS : RECHECK_MS;
+}
 
 // A server that refused, timed out or sent something unusable is not asked
 // again straight away. Shorter than `RECHECK_MS` because being unreachable is
@@ -207,7 +218,7 @@ function createBzfsWorldTracker(deps) {
       if (!record) age = Infinity;
       else if (record.dueNow || !hasPicture(server.host, server.port, record.worldHash)) age = Infinity;
       else age = now - (record.checkedAt || 0);
-      if (age < RECHECK_MS) continue;
+      if (age < recheckMs(record?.worldHash)) continue;
       if (age > bestAge) { bestAge = age; best = server; }
     }
     return best;
@@ -233,10 +244,14 @@ function createBzfsWorldTracker(deps) {
       return;
     }
 
-    // The whole point of the dial: a `p` world that has not changed needs no
+    // The whole point of the dial: a world that has not changed needs no
     // download, however long ago the picture was drawn.
+    // A record from before variables were kept has none to show, which only
+    // a download can fix; `noteImport` stores `[]` where the join was refused,
+    // so this costs each server one download, not one per check.
     if (status.worldHash && status.worldHash === record.worldHash
-      && hasPicture(server.host, server.port, record.worldHash)) {
+      && hasPicture(server.host, server.port, record.worldHash)
+      && Array.isArray(record.variables)) {
       records.set(key, {
         ...record, fingerprint, checkedAt: now, error: null, errorAt: null, dueNow: false,
       });
@@ -273,6 +288,8 @@ function createBzfsWorldTracker(deps) {
         worldBytes: Number.isFinite(byteLength) ? byteLength : 0,
         worldCompressed: Number.isFinite(compressedSize) ? compressedSize : 0,
         worldUncompressed: Number.isFinite(uncompressedSize) ? uncompressedSize : 0,
+        // Recorded by `noteImport` during the import just made.
+        variables: records.get(key)?.variables || record.variables || [],
         fingerprint,
         checkedAt: now,
         error: null,
@@ -324,7 +341,10 @@ function createBzfsWorldTracker(deps) {
     // panel, the `/list` form. It cost the same download this tracker would
     // have made, so recording it here both keeps the picture current and
     // pushes the next check a full cycle out.
-    noteImport(host, port, worldHash, sizes = null) {
+    // `variables` are the world variables that server set away from upstream's
+    // defaults, as `[name, value]` pairs; null when the join that carries them
+    // was refused, which keeps what an earlier import learned.
+    noteImport(host, port, worldHash, sizes = null, variables = null) {
       if (!host || !port) return;
       load();
       const key = serverKey(host, port);
@@ -340,6 +360,7 @@ function createBzfsWorldTracker(deps) {
         worldBytes: sizes?.byteLength || record.worldBytes || 0,
         worldCompressed: sizes?.compressedSize || record.worldCompressed || 0,
         worldUncompressed: sizes?.uncompressedSize || record.worldUncompressed || 0,
+        variables: Array.isArray(variables) ? variables : (record.variables || []),
         checkedAt: Date.now(),
         error: null,
         errorAt: null,
@@ -400,5 +421,6 @@ module.exports = {
   createBzfsWorldTracker,
   listEntryFingerprint,
   RECHECK_MS,
+  TEMP_RECHECK_MS,
   FAILURE_COOLDOWN_MS,
 };

@@ -52,7 +52,7 @@ window.attachTable = function attachTable(tableId, filterId) {
 
 // ---------------------------------------------------------------------------
 // The filter language, which is upstream's (`src/bzflag/ServerListFilter.cxx`).
-// Text with no leading slash is a glob over address, description and hash. After a
+// Text with no leading slash is a glob over address, description, hash and owner. After a
 // slash comes a comma-separated set of filters, combined with AND; a second
 // slash starts another set, and a server matching any set is shown (OR). A
 // filter is `+name`/`-name` for a boolean, `name<value` (`<`, `<=`, `>`, `>=`,
@@ -77,6 +77,8 @@ const BOOL_LABELS = {
   // prints the capital. Both work here rather than either being wrong.
   i: 'inertia', I: 'inertia', inertia: 'inertia',
   a: 'antidote', antidote: 'antidote',
+  ov: 'overview', overview: 'overview',
+  t: 'temp', temp: 'temp',
 };
 
 const RANGE_LABELS = {
@@ -115,6 +117,9 @@ const PATTERN_LABELS = {
   d: 'desc', desc: 'desc', description: 'desc',
   ad: 'addrDesc', addrdesc: 'addrDesc',
   hs: 'hash', hash: 'hash',
+  ow: 'owner', owner: 'owner',
+  ip: 'ip',
+  v: 'variable', var: 'variable',
 };
 
 // A glob is `*` for any run and `?` for any one character; a pattern with
@@ -276,6 +281,8 @@ function boolValue(entry, key) {
     case 'handicap': return entry.h === 1;
     case 'inertia': return entry.in === 1;
     case 'antidote': return entry.an === 1;
+    case 'overview': return entry.ov === 1;
+    case 'temp': return entry.tmp === 1;
     default: return false;
   }
 }
@@ -286,6 +293,12 @@ function checkSet(set, entry) {
   if (set.patterns.addr && !set.patterns.addr.test(addr)) return false;
   if (set.patterns.desc && !set.patterns.desc.test(desc)) return false;
   if (set.patterns.hash && !set.patterns.hash.test(entry.hs || '')) return false;
+  if (set.patterns.owner && !set.patterns.owner.test(entry.ow || '')) return false;
+  if (set.patterns.ip && !set.patterns.ip.test(entry.ip || '')) return false;
+  if (set.patterns.variable
+    && !(entry.v || []).some((line) => set.patterns.variable.test(line))) {
+    return false;
+  }
   if (set.patterns.addrDesc
     && !set.patterns.addrDesc.test(addr) && !set.patterns.addrDesc.test(desc)) {
     return false;
@@ -329,7 +342,8 @@ window.parseServerFilter = function parseServerFilter(source) {
     check(entry) {
       if (orFilter && orFilter.check(entry)) return true;
       if (headPattern && !headPattern.test(entry.a || '')
-        && !headPattern.test(entry.d || '') && !headPattern.test(entry.hs || '')) {
+        && !headPattern.test(entry.d || '') && !headPattern.test(entry.hs || '')
+        && !headPattern.test(entry.ow || '')) {
         return false;
       }
       return checkSet(sets[0], entry);
@@ -435,6 +449,9 @@ window.attachList = function attachList(listId, filterId) {
 
   const filterInput = filterId && document.getElementById(filterId);
   const errorNode = document.getElementById(`${filterId}Error`);
+  // How many rows the filter leaves, in the section's heading, so a filter
+  // that matches nothing reads as that rather than as an empty list.
+  const countNode = document.getElementById(`${listId}-count`);
   if (filterInput) {
     filterInput.addEventListener('input', () => {
       const filter = window.parseServerFilter(filterInput.value);
@@ -446,6 +463,9 @@ window.attachList = function attachList(listId, filterId) {
         row.parentNode.style.display = filter.check(entryFor(row)) ? '' : 'none';
       });
       select(shown()[0] || null, false);
+      if (countNode) {
+        countNode.textContent = filterInput.value.trim() ? `, filtered ${shown().length}` : '';
+      }
     });
   }
 };

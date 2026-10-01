@@ -32,6 +32,7 @@ const {
   decodeQueryGame,
   parseWorldDatabase,
   buildBZWText,
+  collectNonDefaultVariables,
 } = require('./server/remote-world-import.cjs');
 const {
   BzfsSession,
@@ -1241,6 +1242,7 @@ function publishWorldFacts(host, port) {
     bzw: measured.bzw || record?.bzw || 0,
     json: measured.json || record?.json || 0,
     brotli: measured.brotli || record?.brotli || 0,
+    variables: record?.variables?.length ? record.variables : undefined,
   };
   return Object.values(facts).some((value) => value) ? facts : null;
 }
@@ -1363,9 +1365,37 @@ function describeOwnWorld(world) {
   ];
 }
 
+function describeVariableCount(variables) {
+  if (!Array.isArray(variables) || !variables.length) return '';
+  const lines = variables.map(([name, value]) => `${name} ${value}`).join('\n');
+  return `<span title="${escapeHtml(lines)}">${variables.length} set</span>`;
+}
+
+// The bzflag.org account a server's key belongs to, as its forum profile: one
+// account signs into both. By BZID where one is known, as the key table links
+// it, since a callsign can change hands; by name otherwise, which is all the
+// BZFlag list gives.
+function describeOwner(owner, bzid) {
+  if (!owner) return '';
+  const query = isForumBzid(bzid) ? `u=${encodeURIComponent(bzid)}` : `un=${encodeURIComponent(owner)}`;
+  const href = `https://forums.bzflag.org/memberlist.php?mode=viewprofile&${query}`;
+  return `<a href="${escapeHtml(href)}">${escapeHtml(owner)}</a>`;
+}
+
+// A real forum BZID is numeric; `self` and the like are placeholders.
+function isForumBzid(bzid) {
+  return /^\d+$/.test(String(bzid ?? ''));
+}
+
 function describeRelayedWorld(world) {
   return [
     ['BZFlag hash', escapeHtml(world.hash || '')],
+    // A `t` hash is a world bzfs generated rather than read from a file, which
+    // usually changes when that server restarts (`isBzfsWorldHash`).
+    ['World', /^t/i.test(world.hash || '') ? 'temporary' : ''],
+    // Only how many: the list is long and a pane is not the place for it. The
+    // names are on hover and in the filter (`v)`).
+    ['Variables', describeVariableCount(world.variables)],
     ['sent/inflated', escapeHtml(joinSizes(world.sent, world.inflated))],
     ['bzw/json/br', escapeHtml(joinSizes(world.bzw, world.json, world.brotli))],
   ];
@@ -1559,7 +1589,7 @@ function listHeadingCount(entries) {
 // and for a bzo row that the list server has not fetched it.
 function missingOverviewCount(entries) {
   const waiting = entries.filter((entry) => entry.overviewUrl === null).length;
-  return waiting ? `, ${waiting} without image` : '';
+  return waiting ? `, ${waiting} without overview` : '';
 }
 
 // The readout pane for one row: upstream's own panel, in upstream's order,
@@ -1779,10 +1809,13 @@ function bzfsRowOverviewUrl(host, port) {
   return localMapOverviewUrl(remoteMapFileName(host, port));
 }
 
-// A `p` hash is bzfs's MD5 of the world and is stable across that server's
-// restarts, which is what makes it a name a picture can be kept under.
+// bzfs's MD5 of the world, which names that world exactly and so is a name a
+// picture can be kept under. `p` is a world loaded from a file and stable
+// across that server's restarts; `t` is one it generated, which usually
+// changes on each restart (`bzfs.cxx:1211`) and is rechecked sooner for it
+// (`server/bzfs-worlds.cjs`).
 function isBzfsWorldHash(worldHash) {
-  return /^p[0-9a-f]{32}$/i.test(worldHash || '');
+  return /^[pt][0-9a-f]{32}$/i.test(worldHash || '');
 }
 
 // The picture of one BZFlag world, by its hash (issue #147): drawn once, by
@@ -1882,7 +1915,7 @@ function renderFilterHelp(listId) {
     + rows.map(([names, what]) => `<div class="helpRow">`
       + `<span><code>${names}</code></span><span>${what}</span></div>`).join('');
   return `<div class="filterHelp" id="${escapeHtml(listId)}-help" hidden>`
-    + `<p>Plain text is a glob over the address, description and hash --`
+    + `<p>Plain text is a glob over the address, description, hash and owner --`
     + ` <code>league</code>, <code>*.org</code>, <code>bz?.</code> -- and a word`
     + ` with no <code>*</code> or <code>?</code> in it is wrapped in both, so it`
     + ` matches anywhere. A leading <code>/</code> starts filters instead:`
@@ -1900,6 +1933,8 @@ function renderFilterHelp(listId) {
       ['i inertia', 'Tanks have inertia'],
       ['a antidote', 'Antidote flags are spawned'],
       ['P replay', 'A replay server'],
+      ['ov overview', 'The pane has a map overview'],
+      ['t temp', 'A generated world, which usually changes on restart'],
     ])
     + group('Numbers -- a name, then <code>&lt;</code> <code>&lt;=</code>'
       + ' <code>&gt;</code> <code>&gt;=</code> <code>=</code>, then a number', [
@@ -1923,6 +1958,9 @@ function renderFilterHelp(listId) {
       ['d desc description', 'The description'],
       ['ad addrdesc', 'Either one'],
       ['hs hash', 'The world hash the pane shows'],
+      ['ow owner', 'The bzflag.org account that registered it'],
+      ['ip', 'The IP address the list server has for it'],
+      ['v var', 'Any one world variable it sets, as <code>name=value</code>'],
     ])
     + `<p>A capitalised pattern name matches case-sensitively:`
     + ` <code>d)league</code> ignores case, <code>D)League</code> does not.</p>`
@@ -1933,6 +1971,8 @@ function renderFilterHelp(listId) {
       ['/op&gt;0', 'Somebody is watching'],
       ['/+rabbit,+rico,s=3', 'Rabbit chase, ricochet, three shots'],
       ['/+ctf/+rabbit', 'Either capture-the-flag or rabbit chase'],
+      ['/-overview', 'No map overview yet'],
+      ['/v)_disableBots=*', 'Sets <code>_disableBots</code> at all'],
     ])
     + `</div>`;
 }
@@ -1977,6 +2017,11 @@ function renderServerList(listId, filterId, unsorted) {
     in: set(entry, GAME_OPTION_BITS.inertia),
     an: set(entry, GAME_OPTION_BITS.antidote),
     im: entry.imported ? 1 : 0,
+    ov: entry.overviewUrl ? 1 : 0,
+    tmp: /^t/i.test(entry.hash || '') ? 1 : 0,
+    ow: entry.owner || '',
+    ip: entry.ip || '',
+    v: Array.isArray(entry.variables) ? entry.variables.map(([name, value]) => `${name}=${value}`) : [],
     hs: entry.hash || '',
     ob: typeof entry.observers === 'number' ? entry.observers : null,
     // What the Name header sorts by: a server with no title sorts under its
@@ -2095,6 +2140,13 @@ function renderListPage({
   // and one pane renderer rather than a copy of each per table. `extras` are
   // the pane lines only one of the two has, and their values are HTML the
   // caller has already escaped -- a URL extra is a link.
+  // A BZFlag list owner is only a name. Where the same account holds a bzo
+  // key, that row carries its BZID, and the link can use it. bzflag.org
+  // callsigns are unique regardless of case.
+  const ownerBzids = new Map(bzoServers
+    .filter((s) => s.owner && isForumBzid(s.ownerBzid))
+    .map((s) => [s.owner.toLowerCase(), s.ownerBzid]));
+  const ownerLink = (owner) => describeOwner(owner, ownerBzids.get(String(owner || '').toLowerCase()));
   const bzfsEntries = servers.map((s, index) => {
     const info = s.info || {};
     const importFileName = remoteMapFileName(s.host, s.port);
@@ -2102,10 +2154,14 @@ function renderListPage({
     // somebody views it (`listLocalMapFiles`).
     const importedPath = resolveMapFilePath(importFileName);
     const maxima = Array.isArray(info.teamMaximums) ? info.teamMaximums : [];
+    const world = s.world || publishWorldFacts(s.host, s.port) || {};
     return {
       id: `bzfs-pane-${index}`,
       addr: `${s.host}:${s.port}`,
-      hash: (s.world || publishWorldFacts(s.host, s.port) || {}).hash || '',
+      hash: world.hash || '',
+      owner: s.owner || '',
+      ip: s.ip || '',
+      variables: world.variables,
       desc: s.title,
       // Always the row's own link, imported or not -- `?viewmap=` already
       // imports on demand (`importMapForView`) the moment nothing this fresh
@@ -2144,10 +2200,12 @@ function renderListPage({
       // same mtime `sweepStaleImports` ages it out by.
       extras: [
         ['Address', escapeHtml(`${s.host}:${s.port}`)],
+        ['IP', escapeHtml(s.ip || '')],
+        ['Owner', ownerLink(s.owner)],
         ['Imported', escapeHtml(importedPath ? statMtimeOrBlank(importedPath) : '')],
         // What this server holds of that world, and what it cost -- see
         // `describeImportedWorld`.
-        ...(s.world ? describeRelayedWorld(s.world) : describeImportedWorld(s.host, s.port)),
+        ...describeRelayedWorld(world),
       ],
       imported: Boolean(importedPath),
       // Watching is the live game rather than the map: a real observer
@@ -2156,9 +2214,12 @@ function renderListPage({
       // so the two agree about who sees it -- and `?watch=` spells its target
       // `host_port`, since a colon in a query value makes a browser offer to
       // search for the address instead of showing it.
-      actions: (canWatch
-        ? `<a class="action" href="/?watch=${encodeURIComponent(`${s.host}_${s.port}`)}">Watch</a>`
-        : '')
+      // Hands the address to an installed BZFlag client, so it is offered to
+      // everyone: nothing on this server is involved.
+      actions: `<a class="action" href="${escapeHtml(`bzflag://${s.host}:${s.port}`)}">Launch</a>`
+        + (canWatch
+          ? `<a class="action" href="/?watch=${encodeURIComponent(`${s.host}_${s.port}`)}">Watch</a>`
+          : '')
         + `<form method="post" action="/list/import" class="inlineForm">`
         + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
         + `<input type="hidden" name="port" value="${s.port}">`
@@ -2192,7 +2253,13 @@ function renderListPage({
         ? (relayed?.world || publishWorldFacts(...splitHostPort(proxy.target)) || {})
         : (s.world || {})).hash || '',
       href,
+      owner: (proxy ? relayed?.owner : s.owner) || '',
       action: 'Enter game',
+      // A carried target is a real BZFlag server, so a BZFlag client can go
+      // straight there.
+      actions: proxy
+        ? `<a class="action" href="${escapeHtml(`bzflag://${proxy.target}`)}">Launch</a>`
+        : '',
       style: game.style,
       maxShots: game.maxShots,
       gameOptionsBits: game.gameOptionsBits,
@@ -2220,6 +2287,7 @@ function renderListPage({
       extras: proxy
         ? [
           ['BZFlag server', escapeHtml(proxy.target)],
+          ['Owner', ownerLink(relayed?.owner)],
           ['Carried by', urlLink],
           // A proxy row's world is the target's, so the figures are the ones
           // a bzfs row for the same address shows -- what the list server
@@ -2235,6 +2303,7 @@ function renderListPage({
           // Only a bzo row can have this: a bzfs server holds no key and sends
           // no report, and the public BZFlag list carries no uptime.
           ['Up', escapeHtml(formatUptime(s.upSince))],
+          ['Owner', describeOwner(s.owner, s.ownerBzid)],
           ['Voice chat', s.voiceEnabled ? 'configured' : ''],
           ['URL', urlLink],
           // What that instance says its own world costs. Reported rather
@@ -2473,14 +2542,14 @@ function renderListPage({
 </head>
 <body>
 ${navBlock}
-<h1 id="bzo">Public bzo servers - ${listHeadingCount(bzoEntries)}</h1>
+<h1 id="bzo">Public bzo servers - ${listHeadingCount(bzoEntries)}<span id="bzoServerList-count"></span></h1>
 <p class="muted">From the designated bzo list server, ${LIST_SERVER_URL
     ? `<a href="${escapeHtml(LIST_SERVER_URL)}/list">${escapeHtml(LIST_SERVER_URL)}</a>`
     : 'disabled on this instance'} --
 pick a row to read it; Enter, or the pane's own link, goes in.</p>
 ${renderServerList('bzoServerList', 'bzoServerFilter', bzoEntries)}
 
-<h1 id="bzflag">Public BZFlag servers - ${listHeadingCount(bzfsEntries)}</h1>
+<h1 id="bzflag">Public BZFlag servers - ${listHeadingCount(bzfsEntries)}<span id="serverList-count"></span></h1>
 <p class="muted">From the public list server (my.bzflag.org), cached ${cacheAgeSeconds}s ago --
 <a href="/list">refresh</a>. Pick a row to read it; its link views that map, and does
 not enter that game.</p>
@@ -2489,7 +2558,7 @@ ${renderServerList('serverList', 'serverFilter', bzfsEntries)}
 
 <h1 id="maps">Local maps - ${localMaps.length}${missingOverviewCount(localMaps.map(
   (map) => ({ overviewUrl: localMapOverviewUrl(map.fileName) }),
-))}</h1>
+))}<span id="mapList-count"></span></h1>
 <p class="muted">Already in this server's <code>maps/</code> -- pick a row to read it; its link
 views that map.</p>
 ${renderMapList('mapList', 'mapFilter', localMaps)}
@@ -3164,7 +3233,7 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
     byteLength: worldDatabase.length,
     compressedSize: tree.compressedSize,
     uncompressedSize: tree.uncompressedSize,
-  });
+  }, variables ? collectNonDefaultVariables(variables) : null);
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
   // or timed out (see `fetchWorldFromServer`); the map imports either way.
@@ -3172,15 +3241,24 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
   if (gameSettings && gameSettings.length >= 30) tree.gameSettings = decodeGameSettings(gameSettings);
   if (queryGame && queryGame.length >= 44) tree.queryGame = decodeQueryGame(queryGame);
   if (tree.gameSettings) tree.worldSize = tree.gameSettings.worldSize;
-  // Neither the title nor the per-team maximums travel over the direct
-  // connection above -- both are the list server's own words about this
+  // Neither the title, the owner nor the per-team maximums travel over the
+  // direct connection above -- all are the list server's own words about this
   // host:port (`fetchServerList`), carried in on the very record
   // `performRemoteMapImport` matched this target against. Read off that
   // record rather than looked up again here: the fetch above can take up to
   // 15 seconds, and the shared list cache can have expired and been
   // refreshed without this server on it by the time it returns.
   const text = buildBZWText(
-    { host, port, title: listedServer.title || '', listInfo: listedServer.info || null },
+    {
+      host,
+      port,
+      title: listedServer.title || '',
+      owner: listedServer.owner || '',
+      ip: listedServer.ip || '',
+      version: BZFS_PROTOCOL_VERSION,
+      worldHash: worldHash || '',
+      listInfo: listedServer.info || null,
+    },
     tree,
     new Date().toISOString(),
   );
@@ -4055,6 +4133,11 @@ function listPublicListServerRows() {
         url: record.url,
         title: record.live.title,
         description: record.live.description,
+        // Public, as the BZFlag list makes every bzfs server's owner. Only a
+        // real account: an instance's own key with no operator BZID set
+        // carries the server's name there instead.
+        owner: isForumBzid(record.bzid) ? record.callsign : '',
+        ownerBzid: isForumBzid(record.bzid) ? record.bzid : '',
         players: record.live.players,
         maxPlayers: record.live.maxPlayers,
         version: record.live.version,
@@ -4171,6 +4254,8 @@ app.get('/api/list-server/list', async (req, res) => {
       port: server.port,
       title: server.title,
       info: server.info,
+      owner: server.owner,
+      ip: server.ip,
       // The picture of that server's world, when this instance holds an
       // import of it (`server/bzfs-worlds.cjs` keeps them fresh). Absolute,
       // because the reader is another origin -- and stated here rather than

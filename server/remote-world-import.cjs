@@ -117,8 +117,8 @@ class Reader {
 }
 
 // ---------------------------------------------------------------------------
-// Server list: POST action=LIST to the list server and parse the plain-text
-// reply ($HOME/bzflag/src/game/ServerList.cxx, readServerList/checkEchos).
+// Server list: POST action=LIST to the list server and parse the reply, in the
+// plain-text form upstream reads ($HOME/bzflag/src/game/ServerList.cxx, readServerList/checkEchos).
 // Each line is "host:port version pingInfoHex address title...". The hex
 // blob is PingPacket::packHex ($HOME/bzflag/src/net/Ping.cxx) -- 8 uint16's
 // then 13 uint8's -- which already carries game type, options and every
@@ -166,29 +166,74 @@ function decodePingHex(hex) {
   };
 }
 
+// `listformat=json` adds the one thing the plain text lacks: `owner`, the
+// bzflag.org account whose key registered the server. The list server builds
+// that JSON with PHP's `addslashes`, so a title with an apostrophe arrives as
+// `\'`, which JSON does not allow -- undone here before parsing, pair by
+// pair, so an escaped backslash in front of a quote is left alone. Anything
+// that still does not parse falls back to the plain text upstream reads.
 async function fetchServerList(url, version) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `action=LIST&version=${encodeURIComponent(version)}`,
+    body: `action=LIST&version=${encodeURIComponent(version)}&listformat=json`,
   });
   const text = await res.text();
+  return parseJsonServerList(text, version) || parsePlainServerList(text, version);
+}
+
+function splitNamePort(nameport) {
+  const idx = nameport.lastIndexOf(':');
+  if (idx === -1) return { host: nameport, port: 5154 };
+  return {
+    host: nameport.slice(0, idx),
+    port: parseInt(nameport.slice(idx + 1), 10) || 5154,
+  };
+}
+
+function parseJsonServerList(text, version) {
+  let body;
+  try {
+    body = JSON.parse(text.replace(/\\(.)/gs, (pair, ch) => (ch === "'" ? "'" : pair)));
+  } catch {
+    return null;
+  }
+  const fields = Array.isArray(body?.fields) ? body.fields : null;
+  if (!fields || !Array.isArray(body.servers)) return null;
+  const at = (name) => fields.indexOf(name);
+  const [iVersion, iHex, iAddr, iIp, iTitle, iOwner] =
+    ['version', 'hexcode', 'addr', 'ipaddr', 'title', 'owner'].map(at);
+  if (iVersion < 0 || iHex < 0 || iAddr < 0) return null;
+  const servers = [];
+  for (const row of body.servers) {
+    if (!Array.isArray(row) || row[iVersion] !== version) continue;
+    servers.push({
+      ...splitNamePort(String(row[iAddr] || '')),
+      title: iTitle < 0 ? '' : String(row[iTitle] || '').trim(),
+      info: decodePingHex(row[iHex]),
+      ip: iIp < 0 ? '' : String(row[iIp] || ''),
+      owner: iOwner < 0 ? '' : String(row[iOwner] || ''),
+    });
+  }
+  return servers;
+}
+
+function parsePlainServerList(text, version) {
   const servers = [];
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('NOTICE:')) continue;
     const parts = trimmed.split(/\s+/);
     if (parts.length < 4) continue;
-    const [nameport, ver, infoHex, , ...titleParts] = parts;
+    const [nameport, ver, infoHex, ip, ...titleParts] = parts;
     if (ver !== version) continue;
-    let host = nameport;
-    let port = 5154;
-    const idx = nameport.lastIndexOf(':');
-    if (idx !== -1) {
-      host = nameport.slice(0, idx);
-      port = parseInt(nameport.slice(idx + 1), 10) || 5154;
-    }
-    servers.push({ host, port, title: titleParts.join(' '), info: decodePingHex(infoHex) });
+    servers.push({
+      ...splitNamePort(nameport),
+      title: titleParts.join(' '),
+      info: decodePingHex(infoHex),
+      ip,
+      owner: '',
+    });
   }
   return servers;
 }
@@ -1748,6 +1793,12 @@ function buildBZWText(serverMeta, tree, fetchedAt) {
   const lines = [];
   lines.push(`# downloaded by bzo (https://github.com/timriker/bzo) from ${serverMeta.host}:${serverMeta.port}${serverMeta.title ? ` -- ${serverMeta.title}` : ''}`);
   lines.push(`# fetched ${fetchedAt}`);
+  // What the list server says about this server that nothing below records:
+  // the hexcode is already the options block, and the title is above.
+  if (serverMeta.owner) lines.push(`# owner ${serverMeta.owner}`);
+  if (serverMeta.ip) lines.push(`# ip ${serverMeta.ip}`);
+  if (serverMeta.version) lines.push(`# protocol ${serverMeta.version}`);
+  if (serverMeta.worldHash) lines.push(`# world hash ${serverMeta.worldHash}`);
   lines.push('#');
   lines.push('# this is a reconstruction of the world bzfs sent over the wire, not the');
   lines.push('# original .bzw source -- the server never transmits map file text, only the');
