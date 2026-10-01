@@ -6,6 +6,26 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.96] - 2026-10-01
+
+### Added
+- `/list` shows each BZFlag server's owner, linked to their forum profile,
+  and its IP address, both read from the BZFlag list server (#147).
+- A Launch link on each BZFlag server opens it in an installed BZFlag
+  client.
+- Filters for servers with or without a map picture (`/+overview`), on
+  generated worlds (`/+temp`), by owner (`ow)`), by IP (`ip)`) and by any
+  world variable a server sets (`v)`). The pane counts the variables and
+  lists them on hover.
+- Each list's heading shows how many rows the filter leaves.
+- An imported map's header records the server's owner, IP, protocol and
+  world hash.
+
+### Changed
+- A generated world keeps its picture between imports like any other, and
+  its server is rechecked hourly, since such a world usually changes when
+  the server restarts.
+
 ## [1.2.95] - 2026-09-30
 
 ### Fixed
