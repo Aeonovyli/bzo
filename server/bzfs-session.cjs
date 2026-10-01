@@ -23,6 +23,7 @@ const {
   sendFrame,
   createFrameReader,
   buildEnterPayload,
+  TANK_PLAYER,
   decodeSetVars,
 } = require('./remote-world-import.cjs');
 // Upstream's own defaults, for a name the target never mentioned.
@@ -518,7 +519,7 @@ function toBzfsChatText(text) {
 class BzfsSession {
   constructor({
     host, port, callsign, motto = '', token = '', version,
-    team = OBSERVER_TEAM, timeout = JOIN_TIMEOUT_MS,
+    team = OBSERVER_TEAM, type = TANK_PLAYER, timeout = JOIN_TIMEOUT_MS,
   }) {
     this.host = host;
     this.port = port;
@@ -527,6 +528,7 @@ class BzfsSession {
     this.token = token;
     this.version = version;
     this.team = team;
+    this.type = type;
     this.timeout = timeout;
     // Ours on the target, handed over in the handshake before anything else.
     // Every player in this session is named by a bzfs id, this one included.
@@ -637,6 +639,7 @@ class BzfsSession {
             motto: this.motto,
             token: this.token,
             team: this.team,
+            type: this.type,
             ...(this.version ? { version: this.version } : {}),
           }));
 
@@ -801,6 +804,14 @@ class BzfsSession {
         const motion = this.state.motion.get(death.victim);
         if (motion) motion.alive = false;
         this.emit('killed', death);
+        break;
+      }
+      case 'au': {
+        const id = payload.readUInt8(0);
+        const on = payload.readUInt8(1) !== 0;
+        const player = this.state.players.get(id);
+        if (player) player.autopilot = on;
+        this.emit('autopilot', { id, on });
         break;
       }
       case 'pa': {
@@ -986,6 +997,14 @@ class BzfsSession {
     const payload = Buffer.alloc(2);
     payload.writeUInt16BE(team, 0);
     this.send('cf', payload);
+  }
+
+  // MsgAutoPilot: one byte, non-zero for on (`ServerLink.cxx:850`). bzfs
+  // stores it and tells everyone, or kicks under `_disableBots`.
+  sendAutoPilot(on) {
+    const payload = Buffer.alloc(1);
+    payload.writeUInt8(on ? 1 : 0, 0);
+    this.send('au', payload);
   }
 
   // MsgPause: one byte, non-zero for paused (`bzfs.cxx:5209`). bzfs holds the

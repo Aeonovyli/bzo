@@ -216,6 +216,26 @@ https://your-bzo.example.com/?proxy=example.org_5154
 
 `docs/proxy.md` has what a proxied player gets, what they do not, and why.
 
+## Bots
+
+The server can keep its game at a size with bots of its own:
+
+```json
+"bots": { "fill": 4, "pilot": "ace" }
+```
+
+That is four players: a bot for each place people leave empty, and none once
+four people are playing. Observers watch rather than take a place. With nobody
+connected the bots idle until somebody arrives. `pilot` is `roger` (upstream's
+autopilot) or `ace`.
+
+An operator changes it live with `/bot fill <n> [pilot]`, adds bots outside
+the fill with `/bot add [pilot] [team] [count]`, removes them with
+`/bot remove <name|all>`, and sees what is running with `/bot`.
+`"disableBots": true`, or `-disableBots` in a map's options, turns all
+of it off, autopilot included. `docs/bots-plan.md`
+has how they work.
+
 ## Updating
 
 ### Source installs

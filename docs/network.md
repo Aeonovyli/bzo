@@ -91,7 +91,7 @@ omitted rather than sent null.
 
 | type | fields | meaning |
 |---|---|---|
-| `joinGame` | `name`, `team`, `tankModel`, `isMobile`, `viewMap?` | enter the game. `team`/`viewMap` come from `getJoinTeamFields()` so the Map Viewer sentinel is translated in one place |
+| `joinGame` | `name`, `team`, `tankModel`, `isMobile`, `bot`, `viewMap?` | enter the game. `team`/`viewMap` come from `getJoinTeamFields()` so the Map Viewer sentinel is translated in one place. `bot` is upstream's `ComputerPlayer`: set by `?bot`, which the test clients use |
 | `m` | `x`,`y`,`z`,`r`,`fs`,`rs`,`vv`,`vx`,`vz`,`dt`,`sdt`,`ct`,`d?` | motion. See below |
 | `tp` | `fromFaceId`,`toFaceId`,`x`,`y`,`z`,`r`,`vv`,`vx`,`vz`,`jd` | the client believes it crossed a teleporter face |
 | `zone` | `fromFaceId`,`x`,`y`,`z`,`r` | a Phantom Zone tank crossed a portal and flipped instead of moving |
@@ -101,6 +101,7 @@ omitted rather than sent null.
 | `captureFlag` | `team` | the base team whose base the carrier is standing on |
 | `nearFlag` | -- | ask what flag is underfoot, for the HUD line |
 | `pause` | -- | toggle; the server runs the countdown |
+| `autopilot` | `on`, `pilot` | the named pilot has, or has given back, the controls. The pilot's name is the motto meanwhile. Refused under `-disableBots` |
 | `selfDestruct` | -- | `/kill` on yourself |
 | `identify` | -- | toggle the lock/identify target |
 | `killed` | `reason`,`killerId`,`shotId`,`flag`,`stoppedByHit`,`deathMessage` | the client reporting its own death. Only on a proxied connection, where bzfs takes the victim's word for it -- bzo's own server decides deaths itself and ignores this |
@@ -150,6 +151,7 @@ omitted rather than sent null.
 | `gmUpdate` | `playerId`, `targetId` | a GM lock (`MsgGMUpdate`'s target half) |
 | `identifyResult` | `targetId`, `locked` | the identify answer |
 | `playerPaused` / `playerUnpaused` / `pauseCountdown` / `pauseCancelled` | `playerId` (+ position on pause) | pause state |
+| `autopilot` | `playerId`,`on` | somebody's autopilot changed |
 | `message` | `src`, `dst`, `msgType`, `text`, `ts` | chat, in and out |
 | `lag` | `lagMs` | the server's measurement of *your* lag |
 | `serverConfigUpdate` | `serverName`, `motd`, `shotMaxActive`, `ricochet`, `timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore` | live config changed |
@@ -293,6 +295,7 @@ the mapping is mostly one to one:
 | `MsgTeamUpdate` / `MsgScore` / `MsgScoreOver` | `teamUpdate` / player records / `scoreOver` |
 | `MsgTimeUpdate` | `timeUpdate` |
 | `MsgPause` | `pause` / `playerPaused` |
+| `MsgAutoPilot` | `autopilot`, both ways |
 | `MsgNewRabbit` | `newRabbit` |
 | `MsgMessage` | `message` |
 | `MsgSetVar` / `MsgGameSettings` | `init.config` / `serverConfigUpdate` |
@@ -304,7 +307,7 @@ the mapping is mostly one to one:
 
 Upstream messages bzo has no counterpart for: `MsgNegotiateFlags`,
 `MsgAdminInfo`, `MsgPlayerInfo`, `MsgHandicap`,
-`MsgAutoPilot`, `MsgCustomSound`, `MsgFetchResources`, `MsgCacheURL`,
+`MsgCustomSound`, `MsgFetchResources`, `MsgCacheURL`,
 `MsgGameTime`, `MsgLagState`, `MsgFlagType`, `MsgReplayReset`,
 `MsgPortalAdd`/`Remove`/`Update`, and the ping-packet codes.
 

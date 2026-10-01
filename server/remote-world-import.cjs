@@ -51,7 +51,9 @@ const OBSERVER_TEAM = 5;
 // `AutomaticTeam` (`global.h:61`): let the target pick, which it does with its
 // own `autoTeamSelect` on every join (`bzfs.cxx:2299`).
 const AUTOMATIC_TEAM = -2;
+// `PlayerType` (`global.h:44`): a person, or a robot tank (`PlayerInfo::isBot`).
 const TANK_PLAYER = 0;
+const COMPUTER_PLAYER = 1;
 // Who the remote server sees for the moment this is joined. The version is the
 // shape `getAppVersion()` builds (`buildDate.cxx:138-150`): bzfs reads the
 // first three numbers with `sscanf(..., "%d.%d.%d", ...)` and keeps the rest
@@ -304,11 +306,12 @@ function buildEnterPayload({
   token = '',
   version = IMPORT_CLIENT_VERSION,
   team = OBSERVER_TEAM,
+  type = TANK_PLAYER,
 } = {}) {
   const payload = Buffer.alloc(
     2 + 2 + CALLSIGN_LEN + MOTTO_LEN + TOKEN_LEN + VERSION_LEN + PLAYER_ID_LEN
   );
-  payload.writeUInt16BE(TANK_PLAYER, 0);
+  payload.writeUInt16BE(type, 0);
   // Signed, because `AutomaticTeam` is -2 (`global.h:61`) and bzfs unpacks the
   // field into an `int16_t` before it casts (`PlayerInfo::unpackEnter`). Every
   // real team is positive and packs the same either way, so this costs the
@@ -1893,6 +1896,8 @@ module.exports = {
   sendFrame,
   createFrameReader,
   buildEnterPayload,
+  TANK_PLAYER,
+  COMPUTER_PLAYER,
   decodeSetVars,
   DEFAULT_LIST_SERVER,
   OBSTACLE_ORDER,

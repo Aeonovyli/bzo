@@ -154,7 +154,7 @@ function seat(name, team, x, z) {
     self.spinning = false;
     self.dead = false;
     ws.on('open', () => ws.send(JSON.stringify({
-      type: 'joinGame', name, team, tankModel: 'bzflag',
+      type: 'joinGame', name, team, tankModel: 'bzflag', bot: true,
     })));
     ws.on('message', (data) => {
       let message;

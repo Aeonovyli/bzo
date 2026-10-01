@@ -60,6 +60,16 @@ no published identity -- a second loopback port, a LAN address -- has no
 `-publicaddr` to borrow, so its key is whatever label the operator wants
 shown, and its title and settings still come from the target itself.
 
+A value may be an object instead, for a target that needs more than an
+address. `requireLogin: false` lifts the verified-player rule below for that
+one target, which is what a test server wants:
+
+```json
+"proxies": {
+  "bz.rikers.org:5154": { "address": "127.0.0.1:5154", "requireLogin": false }
+}
+```
+
 The map is the allowlist, and the only thing that makes a target nameable:
 `?proxy=`, `/login/<name>` and `/logout/<name>` all refuse a name that is not
 a key -- under its link spelling, and a refusal names the ones that are -- so
@@ -246,8 +256,10 @@ admit it as a player itself -- this is the proxy's courtesy, not the target's
 rule -- and what it buys the operator is that every proxied player is
 answerable by a BZID, so `/idban` reaches one of them where `/ban` would reach
 all of them. An operator who does not want the policy edits their own bzo: it
-is a default, not a boundary. A registered callsign gets the same answer for a
-second reason, since it could not have spawned anyway.
+is a default, not a boundary, and `requireLogin: false` on a target turns it
+off there. A registered callsign gets the same answer for a second reason,
+since it could not have spawned anyway -- and keeps getting it on a target
+that does not require a login.
 
 ## What a proxy connection is
 

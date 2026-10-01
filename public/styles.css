@@ -1933,7 +1933,8 @@ body.no-jumping #altimeter {
   display: none;
 }
 
-body.observing #roamStatus {
+body.observing #roamStatus,
+body.autopiloting #roamStatus {
   display: block;
 }
 

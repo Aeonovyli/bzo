@@ -15,6 +15,9 @@ export const SETTINGS_MENU_ITEMS = Object.freeze([
   // chevrons around the value rather than at the row's edges, to say outright
   // that it is not one of those. See getMenuClickZone in menus.js.
   { id: 'huntBtn', label: 'Hunt', kind: 'pick' },
+  // Left and right choose the pilot, select flies it -- or lands, on `None` or
+  // on the one already flying.
+  { id: 'autopilotBtn', label: 'Autopilot', kind: 'pick' },
   { id: 'radarZoomBtn', label: 'Radar Range', kind: 'choice' },
   { id: 'mouseBtn', label: 'Mouse Steering', kind: 'toggle' },
   { id: 'virtualControlsBtn', label: 'Virtual Controls', kind: 'toggle' },

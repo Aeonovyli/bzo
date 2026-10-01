@@ -54,6 +54,9 @@ A `zoneflag WA` is ignored and `WA` never spawns.
 - `Tab` — jump
 - `Space` — drop flag
 - `Delete` — self-destruct, after a five second countdown; `Delete` again calls it off
+- `9` or `/autopilot [roger|ace]` — autopilot: the pilot drives, aims and
+  shoots until pressed again. `Settings -> Autopilot` chooses the pilot without
+  a keyboard
 - `P` — pause/resume
 - `N` — open chat (or click the `Send` button)
 - `Enter` — send chat (while chat input is focused, or click `Send` again)

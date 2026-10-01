@@ -307,6 +307,7 @@ import {
   GM_TURN_ANGLE,
   TARGETING_ANGLE,
   LOCK_ON_ANGLE,
+  SHOCK_OUT_RADIUS,
   pickTargetInSights,
   steerGuidedShot,
   canRunOver,
@@ -391,6 +392,7 @@ import {
 } from './collision.mjs';
 import { meshArrays, FACE_NO_RADAR } from './mesh-arrays.mjs';
 import { resolveTankMotion } from './motion.mjs';
+import { AUTOPILOTS, createWorldProbes } from './autopilot.mjs';
 import {
   TRACK_SURFACE_TOLERANCE,
   TRACK_UPDATE_TIME,
@@ -642,6 +644,11 @@ const XR_FLAG_HELP_PLANE_WIDTH = 0.8;
 const XR_FLAG_HELP_TOP = -0.05;
 // BZFlag fires with Enter or the left mouse button and keeps the space bar for
 // dropping a flag (ActionBinding.cxx:92-95).
+// `?bot` joins as a robot tank, upstream's `ComputerPlayer` rather than its
+// `TankPlayer`: what a probe or a test client is, so the list counts it apart
+// from the people playing. Autopilot is not this -- a human on autopilot is
+// still a human, as upstream's `isBot()` has it.
+const IS_BOT_CLIENT = new URLSearchParams(window.location.search).has('bot');
 const FIRE_KEY = 'Enter';
 // The drive keys and which way each one pushes its axis, kept as the two axes
 // they steer rather than one list, because a held key owns its own axis and
@@ -2453,6 +2460,7 @@ function maybeSendPendingJoinRequest() {
     isMobile: pendingJoinRequest.isMobile,
     tankModel: pendingJoinRequest.tankModel,
     motto: pendingJoinRequest.motto,
+    bot: IS_BOT_CLIENT,
     ...getJoinTeamFields(),
   });
 }
@@ -3188,6 +3196,23 @@ function applySilenceToVoice(playerId) {
 function refreshAllSilencedVoice() {
   tanks.forEach((_tank, playerId) => applySilenceToVoice(playerId));
 }
+
+// cmdAutoPilot (clientCommands.cxx:490), which upstream reaches from its own
+// command line rather than chat; bzo's is the chat entry.
+defineLocalCommand('/autopilot', (args) => {
+  const name = args.trim().toLowerCase();
+  if (!name) {
+    toggleAutopilot();
+    return;
+  }
+  const entry = AUTOPILOTS.find((candidate) => candidate.id === name);
+  if (!entry) {
+    showMessage(`Usage: /autopilot [${AUTOPILOTS.map((candidate) => candidate.id).join('|')}]`);
+    return;
+  }
+  autopilotRowId = entry.id;
+  engageAutopilot(entry.id);
+});
 
 defineLocalCommand('/silence', (args) => {
   const target = args.trim();
@@ -4357,11 +4382,12 @@ function updateObserverHudVisibility() {
   // one of the two with nothing to aim or reload.
   const observing = isObserver() && !isPhantomDriving();
   document.body.classList.toggle('observing', observing);
+  document.body.classList.toggle('autopiloting', !observing && autopilotOn);
   // HUDRenderer::renderStatus (HUDRenderer.cxx:1026) prints the roaming label
   // where a playing tank's status would go.
   const status = document.getElementById('roamStatus');
   if (status) {
-    const parts = observing ? getRoamLabelParts() : { text: '', segments: [] };
+    const parts = getHudStatusParts(observing);
     // Rebuilt only when the words change, since this runs every frame and the
     // line is usually the same one it was.
     if (status.textContent !== parts.text) {
@@ -4375,6 +4401,19 @@ function updateObserverHudVisibility() {
       }
     }
   }
+}
+
+// HUDRenderer::renderStatus: the roaming label for an observer, and
+// "AutoPilot on" (HUDRenderer.cxx:1805) for a piloted tank -- here naming the
+// pilot.
+function getHudStatusParts(observing) {
+  if (observing) return getRoamLabelParts();
+  if (autopilotOn) {
+    // Upstream's "AutoPilot on", naming the pilot.
+    const text = `AutoPilot ${getAutopilotName(autopilotId)}`;
+    return { text, segments: [{ text }] };
+  }
+  return { text: '', segments: [] };
 }
 
 function updateDeathCameraHudVisibility() {
@@ -5780,6 +5819,11 @@ function handleGameplayKeydown(event) {
     pressHuntKey(event.code === 'Digit7');
     return true;
   }
+  // `autopilot` on `9` (ActionBinding.cxx:157).
+  if (event.code === 'Digit9' && !event.repeat) {
+    toggleAutopilot();
+    return true;
+  }
 
   // An observer has no tank to pause or destroy, and the server drops both
   // messages from one. The keys stay consumed so nothing else reacts to them.
@@ -5945,6 +5989,9 @@ initHudControls({
   getHuntRowValue,
   stepHuntRow,
   toggleHuntRow,
+  getAutopilotRowValue,
+  stepAutopilotRow,
+  selectAutopilotRow,
   hasHuntCandidates: () => getHuntRowPlayers().length > 0,
   getMouseControlEnabled: () => mouseControlEnabled,
   setMouseControlEnabled: (value) => { mouseControlEnabled = value; },
@@ -6862,6 +6909,7 @@ function connectToServer() {
     ? `/?watch=${encodeURIComponent(watchTarget)}`
     : (proxyTarget
       ? `/?proxy=${encodeURIComponent(proxyTarget)}${proxyTeam ? `&team=${encodeURIComponent(proxyTeam)}` : ''}`
+        + (IS_BOT_CLIENT ? '&bot' : '')
       : '');
   ws = new WebSocket(`${protocol}//${window.location.host}${query}`);
 
@@ -7325,6 +7373,14 @@ function handleServerMessage(message) {
         // never once per map cycled through while still choosing.
         announceWorldMessages(currentWorldData);
         playerTeam = normalizePlayerTeam(message.player.team);
+        // A reconnect is a new player to the server, but the same pilot here;
+        // a reload finds it in storage, and is not a fresh enable.
+        if (autopilotOn) {
+          sendToServer({ type: 'autopilot', on: true, pilot: getAutopilotName(autopilotId) });
+        } else if (autopilotRestoreId && canUseAutopilot() && !isObserver()) {
+          setAutopilot(autopilotRestoreId);
+        }
+        autopilotRestoreId = null;
         // The view the spectator link asked for. Applied on every join rather
         // than once: a reconnect is how this client comes back from a server
         // restart, and a link left running on a screen somewhere should come
@@ -7706,6 +7762,15 @@ function handleServerMessage(message) {
     case 'playerList':
       applyPlayerList(message.players || []);
       break;
+
+    // MsgAutoPilot (playing.cxx:2423), and upstream's own words for it.
+    case 'autopilot': {
+      const tank = tanks.get(message.playerId);
+      if (tank?.userData?.playerState) tank.userData.playerState.autopilot = message.on;
+      noticeAbout(null, [describePlayer(message.playerId),
+        message.on ? ': Roger taking controls' : ': Roger releasing controls'], 0, false);
+      break;
+    }
 
     case 'pauseCountdown':
       if (message.playerId === myPlayerId) {
@@ -8265,6 +8330,13 @@ function hasGuidedShotInFlight(playerId) {
 
 function handlePlayerHit(message) {
   checkOwnGenocide(message);
+  // teachAutoPilot (playing.cxx:2547, :3895): a kill counts for the flag it
+  // was made with, a death against the flag held.
+  if (autopilotOn) {
+    const pilot = autopilots.get(autopilotId);
+    if (message.victimId === myPlayerId) pilot.teach(message.victimFlag ?? null, -1);
+    else if (message.shooterId === myPlayerId) pilot.teach(message.shooterFlag ?? null, 1);
+  }
   const shooterTank = tanks.get(message.shooterId);
   const victimTank = tanks.get(message.victimId);
   // A world weapon has no tank and no name of its own -- see `WORLD_WEAPON_NAME`
@@ -8972,6 +9044,7 @@ function viewMapFile(file) {
       isMobile,
       tankModel: selectedTankModelId,
       motto: myPlayerMotto,
+      bot: IS_BOT_CLIENT,
       ...getJoinTeamFields(),
     });
   });
@@ -10743,6 +10816,7 @@ function usesVirtualInput() {
 // shoots with it; an observer cycles the roaming view with it, which is the
 // whole reason it is shared rather than inlined.
 function isFireHeld() {
+  if (autopilotOn && !isObserver()) return autopilotOutput?.fire === true;
   return keys[FIRE_KEY] || (usesVirtualInput() && virtualInput.fire);
 }
 
@@ -11629,12 +11703,326 @@ function sendObserverUpdate() {
   });
 }
 
+// --- Autopilot -----------------------------------------------------------
+//
+// Roger (`AutoPilot.cxx`) and the pilots built on him, chosen on the Settings
+// row and toggled by `9` or `/autopilot`. The decisions live in
+// `public/autopilot.mjs` behind a view of this client's world, so a
+// server-launched bot can drive the same code; this is the view, and the seam
+// where its answer replaces the sticks. One of each pilot for the session, so
+// what one has learned about flags survives switching it off and on, as
+// upstream's static tables do.
+const autopilots = new Map(AUTOPILOTS.map((entry) => [entry.id, new entry.Pilot()]));
+// The pilot flying, or null.
+let autopilotId = null;
+// The pilot flying when the page went away, kept so a reload -- which is what a
+// server restart with a new build does to every client -- comes back flying.
+const AUTOPILOT_STORAGE_KEY = 'autopilot';
+function readStoredAutopilot() {
+  try {
+    const id = localStorage.getItem(AUTOPILOT_STORAGE_KEY);
+    return AUTOPILOTS.some((entry) => entry.id === id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+function storeAutopilot(id) {
+  try {
+    if (id) localStorage.setItem(AUTOPILOT_STORAGE_KEY, id);
+    else localStorage.removeItem(AUTOPILOT_STORAGE_KEY);
+  } catch {
+    /* ignore storage errors */
+  }
+}
+let autopilotRestoreId = readStoredAutopilot();
+// The pilot the Settings row is pointed at, and the one `9` turns on.
+let autopilotRowId = autopilotRestoreId ?? AUTOPILOTS[0].id;
+let autopilotOn = false;
+let autopilotOutput = null;
+let autopilotEnabledAt = -Infinity;
+let autopilotDropAt = -Infinity;
+let autopilotLockAt = -Infinity;
+// cmdAutoPilot's "more than once every five seconds" (clientCommands.cxx:526).
+const AUTOPILOT_ENABLE_INTERVAL_MS = 5000;
+// How long a drop request is left to land before Roger asks again.
+const AUTOPILOT_DROP_RETRY_MS = 1000;
+// How often Roger may press Identify to move its missile lock.
+const AUTOPILOT_LOCK_RETRY_MS = 500;
+
+function canUseAutopilot() {
+  return gameplayJoinConfirmed && !isObserver() && gameConfig?.DISABLE_BOTS !== true;
+}
+
+function getAutopilotName(id) {
+  return AUTOPILOTS.find((entry) => entry.id === id)?.name ?? id;
+}
+
+// cmdAutoPilot: off if on, otherwise on with the pilot `id` names.
+function toggleAutopilot(id = autopilotRowId) {
+  if (!gameplayJoinConfirmed || isObserver()) return;
+  if (autopilotOn) {
+    setAutopilot(null);
+    setHudAlert(0, 'autopilot disabled', 1);
+    return;
+  }
+  engageAutopilot(id);
+}
+
+function engageAutopilot(id) {
+  if (!gameplayJoinConfirmed || isObserver()) return;
+  if (gameConfig?.DISABLE_BOTS === true) {
+    setHudAlert(0, 'autopilot not allowed on this server', 1);
+    return;
+  }
+  // Changing pilot in flight is not enabling the autopilot, so it does not
+  // spend the five seconds.
+  if (autopilotOn) {
+    autopilotId = id;
+    autopilotOutput = null;
+    storeAutopilot(id);
+    sendToServer({ type: 'autopilot', on: true, pilot: getAutopilotName(id) });
+    setHudAlert(0, `${getAutopilotName(id)} has the controls`, 1);
+    return;
+  }
+  const now = performance.now();
+  if (now - autopilotEnabledAt <= AUTOPILOT_ENABLE_INTERVAL_MS) {
+    showMessage('You may not enable the Autopilot more than once every five seconds.');
+    return;
+  }
+  autopilotEnabledAt = now;
+  setAutopilot(id);
+  setHudAlert(0, 'autopilot enabled', 1);
+}
+
+function setAutopilot(id) {
+  autopilotId = id;
+  autopilotOn = id !== null;
+  storeAutopilot(id);
+  autopilotOutput = null;
+  sendToServer({ type: 'autopilot', on: autopilotOn, pilot: autopilotOn ? getAutopilotName(id) : null });
+}
+
+// The Autopilot row: `None`, then each pilot, the one flying marked as the
+// Hunt row marks a hunted player. Select flies the pilot shown, or on `None`
+// or the pilot already flying, lands.
+function getAutopilotRowChoices() {
+  return [{ id: null, name: 'None' }, ...AUTOPILOTS];
+}
+
+function getAutopilotRowValue() {
+  if (!canUseAutopilot()) return gameConfig?.DISABLE_BOTS === true ? 'Not allowed' : 'Unavailable';
+  const flying = autopilotOn ? autopilotId : null;
+  const mark = autopilotRowId === flying ? '◎' : '○';
+  return `${autopilotRowId === null ? 'None' : getAutopilotName(autopilotRowId)} ${mark}`;
+}
+
+function stepAutopilotRow(direction) {
+  const choices = getAutopilotRowChoices();
+  const at = choices.findIndex((choice) => choice.id === autopilotRowId);
+  const next = (at + (direction < 0 ? -1 : 1) + choices.length) % choices.length;
+  autopilotRowId = choices[next].id;
+  return true;
+}
+
+function selectAutopilotRow() {
+  if (!canUseAutopilot()) return false;
+  if (autopilotRowId === null || (autopilotOn && autopilotId === autopilotRowId)) {
+    if (autopilotOn) {
+      setAutopilot(null);
+      setHudAlert(0, 'autopilot disabled', 1);
+    }
+    return true;
+  }
+  engageAutopilot(autopilotRowId);
+  return true;
+}
+
+const autopilotProbes = createWorldProbes({
+  obstacles: () => OBSTACLES,
+  colliders: getCollisionColliders,
+  mapSize: () => currentWorldMapSize || DEFAULT_MAP_SIZE,
+  findImpact: findShotSegmentImpact,
+  topOf: getColliderTopY,
+});
+
+// A remote tank's motion now, from the last move it sent, by the same model
+// `extrapolatePosition` draws it with: in the air its packet's air velocity
+// and its vertical velocity run down by gravity since the packet, on the
+// ground its speed along its heading.
+function getTankMotion(tank, flagType, now) {
+  const data = tank.userData;
+  const airborne = data.jumpDirection !== null && data.jumpDirection !== undefined;
+  const gravity = hasAirControl(flagType) ? gameConfig.WINGS_GRAVITY : gameConfig.GRAVITY;
+  if (airborne) {
+    const elapsed = Math.max(0, (now - (data.lastUpdateTime || now)) / 1000);
+    return {
+      airborne,
+      gravity,
+      vx: data.airVelocityX || 0,
+      vy: (data.verticalVelocity || 0) - (gravity * elapsed),
+      vz: data.airVelocityZ || 0,
+    };
+  }
+  const direction = data.slideDirection ?? tank.rotation.y;
+  const speed = (data.forwardSpeed || 0) * gameConfig.TANK_SPEED;
+  return {
+    airborne, gravity, vx: -Math.sin(direction) * speed, vy: 0, vz: -Math.cos(direction) * speed,
+  };
+}
+
+function buildAutopilotView() {
+  const myFlag = getMyFlag();
+  const myType = myFlag?.type ?? null;
+  const myTeamColor = getMyTeamColorIndex();
+  const teamsAllowed = gameConfig?.TEAMS_ALLOWED !== false;
+  const now = performance.now();
+  const players = [];
+  for (const [playerId, tank] of tanks) {
+    if (playerId === myPlayerId) continue;
+    const state = tank.userData?.playerState;
+    if (!state || isObserverTeam(state.team)) continue;
+    const flag = getPlayerFlag(playerId);
+    players.push({
+      id: playerId,
+      x: tank.position.x,
+      y: tank.position.y,
+      z: tank.position.z,
+      ...getTankMotion(tank, flag?.type ?? null, now),
+      team: state.team,
+      alive: state.alive === true,
+      paused: state.paused === true,
+      notResponding: false,
+      flag: flag?.type ?? null,
+      flagIndex: flag?.index ?? null,
+      flagTeam: getFlagTeamIndex(flag?.type ?? null),
+      zoned: isZoned(flag?.type ?? null, flag?.zoned === true),
+    });
+  }
+  const shots = [];
+  for (const projectile of projectiles.values()) {
+    const data = projectile.userData;
+    if (!data || data.playerId === myPlayerId || !Number.isFinite(data.speed)) continue;
+    const ownerFlag = getPlayerFlag(data.playerId);
+    shots.push({
+      ownerId: data.playerId,
+      ownerZoned: isZoned(ownerFlag?.type ?? null, ownerFlag?.zoned === true),
+      flag: data.flag ?? null,
+      x: projectile.position.x,
+      y: projectile.position.y,
+      z: projectile.position.z,
+      vx: (data.dirX || 0) * data.speed,
+      vy: (data.dirY || 0) * data.speed,
+      vz: (data.dirZ || 0) * data.speed,
+    });
+  }
+  const groundFlags = [];
+  let teamFlags = false;
+  for (const flag of flags.values()) {
+    const team = getFlagTeamIndex(flag.type);
+    if (team !== null) teamFlags = true;
+    groundFlags.push({
+      index: flag.index,
+      type: flag.type ?? null,
+      team,
+      onGround: flag.status === FLAG_STATUS.ON_GROUND,
+      x: flag.position.x,
+      y: flag.position.y,
+      z: flag.position.z,
+    });
+  }
+  return {
+    now: now / 1000,
+    self: {
+      id: myPlayerId,
+      x: playerX,
+      y: myTank.position.y,
+      z: playerZ,
+      rotation: playerRotation,
+      flag: myType,
+      flagIndex: myFlag?.index ?? null,
+      flagTeam: getFlagTeamIndex(myType),
+      teamColor: myTeamColor,
+      zoned: amZoned(),
+      inAir: isInAir,
+      muzzleForward: Number.isFinite(myTank.userData?.muzzleForward) ? myTank.userData.muzzleForward : 3.0,
+      muzzleHeight: Number.isFinite(myTank.userData?.muzzleHeight) ? myTank.userData.muzzleHeight : 1.57,
+      shotSpeed: getShotSpeed(getMyShotFlag()),
+      shotLifetime: getShotLifetimeSeconds(getMyShotFlag()),
+      ricochet: shotRicochets(getMyShotFlag(), gameConfig?.ALL_SHOTS_RICOCHET),
+      canFire: findFreeShotSlot(
+        myShotSlotFreeAt, normalizeShotSlotCount(gameConfig.SHOT_MAX_ACTIVE), frameEpochMs) >= 0,
+    },
+    players,
+    shots,
+    flags: groundFlags,
+    world: {
+      allowJumping: gameConfig.ALLOW_JUMPING === true,
+      teamFlags,
+      waterLevel: currentWorldWaterHeight > 0 ? currentWorldWaterHeight : null,
+      shotSpeed: Number.isFinite(gameConfig.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100,
+      maxShots: normalizeShotSlotCount(gameConfig.SHOT_MAX_ACTIVE),
+      tankHeight: TANK_HEIGHT,
+      tankLength: TANK_HALF_LENGTH * 2,
+      tankAngVel: gameConfig.TANK_ROTATION_SPEED,
+      jumpVelocity: gameConfig.JUMP_VELOCITY,
+      gravity: gameConfig.GRAVITY,
+      lockOnAngle: LOCK_ON_ANGLE,
+      shockOutRadius: SHOCK_OUT_RADIUS,
+    },
+    isFoe: (player) => areFoes(player.team, playerTeam, teamsAllowed),
+    myBase: () => {
+      const base = OBSTACLES.find((obs) => obs.kind === 'base' && obs.team === myTeamColor);
+      if (!base) return null;
+      return {
+        x: base.x,
+        y: getColliderTopY(base),
+        z: base.z,
+        radius: Math.min(base.w, base.d) / 2,
+      };
+    },
+    ...autopilotProbes,
+  };
+}
+
+function runAutopilot() {
+  if (!autopilotOn || isObserver() || !isMyTankAlive() || pauseState.paused) {
+    autopilotOutput = null;
+    return;
+  }
+  autopilotOutput = autopilots.get(autopilotId).think(buildAutopilotView());
+  const now = performance.now();
+  // chasePlayer's `setTarget` (AutoPilot.cxx:394), which is what a Guided
+  // Missile steers at. Upstream names the target outright; bzo locks the way a
+  // player does, with Identify, so the server keeps its sights check. Roger
+  // only fires inside a cone narrower than the lock's, so a shot it is about to
+  // take is one Identify would lock.
+  if (autopilotOutput.shotTargetId !== null
+    && getMyFlag()?.type === 'GM'
+    && playerLockTargets.get(myPlayerId) !== autopilotOutput.shotTargetId
+    && now - autopilotLockAt > AUTOPILOT_LOCK_RETRY_MS) {
+    autopilotLockAt = now;
+    requestLockOn();
+  }
+  if (autopilotOutput.dropFlag && getMyFlag() && now - autopilotDropAt > AUTOPILOT_DROP_RETRY_MS) {
+    autopilotDropAt = now;
+    requestFlagDrop();
+  }
+}
+
 // The drive axes every input surface funnels into, gathered in one place so a
 // tank and an observer's camera read the same controls. Callers apply their own
 // limits: a tank caps reverse and treats `up` as a jump, while the roaming
 // camera spends `up` and `down` on altitude, which is the whole reason those two
 // come back raw.
 function gatherDriveInput() {
+  if (autopilotOn && autopilotOutput) {
+    return {
+      forward: autopilotOutput.speed,
+      turn: autopilotOutput.rotation,
+      up: autopilotOutput.jump,
+      down: false,
+    };
+  }
   let up = false;
   let down = false;
 
@@ -11711,6 +12099,8 @@ function handleInputEvents() {
   showMotionSurfaceDebug(lastMotionObstacle);
 
   if (pauseState.isFrozen() || entryDialogFreeze) return;
+
+  runAutopilot();
 
   // Gather intended input from controls
   const carriedFlagType = effectiveMotionFlagType();
@@ -12367,6 +12757,46 @@ function handleMotion(deltaTime) {
     forceMoveSend = true;
   }
 
+  // Fire: the keyboard fire key or the left mouse button, and on mobile, XR or
+  // a gamepad, virtualInput.fire.
+  //
+  // `LocalPlayer::fireShot` waits on one thing: a free slot. `firingStatus`
+  // stays Ready however long a reload has left (LocalPlayer.cxx:847), and
+  // nothing upstream puts a minimum gap between two shots -- a bzflag player
+  // empties their slots as fast as they can click. What upstream does have is a
+  // trigger read once per press (`cmdFire`, clientCommands.cxx:333) on a mouse.
+  //
+  // bzo has a touch button, an XR trigger and a gamepad, where a trigger left
+  // held would fire on every frame. So a press and a hold are told apart: a
+  // press may fire again after `SHOT_TAP_SPACING_MS`, which is short enough
+  // that tapping is as fast as clicking a mouse, and a trigger still held
+  // repeats at the world's sustained rate instead. Holding is the convenience;
+  // it is never the faster option.
+  //
+  // "Tank can't stop firing." Trigger Happy pulls the trigger every frame
+  // whether or not anybody is holding it, and neither of the trigger's own
+  // gates applies to it -- but `forceReload` below does, which is upstream's
+  // own way of stopping all of its shots going off at once.
+  //
+  // Decided here, ahead of the move, because a shot forces one: "always send
+  // a player-update message. To synchronize movement and shot start"
+  // (LocalPlayer.cxx:1268). The server measures the muzzle against where the
+  // last move says the tank is, and a tank that turned since then is not there.
+  const triggerHappy = firesContinuously(getMyFlag()?.type ?? null);
+  const fireHeld = isFireHeld();
+  const firePress = fireHeld && !fireWasHeld;
+  fireWasHeld = fireHeld;
+  const fireNow = frameEpochMs;
+  let triggerOpen = false;
+  if (triggerHappy) triggerOpen = true;
+  else if (firePress) triggerOpen = fireNow >= nextTapShotAt;
+  else if (fireHeld) triggerOpen = fireNow >= nextHeldShotAt;
+  const maxActiveShots = normalizeShotSlotCount(gameConfig?.SHOT_MAX_ACTIVE);
+  const shotSlot = triggerOpen && fireNow >= shotJamUntil
+    ? findFreeShotSlot(myShotSlotFreeAt, maxActiveShots, fireNow)
+    : -1;
+  if (shotSlot >= 0) forceMoveSend = true;
+
   const reasons = [];
   if (forceMoveSend) reasons.push('force');
   if (deadStickStopUpdate) reasons.push('dead-stick-stop');
@@ -12530,51 +12960,19 @@ function handleMotion(deltaTime) {
   if (identifyHeld && !identifyWasHeld) requestLockOn();
   identifyWasHeld = identifyHeld;
 
-  // Fire: the keyboard fire key or the left mouse button, and on mobile, XR or
-  // a gamepad, virtualInput.fire.
-  //
-  // `LocalPlayer::fireShot` waits on one thing: a free slot. `firingStatus`
-  // stays Ready however long a reload has left (LocalPlayer.cxx:847), and
-  // nothing upstream puts a minimum gap between two shots -- a bzflag player
-  // empties their slots as fast as they can click. What upstream does have is a
-  // trigger read once per press (`cmdFire`, clientCommands.cxx:333) on a mouse.
-  //
-  // bzo has a touch button, an XR trigger and a gamepad, where a trigger left
-  // held would fire on every frame. So a press and a hold are told apart: a
-  // press may fire again after `SHOT_TAP_SPACING_MS`, which is short enough
-  // that tapping is as fast as clicking a mouse, and a trigger still held
-  // repeats at the world's sustained rate instead. Holding is the convenience;
-  // it is never the faster option.
-  //
-  // "Tank can't stop firing." Trigger Happy pulls the trigger every frame
-  // whether or not anybody is holding it, and neither of the trigger's own
-  // gates applies to it -- but `forceReload` below does, which is upstream's
-  // own way of stopping all of its shots going off at once.
-  const triggerHappy = firesContinuously(getMyFlag()?.type ?? null);
-  const fireHeld = isFireHeld();
-  const firePress = fireHeld && !fireWasHeld;
-  fireWasHeld = fireHeld;
-  const fireNow = frameEpochMs;
-  let triggerOpen = false;
-  if (triggerHappy) triggerOpen = true;
-  else if (firePress) triggerOpen = fireNow >= nextTapShotAt;
-  else if (fireHeld) triggerOpen = fireNow >= nextHeldShotAt;
-  if (triggerOpen && fireNow >= shotJamUntil) {
-    const maxActiveShots = normalizeShotSlotCount(gameConfig?.SHOT_MAX_ACTIVE);
-    const slot = findFreeShotSlot(myShotSlotFreeAt, maxActiveShots, fireNow);
-    if (slot >= 0 && shoot()) {
-      const slotReloadMs = getSlotReloadMs(getMyShotFlag());
-      myShotSlotFreeAt[slot] = fireNow + slotReloadMs;
-      myShotSlotReloadMs[slot] = slotReloadMs;
-      nextTapShotAt = fireNow + SHOT_TAP_SPACING_MS;
-      nextHeldShotAt = fireNow + getHeldTriggerIntervalMs();
-      // LocalPlayer.cxx:1311, "make sure all the shots don't go off at once".
-      // The one place upstream itself spaces shots, and it spaces only this
-      // flag's: a tank nobody is even aiming would otherwise fire its whole
-      // magazine into the ground the instant it picked the flag up.
-      if (triggerHappy) {
-        forceReload(getWorldReloadSeconds(gameConfig || {}) / Math.max(1, maxActiveShots));
-      }
+  // The shot decided above, taken now that the move it rides with is out.
+  if (shotSlot >= 0 && shoot()) {
+    const slotReloadMs = getSlotReloadMs(getMyShotFlag());
+    myShotSlotFreeAt[shotSlot] = fireNow + slotReloadMs;
+    myShotSlotReloadMs[shotSlot] = slotReloadMs;
+    nextTapShotAt = fireNow + SHOT_TAP_SPACING_MS;
+    nextHeldShotAt = fireNow + getHeldTriggerIntervalMs();
+    // LocalPlayer.cxx:1311, "make sure all the shots don't go off at once".
+    // The one place upstream itself spaces shots, and it spaces only this
+    // flag's: a tank nobody is even aiming would otherwise fire its whole
+    // magazine into the ground the instant it picked the flag up.
+    if (triggerHappy) {
+      forceReload(getWorldReloadSeconds(gameConfig || {}) / Math.max(1, maxActiveShots));
     }
   }
 }
@@ -14977,7 +15375,7 @@ function updateXRHudOverlays() {
 // there is nothing to say, so a quiet session pays only the visibility flag.
 function ensureXRNoticeOverlay() {
   const alerts = getActiveHudAlerts();
-  const status = isObserver() ? getRoamLabelParts() : null;
+  const status = getHudStatusParts(isObserver() && !isPhantomDriving());
   const lines = [];
   // The panel already draws a chat line's own `segments`, so the roaming
   // label's name arrives in the player's colour here too.
@@ -17102,6 +17500,7 @@ function applyXRJoinSelection() {
     isMobile,
     tankModel: selectedTankModelId,
     motto: myPlayerMotto,
+    bot: IS_BOT_CLIENT,
     ...getJoinTeamFields(),
   });
 }

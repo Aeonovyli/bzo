@@ -704,6 +704,10 @@ const defaultHudContext = {
   stepHuntRow: () => false,
   toggleHuntRow: () => false,
   hasHuntCandidates: () => false,
+  // The Autopilot row, which asks client.js the same way.
+  getAutopilotRowValue: () => '',
+  stepAutopilotRow: () => false,
+  selectAutopilotRow: () => false,
 };
 
 let hudContext = { ...defaultHudContext };
@@ -717,6 +721,7 @@ const domRefs = {
   debugBtn: null,
   cameraBtn: null,
   huntBtn: null,
+  autopilotBtn: null,
   helpBtn: null,
   playerOptionsBtn: null,
   settingsBtn: null,
@@ -805,6 +810,8 @@ const GAMEPLAY_OWNED_KEYS = new Set([
   'KeyM', 'KeyC', 'KeyO', 'KeyF', 'Backquote', 'KeyB', 'KeyI',
   // Hunting: `U` is upstream's `hunt` and `7` its `addhunt`.
   'KeyU', 'Digit7',
+  // Autopilot
+  'Digit9',
   'Slash', 'Backslash', 'Minus', 'Equal', 'NumpadAdd', 'NumpadSubtract',
   // Not a binding: Firefox opens its link quick-find on an apostrophe and eats
   // the keyboard until dismissed, which from inside a tank looks like a freeze.
@@ -977,8 +984,9 @@ export function adjustSettingsMenuRow(id, direction) {
   // the one kind where select does something else, which is why it is a kind of
   // its own rather than a `choice` with a special case.
   if (item.kind === 'pick') {
-    if (id !== 'huntBtn') return false;
-    return hudContext.stepHuntRow(direction);
+    if (id === 'huntBtn') return hudContext.stepHuntRow(direction);
+    if (id === 'autopilotBtn') return hudContext.stepAutopilotRow(direction);
+    return false;
   }
 
   if (item.kind === 'choice') {
@@ -1010,6 +1018,7 @@ function getSettingsMenuValue(id, item) {
   // The player the row is pointed at and whether they are marked, or why there
   // is nobody to point at. Composed in client.js, which owns the roster.
   if (id === 'huntBtn') return hudContext.getHuntRowValue() ?? 'No players';
+  if (id === 'autopilotBtn') return hudContext.getAutopilotRowValue();
   if (id === 'cameraBtn') {
     return hudContext.isObserver()
       ? hudContext.getObserverViewLabel()
@@ -1566,6 +1575,7 @@ function bindHudElements() {
   domRefs.debugBtn = document.getElementById('debugBtn');
   domRefs.cameraBtn = document.getElementById('cameraBtn');
   domRefs.huntBtn = document.getElementById('huntBtn');
+  domRefs.autopilotBtn = document.getElementById('autopilotBtn');
   domRefs.helpBtn = document.getElementById('helpBtn');
   domRefs.playerOptionsBtn = document.getElementById('playerOptionsBtn');
   domRefs.settingsBtn = document.getElementById('settingsBtn');
@@ -1680,6 +1690,17 @@ function bindHudElements() {
       const zone = getMenuClickZone(e, domRefs.huntBtn);
       if (zone === 0) hudContext.toggleHuntRow();
       else hudContext.stepHuntRow(zone);
+      refreshSettingsMenu();
+    });
+  }
+
+  if (domRefs.autopilotBtn) {
+    domRefs.autopilotBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const zone = getMenuClickZone(e, domRefs.autopilotBtn);
+      if (zone === 0) hudContext.selectAutopilotRow();
+      else hudContext.stepAutopilotRow(zone);
       refreshSettingsMenu();
     });
   }

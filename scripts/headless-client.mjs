@@ -28,6 +28,8 @@
 // center` taps A/D between polls to keep it pointed at the map origin. `--chat`
 // types chat lines (newline-separated) into the chat box before the drive,
 // which is how a probe reaches anything that only a command can set up.
+// `--hop 3` taps jump every three seconds instead of sitting still, for a
+// target that is in the air on a schedule.
 
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -143,7 +145,12 @@ await send('Page.enable');
 // anything focused after that first paint, like the chat input, silently does
 // not.
 await send('Emulation.setFocusEmulationEnabled', { enabled: true });
-await send('Page.navigate', { url });
+// Joined as a robot tank (`?bot`), so a probe is counted apart from the people
+// playing on the list and in the log -- unless `--human 1` says it is standing
+// in for one, which is how the bot fill is tested.
+const pageUrl = new URL(url);
+if (!args.get('human')) pageUrl.searchParams.set('bot', '');
+await send('Page.navigate', { url: pageUrl.href });
 
 // The entry dialog is what a browser that has never been here gets, and it can
 // take a while to arrive behind the asset load.
@@ -257,7 +264,20 @@ if (driveSeconds > 0 && joined.startsWith('joined')) {
   await keyUp('KeyW');
 }
 
-await sleep(settleSeconds * 1000);
+// `--hop <seconds>`: tap jump on that interval for the whole settle, a target
+// that is in the air on a schedule -- what a pilot's landing shot is aimed at.
+const hopSeconds = Number(args.get('hop') || 0);
+if (hopSeconds > 0 && joined.startsWith('joined')) {
+  const settleEnd = Date.now() + (settleSeconds * 1000);
+  while (Date.now() < settleEnd) {
+    await keyDown('Tab');
+    await sleep(150);
+    await keyUp('Tab');
+    await sleep(Math.max(0, Math.min(hopSeconds * 1000 - 150, settleEnd - Date.now())));
+  }
+} else {
+  await sleep(settleSeconds * 1000);
+}
 
 console.log(joined);
 if (driveLog.length) console.log(driveLog.join('\n'));

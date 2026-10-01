@@ -23,6 +23,15 @@
 // this instance reaches it, which is operator configuration and nothing a
 // player is ever shown.
 //
+// A value may instead be an object, for a target that wants more than an
+// address:
+//
+//     "bz.rikers.org:5154": { "address": "127.0.0.1:5154", "requireLogin": false }
+//
+// `requireLogin` (default true) is the proxy's rule that only a verified
+// player plays. False lets a connection with no global login play there too,
+// which a test server wants and bzfs itself allows.
+//
 // The map is also the allowlist. A target not named here cannot be proxied,
 // linked to, or logged in to, which is what keeps `?proxy=` from being an
 // invitation to dial anywhere.
@@ -85,7 +94,8 @@ function parseProxies(raw) {
       refused.push({ key, reason: 'the name must be <host>:<port>' });
       continue;
     }
-    const dial = parseAddress(value);
+    const spec = value && typeof value === 'object' ? value : { address: value };
+    const dial = parseAddress(spec.address);
     if (!dial) {
       refused.push({ key, reason: 'the address must be <host>:<port>' });
       continue;
@@ -108,6 +118,7 @@ function parseProxies(raw) {
       displayPort: name.port,
       host: dial.host,
       port: dial.port,
+      requireLogin: spec.requireLogin !== false,
     });
     targets[key] = target;
     byUrlKey[urlKey] = target;

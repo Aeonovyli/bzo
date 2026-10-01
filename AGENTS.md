@@ -559,6 +559,11 @@ version appears.
 `docs/tutorial-plan.md` is the plan for what an installed client does when the
 server is unreachable, and for tutorial levels built on top of that.
 
+`docs/bots-plan.md` is the plan for the autopilot and for bots (issue #151).
+`public/autopilot.mjs` reads the world only through the view that plan
+describes, so the client's autopilot and the server's own bots
+(`server/bots.cjs`) drive the same decisions -- keep it that way.
+
 ### Layout
 
 | Path | Role |

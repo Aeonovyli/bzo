@@ -27,6 +27,8 @@ const {
   fetchWorldFromServer,
   queryServerStatus,
   AUTOMATIC_TEAM,
+  TANK_PLAYER,
+  COMPUTER_PLAYER,
   probeGlobalToken,
   decodeGameSettings,
   decodeQueryGame,
@@ -66,6 +68,8 @@ const {
   FLAG_CLEARANCE,
   FLAG_ENDURANCE,
   FLAG_GRAB_LEVEL_TOLERANCE,
+  FLAG_GRAB_INTERVAL_MS,
+  SHOCK_OUT_RADIUS,
   FLAG_RADIUS,
   FLAG_STATUS,
   FLAG_TYPES,
@@ -152,6 +156,7 @@ const {
   TANK_HIT_RADIUS,
   traceShotStep,
   WORLD_WALL_HEIGHT,
+  TANK_HEIGHT,
 } = require('./server/collision.cjs');
 const { MAX_BUMP_HEIGHT: DEFAULT_MAX_BUMP_HEIGHT } = require('./server/motion.cjs');
 const {
@@ -1578,7 +1583,9 @@ function listColumnWidth(header, values) {
 function listHeadingCount(entries) {
   if (!entries.length) return 'none';
   const players = entries.reduce((sum, entry) => sum + (Number(entry.players) || 0), 0);
+  const bots = entries.reduce((sum, entry) => sum + (Number(entry.bots) || 0), 0);
   return `${entries.length} with ${players} ${players === 1 ? 'player' : 'players'}`
+    + (bots > 0 ? `, ${bots} ${bots === 1 ? 'bot' : 'bots'}` : '')
     + missingOverviewCount(entries);
 }
 
@@ -1660,6 +1667,9 @@ function renderListReadout(entry, hidden) {
     // `maxPlayers` outright, which would leave a playing limit of zero.
     + `<div class="paneRow"><span>Players</span>`
     + `<span>${typeof entry.players === 'number' ? entry.players : '?'}/${entry.maxPlayers || 0}</span></div>`
+    // Only a bzo instance reports these; upstream's ping folds its robots into
+    // the team counts and says nothing more.
+    + (entry.bots > 0 ? `<div class="paneRow"><span>Bots</span><span>${entry.bots}</span></div>` : '')
     + teamRows
     + `</div>`
     + `<div class="paneCol">`
@@ -2264,6 +2274,7 @@ function renderListPage({
       maxShots: game.maxShots,
       gameOptionsBits: game.gameOptionsBits,
       players: game.players,
+      bots: game.bots,
       maxPlayers: game.maxPlayers,
       observers: Array.isArray(game.teamCounts) ? game.teamCounts[5] : undefined,
       observerMax: maxima[5],
@@ -3889,6 +3900,7 @@ function sanitizeReportedWorld(world) {
 
 function sanitizeListServerReadout(source) {
   return {
+    bots: boundedReportCount(source?.bots, 255),
     teamCounts: boundedTeamArray(source?.teamCounts),
     teamMaximums: boundedTeamArray(source?.teamMaximums),
     shakeTimeout: boundedReportCount(source?.shakeTimeout, 65535),
@@ -6097,6 +6109,8 @@ function parseBZWServerOptions(lines) {
     // client in LocalPlayer::checkHit; bzo's server decides every hit, so it
     // enforces it in the one place instead.
     if (readOption('-noTeamKills')) options.noTeamKills = true;
+    // -disableBots: "disallow clients from using autopilot or robots".
+    if (readOption('-disableBots')) options.disableBots = true;
     // -tk: "player does not die when killing a teammate". Note which way round
     // this runs -- upstream kills a team killer *by default*, and the switch is
     // what turns that off, so `-tk` is the lenient setting rather than the
@@ -11249,6 +11263,16 @@ class Player {
     this.pauseCountdownStart = 0;
     this.pauseTimer = null;
     this.pauseDropTimer = null;
+    // Roger has the controls (`Player::autoPilot`). The client drives; the
+    // server only says so to everyone else.
+    this.autopilot = false;
+    // Who is flying, shown as the motto meanwhile, and the motto it stands in
+    // for.
+    this.autopilotName = null;
+    this.savedMotto = null;
+    // Joined as a robot tank, upstream's `ComputerPlayer` (`PlayerInfo::isBot`).
+    // Declared at join and never changed; autopilot does not make a bot.
+    this.bot = false;
     this.verticalVelocity = 0;
     this.isJumping = false;
     this.lastJumpTime = 0;
@@ -11561,6 +11585,8 @@ class Player {
       losses: this.losses,
       tks: this.tks,
       paused: this.paused,
+      autopilot: this.autopilot,
+      bot: this.bot,
       forwardSpeed: this.forwardSpeed,
       rotationSpeed: this.rotationSpeed,
       verticalVelocity: this.verticalVelocity,
@@ -14316,6 +14342,11 @@ if (Number.isFinite(mapServerOptions.angularAcceleration)) {
 
 const NO_TEAM_KILLS = serverConfig.noTeamKills === true
   || mapServerOptions.noTeamKills === true;
+// `-disableBots`, which upstream also publishes as `_disableBots` so a client
+// knows before it asks. Off by default, as upstream has it.
+const DISABLE_BOTS = serverConfig.disableBots === true
+  || mapServerOptions.disableBots === true;
+GAME_CONFIG.DISABLE_BOTS = DISABLE_BOTS;
 // `-tk`, which runs the opposite way round from its name: upstream kills a team
 // killer *by default* (`teamKillerDies` starts true, CmdLineOptions.h:79) and
 // `-tk` is what turns that off. So the default here is the strict one, and a map
@@ -14652,9 +14683,11 @@ function computeListServerStatus() {
   // bzfs row's (`decodePingHex`'s `teamCounts`/`teamMaximums`). One pass:
   // this runs on every join and part, not just the periodic report.
   const joinedByTeam = new Map();
+  let bots = 0;
   for (const player of players.values()) {
     if (!player.joined) continue;
     joinedByTeam.set(player.team, (joinedByTeam.get(player.team) || 0) + 1);
+    if (player.bot && player.team !== PLAYER_TEAM.OBSERVER) bots++;
   }
   return {
     proxies: computeProxyRows(),
@@ -14674,7 +14707,11 @@ function computeListServerStatus() {
     world: measureLiveWorld(),
     title: serverConfig.serverName || '',
     description: serverConfig.description || '',
-    players: [...players.values()].filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER).length,
+    // People, which is what the list sorts on. Bots are in the team counts,
+    // as upstream's ping has them, and counted on their own beside this.
+    players: [...players.values()]
+      .filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER && !p.bot).length,
+    bots,
     maxPlayers: MAX_REAL_PLAYERS,
     version: SERVER_VERSION,
     gameOptionsBits: computeLocalGameOptionsBits(),
@@ -15619,6 +15656,38 @@ function setPaused(player, paused) {
     y: player.y,
     z: player.z,
   });
+}
+
+// autopilotPlayer (bzfs.cxx:2820). Turning it off is always allowed. Upstream
+// kicks a player who turns it on against `-disableBots`; bzo has no kick and
+// its own client never asks, so the request is refused with upstream's words.
+//
+// The scoreboard says who is flying: the pilot's name stands in for the motto
+// while it does, and the player's own comes back when it lands. Asking again
+// with another pilot only changes the name.
+function setAutopilot(player, on, pilot) {
+  if (on && DISABLE_BOTS) {
+    replyToPlayer(player, "I'm sorry, we do not allow autopilot on this server.");
+    return;
+  }
+  if (isObserverTeam(player.team)) return;
+  if (!on && !player.autopilot) return;
+  const changed = player.autopilot !== on;
+  if (on) {
+    if (!player.autopilot) player.savedMotto = player.motto;
+    player.autopilotName = sanitizeMotto(typeof pilot === 'string' && pilot ? pilot : 'Roger');
+    player.motto = player.autopilotName;
+  } else {
+    player.motto = player.savedMotto ?? '';
+    player.savedMotto = null;
+    player.autopilotName = null;
+  }
+  player.autopilot = on;
+  if (changed) {
+    log(`Player ${player.id} "${player.name}" autopilot ${on ? `on (${player.autopilotName})` : 'off'}`);
+    broadcastAll({ type: 'autopilot', playerId: player.id, on });
+  }
+  if (player.joined) broadcastPlayerRecord('playerUpdated', player);
 }
 
 function requestPause(player) {
@@ -18107,6 +18176,8 @@ function resolveProxyRequest(url) {
     team: (asked === PLAYER_TEAM.AUTOMATIC || PLAYER_TEAMS.includes(asked))
       ? asked
       : PLAYER_TEAM.OBSERVER,
+    // `?bot`, the browser's own join as a robot tank, carried to the target.
+    bot: params.has('bot'),
   };
 }
 
@@ -18183,6 +18254,7 @@ function proxyPlayerRecord(player, motion = null) {
     losses: player.losses,
     tks: player.tks,
     paused: motion ? motion.paused : false,
+    autopilot: player.autopilot === true,
     forwardSpeed: 0,
     rotationSpeed: 0,
     verticalVelocity: motion ? round3(motion.velocity[2]) : 0,
@@ -18553,6 +18625,10 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
       NO_TEAM_KILLS: proxyGameOptions(session) !== null
         && (proxyGameOptions(session) & GAME_OPTION_BITS.noTeamKills) !== 0,
       TEAMS_ALLOWED: allowTeams(proxyGameType(session)),
+      // `_disableBots`, which bzfs publishes so a client never asks: its
+      // answer to asking anyway is a kick (`bzfs.cxx:2828`). Read as
+      // `BZDB.isTrue` reads it, `atoi(value) != 0`.
+      DISABLE_BOTS: (parseInt(session.state.vars.get('_disableBots'), 10) || 0) !== 0,
       // What a native client does: `MaxUpdateTime` is one second, and
       // `isDeadReckoningWrong` returns true past it whatever the tank is doing
       // -- "otherwise always send at least one packet per second"
@@ -18650,7 +18726,7 @@ function shortUserAgent(userAgent) {
 // answered only after the target has answered us: an `init` that named an
 // empty world would be a lie a reload could not fix.
 async function handleProxyConnection(ws, req, request) {
-  const { kind, key, target, team } = request;
+  const { kind, key, target, team, bot = false } = request;
   const send = (message) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
   };
@@ -18694,7 +18770,7 @@ async function handleProxyConnection(ws, req, request) {
     token: pendingLogin ? pendingLogin.token : '',
   };
   log(`[PROXY] ${key}: viewer "${viewer.callsign}" connecting`
-    + ` to ${target.host}:${target.port} as ${team}`
+    + ` to ${target.host}:${target.port} as ${team}${bot ? ' [BOT]' : ''}`
     + `${pendingLogin ? ' with a forwarded token' : ''}`);
 
   let session = null;
@@ -18764,7 +18840,10 @@ async function handleProxyConnection(ws, req, request) {
     // spawn without a token at all -- `playerAlive` removes one that has not
     // identified (`bzfs.cxx:3199`). A bzo restart lands here: the session
     // outlives it, and the single-use token held in memory does not.
-    const cannotSpawn = !viewer.token;
+    //
+    // A target configured with `requireLogin: false` lets an unregistered
+    // name play. A registered one still cannot without its token.
+    const cannotSpawn = !viewer.token && (target.requireLogin || viewer.globalCallsign !== null);
     const wanted = cannotSpawn ? PLAYER_TEAM.OBSERVER : team;
     const enterTeam = (wanted === PLAYER_TEAM.AUTOMATIC || offered.includes(wanted))
       ? wanted
@@ -18790,6 +18869,9 @@ async function handleProxyConnection(ws, req, request) {
       team: enterTeam === PLAYER_TEAM.AUTOMATIC
         ? AUTOMATIC_TEAM
         : getTeamColorIndex(enterTeam),
+      // A bot enters as one, except to watch: bzfs refuses a robot observer
+      // ("This game is full", bzfs.cxx:2333), so one joins as a person.
+      type: bot && enterTeam !== PLAYER_TEAM.OBSERVER ? COMPUTER_PLAYER : TANK_PLAYER,
       // The forwarded global login, unspent. It only verifies because bzfs
       // sees this connection arrive from a private address and asks the list
       // server without one (docs/proxy.md, "A proxy runs inside its
@@ -18951,6 +19033,12 @@ async function handleProxyConnection(ws, req, request) {
       if (killer && killer !== victim) {
         send({ type: 'playerUpdated', player: proxyPlayerRecord(killer, session.state.motion.get(death.killer)) });
       }
+    });
+
+    session.on('autopilot', ({ id, on }) => {
+      const callsign = session.state.players.get(id)?.callsign ?? id;
+      log(`[PROXY] ${key}: "${callsign}" autopilot ${on ? 'on' : 'off'}`);
+      send({ type: 'autopilot', playerId: String(id), on });
     });
 
     session.on('pause', ({ id, paused }) => {
@@ -19541,6 +19629,13 @@ async function handleProxyConnection(ws, req, request) {
     // and declared. Without it a "paused" browser is still alive on the
     // target -- shootable, scoreable, and no longer moving, which is worse
     // than having no pause at all.
+    // MsgAutoPilot: the browser flies the tank either way, and bzfs only
+    // records and relays that it is (`bzfs.cxx:2820`).
+    if (message.type === 'autopilot') {
+      if (!playingTeam) return;
+      session.sendAutoPilot(message.on === true);
+      return;
+    }
     if (message.type === 'pause') {
       if (!playingTeam) return;
       proxyPaused = !proxyPaused;
@@ -19650,8 +19745,11 @@ async function handleProxyConnection(ws, req, request) {
 }
 
 // WebSocket connection handler
-// When a new player connects, assign a default name and number
-wss.on('connection', (ws, req) => {
+// When a new player connects, assign a default name and number. Named, because
+// a server-run bot connects through it too (`addBot`).
+wss.on('connection', (ws, req) => acceptConnection(ws, req));
+
+function acceptConnection(ws, req) {
 
   // A proxied or watched connection takes none of what follows: no `Player`,
   // no entry in `players`, no place in this server's game. The two spellings
@@ -20640,6 +20738,12 @@ wss.on('connection', (ws, req) => {
           // scoreboard, and a proxied one carries it to a target that has its
           // own `MOTTO_LEN` to respect.
           player.motto = sanitizeMotto(message.motto);
+          // A rejoin while flying keeps the pilot on the scoreboard, and the
+          // motto it brought is the one to give back on landing.
+          if (player.autopilot) {
+            player.savedMotto = player.motto;
+            player.motto = player.autopilotName;
+          }
           player.tankModel = isAllowedTankModel(requestedTankModel)
             ? requestedTankModel
             : 'bzflag';
@@ -20658,8 +20762,10 @@ wss.on('connection', (ws, req) => {
           }
           player.voiceMicEnabled = false;
           player.joined = true;
+          player.bot = message.bot === true;
           player.voiceRosterSignature = '';
           reportToListServer('join');
+          scheduleBotReconcile();
           // An observer never comes alive. Not alive is the state the join flow
           // already renders as a scoreboard entry with an invisible tank, which
           // is exactly what an observer wants, and it leaves every path that
@@ -20721,6 +20827,7 @@ wss.on('connection', (ws, req) => {
           // read backwards for a change that may never have happened.
           const joinTags = [`[${player.team.toUpperCase()}]`, `[${player.tankModel}]`];
           if (message.isMobile) joinTags.push('[MOBILE]');
+          if (player.bot) joinTags.push('[BOT]');
           log(`Player ${player.id} joining as "${joinName}" ${joinTags.join(' ')}`);
 
           // broadcast join to all (full player info)
@@ -20789,6 +20896,10 @@ wss.on('connection', (ws, req) => {
 
         case 'pause':
           requestPause(player);
+          break;
+
+        case 'autopilot':
+          setAutopilot(player, message.on === true, message.pilot);
           break;
 
         case 'getMaps': {
@@ -21071,6 +21182,7 @@ wss.on('connection', (ws, req) => {
     dropPlayerFlag(player.id);
     players.delete(player.id);
     if (wasJoined) reportToListServer('part');
+    scheduleBotReconcile();
     // playing.cxx:1685. A lock onto a player who has gone is cleared rather than
     // left to expire, so nobody is told to steer at an id that no longer names
     // anyone.
@@ -21101,7 +21213,444 @@ wss.on('connection', (ws, req) => {
     broadcastTeamScores();
     refreshVoiceRosters(true);
   });
+}
+
+// --- Server bots -----------------------------------------------------------
+//
+// docs/bots-plan.md, step 2. A bot is a client whose socket never leaves the
+// process: `acceptConnection` takes it like any other, the bot joins, moves and
+// shoots with the messages a browser sends, and everything the server does for
+// a player it does for a bot. `server/bots.cjs` drives the tank; this is the
+// world it drives in.
+//
+// `bots.fill` in server.json, or `/bot fill`, keeps the playing roster at that
+// many: a bot for each place people leave empty, and none once people fill it.
+// With nobody connected at all the bots idle -- nothing to think, move or send
+// for -- until somebody arrives.
+const { EventEmitter } = require('node:events');
+const { planBotFill, pickBotToRemove, BotDriver } = require('./server/bots.cjs');
+
+const BOT_TICK_SECONDS = 0.05;
+const BOT_FAKE_REQUEST = Object.freeze({
+  url: '/',
+  headers: Object.freeze({ 'user-agent': 'bzo-bot' }),
+  // Not a loopback address, so a bot is never a local admin.
+  socket: Object.freeze({ remoteAddress: 'bot', remotePort: 0 }),
 });
+let AUTOPILOT_MODULE = null;
+const bots = new Map();
+let botFill = Math.max(0, Math.floor(Number(serverConfig.bots?.fill) || 0));
+let botFillPilot = typeof serverConfig.bots?.pilot === 'string' ? serverConfig.bots.pilot : 'ace';
+let botsIdle = false;
+let nextBotNumber = 1;
+
+// The socket a bot's client holds: what the server sends it goes nowhere, and
+// what it says arrives as a browser's message would.
+function createBotSocket() {
+  const socket = new EventEmitter();
+  socket.OPEN = 1;
+  socket.readyState = 1;
+  socket.send = () => {};
+  socket.ping = () => setTimeout(() => socket.emit('pong'), 0);
+  const close = () => {
+    if (socket.readyState !== 1) return;
+    socket.readyState = 3;
+    socket.emit('close');
+  };
+  socket.close = close;
+  socket.terminate = close;
+  socket.say = (message) => socket.emit('message', Buffer.from(JSON.stringify(message)));
+  return socket;
+}
+
+function findAutopilot(id) {
+  return AUTOPILOT_MODULE?.AUTOPILOTS.find((entry) => entry.id === id) ?? null;
+}
+
+// A person: neither a bot this server runs nor a client that joined as one.
+// A connection still in the entry dialog has declared nothing yet, so counts.
+function isRealPlayer(player) {
+  return !bots.has(player.id) && !player.bot;
+}
+
+// A remote tank's motion now, by the same model the client draws it with.
+function getBotViewMotion(player, flagType, now) {
+  const airborne = player.jumpDirection !== null && player.jumpDirection !== undefined;
+  const gravity = hasAirControl(flagType) ? GAME_CONFIG.WINGS_GRAVITY : GAME_CONFIG.GRAVITY;
+  if (airborne) {
+    const elapsed = Math.max(0, (now - player.lastUpdate) / 1000);
+    return {
+      airborne,
+      gravity,
+      vx: player.airVelocityX || 0,
+      vy: (player.verticalVelocity || 0) - (gravity * elapsed),
+      vz: player.airVelocityZ || 0,
+    };
+  }
+  const direction = player.slideDirection ?? player.rotation;
+  const speed = (player.forwardSpeed || 0) * GAME_CONFIG.TANK_SPEED;
+  return {
+    airborne, gravity, vx: -Math.sin(direction) * speed, vy: 0, vz: -Math.cos(direction) * speed,
+  };
+}
+
+const botProbes = { current: null };
+function getBotProbes() {
+  if (!botProbes.current) {
+    botProbes.current = AUTOPILOT_MODULE.createWorldProbes({
+      obstacles: () => OBSTACLES,
+      colliders: getCollisionColliders,
+      mapSize: () => GAME_CONFIG.MAP_SIZE,
+      findImpact: findShotSegmentImpact,
+      topOf: getColliderTopY,
+    });
+  }
+  return botProbes.current;
+}
+
+// The pilot's view of the game, as much of it as a client would see: a
+// superflag on the ground keeps its type hidden (`getFlagState`), and the
+// pilot's own memory is all it has to go on.
+function buildBotView(bot, self) {
+  const now = Date.now();
+  const me = bot.player;
+  const myFlag = getPlayerFlag(me.id);
+  const myType = myFlag?.type ?? null;
+  const teamColor = getTeamColorIndex(me.team);
+  const players = [];
+  for (const other of players.values()) {
+    if (other.id === me.id || !other.joined || isObserverTeam(other.team)) continue;
+    const flag = getPlayerFlag(other.id);
+    const position = other.getExtrapolatedPosition(now);
+    players.push({
+      id: other.id,
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      ...getBotViewMotion(other, flag?.type ?? null, now),
+      team: other.team,
+      alive: other.alive,
+      paused: other.paused,
+      notResponding: false,
+      flag: flag?.type ?? null,
+      flagIndex: flag?.index ?? null,
+      flagTeam: getFlagTeamIndex(flag?.type ?? null),
+      zoned: isZoned(flag?.type ?? null, flag?.zoned === true),
+    });
+  }
+  const shots = [];
+  for (const proj of projectiles.values()) {
+    if (proj.playerId === me.id || proj.beam || proj.shockwave) continue;
+    const owner = getPlayerFlag(proj.playerId);
+    shots.push({
+      ownerId: proj.playerId,
+      ownerZoned: isZoned(owner?.type ?? null, owner?.zoned === true),
+      flag: proj.flag ?? null,
+      x: proj.x,
+      y: proj.y,
+      z: proj.z,
+      vx: proj.dirX * proj.speed,
+      vy: proj.dirY * proj.speed,
+      vz: proj.dirZ * proj.speed,
+    });
+  }
+  let teamFlags = false;
+  const viewFlags = [];
+  for (const flag of flags) {
+    if (flag.status === FLAG_STATUS.NO_EXIST) continue;
+    const state = getFlagState(flag, now);
+    const team = getFlagTeamIndex(flag.type);
+    if (team !== null) teamFlags = true;
+    viewFlags.push({
+      index: state.index,
+      type: state.type,
+      team,
+      onGround: state.status === FLAG_STATUS.ON_GROUND,
+      x: state.position.x,
+      y: state.position.y,
+      z: state.position.z,
+    });
+  }
+  const maxShots = normalizeShotSlotCount(GAME_CONFIG.SHOT_MAX_ACTIVE);
+  return {
+    now: now / 1000,
+    self: {
+      ...self,
+      id: me.id,
+      flag: myType,
+      flagIndex: myFlag?.index ?? null,
+      flagTeam: getFlagTeamIndex(myType),
+      teamColor,
+      zoned: isZoned(myType, myFlag?.zoned === true),
+      shotSpeed: GAME_CONFIG.SHOT_SPEED * getShotEffects(myType).velocityFactor,
+      shotLifetime: getWorldReloadSeconds(GAME_CONFIG) * getShotEffects(myType).lifeFactor,
+      ricochet: shotRicochets(myType, GAME_CONFIG.ALL_SHOTS_RICOCHET),
+      canFire: findFreeShotSlot(me.shotSlotFreeAt, maxShots, now) >= 0,
+    },
+    players,
+    shots,
+    flags: viewFlags,
+    world: {
+      allowJumping: GAME_CONFIG.ALLOW_JUMPING === true,
+      teamFlags,
+      waterLevel: mapWaterLevel && mapWaterLevel.height > 0 ? mapWaterLevel.height : null,
+      shotSpeed: GAME_CONFIG.SHOT_SPEED,
+      maxShots,
+      tankHeight: TANK_HEIGHT,
+      tankLength: TANK_HALF_LENGTH * 2,
+      tankAngVel: GAME_CONFIG.TANK_ROTATION_SPEED,
+      jumpVelocity: GAME_CONFIG.JUMP_VELOCITY,
+      gravity: GAME_CONFIG.GRAVITY,
+      lockOnAngle: LOCK_ON_ANGLE,
+      shockOutRadius: SHOCK_OUT_RADIUS,
+    },
+    isFoe: (player) => areFoes(player.team, me.team, TEAMS_ALLOWED),
+    myBase: () => {
+      const base = OBSTACLES.find((obs) => obs.kind === 'base' && obs.team === teamColor);
+      if (!base) return null;
+      return { x: base.x, y: getColliderTopY(base), z: base.z, radius: Math.min(base.w, base.d) / 2 };
+    },
+    ...getBotProbes(),
+  };
+}
+
+// checkEnvironment's two checks, as a client makes them for its own tank: drive
+// over a flag and ask for it; carry a team flag onto a base and say so.
+function botCheckEnvironment(bot, self) {
+  const me = bot.player;
+  const now = Date.now();
+  if (now - bot.lastGrabAt < FLAG_GRAB_INTERVAL_MS) return;
+  const carried = getPlayerFlag(me.id);
+  if (carried) {
+    const flagTeam = getFlagTeamIndex(carried.type);
+    if (flagTeam === null) return;
+    const baseTeam = getBaseTeamAtPoint(OBSTACLES, self.x, self.y, self.z);
+    if (baseTeam === null) return;
+    const myTeam = getTeamColorIndex(me.team);
+    if ((flagTeam === myTeam) === (baseTeam === myTeam)) return;
+    bot.lastGrabAt = now;
+    bot.socket.say({ type: 'captureFlag', team: baseTeam });
+    return;
+  }
+  if (self.inAir) return;
+  for (const flag of flags) {
+    if (flag.status !== FLAG_STATUS.ON_GROUND) continue;
+    if (Math.abs(self.y - flag.position.y) >= FLAG_GRAB_LEVEL_TOLERANCE) continue;
+    if (distance(self.x, self.z, flag.position.x, flag.position.z) >= FLAG_GRAB_RADIUS) continue;
+    bot.lastGrabAt = now;
+    bot.socket.say({ type: 'grabFlag', index: flag.index });
+    return;
+  }
+}
+
+function addBot(pilotId = botFillPilot, team = PLAYER_TEAM.AUTOMATIC, { auto = false } = {}) {
+  const entry = findAutopilot(pilotId);
+  if (!entry) return { error: `no pilot "${pilotId}"` };
+  if (DISABLE_BOTS) return { error: 'bots are disabled on this server (-disableBots)' };
+  const socket = createBotSocket();
+  acceptConnection(socket, BOT_FAKE_REQUEST);
+  const player = [...players.values()].find((candidate) => candidate.ws === socket);
+  if (!player) return { error: 'the bot could not connect' };
+  let name;
+  do {
+    name = `${entry.name}${nextBotNumber++}`;
+  } while ([...players.values()].some((other) => other.name === name));
+  const bot = {
+    player,
+    socket,
+    pilotId: entry.id,
+    auto,
+    lastGrabAt: 0,
+  };
+  bot.driver = new BotDriver({
+    pilot: new entry.Pilot(),
+    env: {
+      config: () => GAME_CONFIG,
+      colliders: getCollisionColliders,
+      topOf: getColliderTopY,
+      state: () => ({
+        alive: player.alive && player.joined, x: player.x, y: player.y, z: player.z, rotation: player.rotation,
+      }),
+      view: (self) => buildBotView(bot, self),
+      send: (message) => socket.say(message),
+      act: (self) => botCheckEnvironment(bot, self),
+    },
+  });
+  bots.set(player.id, bot);
+  socket.say({
+    type: 'joinGame', name, team, tankModel: 'bzflag', motto: entry.name, bot: true,
+  });
+  return { bot };
+}
+
+function removeBot(bot) {
+  bots.delete(bot.player.id);
+  bot.socket.close();
+}
+
+// People playing, by the measure the fill counts: joined, on a team, and not a
+// bot. An observer watches the bots rather than taking one's place.
+function countRealPlayers() {
+  let count = 0;
+  players.forEach((player) => {
+    if (isRealPlayer(player) && player.joined && !isObserverTeam(player.team)) count++;
+  });
+  return count;
+}
+
+function reconcileBots() {
+  if (!AUTOPILOT_MODULE || DISABLE_BOTS) return;
+  const autoBots = [...bots.values()].filter((bot) => bot.auto);
+  let change = planBotFill({ fill: botFill, humans: countRealPlayers(), bots: autoBots.length });
+  while (change > 0) {
+    const { error } = addBot(botFillPilot, PLAYER_TEAM.AUTOMATIC, { auto: true });
+    if (error) {
+      log(`[BOT] fill could not add a bot: ${error}`);
+      return;
+    }
+    change--;
+  }
+  while (change < 0) {
+    const teamSizes = new Map();
+    players.forEach((player) => {
+      if (player.joined && !isObserverTeam(player.team)) {
+        teamSizes.set(player.team, (teamSizes.get(player.team) || 0) + 1);
+      }
+    });
+    const candidates = [...bots.values()].filter((bot) => bot.auto)
+      .map((bot) => ({ bot, team: bot.player.team }));
+    const chosen = pickBotToRemove(candidates, teamSizes);
+    if (!chosen) return;
+    removeBot(chosen.bot);
+    change++;
+  }
+}
+
+// Joins and parts arrive from inside the handlers that cause them, so the
+// roster is settled before anything is added or taken away.
+let botReconcileQueued = false;
+function scheduleBotReconcile() {
+  if (botReconcileQueued) return;
+  botReconcileQueued = true;
+  setTimeout(() => {
+    botReconcileQueued = false;
+    reconcileBots();
+  }, 0);
+}
+
+function hasRealConnection() {
+  for (const player of players.values()) {
+    if (isRealPlayer(player)) return true;
+  }
+  return false;
+}
+
+setInterval(() => {
+  if (bots.size === 0) return;
+  const idle = !hasRealConnection();
+  if (idle !== botsIdle) {
+    botsIdle = idle;
+    log(`[BOT] ${idle ? 'idle: nobody connected' : 'awake'}`);
+    if (idle) bots.forEach((bot) => bot.driver.halt());
+  }
+  if (idle) return;
+  bots.forEach((bot) => {
+    try {
+      bot.driver.tick(BOT_TICK_SECONDS);
+    } catch (err) {
+      logError(`[BOT] "${bot.player.name}" ${err.stack || err.message}`);
+    }
+  });
+}, BOT_TICK_SECONDS * 1000);
+
+import('./public/autopilot.mjs').then((module) => {
+  AUTOPILOT_MODULE = module;
+  if (botFill > 0) log(`[BOT] fill ${botFill} with ${botFillPilot}`);
+  scheduleBotReconcile();
+}).catch((err) => logError(`[BOT] pilots did not load: ${err.message}`));
+
+function describeBots() {
+  const list = [...bots.values()].map((bot) => `${bot.player.name} (${bot.pilotId}${bot.auto ? ', fill' : ''})`);
+  return `fill ${botFill} with ${botFillPilot}; ${list.length ? list.join(', ') : 'no bots'}`
+    + (botsIdle ? '; idle' : '');
+}
+
+defineCommand('/bot', COMMAND_TIER.OPERATOR,
+  '[fill <n> [pilot] | add [pilot] [team] [count] | remove <name|all>] - server-run bots',
+  (player, args) => {
+    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+    if (!AUTOPILOT_MODULE) {
+      replyToPlayer(player, 'The pilots have not loaded');
+      return;
+    }
+    const pilots = AUTOPILOT_MODULE.AUTOPILOTS.map((entry) => entry.id).join('|');
+    if (!verb) {
+      replyToPlayer(player, describeBots());
+      return;
+    }
+    if (verb === 'fill') {
+      const count = Number(rest[0]);
+      if (!Number.isInteger(count) || count < 0 || count > MAX_REAL_PLAYERS) {
+        replyToPlayer(player, `Usage: /bot fill <0-${MAX_REAL_PLAYERS}> [${pilots}]`);
+        return;
+      }
+      if (rest[1]) {
+        if (!findAutopilot(rest[1].toLowerCase())) {
+          replyToPlayer(player, `No pilot "${rest[1]}"; one of ${pilots}`);
+          return;
+        }
+        botFillPilot = rest[1].toLowerCase();
+      }
+      botFill = count;
+      log(`[CMD] "${player.name}" set bot fill to ${count} with ${botFillPilot}`);
+      reconcileBots();
+      replyToPlayer(player, describeBots());
+      return;
+    }
+    if (verb === 'add') {
+      let pilotId = botFillPilot;
+      let team = PLAYER_TEAM.AUTOMATIC;
+      let count = 1;
+      for (const word of rest) {
+        const lower = word.toLowerCase();
+        if (findAutopilot(lower)) pilotId = lower;
+        else if (PLAYER_TEAMS.includes(lower) && !isObserverTeam(lower)) team = lower;
+        else if (/^\d+$/.test(word)) count = Math.min(Number(word), MAX_REAL_PLAYERS);
+        else {
+          replyToPlayer(player, `Usage: /bot add [${pilots}] [team] [count]`);
+          return;
+        }
+      }
+      for (let i = 0; i < count; i++) {
+        const { error } = addBot(pilotId, team);
+        if (error) {
+          replyToPlayer(player, error);
+          return;
+        }
+      }
+      log(`[CMD] "${player.name}" added ${count} ${pilotId} bot(s)`);
+      replyToPlayer(player, describeBots());
+      return;
+    }
+    if (verb === 'remove') {
+      const target = rest.join(' ');
+      const chosen = target === 'all'
+        ? [...bots.values()]
+        : [...bots.values()].filter((bot) => bot.player.name === target);
+      if (!target || chosen.length === 0) {
+        replyToPlayer(player, 'Usage: /bot remove <name|all>');
+        return;
+      }
+      // A removed fill bot would only come straight back, so `all` empties the
+      // fill too.
+      if (target === 'all') botFill = 0;
+      chosen.forEach(removeBot);
+      log(`[CMD] "${player.name}" removed ${chosen.length} bot(s)`);
+      replyToPlayer(player, describeBots());
+      return;
+    }
+    replyToPlayer(player, `Usage: /bot [fill <n> [${pilots}] | add [${pilots}] [team] [count] | remove <name|all>]`);
+  });
 
 // Expose the forceClientReload function for manual triggering
 // You can call this from the Node.js console or via a signal

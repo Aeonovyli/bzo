@@ -78,4 +78,12 @@ assert.equal(toBzfsChatText('one\ntwo\ttab'), 'onetwotab');
   assert.deepEqual(decodeShotEnd(payload), { player: 2, id: (5 << 8) | 3, reason: 1 });
 }
 
+// MsgEnter's first field is the PlayerType: a person unless asked otherwise,
+// and a robot tank (`ComputerPlayer`) for a bot.
+{
+  const { buildEnterPayload, TANK_PLAYER, COMPUTER_PLAYER } = require('../server/remote-world-import.cjs');
+  assert.equal(buildEnterPayload().readUInt16BE(0), TANK_PLAYER);
+  assert.equal(buildEnterPayload({ type: COMPUTER_PLAYER }).readUInt16BE(0), 1);
+}
+
 console.log('bzfs session tests passed');
