@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.97] - 2026-10-01
+
+### Added
+- Autopilot (#151): `9`, `/autopilot [roger|ace]`, or Settings -> Autopilot
+  hands the tank to a pilot. Roger is BZFlag's own autopilot; Ace is Roger
+  with improvements -- he remembers flag types, goes for captures, times one
+  shot to land on a jumper, and holds a ricochet that would come back at him.
+  The HUD names the pilot, the scoreboard shows it as the motto, and the
+  choice survives a reload. Works through a proxy too.
+- Server bots: `bots` in server.json, the Operator panel's Bot Fill and Bot
+  Pilot, or `/bot`, keep the game at that many players with bots, none once
+  people fill it. Bots idle while nobody is connected.
+- Bots on `/list`: bots are counted apart from people, and a server's pane
+  and the table heading say how many.
+- `-disableBots` refuses autopilot and bots.
+- A proxy target may set `requireLogin: false` so unregistered players can
+  play there.
+
+### Changed
+- Every shot is sent right after a position update, as BZFlag does, so a
+  shot fired while turning is no longer refused as too far from the barrel.
+
 ## [1.2.96] - 2026-10-01
 
 ### Added
