@@ -33,6 +33,10 @@ checkout. Docker is the better install and update path for most people.
 running behind a reverse proxy, listing your server, proxying BZFlag servers,
 and updating.
 
+`/list`'s **Launch** links open a BZFlag server in an installed BZFlag client;
+[docs/bzflag-links.md](docs/bzflag-links.md) sets up `bzflag://` on Linux,
+Windows and macOS.
+
 ## Flags
 
 bzo carries every flag BZFlag has except `WA` Wide Angle, which is deliberately
