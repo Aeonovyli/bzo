@@ -12640,6 +12640,7 @@ defineCommand('/pos', COMMAND_TIER.OPEN,
 // decide what the next kill or capture checks against.
 const LIVE_CONFIG_KEYS = Object.freeze([
   'serverName', 'motd', 'shotMaxActive', 'ricochet', 'timeLimit', 'timeManualStart', 'maxPlayerScore', 'maxTeamScore',
+  'botFill', 'botPilot',
 ]);
 // A server's own name, not upstream's -- bzfs has no such thing to cap.
 // Well under the 120 characters `/api/list-server/report` accepts for the
@@ -12703,6 +12704,8 @@ function getOperatorConfigState() {
     maxPlayerScore: GAME_CONFIG.MAX_PLAYER_SCORE,
     maxTeamScore: GAME_CONFIG.MAX_TEAM_SCORE,
     maxPlayers: MAX_REAL_PLAYERS,
+    botFill,
+    botPilot: botFillPilot,
     ...Object.fromEntries(Object.entries(OPERATOR_TEAM_LIMIT_KEYS)
       .map(([key, team]) => [key, limits[team]])),
   };
@@ -12725,6 +12728,8 @@ function writeOperatorConfigFields(config, next) {
       config.teamMode.limits = { ...config.teamMode.limits, [team]: value };
     } else if (key === 'teams') {
       config.teamMode.enabled = value;
+    } else if (key === 'botFill' || key === 'botPilot') {
+      config.bots = { ...config.bots, [key === 'botFill' ? 'fill' : 'pilot']: value };
     } else if (key === 'rabbit') {
       // `false` is the config's own off position, and what resolveRabbitSelection
       // reads; `"off"` is the row's.
@@ -12857,6 +12862,23 @@ function applyServerConfigChanges(requested, byWhom) {
     next[key] = limit;
   }
 
+  // The server's own bots (`bots` in server.json): how many places they fill,
+  // and which pilot flies them.
+  if (has('botFill')) {
+    const fill = Math.round(Number(requested.botFill));
+    if (!Number.isFinite(fill) || fill < 0 || fill > MAX_REAL_PLAYERS) {
+      return { error: `Bot fill is 0 to ${MAX_REAL_PLAYERS}` };
+    }
+    if (fill > 0 && DISABLE_BOTS) return { error: 'Bots are disabled on this server (-disableBots)' };
+    next.botFill = fill;
+  }
+  if (has('botPilot')) {
+    if (typeof requested.botPilot !== 'string' || !findAutopilot(requested.botPilot)) {
+      return { error: 'Invalid bot pilot' };
+    }
+    next.botPilot = requested.botPilot;
+  }
+
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     writeOperatorConfigFields(config, next);
@@ -12920,6 +12942,16 @@ function applyServerConfigChanges(requested, byWhom) {
     changed.push('maxTeamScore');
   }
 
+  if (next.botPilot !== undefined && next.botPilot !== botFillPilot) {
+    botFillPilot = next.botPilot;
+    changed.push('botPilot');
+  }
+  if (next.botFill !== undefined && next.botFill !== botFill) {
+    botFill = next.botFill;
+    changed.push('botFill');
+  }
+  if (changed.includes('botFill') || changed.includes('botPilot')) scheduleBotReconcile();
+
   // A new game rather than a live change: the world, the team layout and the flag
   // pool are resolved once at boot, so the only honest way to apply one of these
   // is to start over. Written to `server.json` above; this is what makes the
@@ -12944,6 +12976,8 @@ function applyServerConfigChanges(requested, byWhom) {
     timeManualStart: GAME_CONFIG.TIME_MANUAL_START,
     maxPlayerScore: GAME_CONFIG.MAX_PLAYER_SCORE,
     maxTeamScore: GAME_CONFIG.MAX_TEAM_SCORE,
+    botFill,
+    botPilot: botFillPilot,
   });
   log(`Config changed by ${byWhom}: ${changed.length ? changed.join(', ') : 'nothing'}`);
   return { changed, restarted: false };
@@ -21399,6 +21433,7 @@ function buildBotView(bot, self) {
       tankHeight: TANK_HEIGHT,
       tankLength: TANK_HALF_LENGTH * 2,
       tankAngVel: GAME_CONFIG.TANK_ROTATION_SPEED,
+      tankSpeed: GAME_CONFIG.TANK_SPEED,
       jumpVelocity: GAME_CONFIG.JUMP_VELOCITY,
       gravity: GAME_CONFIG.GRAVITY,
       lockOnAngle: LOCK_ON_ANGLE,
@@ -21594,17 +21629,16 @@ defineCommand('/bot', COMMAND_TIER.OPERATOR,
         replyToPlayer(player, `Usage: /bot fill <0-${MAX_REAL_PLAYERS}> [${pilots}]`);
         return;
       }
-      if (rest[1]) {
-        if (!findAutopilot(rest[1].toLowerCase())) {
-          replyToPlayer(player, `No pilot "${rest[1]}"; one of ${pilots}`);
-          return;
-        }
-        botFillPilot = rest[1].toLowerCase();
+      if (rest[1] && !findAutopilot(rest[1].toLowerCase())) {
+        replyToPlayer(player, `No pilot "${rest[1]}"; one of ${pilots}`);
+        return;
       }
-      botFill = count;
-      log(`[CMD] "${player.name}" set bot fill to ${count} with ${botFillPilot}`);
-      reconcileBots();
-      replyToPlayer(player, describeBots());
+      // The Operator panel's own change, so the two cannot disagree and the
+      // fill survives a restart.
+      const result = applyServerConfigChanges(
+        { botFill: count, ...(rest[1] ? { botPilot: rest[1].toLowerCase() } : {}) },
+        `"${player.name}" via /bot`);
+      replyToPlayer(player, result.error || describeBots());
       return;
     }
     if (verb === 'add') {
@@ -21643,7 +21677,7 @@ defineCommand('/bot', COMMAND_TIER.OPERATOR,
       }
       // A removed fill bot would only come straight back, so `all` empties the
       // fill too.
-      if (target === 'all') botFill = 0;
+      if (target === 'all' && botFill > 0) applyServerConfigChanges({ botFill: 0 }, `"${player.name}" via /bot`);
       chosen.forEach(removeBot);
       log(`[CMD] "${player.name}" removed ${chosen.length} bot(s)`);
       replyToPlayer(player, describeBots());

@@ -479,6 +479,15 @@ export class Roger {
 const SELF_HIT_MARGIN = 2;
 // How close a foe has to be to pull Ace off a capture.
 const CAPTURE_CHASE_RANGE = 50;
+// A step a tank drives up without a jump: `_maxBumpHeight`'s default.
+const MAX_STEP_UP = 0.33;
+// How much of one jump's height a flag may sit above Ace, and still be worth
+// jumping for; how square to the flag he must be to jump; how far ahead he
+// looks for the edge; and how far past an edge's corner the jump should clear.
+const JUMP_REACH_SHARE = 0.9;
+const JUMP_AIM_TOLERANCE = 0.2;
+const JUMP_LOOKAHEAD = 30;
+const JUMP_EDGE_CLEARANCE = 1;
 const SELF_HIT_GRACE_SECONDS = 0.1;
 
 // Roger with bzo's improvements. Each override is one of Roger's decisions
@@ -678,10 +687,14 @@ export class Ace extends Roger {
     if (!view.world.teamFlags || me.flagTeam !== null) return null;
     if (me.flag && isBadFlag(me.flag)) return null;
     const base = view.myBase();
+    const reach = this.jumpReach(ctx) * JUMP_REACH_SHARE;
     let best = null;
     for (const flag of view.flags) {
       if (!flag.onGround || flag.team === null) continue;
       const pos = toBzf(flag);
+      // Ace has no route to anything, so a flag is worth going for only where
+      // driving straight at it gets there: down, level, or up one jump.
+      if (pos.z - me.z > Math.max(reach, MAX_STEP_UP)) continue;
       if (flag.team === me.teamColor) {
         if (!base || this.isHome(pos, base)) continue;
       }
@@ -689,6 +702,14 @@ export class Ace extends Roger {
       if (!best || dist < best.dist) best = { flag, pos, dist };
     }
     return best;
+  }
+
+  // How high one jump lifts the tank, if it may jump at all.
+  jumpReach(ctx) {
+    const { view, me } = ctx;
+    const canJump = (view.world.allowJumping || me.flag === 'JP' || me.flag === 'WG') && me.flag !== 'NJ';
+    if (!canJump || !(view.world.gravity > 0)) return 0;
+    return (view.world.jumpVelocity * view.world.jumpVelocity) / (2 * view.world.gravity);
   }
 
   foeWithin(ctx, range) {
@@ -704,7 +725,34 @@ export class Ace extends Roger {
     if (target.dist < 10 && me.flag) out.dropFlag = true;
     out.rotation = normalizeAngle(azimuthTo(me, target.pos) - me.azimuth);
     out.speed = HALF_PI - Math.abs(out.rotation);
+    // Up onto whatever the flag sits on: at full speed, from where the jump
+    // clears the top on the way up and comes down on it before falling past.
+    const rise = target.pos.z - me.z;
+    if (rise > MAX_STEP_UP && Math.abs(out.rotation) < JUMP_AIM_TOLERANCE && !me.inAir) {
+      const edge = ctx.view.firstBuilding(
+        { x: me.x, y: me.z, z: -me.y }, toBzoHeading(me.azimuth), JUMP_LOOKAHEAD);
+      const window = edge && this.jumpWindow(ctx, edge.top - me.z);
+      if (window && edge.distance >= window.min && edge.distance <= window.max) {
+        out.speed = 1;
+        out.jump = true;
+      }
+    }
     return true;
+  }
+
+  // The distances ahead of an edge `height` up from which a full-speed jump
+  // lands on top of it, or null where no jump does.
+  jumpWindow(ctx, height) {
+    const { view } = ctx;
+    const v = view.world.jumpVelocity;
+    const g = view.world.gravity;
+    if (!(g > 0) || height > this.jumpReach(ctx)) return null;
+    const root = Math.sqrt((v * v) - (2 * g * height));
+    const speed = view.world.tankSpeed;
+    return {
+      min: speed * ((v - root) / g) + JUMP_EDGE_CLEARANCE,
+      max: Math.min(speed * ((v + root) / g) * 0.5, JUMP_LOOKAHEAD),
+    };
   }
 
   // Home is on the base.
@@ -776,7 +824,11 @@ export function createWorldProbes({
       if (!(range > 0)) return null;
       const hit = ray(pos, heading, range);
       if (!hit.obstacle) return null;
-      return { isBox: hit.obstacle.type === 'box', top: topOf(hit.obstacle) };
+      return {
+        isBox: hit.obstacle.type === 'box',
+        top: topOf(hit.obstacle),
+        distance: hit.fraction * range,
+      };
     },
     // Where a shot goes over its life, bounces and all, by the tracer the
     // shot itself is flown with: a list of `{ t0, t1, from, to }`, seconds

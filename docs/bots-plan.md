@@ -170,9 +170,11 @@ Lessons want a few knobs the pilot doesn't have yet:
 
 Roger stays upstream's; these go into Ace. In order of payoff:
 
-1. **Path finding.** A route graph built from the world once: ramps,
-   teleporters and jump links, searched for a path. Roger only looks three ways
-   and goes whichever is most open.
+1. **Path finding.** A route graph built from the world once and searched for
+   a path. Its links are the only ways a tank changes level: a step no taller
+   than `_maxBumpHeight`, a drop, a jump, and a teleporter. There are no
+   ramps -- a slope holds a tank up but is never driven up, pyramid or mesh.
+   Roger only looks three ways and goes whichever is most open.
 2. **Aiming.** Lead the target from shot speed instead of a fixed 300ms, and
    use the shot tracer for ricochet bank shots.
 3. **Skill knobs.** As in step 3.

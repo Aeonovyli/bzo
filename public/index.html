@@ -128,6 +128,19 @@
             <output id="maxTeamScoreValue" class="volumeValue" for="maxTeamScoreSlider">No limit</output>
           </div>
         </div>
+        <!-- The server's own bots: how many places they keep filled, and who
+             flies them. Live, like the rows above it. -->
+        <div class="operatorRow operatorConfigRow" data-menu-row="botFill" data-menu-kind="range">
+          <label for="botFillSlider">Bot Fill:</label>
+          <div class="volumeControl">
+            <input id="botFillSlider" class="volumeSlider" type="range" min="0" max="16" step="1" value="0">
+            <output id="botFillValue" class="volumeValue" for="botFillSlider">Off</output>
+          </div>
+        </div>
+        <div class="operatorRow" data-menu-row="botPilot" data-menu-kind="choice">
+          <label for="botPilotSelect">Bot Pilot:</label>
+          <select id="botPilotSelect"></select>
+        </div>
         <!-- Immediate actions, like Upload above -- nothing here is staged, so
              these fire on click rather than waiting for Apply. Only meaningful
              on a world with a time limit configured (`timeLimit` in

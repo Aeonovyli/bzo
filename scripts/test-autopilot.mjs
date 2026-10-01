@@ -40,6 +40,7 @@ function makeView(overrides = {}) {
       shotSpeed: 100,
       maxShots: 1,
       tankHeight: 2.05,
+      tankSpeed: 25,
       tankLength: 6,
       jumpVelocity: 19,
       gravity: 9.8,
@@ -298,6 +299,25 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.ok(ace.rotation < -1, 'and turns east for the flag');
   assert.equal(new Roger().think(view(0)).targetId, 'foe', 'Roger chases');
   assert.equal(new Ace().think(view(295)).dropFlag, true, 'drops V to take the flag');
+}
+
+// A raised flag: one a jump reaches is jumped for when the edge is in the
+// window, one too high is left alone.
+{
+  const flagAt = (height) => ({ index: 0, type: 'R*', team: 1, onGround: true, x: 0, y: height, z: -40 });
+  const view = (height, edgeDistance) => makeView({
+    self: { teamColor: 2 },
+    flags: [flagAt(height)],
+    world: { teamFlags: true },
+    myBase: () => ({ x: 0, y: 0, z: 300, radius: 15 }),
+    firstBuilding: () => ({ isBox: true, top: height, distance: edgeDistance }),
+  });
+  const near = new Ace().think(view(5, 15));
+  assert.equal(near.jump, true, 'jumps for a flag 5 up with the edge 15 ahead');
+  assert.equal(new Ace().think(view(5, 2)).jump, false, 'too close to clear the corner');
+  const high = new Ace().think(view(30, 15));
+  assert.equal(high.jump, false, 'a flag out of reach is not tried');
+  assert.ok(Math.abs(high.rotation) > 0 || high.speed !== near.speed, 'and Ace does something else');
 }
 
 console.log('autopilot tests passed');

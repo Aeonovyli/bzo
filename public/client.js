@@ -9205,6 +9205,8 @@ function handleServerConfigUpdate(message) {
   if (Number.isFinite(message.maxTeamScore) && liveGameConfig) {
     liveGameConfig.MAX_TEAM_SCORE = message.maxTeamScore;
   }
+  if (Number.isFinite(message.botFill)) serverOperatorConfig.botFill = message.botFill;
+  if (typeof message.botPilot === 'string') serverOperatorConfig.botPilot = message.botPilot;
   // Whatever world is on screen keeps its own physics over the top of the
   // values that just moved.
   applyWorldGameplay(currentWorldData?.gameplay || null);
@@ -9293,6 +9295,8 @@ function getOperatorServerState() {
     maxPlayerScore: Number(gameConfig?.MAX_PLAYER_SCORE) || 0,
     maxTeamScore: Number(gameConfig?.MAX_TEAM_SCORE) || 0,
     mapFile: currentMapFile || serverOperatorConfig.mapFile || '',
+    botFill: Number(serverOperatorConfig.botFill) || 0,
+    botPilot: serverOperatorConfig.botPilot || AUTOPILOTS.at(-1).id,
   };
 }
 
@@ -9313,6 +9317,7 @@ function getOperatorNumberBounds(key, state) {
   if (key === 'shotMaxActive') return { min: SHOT_MAX_ACTIVE_MIN, max: SHOT_MAX_ACTIVE_MAX };
   if (key === 'timeLimit') return { min: 0, max: OPERATOR_TIME_LIMIT_MAX };
   if (key === 'maxPlayerScore' || key === 'maxTeamScore') return { min: 0, max: OPERATOR_SCORE_LIMIT_MAX };
+  if (key === 'botFill') return { min: 0, max: Number(state?.maxPlayers) || OPERATOR_LIMIT_MAX };
   // At least one tank: a server that allows none is one nobody can play on.
   if (key === 'maxPlayers') return { min: 1, max: OPERATOR_LIMIT_MAX };
   const team = OPERATOR_LIMIT_TEAMS.find((candidate) => operatorLimitKey(candidate) === key);
@@ -9435,6 +9440,11 @@ function paintOperatorRows(state) {
   setOperatorNoLimitLabel('maxPlayerScoreValue', state.maxPlayerScore);
   setOperatorRangeRow('maxTeamScore', state.maxTeamScore);
   setOperatorNoLimitLabel('maxTeamScoreValue', state.maxTeamScore);
+  setOperatorRangeRow('botFill', state.botFill, { max: getOperatorNumberBounds('botFill', state).max });
+  const botFillValue = document.getElementById('botFillValue');
+  if (botFillValue && !(state.botFill > 0)) botFillValue.textContent = 'Off';
+  const botPilotSelect = document.getElementById('botPilotSelect');
+  if (botPilotSelect) botPilotSelect.value = state.botPilot;
   const rabbitSelect = document.getElementById('rabbitSelect');
   if (rabbitSelect) {
     rabbitSelect.value = RABBIT_SELECTIONS.includes(state.rabbit) ? state.rabbit : 'off';
@@ -9640,6 +9650,22 @@ function wireOperatorPanel() {
   const rabbitSelect = document.getElementById('rabbitSelect');
   if (rabbitSelect) {
     rabbitSelect.addEventListener('change', () => stageOperatorChange('rabbit', rabbitSelect.value));
+  }
+  const botFillSlider = document.getElementById('botFillSlider');
+  if (botFillSlider) {
+    botFillSlider.addEventListener('input', () => stageOperatorNumberValue('botFill', Number(botFillSlider.value)));
+  }
+  // The pilots, from the module that defines them, so the panel cannot offer
+  // one the server does not have.
+  const botPilotSelect = document.getElementById('botPilotSelect');
+  if (botPilotSelect) {
+    for (const entry of AUTOPILOTS) {
+      const option = document.createElement('option');
+      option.value = entry.id;
+      option.textContent = entry.name;
+      botPilotSelect.append(option);
+    }
+    botPilotSelect.addEventListener('change', () => stageOperatorChange('botPilot', botPilotSelect.value));
   }
   const mapList = document.getElementById('mapList');
   if (mapList) {
@@ -11964,6 +11990,7 @@ function buildAutopilotView() {
       tankHeight: TANK_HEIGHT,
       tankLength: TANK_HALF_LENGTH * 2,
       tankAngVel: gameConfig.TANK_ROTATION_SPEED,
+      tankSpeed: gameConfig.TANK_SPEED,
       jumpVelocity: gameConfig.JUMP_VELOCITY,
       gravity: gameConfig.GRAVITY,
       lockOnAngle: LOCK_ON_ANGLE,
@@ -17349,6 +17376,18 @@ function getXROperatorMenuItems() {
       adjustable: true,
     },
     {
+      id: 'operatorBotFillXR',
+      label: 'Bot Fill',
+      value: staged.botFill > 0 ? String(staged.botFill) : 'Off',
+      adjustable: true,
+    },
+    {
+      id: 'operatorBotPilotXR',
+      label: 'Bot Pilot',
+      value: getAutopilotName(staged.botPilot),
+      adjustable: true,
+    },
+    {
       id: 'operatorPlayersXR',
       label: 'Playing Limit',
       value: String(staged.maxPlayers ?? ''),
@@ -17456,6 +17495,17 @@ function adjustXRSettingsMenuItem(item, direction) {
   }
   if (item.id === 'operatorPlayersXR') {
     stageOperatorNumber('maxPlayers', direction);
+    return true;
+  }
+  if (item.id === 'operatorBotFillXR') {
+    stageOperatorNumber('botFill', direction);
+    return true;
+  }
+  if (item.id === 'operatorBotPilotXR') {
+    if (!operatorStaged) operatorStaged = getOperatorServerState();
+    const at = AUTOPILOTS.findIndex((entry) => entry.id === operatorStaged.botPilot);
+    const next = (Math.max(0, at) + (direction > 0 ? 1 : -1) + AUTOPILOTS.length) % AUTOPILOTS.length;
+    stageOperatorChange('botPilot', AUTOPILOTS[next].id);
     return true;
   }
   const limitTeam = OPERATOR_LIMIT_TEAMS.find((team) => getXROperatorLimitId(team) === item.id);
