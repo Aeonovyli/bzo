@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+/*
+ * Copyright (C) 2025-2026 Tim Riker <timriker@gmail.com>
+ * Licensed under the GNU Affero General Public License v3.0 (AGPLv3).
+ * Source: https://github.com/timriker/bzo
+ * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
+ */
+
+// How fast Ace gets around a map: from the centre of every team base to the
+// centre of every other, flying his own capture route, with the server bot's
+// physics (`server/bots.cjs`) against the map's real obstacles. Each driving
+// strategy -- a set of `ACE_TUNING` values -- runs every pair, and the table
+// says which arrives, how fast, and how often it fell or jumped on the way.
+//
+//   node scripts/bench-pilot.mjs                  # hix, every strategy below
+//   node scripts/bench-pilot.mjs --map hix.bzw --only default,pursuit --detail 1
+//   node scripts/bench-pilot.mjs --tuning '{"raisedFactor":0.7}'
+//
+// The world is the server's cached conversion (`cache/map-index.json`), so a
+// map has to have been served once. Nobody shoots, nobody else drives: this
+// measures getting there, and nothing else.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import {
+  Ace, ACE_TUNING, createRouter, createWorldProbes,
+} from '../public/autopilot.mjs';
+import { findShotSegmentImpact } from '../public/collision.mjs';
+
+const require = createRequire(import.meta.url);
+const { BotDriver } = require('../server/bots.cjs');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+const args = new Map();
+for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1]);
+const mapName = args.get('map') || 'hix.bzw';
+const timeLimit = Number(args.get('seconds') || 150);
+const dt = 0.05;
+
+// The strategies compared, each a change from the defaults.
+const STRATEGIES = {
+  default: {},
+  'lookahead 3': { groundLookahead: 3 },
+  pursuit: { follow: 'pursuit' },
+  arrival: { speed: 'arrival' },
+  'pursuit+arrival': { follow: 'pursuit', speed: 'arrival' },
+  'raised 0.7': { raisedFactor: 0.7 },
+  'raised 1.0': { raisedFactor: 1 },
+  curve: { raised: 'curve' },
+  'curve 20': { raised: 'curve', cornerLookahead: 20 },
+  'curve+pursuit': { raised: 'curve', follow: 'pursuit' },
+};
+
+const index = JSON.parse(fs.readFileSync(path.join(root, 'cache/map-index.json'), 'utf8'));
+const entry = index[mapName];
+if (!entry) {
+  console.error(`${mapName} is not in cache/map-index.json; serve it once first`);
+  process.exit(1);
+}
+const world = JSON.parse(fs.readFileSync(path.join(root, `cache/maps/${entry.hash}.json`), 'utf8'));
+const obstacles = world.obstacles;
+const topOf = (obs) => ((obs.type === 'mesh' && obs.bounds) ? obs.bounds.maxY : (obs.baseY || 0) + (obs.h || 0));
+const CONFIG = {
+  TANK_SPEED: 25,
+  TANK_ROTATION_SPEED: Math.PI / 4,
+  GRAVITY: 9.8,
+  JUMP_VELOCITY: 19,
+  ALLOW_JUMPING: true,
+  MAX_BUMP_HEIGHT: 0.33,
+};
+const probes = createWorldProbes({
+  obstacles: () => obstacles,
+  colliders: () => obstacles,
+  mapSize: () => world.mapSize,
+  findImpact: findShotSegmentImpact,
+  topOf,
+});
+// One router for every run, so the graph and each base's field are built once.
+const findRoute = createRouter(() => ({
+  obstacles,
+  mapSize: world.mapSize,
+  waterLevel: world.waterLevel?.height ?? null,
+  jump: { velocity: CONFIG.JUMP_VELOCITY, gravity: CONFIG.GRAVITY, tankSpeed: CONFIG.TANK_SPEED },
+}));
+const bases = obstacles.filter((obs) => obs.kind === 'base').sort((a, b) => a.team - b.team);
+if (bases.length < 2) {
+  console.error(`${mapName} has ${bases.length} team base(s); this needs two or more`);
+  process.exit(1);
+}
+
+function run(tuning, from, to) {
+  let now = 100;
+  const pilot = new Ace({ tuning });
+  const start = { x: from.x, y: topOf(from), z: from.z };
+  const target = { x: to.x, y: topOf(to), z: to.z };
+  const driver = new BotDriver({
+    pilot,
+    env: {
+      config: () => CONFIG,
+      colliders: () => obstacles,
+      topOf,
+      state: () => ({ alive: true, ...start, rotation: 0 }),
+      view: (self) => ({
+        now,
+        self: {
+          ...self, id: 'me', flag: null, flagIndex: null, flagTeam: null, teamColor: from.team,
+          zoned: false, shotSpeed: 100, shotLifetime: 3.5, ricochet: false, canFire: false,
+        },
+        players: [],
+        shots: [],
+        flags: [{ index: 0, type: 'X*', team: to.team, onGround: true, ...target }],
+        world: {
+          allowJumping: true, teamFlags: true, waterLevel: null, shotSpeed: 100, maxShots: 1,
+          tankHeight: 2.05, tankLength: 6, tankAngVel: CONFIG.TANK_ROTATION_SPEED,
+          tankSpeed: CONFIG.TANK_SPEED, jumpVelocity: CONFIG.JUMP_VELOCITY, gravity: CONFIG.GRAVITY,
+          lockOnAngle: 0.15, shockOutRadius: 60, shakeTimeout: 0,
+        },
+        isFoe: () => true,
+        myBase: () => ({ ...start, radius: Math.min(from.w, from.d) / 2 }),
+        antidote: null,
+        ...probes,
+        findRoute,
+      }),
+      send: () => {},
+      act: () => {},
+    },
+  });
+  const phases = { ground: 0, raised: 0, lineup: 0, air: 0, unstick: 0, idle: 0 };
+  let jumps = 0;
+  let falls = 0;
+  let wasAir = false;
+  let travelled = 0;
+  let last = { x: start.x, z: start.z };
+  for (let t = 0; t < timeLimit; t += dt) {
+    now += dt;
+    driver.tick(dt);
+    const out = driver.lastOut;
+    const next = pilot.route?.nodes?.[pilot.route.at];
+    if (driver.jumpDirection !== null) phases.air += dt;
+    else if (out?.intent?.mode === 'unstick') phases.unstick += dt;
+    else if (next?.jump || next?.bridge) phases.lineup += dt;
+    else if (Math.abs(out?.speed || 0) < 0.05) {
+      phases.idle += dt;
+      if (process.env.BENCH_TRACE && Math.round(t / dt) % 10 === 0) {
+        console.log(`    idle t=${t.toFixed(1)} at (${driver.x.toFixed(0)},${driver.y.toFixed(0)},${driver.z.toFixed(0)})`
+          + ` rot=${out.rotation.toFixed(2)} mode=${out.intent.mode} next=${JSON.stringify(next)}`);
+      }
+    }
+    else if (driver.y > 0.33) phases.raised += dt;
+    else phases.ground += dt;
+    if (process.env.BENCH_PATH && Math.round(t / dt) % 20 === 0) {
+      console.log(`    t=${t.toFixed(0)} (${driver.x.toFixed(0)},${driver.y.toFixed(1)},${driver.z.toFixed(0)})`
+        + ` ${out?.intent?.mode} next=${JSON.stringify(next)}`);
+    }
+    travelled += Math.hypot(driver.x - last.x, driver.z - last.z);
+    last = { x: driver.x, z: driver.z };
+    const air = driver.jumpDirection !== null;
+    if (air && !wasAir) {
+      if (driver.vy > 10) jumps++;
+      else falls++;
+    }
+    wasAir = air;
+    const radius = Math.min(to.w, to.d) / 2;
+    if (Math.hypot(driver.x - to.x, driver.z - to.z) < radius && Math.abs(driver.y - target.y) < 0.5) {
+      return { arrived: true, time: t, jumps, falls, travelled, phases };
+    }
+  }
+  return { arrived: false, time: timeLimit, jumps, falls, travelled, phases };
+}
+
+const only = args.get('only') ? args.get('only').split(',') : null;
+const strategies = args.get('tuning')
+  ? { custom: JSON.parse(args.get('tuning')) }
+  : Object.fromEntries(Object.entries(STRATEGIES).filter(([name]) => !only || only.includes(name)));
+
+// `--pair 3-2`: one run, from team 3's base to team 2's.
+const pairFilter = args.get('pair') ? args.get('pair').split('-').map(Number) : null;
+const pairs = [];
+for (const from of bases) {
+  for (const to of bases) {
+    if (from === to) continue;
+    if (pairFilter && (from.team !== pairFilter[0] || to.team !== pairFilter[1])) continue;
+    pairs.push([from, to]);
+  }
+}
+console.log(`${mapName}: ${pairs.length} base-to-base runs per strategy, ${timeLimit}s limit`);
+console.log('strategy           arrived  mean s  worst s  falls  jumps  units');
+for (const [name, change] of Object.entries(strategies)) {
+  const tuning = { ...ACE_TUNING, ...change };
+  const results = pairs.map(([from, to]) => run(tuning, from, to));
+  const arrived = results.filter((r) => r.arrived);
+  const mean = arrived.length ? arrived.reduce((sum, r) => sum + r.time, 0) / arrived.length : NaN;
+  const worst = Math.max(...results.map((r) => r.time));
+  const total = (key) => results.reduce((sum, r) => sum + r[key], 0);
+  console.log(`${name.padEnd(18)} ${`${arrived.length}/${results.length}`.padStart(7)}`
+    + `  ${mean.toFixed(1).padStart(6)}  ${worst.toFixed(1).padStart(7)}`
+    + `  ${String(total('falls')).padStart(5)}  ${String(total('jumps')).padStart(5)}`
+    + `  ${total('travelled').toFixed(0).padStart(5)}`);
+  if (args.get('detail')) {
+    results.forEach((r, i) => {
+      const [from, to] = pairs[i];
+      const ph = Object.entries(r.phases).map(([k, v]) => `${k} ${v.toFixed(0)}`).join(' ');
+      console.log(`   team ${from.team}->${to.team} ${r.arrived ? 'ok ' : 'NO '}${r.time.toFixed(0).padStart(4)}s`
+        + ` falls ${r.falls} jumps ${r.jumps} | ${ph}`);
+    });
+  }
+}

@@ -392,7 +392,7 @@ import {
 } from './collision.mjs';
 import { meshArrays, FACE_NO_RADAR } from './mesh-arrays.mjs';
 import { resolveTankMotion } from './motion.mjs';
-import { AUTOPILOTS, createWorldProbes } from './autopilot.mjs';
+import { AUTOPILOTS, createRouter, createWorldProbes } from './autopilot.mjs';
 import {
   TRACK_SURFACE_TOLERANCE,
   TRACK_UPDATE_TIME,
@@ -4409,8 +4409,9 @@ function updateObserverHudVisibility() {
 function getHudStatusParts(observing) {
   if (observing) return getRoamLabelParts();
   if (autopilotOn) {
-    // Upstream's "AutoPilot on", naming the pilot.
-    const text = `AutoPilot ${getAutopilotName(autopilotId)}`;
+    // Upstream's "AutoPilot on", naming the pilot and what it is doing.
+    const mode = autopilotOutput?.intent?.mode;
+    const text = `AutoPilot ${getAutopilotName(autopilotId)}${mode ? `: ${mode}` : ''}`;
     return { text, segments: [{ text }] };
   }
   return { text: '', segments: [] };
@@ -7767,8 +7768,9 @@ function handleServerMessage(message) {
     case 'autopilot': {
       const tank = tanks.get(message.playerId);
       if (tank?.userData?.playerState) tank.userData.playerState.autopilot = message.on;
+      // Upstream's words, with the pilot's own name where it is not Roger.
       noticeAbout(null, [describePlayer(message.playerId),
-        message.on ? ': Roger taking controls' : ': Roger releasing controls'], 0, false);
+        `: ${message.pilot || 'Roger'} ${message.on ? 'taking' : 'releasing'} controls`], 0, false);
       break;
     }
 
@@ -8334,8 +8336,13 @@ function handlePlayerHit(message) {
   // was made with, a death against the flag held.
   if (autopilotOn) {
     const pilot = autopilots.get(autopilotId);
-    if (message.victimId === myPlayerId) pilot.teach(message.victimFlag ?? null, -1);
-    else if (message.shooterId === myPlayerId) pilot.teach(message.shooterFlag ?? null, 1);
+    if (message.victimId === myPlayerId) {
+      pilot.teach(message.victimFlag ?? null, -1);
+      autopilotTally.deaths++;
+    } else if (message.shooterId === myPlayerId) {
+      pilot.teach(message.shooterFlag ?? null, 1);
+      autopilotTally.kills++;
+    }
   }
   const shooterTank = tanks.get(message.shooterId);
   const victimTank = tanks.get(message.victimId);
@@ -11823,6 +11830,8 @@ function engageAutopilot(id) {
 function setAutopilot(id) {
   autopilotId = id;
   autopilotOn = id !== null;
+  if (!autopilotOn) clearAutopilotIntent();
+  autopilotReportAt = 0;
   storeAutopilot(id);
   autopilotOutput = null;
   sendToServer({ type: 'autopilot', on: autopilotOn, pilot: autopilotOn ? getAutopilotName(id) : null });
@@ -11863,6 +11872,14 @@ function selectAutopilotRow() {
   return true;
 }
 
+const autopilotRouter = createRouter(() => ({
+  obstacles: OBSTACLES,
+  mapSize: currentWorldMapSize || DEFAULT_MAP_SIZE,
+  waterLevel: currentWorldWaterHeight > 0 ? currentWorldWaterHeight : null,
+  jump: gameConfig?.ALLOW_JUMPING
+    ? { velocity: gameConfig.JUMP_VELOCITY, gravity: gameConfig.GRAVITY, tankSpeed: gameConfig.TANK_SPEED }
+    : null,
+}));
 const autopilotProbes = createWorldProbes({
   obstacles: () => OBSTACLES,
   colliders: getCollisionColliders,
@@ -11991,6 +12008,7 @@ function buildAutopilotView() {
       tankLength: TANK_HALF_LENGTH * 2,
       tankAngVel: gameConfig.TANK_ROTATION_SPEED,
       tankSpeed: gameConfig.TANK_SPEED,
+      shakeTimeout: normalizeShakeTimeout(gameConfig.FLAG_SHAKE_TIMEOUT),
       jumpVelocity: gameConfig.JUMP_VELOCITY,
       gravity: gameConfig.GRAVITY,
       lockOnAngle: LOCK_ON_ANGLE,
@@ -12008,16 +12026,117 @@ function buildAutopilotView() {
       };
     },
     ...autopilotProbes,
+    findRoute: autopilotRouter,
+    // Where this client's bad flag can be shed, which the server tells only
+    // its carrier.
+    antidote: antidotePosition,
   };
+}
+
+// What the pilot is doing, drawn under Debug Geometry for the person it is
+// flying for: the route
+// left to drive (jump legs in their own colour), a beacon on what it is going
+// for, a cross where a jumper it is waiting on will land, and each shot's path
+// for a moment after it goes -- red for one it held back. None of this is the
+// server's business, so a server-run bot simply has no one to draw it for.
+const AUTOPILOT_OVERLAY = Object.freeze({
+  ground: 0x00e5ff,
+  raised: 0xffd400,
+  jump: 0xff40ff,
+  target: 0x40ff40,
+  foe: 0xff6040,
+  landing: 0xffffff,
+  shot: 0xffffff,
+  held: 0xff3030,
+  lift: 0.3,
+  beaconHeight: 20,
+  shotSeconds: 1,
+});
+let autopilotShotOverlay = null;
+// The report the pilot sends every so often, and the kills and deaths since
+// the last one, which only the client hears about.
+const AUTOPILOT_REPORT_MS = 10000;
+let autopilotReportAt = 0;
+const autopilotTally = { kills: 0, deaths: 0 };
+
+function drawAutopilotIntent(intent, nowMs) {
+  const segments = [];
+  const lift = (p, dy = AUTOPILOT_OVERLAY.lift) => ({ x: p.x, y: p.y + dy, z: p.z });
+  if (intent?.route?.length) {
+    let from = { x: playerX, y: myTank.position.y, z: playerZ };
+    for (const node of intent.route) {
+      const color = node.jump
+        ? AUTOPILOT_OVERLAY.jump
+        : (node.y > 0.33 ? AUTOPILOT_OVERLAY.raised : AUTOPILOT_OVERLAY.ground);
+      segments.push({ a: lift(from), b: lift(node), color });
+      from = node;
+    }
+  }
+  if (intent?.target) {
+    const t = intent.target;
+    const color = t.id !== undefined ? AUTOPILOT_OVERLAY.foe : AUTOPILOT_OVERLAY.target;
+    segments.push({ a: lift(t, 0), b: lift(t, AUTOPILOT_OVERLAY.beaconHeight), color });
+    const r = 3;
+    const corners = [[r, 0], [0, r], [-r, 0], [0, -r], [r, 0]];
+    for (let i = 0; i < 4; i++) {
+      segments.push({
+        a: { x: t.x + corners[i][0], y: t.y + 0.5, z: t.z + corners[i][1] },
+        b: { x: t.x + corners[i + 1][0], y: t.y + 0.5, z: t.z + corners[i + 1][1] },
+        color,
+      });
+    }
+  }
+  if (intent?.landing) {
+    const l = intent.landing;
+    const r = 2.5;
+    segments.push({ a: { x: l.x - r, y: l.y + 0.2, z: l.z - r }, b: { x: l.x + r, y: l.y + 0.2, z: l.z + r }, color: AUTOPILOT_OVERLAY.landing });
+    segments.push({ a: { x: l.x - r, y: l.y + 0.2, z: l.z + r }, b: { x: l.x + r, y: l.y + 0.2, z: l.z - r }, color: AUTOPILOT_OVERLAY.landing });
+  }
+  if (intent?.shot) {
+    const shot = intent.shot;
+    const path = shot.segments || autopilotProbes.traceShot(
+      shot.from, shot.dir, getShotSpeed(getMyShotFlag()), getShotLifetimeSeconds(getMyShotFlag()),
+      shotRicochets(getMyShotFlag(), gameConfig?.ALL_SHOTS_RICOCHET));
+    autopilotShotOverlay = { path, held: shot.held === true, at: nowMs };
+  }
+  if (autopilotShotOverlay && nowMs - autopilotShotOverlay.at < AUTOPILOT_OVERLAY.shotSeconds * 1000) {
+    const color = autopilotShotOverlay.held ? AUTOPILOT_OVERLAY.held : AUTOPILOT_OVERLAY.shot;
+    for (const step of autopilotShotOverlay.path) segments.push({ a: step.from, b: step.to, color });
+  }
+  renderManager.setOverlaySegments(segments);
+}
+
+function clearAutopilotIntent() {
+  autopilotShotOverlay = null;
+  renderManager.setOverlaySegments([]);
+}
+
+function reportAutopilot(nowMs) {
+  if (nowMs < autopilotReportAt) return;
+  const first = autopilotReportAt === 0;
+  autopilotReportAt = nowMs + AUTOPILOT_REPORT_MS;
+  const report = autopilots.get(autopilotId).takeReport();
+  if (first) return;
+  sendToServer({
+    type: 'debug',
+    message: `[autopilot] ${getAutopilotName(autopilotId)}: ${report};`
+      + ` kills ${autopilotTally.kills}, deaths ${autopilotTally.deaths}`,
+  });
+  autopilotTally.kills = 0;
+  autopilotTally.deaths = 0;
 }
 
 function runAutopilot() {
   if (!autopilotOn || isObserver() || !isMyTankAlive() || pauseState.paused) {
+    if (autopilotOutput) clearAutopilotIntent();
     autopilotOutput = null;
     return;
   }
   autopilotOutput = autopilots.get(autopilotId).think(buildAutopilotView());
   const now = performance.now();
+  if (showDebugGeometry) drawAutopilotIntent(autopilotOutput.intent, now);
+  else if (autopilotShotOverlay !== null || renderManager.overlayLines?.visible) clearAutopilotIntent();
+  reportAutopilot(now);
   // chasePlayer's `setTarget` (AutoPilot.cxx:394), which is what a Guided
   // Missile steers at. Upstream names the target outright; bzo locks the way a
   // player does, with Identify, so the server keeps its sights check. Roger

@@ -15707,6 +15707,7 @@ function setAutopilot(player, on, pilot) {
   if (isObserverTeam(player.team)) return;
   if (!on && !player.autopilot) return;
   const changed = player.autopilot !== on;
+  const previousName = player.autopilotName;
   if (on) {
     if (!player.autopilot) player.savedMotto = player.motto;
     player.autopilotName = sanitizeMotto(typeof pilot === 'string' && pilot ? pilot : 'Roger');
@@ -15719,7 +15720,11 @@ function setAutopilot(player, on, pilot) {
   player.autopilot = on;
   if (changed) {
     log(`Player ${player.id} "${player.name}" autopilot ${on ? `on (${player.autopilotName})` : 'off'}`);
-    broadcastAll({ type: 'autopilot', playerId: player.id, on });
+  }
+  // Said again when the pilot changes in flight, so everyone hears who has
+  // the controls now.
+  if (changed || on) {
+    broadcastAll({ type: 'autopilot', playerId: player.id, on, pilot: on ? player.autopilotName : previousName });
   }
   if (player.joined) broadcastPlayerRecord('playerUpdated', player);
 }
@@ -21328,6 +21333,21 @@ function getBotViewMotion(player, flagType, now) {
   };
 }
 
+const botRouter = { current: null };
+function getBotRouter() {
+  if (!botRouter.current) {
+    botRouter.current = AUTOPILOT_MODULE.createRouter(() => ({
+      obstacles: OBSTACLES,
+      mapSize: GAME_CONFIG.MAP_SIZE,
+      waterLevel: mapWaterLevel && mapWaterLevel.height > 0 ? mapWaterLevel.height : null,
+      jump: GAME_CONFIG.ALLOW_JUMPING
+        ? { velocity: GAME_CONFIG.JUMP_VELOCITY, gravity: GAME_CONFIG.GRAVITY, tankSpeed: GAME_CONFIG.TANK_SPEED }
+        : null,
+    }));
+  }
+  return botRouter.current;
+}
+
 const botProbes = { current: null };
 function getBotProbes() {
   if (!botProbes.current) {
@@ -21434,6 +21454,7 @@ function buildBotView(bot, self) {
       tankLength: TANK_HALF_LENGTH * 2,
       tankAngVel: GAME_CONFIG.TANK_ROTATION_SPEED,
       tankSpeed: GAME_CONFIG.TANK_SPEED,
+      shakeTimeout: FLAG_SHAKE_TIMEOUT,
       jumpVelocity: GAME_CONFIG.JUMP_VELOCITY,
       gravity: GAME_CONFIG.GRAVITY,
       lockOnAngle: LOCK_ON_ANGLE,
@@ -21446,6 +21467,8 @@ function buildBotView(bot, self) {
       return { x: base.x, y: getColliderTopY(base), z: base.z, radius: Math.min(base.w, base.d) / 2 };
     },
     ...getBotProbes(),
+    findRoute: getBotRouter(),
+    antidote: me.antidote ?? null,
   };
 }
 
@@ -21496,6 +21519,9 @@ function addBot(pilotId = botFillPilot, team = PLAYER_TEAM.AUTOMATIC, { auto = f
     pilotId: entry.id,
     auto,
     lastGrabAt: 0,
+    reportAt: 0,
+    reportedWins: 0,
+    reportedLosses: 0,
   };
   bot.driver = new BotDriver({
     pilot: new entry.Pilot(),
@@ -21516,6 +21542,21 @@ function addBot(pilotId = botFillPilot, team = PLAYER_TEAM.AUTOMATIC, { auto = f
     type: 'joinGame', name, team, tankModel: 'bzflag', motto: entry.name, bot: true,
   });
   return { bot };
+}
+
+// What a bot has been doing, every so often, in the log: the pilot's own
+// account (`takeReport`) and the kills and deaths the server scored it.
+const BOT_REPORT_MS = 10000;
+function reportBot(bot, now) {
+  if (now < bot.reportAt) return;
+  const first = bot.reportAt === 0;
+  bot.reportAt = now + BOT_REPORT_MS;
+  const report = bot.driver.pilot.takeReport();
+  const kills = bot.player.wins - bot.reportedWins;
+  const deaths = bot.player.losses - bot.reportedLosses;
+  bot.reportedWins = bot.player.wins;
+  bot.reportedLosses = bot.player.losses;
+  if (!first) log(`[BOT] "${bot.player.name}" ${report}; kills ${kills}, deaths ${deaths}`);
 }
 
 function removeBot(bot) {
@@ -21589,9 +21630,11 @@ setInterval(() => {
     if (idle) bots.forEach((bot) => bot.driver.halt());
   }
   if (idle) return;
+  const now = Date.now();
   bots.forEach((bot) => {
     try {
       bot.driver.tick(BOT_TICK_SECONDS);
+      reportBot(bot, now);
     } catch (err) {
       logError(`[BOT] "${bot.player.name}" ${err.stack || err.message}`);
     }

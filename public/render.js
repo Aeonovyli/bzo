@@ -440,6 +440,8 @@ const BZFLAG_FLAG_ALPHA_THRESHOLD = 0.9;
 const FLAG_RENDER_ORDER = 5;
 // Shots ride over the flags they pass, and their explosions over the shots.
 const SHOT_RENDER_ORDER = 16;
+// How many lines the overlay holds; past that it draws the first ones.
+const OVERLAY_MAX_SEGMENTS = 2048;
 const SHOT_EXPLOSION_RENDER_ORDER = 17;
 // The teleporter proximity wash, drawn on a quad mounted to the camera. Last of
 // everything the world draws, matching where upstream runs it: `renderDimming`
@@ -8241,6 +8243,49 @@ class RenderManager {
   // in a headset as readily as in a window. Depth testing is off because a lock
   // is a HUD element -- upstream's is drawn over everything, and a target that
   // ducks behind a wall is exactly when you want to know where it went.
+  // A set of coloured line segments drawn over the world, for whatever the
+  // client wants to show without a mesh of its own -- the autopilot's plan. One
+  // draw for all of them, through walls, so a route behind a building is still
+  // a route. `segments` is `[{ a, b, color }]`, or empty to hide it.
+  setOverlaySegments(segments) {
+    if (!this.scene) return;
+    const count = Math.min(segments?.length || 0, OVERLAY_MAX_SEGMENTS);
+    if (count === 0) {
+      if (this.overlayLines) this.overlayLines.visible = false;
+      return;
+    }
+    if (!this.overlayLines) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(OVERLAY_MAX_SEGMENTS * 6), 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(OVERLAY_MAX_SEGMENTS * 6), 3));
+      const material = new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.85,
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.overlayLines = new THREE.LineSegments(geometry, material);
+      this.overlayLines.frustumCulled = false;
+      this.overlayLines.renderOrder = SHOT_RENDER_ORDER + 2;
+      this.worldGroup.add(this._tagDraws(this.overlayLines, 'effect'));
+    }
+    const geometry = this.overlayLines.geometry;
+    const positions = geometry.attributes.position.array;
+    const colors = geometry.attributes.color.array;
+    const color = this._overlayColor || (this._overlayColor = new THREE.Color());
+    for (let i = 0; i < count; i++) {
+      const { a, b } = segments[i];
+      color.setHex(segments[i].color);
+      positions.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6);
+      colors.set([color.r, color.g, color.b, color.r, color.g, color.b], i * 6);
+    }
+    geometry.setDrawRange(0, count * 2);
+    geometry.attributes.position.needsUpdate = true;
+    geometry.attributes.color.needsUpdate = true;
+    this.overlayLines.visible = true;
+  }
+
   setLockOnMarker(position, color) {
     if (!this.scene) return;
     if (!position) {

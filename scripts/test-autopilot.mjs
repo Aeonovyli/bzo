@@ -320,4 +320,72 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.ok(Math.abs(high.rotation) > 0 || high.speed !== near.speed, 'and Ace does something else');
 }
 
+// The intent: what the pilot is doing, for a client to draw and a log to read.
+{
+  const chase = new Roger().think(makeView({ players: [enemy(0, -150)] }));
+  assert.equal(chase.intent.mode, 'chase');
+  assert.equal(chase.intent.target.id, 'foe');
+  assert.ok(Math.abs(chase.intent.target.z + 150) < 1e-9, 'the target is in bzo\'s frame');
+  assert.ok(chase.intent.shot && Math.abs(chase.intent.shot.dir.z + 1) < 1e-9, 'a shot fired north');
+
+  const wander = new Roger().think(makeView());
+  assert.equal(wander.intent.mode, 'wander');
+  assert.equal(wander.intent.target, null);
+
+  const redFlag = { index: 0, type: 'R*', team: 1, onGround: true, x: 300, y: 0, z: 0 };
+  const ace = new Ace();
+  const capture = ace.think(makeView({
+    self: { teamColor: 2 },
+    flags: [redFlag],
+    world: { teamFlags: true },
+    myBase: () => ({ x: -300, y: 0, z: 0, radius: 15 }),
+    findRoute: () => [{ x: 4, y: 0, z: 0, jump: false }, { x: 300, y: 0, z: 0, jump: false }],
+  }));
+  assert.equal(capture.intent.mode, 'capture');
+  assert.equal(capture.intent.target.flag, 'R*');
+  assert.equal(capture.intent.route.length, 2, 'the route left to drive');
+
+  const report = ace.takeReport();
+  assert.match(report, /^capture 100%; shots 0, jumps 0, falls 0, routes 1 \(0 none\)/);
+  assert.match(ace.takeReport(), /^idle;/, 'a report starts the count again');
+}
+
+// Staying alive: a shot from the side is driven out of the way, not jumped;
+// one too close to drive clear of is jumped; one head-on cannot be driven out
+// of and is jumped too.
+{
+  const fromEast = (distance) => ({
+    ownerId: 'foe', ownerZoned: false, flag: null, x: distance, y: 1, z: 0, vx: -100, vy: 0, vz: 0,
+  });
+  const side = new Ace().think(makeView({ shots: [fromEast(40)] }));
+  assert.equal(side.intent.mode, 'dodge');
+  assert.equal(side.jump, false, 'a shot from the side is driven out of');
+  assert.equal(side.speed, 1, 'forward, which is across its line');
+
+  const close = new Ace().think(makeView({ shots: [fromEast(12)] }));
+  assert.equal(close.jump, true, 'too close to drive clear of: jump');
+
+  const headOn = { ownerId: 'foe', ownerZoned: false, flag: null, x: 0, y: 1, z: -40, vx: 0, vy: 0, vz: 100 };
+  assert.equal(new Ace().think(makeView({ shots: [headOn] })).jump, true, 'head-on: no way across, so up');
+
+  const wide = { ...fromEast(40), z: -10 };
+  assert.notEqual(new Ace().think(makeView({ shots: [wide] })).intent.mode, 'dodge', 'a shot that misses is ignored');
+}
+
+// The antidote: carrying a bad flag with no shake-off, Ace goes to it before
+// anything else but dodging; with a quick shake-off, he waits it out.
+{
+  const view = (shakeTimeout) => makeView({
+    self: { flag: 'B', flagIndex: 5 },
+    players: [enemy(0, -150)],
+    world: { shakeTimeout },
+    antidote: { x: 100, y: 0, z: 0 },
+  });
+  const going = new Ace().think(view(0));
+  assert.equal(going.intent.mode, 'antidote');
+  assert.ok(going.rotation < 0, 'east of a north-facing tank is a right turn');
+  assert.equal(new Ace().think(view(2)).intent.mode, 'chase', 'two seconds is sooner than the drive');
+  assert.equal(new Ace().think(view(60)).intent.mode, 'antidote', 'a minute is not');
+}
+
 console.log('autopilot tests passed');

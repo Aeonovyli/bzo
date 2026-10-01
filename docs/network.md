@@ -151,7 +151,7 @@ omitted rather than sent null.
 | `gmUpdate` | `playerId`, `targetId` | a GM lock (`MsgGMUpdate`'s target half) |
 | `identifyResult` | `targetId`, `locked` | the identify answer |
 | `playerPaused` / `playerUnpaused` / `pauseCountdown` / `pauseCancelled` | `playerId` (+ position on pause) | pause state |
-| `autopilot` | `playerId`,`on` | somebody's autopilot changed |
+| `autopilot` | `playerId`,`on`,`pilot` | somebody's autopilot changed, or its pilot did |
 | `message` | `src`, `dst`, `msgType`, `text`, `ts` | chat, in and out |
 | `lag` | `lagMs` | the server's measurement of *your* lag |
 | `serverConfigUpdate` | `serverName`, `motd`, `shotMaxActive`, `ricochet`, `timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore` | live config changed |

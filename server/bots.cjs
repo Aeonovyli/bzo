@@ -21,6 +21,7 @@ const {
   TANK_HALF_WIDTH,
   TANK_HALF_LENGTH,
 } = require('./collision.cjs');
+const { getAccelerationLimits, applyAccelerationLimit } = require('./flags.cjs');
 
 // The fill rule: bots make up the playing roster to `fill`, and there are none
 // once the people do. Returns how many to add (positive) or take away
@@ -83,6 +84,7 @@ class BotDriver {
     this.r = state.rotation;
     this.vy = 0;
     this.angVel = 0;
+    this.speed = 0;
     this.jumpDirection = null;
     this.airVX = 0;
     this.airVZ = 0;
@@ -119,6 +121,7 @@ class BotDriver {
     }
     const config = this.env.config();
     const out = this.pilot.think(this.env.view(this.self()));
+    this.lastOut = out;
 
     if (out.dropFlag && this.clock - this.lastDropAt > 1) {
       this.lastDropAt = this.clock;
@@ -135,13 +138,19 @@ class BotDriver {
     let vx;
     let vz;
     if (airborne) {
-      // "can't control motion in air" (LocalPlayer.cxx:341).
+      // "can't control motion in air" (LocalPlayer.cxx:341): the velocity and
+      // the turn rate are the ones it left with, so a tank that jumps turning
+      // lands facing somewhere else.
       vx = this.airVX;
       vz = this.airVZ;
     } else {
-      vx = -Math.sin(this.r) * forward * speed;
-      vz = -Math.cos(this.r) * forward * speed;
-      this.angVel = turn * angSpeed;
+      // doMomentum, the same model the client drives by: no limit at all by
+      // default, a world's `-a` or `M` Momentum otherwise.
+      const limits = getAccelerationLimits(null, config.LINEAR_ACCELERATION, config.ANGULAR_ACCELERATION);
+      this.speed = applyAccelerationLimit(this.speed, forward * speed, limits.linear, dt);
+      this.angVel = applyAccelerationLimit(this.angVel, turn * angSpeed, limits.angular, dt);
+      vx = -Math.sin(this.r) * this.speed;
+      vz = -Math.cos(this.r) * this.speed;
     }
 
     if (!airborne && this.onGround) {
@@ -157,7 +166,7 @@ class BotDriver {
       force = true;
     }
 
-    const step = this.resolve(vx, this.vy, vz, this.jumpDirection === null ? this.angVel : 0, dt, config);
+    const step = this.resolve(vx, this.vy, vz, this.angVel, dt, config);
     const oldX = this.x;
     const oldZ = this.z;
     const oldR = this.r;
@@ -188,13 +197,14 @@ class BotDriver {
     // `fs` and `rs` are what the tank did, not what it was asked: client.js
     // measures them off the resolved step.
     let fs;
-    let rs = 0;
+    // In the air the turn carries on, so it is the turn rate the tank left
+    // with, as the client reports it.
+    const rs = dt > 0 ? (this.r - oldR) / dt / angSpeed : 0;
     if (this.jumpDirection === null) {
       const dx = this.x - oldX;
       const dz = this.z - oldZ;
       const along = (dx * -Math.sin(this.r)) + (dz * -Math.cos(this.r));
       fs = dt > 0 ? along / dt / speed : 0;
-      rs = dt > 0 ? (this.r - oldR) / dt / angSpeed : 0;
     } else {
       fs = Math.hypot(this.airVX, this.airVZ) / speed;
     }
