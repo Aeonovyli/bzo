@@ -39,9 +39,9 @@ Windows and macOS.
 
 ## Flags
 
-bzo carries every flag BZFlag has except `WA` Wide Angle, which is deliberately
-absent: it widens the field of view, and in VR the headset owns the projection.
-A `zoneflag WA` is ignored and `WA` never spawns.
+bzo carries every flag BZFlag has. `WA` Wide Angle spawns, sticks and shakes off
+like any bad flag, but does nothing: it widens the field of view, and in VR the
+headset owns the projection.
 
 [docs/flags.md](docs/flags.md) has the rest, including why.
 

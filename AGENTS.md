@@ -421,10 +421,11 @@ These are deliberate. Do not "fix" them without being asked.
   This is the one place bzo's motion loop diverges from `doUpdateMotion`.
   `npm run test:motion` holds the rule.
 
-- **`WA` Wide Angle is not implemented and will not be**, and neither is
-  upstream's binoculars key: both move the field of view, which the headset
-  runtime owns. `WA` is the only flag BZFlag has that bzo does not.
-  `docs/flags.md` says why.
+- **`WA` Wide Angle's effect is not implemented and will not be**, and neither
+  is upstream's binoculars key: both move the field of view, which the headset
+  runtime owns. The flag itself is carried -- it spawns, sticks and shakes off
+  like any bad flag, and its help says it does nothing here. `docs/flags.md`
+  says why.
 
 - **A face buried inside other obstacles is never built.** Upstream leaves out
   the two cases every map hits and no more: a box's bottom polygon when it sits
@@ -1042,8 +1043,8 @@ Two rules that decide new work rather than describe old:
 headset, so a desktop-camera or 2D-HUD trick is not enough: a flag that
 quietly does nothing in VR looks like it works and the player cannot tell.
 The headset runtime owns the projection, so anything that moves the field of
-view is out on those grounds -- `WA` Wide Angle, and upstream's binoculars
-key with it.
+view is out on those grounds -- `WA` Wide Angle's effect, and upstream's
+binoculars key with it.
 
 **Where a flag's rule is enforced follows one test:** server-side wherever a
 modified client could gain by lying, client-side wherever it only changes what

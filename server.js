@@ -6150,8 +6150,7 @@ function parseBZWServerOptions(lines) {
     // -f <abbreviation|good|bad>: take a flag type out of the pool a slot draws
     // from, upstream's flagDisallowed table. Disallows accumulate and nothing
     // puts one back, so this is a switch like the rest even though it names its
-    // target. `WA`, the one type bzo does not carry, is already absent from the
-    // pool, so naming it is not an error -- it asks for nothing that was there.
+    // target.
     if (readOption('-f') && value) {
       const disallowed = value.trim().toUpperCase();
       const disallowedQuality = disallowed === 'GOOD' || disallowed === 'BAD'
