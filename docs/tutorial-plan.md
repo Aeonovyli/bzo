@@ -67,10 +67,11 @@ targets that belong to nobody.
 
 ## Stage 4: bots, and a real offline match
 
-Opponents and adjudication. That means porting upstream's `RobotPlayer`
-(`src/bzflag/RobotPlayer.cxx`) and standing up kill, flag and score authority in
-the browser. This is the expensive tier, and the one to be sure is wanted before
-starting.
+Opponents and adjudication. The opponents exist now -- the autopilot's pilots
+and the server's bots ([bots-plan.md](bots-plan.md)) -- and
+[practice-plan.md](practice-plan.md) is the plan for the adjudication: the game's
+rules out of `server.js` into one module the server and a browser Worker both
+run. This is the expensive tier.
 
 ## What the client already has
 

@@ -559,6 +559,10 @@ version appears.
 `docs/tutorial-plan.md` is the plan for what an installed client does when the
 server is unreachable, and for tutorial levels built on top of that.
 
+`docs/practice-plan.md` is the plan for a practice match against bots, offline
+from an installed client: the game's rules out of `server.js` into one module
+the server and a browser Worker both run.
+
 `docs/bots-plan.md` is the plan for the autopilot and for bots (issue #151).
 `public/autopilot.mjs` reads the world only through the view that plan
 describes, so the client's autopilot and the server's own bots
