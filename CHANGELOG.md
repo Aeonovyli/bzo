@@ -6,6 +6,53 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.99] - 2026-10-02
+
+### Added
+- `/set` and `/reset` take any world variable by upstream's name, formulas
+  included (`/set _tankSpeed 40`, `/reset *`), tell everyone in upstream's
+  words, and take effect live for every player.
+- server.json has a `bzdb` block: upstream's command-line `-set`, by
+  upstream's names (`"_tankSpeed": "30"`). The old keys (`tankSpeed`,
+  `gravity`, `shotDuration` and the rest) still work, and the startup log
+  names each one to move. See docs/installation.md.
+- Maps, server.json and `/set` now reach many more of upstream's variables:
+  the tank's size; every superflag's tuning (Machine Gun, Laser, Shock Wave,
+  Guided Missile, Burrow, Rapid Fire, Thief, Velocity, Quick Turn, Tiny,
+  Obesity, Narrow, Agility, Steamroller); Wings; `_noClimb`; wall, flag and
+  default box heights; explosions; fog and sky colour; `_syncTime`; whether
+  a world draws mountains, clouds, sun and moon, ground and shadows; tread
+  mark fade; and the radar limit and `-noradar`. `docs/bzw.md` lists them.
+- `-set` values may be formulas (`12*_muzzleHeight`), and upstream defaults
+  that are formulas follow what they are built from, so `_tankLength 5`
+  shrinks the tank's radius, muzzle and explosion too.
+- Colours take upstream's X11 names (`black`, `grey3`, `red 0.5`), in
+  materials as well as variables.
+- The radar draws upstream's height box round every tank, bigger the
+  higher it is.
+- server.json's `timeOfDay` and `daySpeed` set the sky clock (#4).
+- `/list` filters by `+guestWatch`, `+guests`, `+guestChat` and `+bots`, and
+  shows Guests Watch / No Guests.
+- A player who leaves and comes back within `_rejoinTime` waits out the
+  rest before spawning, as on upstream.
+
+### Changed
+- `_explodeTime` is the respawn delay, as upstream has it; bundled maps
+  that set it now respawn that fast.
+- The radar's ranges are upstream's: a share of the world's radar limit
+  (the world size by default), so Medium shows half the world.
+- Fog is its own colour, `_fogColor`, rather than the sky's.
+- A jump from a slope goes straight up unless the world sets `_noClimb 0`.
+- A Map Viewer preview plays the map as it would play on this server,
+  server.json's `-set`s included.
+
+### Fixed
+- `_disableBots=true`, which upstream's `-disableBots` sets, counted as
+  allowing bots, on `/list` and through the proxy.
+- The server's sky clock ran about three times fast, so joiners saw a
+  different time of day from everyone else.
+- A `box` or `pyramid` with no `size` line had no size at all.
+
 ## [1.2.98] - 2026-10-02
 
 ### Added
