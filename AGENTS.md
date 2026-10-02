@@ -173,6 +173,11 @@ These are deliberate. Do not "fix" them without being asked.
   the moon rather than as spheres in the distance. Do not report the arc, the
   missing phases, or the absence of latitude as parity gaps.
 
+  server.json's `timeOfDay` (the hour the day starts at, random when unset)
+  and `daySpeed` (1 a real day, 72 the default 20-minute one, 0 stopped) set the
+  clock. The server reads it off the wall clock (`currentWorldTime`), so
+  every joiner is told the same time.
+
 - **Sky clouds are real 3D puff-sphere meshes with ordinary depth testing, not
   upstream's flat billboard texture.** `BackgroundRenderer::renderGroundEffects`
   draws its cloud layer (`cloudsGState`, `BackgroundRenderer.cxx:698-709`) in the

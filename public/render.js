@@ -62,7 +62,7 @@ import {
 import {
   FLAG_POLE_SIZE,
   FLAG_POLE_WIDTH,
-  SHOCK_IN_RADIUS,
+  getShotEffects,
   SUPER_FLAG_COLOR,
   getShockWaveAlpha,
 } from './flags.mjs';
@@ -4112,7 +4112,7 @@ class RenderManager {
     puddleAlpha.needsUpdate = true;
   }
 
-  createMapBoundaries(mapSize = 100, noWalls = false) {
+  createMapBoundaries(mapSize = 100, noWalls = false, wallHeight = WORLD_WALL_HEIGHT) {
     if (!this.scene) return;
 
     // Remove old boundary meshes and debug labels if present
@@ -4128,7 +4128,6 @@ class RenderManager {
     // the wall up to, so what bounces a shot is exactly what a player can see.
     // Above it the barrier is invisible and lets shots through, which is what
     // upstream's outer wall does too.
-    const wallHeight = WORLD_WALL_HEIGHT;
     const wallThickness = 1;
 
     // Create and track boundary meshes
@@ -4145,8 +4144,10 @@ class RenderManager {
 
     // `noWalls` -- a map's `world` block skipped the border entirely. There is
     // nothing to draw, but the compass letters are still worth having: with no
-    // wall to judge direction by, they are the only orientation cue left.
-    if (noWalls) {
+    // wall to judge direction by, they are the only orientation cue left. A
+    // `_wallHeight` of 0 is the same picture: the wall is there for tanks, but
+    // nothing of it stands above the ground.
+    if (noWalls || !(wallHeight > 0)) {
       const markerHeight = Math.max(wallHeight + 8, this.maxObstacleHeight + 5);
       this._addCompassMarker('N', 0xB20000, new THREE.Vector3(0, markerHeight, -mapSize / 2));
       this._addCompassMarker('S', 0x1976D2, new THREE.Vector3(0, markerHeight, mapSize / 2));
@@ -8787,12 +8788,12 @@ class RenderManager {
     const material = new THREE.MeshBasicMaterial({
       color: waveColor,
       transparent: true,
-      opacity: getShockWaveAlpha(SHOCK_IN_RADIUS),
+      opacity: getShockWaveAlpha(getShotEffects('SW').shockInRadius),
       side: THREE.DoubleSide,
       depthWrite: false,
     });
     const mesh = new THREE.Mesh(this._shockWaveGeometry, material);
-    mesh.scale.setScalar(SHOCK_IN_RADIUS);
+    mesh.scale.setScalar(Math.max(getShotEffects('SW').shockInRadius, 1e-3));
     mesh.frustumCulled = false;
     mesh.renderOrder = SHOT_RENDER_ORDER;
 

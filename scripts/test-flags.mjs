@@ -25,6 +25,7 @@ import {
   isColorTeamIndex,
 } from '../public/teams.mjs';
 import {
+  configureShotEffects,
   BZFLAG_TANK_RADIUS,
   GM_AD_LIFE,
   GM_ACTIVATION_TIME,
@@ -1830,6 +1831,37 @@ for (const theirs of ['ST', 'CL', 'MQ', 'SE', null]) {
     serverFlags.parseFlagInfo(formatFlagInfo(description)),
     parseFlagInfo(formatFlagInfo(description)),
   );
+}
+
+// A world's own Machine Gun (`_mGunAdVel`, `_mGunAdRate`, `_mGunAdLife`). Its
+// life defaults to "1.0 / _mGunAdRate", so it follows a rate the world sets.
+{
+  assert.deepEqual([getShotEffects('MG').velocityFactor, getShotEffects('MG').rateFactor, getShotEffects('MG').lifeFactor], [1.5, 10, 0.1]);
+  configureShotEffects({ MGUN_AD_VEL: 4, MGUN_AD_RATE: 20 });
+  assert.equal(getShotEffects('MG').velocityFactor, 4);
+  assert.equal(getShotEffects('MG').lifeFactor, 1 / 20, 'life follows the rate');
+  configureShotEffects({ MGUN_AD_RATE: 20, MGUN_AD_LIFE: 0.02 });
+  assert.equal(getShotEffects('MG').lifeFactor, 0.02, 'a stated life wins');
+  assert.equal(getShotEffects('F').rateFactor, 2, 'other flags untouched');
+  configureShotEffects({});
+  assert.equal(getShotEffects('MG').rateFactor, 10, 'and back to upstream');
+}
+
+// Laser's `_laserAd*` and Shock Wave's `_shockAdLife`, `_shockInRadius` and
+// `_shockOutRadius`, which the wave's growth and fade both follow.
+{
+  configureShotEffects({ LASER_AD_VEL: 20, LASER_AD_RATE: 1.5, LASER_AD_LIFE: 0.3 });
+  const laser = getShotEffects('L');
+  assert.deepEqual([laser.velocityFactor, laser.rateFactor, laser.lifeFactor, laser.beam], [20, 1.5, 0.3, true]);
+  configureShotEffects({ SHOCK_AD_LIFE: 0.25, SHOCK_IN_RADIUS: 0, SHOCK_OUT_RADIUS: 80 });
+  assert.equal(getShotEffects('SW').lifeFactor, 0.25);
+  close(getShockWaveRadius(0, 1), 0, 'a wave may start from nothing');
+  close(getShockWaveRadius(0.5, 1), 40, 'and grows to the world\'s radius');
+  close(getShockWaveRadius(1, 1), 80);
+  close(getShockWaveAlpha(80), 0.25, 'fading by the world\'s span');
+  configureShotEffects({});
+  close(getShockWaveRadius(1, 1), SHOCK_OUT_RADIUS, 'and back to upstream');
+  assert.equal(getShotEffects('L').velocityFactor, LASER_AD_VEL);
 }
 
 console.log('Flag flight and type tests passed');

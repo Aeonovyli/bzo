@@ -366,7 +366,10 @@ free-for-all here (upstream's own table gives the letter to both `ffa` and
 bzo has no favourites to collide with), and `i` and `I` both mean inertia
 (upstream's parser takes the lowercase letter while its help page prints the
 capital). A filter naming a per-team figure leaves out any row bzo has no
-figure for, rather than counting it as zero.
+figure for, rather than counting it as zero. bzo adds three booleans of its own: `b`/`bots`, from a
+server's `_disableBots`, and `gw`/`guestWatch`, `gu`/`guests` and `gc`/`guestChat`, from what bzo
+has learned about guest access (docs/proxy.md, "Guest access"). A server bzo
+has not found out about matches neither `+` nor `-`.
 
 Clicking a row selects it rather than following it, because the pane is
 where the detail is and the bar above it holds the way in. Arrow keys move

@@ -2607,7 +2607,7 @@ function getSegmentTankHitFraction(from, to, tank, shape = {}) {
 //
 // Both flags are the ones a map's `shootthrough` and `drivethrough` keywords
 // set, which is what makes this the compatible way to say it.
-function buildWorldBorderColliders(mapSize, noWalls = false) {
+function buildWorldBorderColliders(mapSize, noWalls = false, wallHeight = WORLD_WALL_HEIGHT) {
   if (noWalls) return [];
   const halfMap = mapSize / 2;
   const thickness = 4;
@@ -2627,14 +2627,17 @@ function buildWorldBorderColliders(mapSize, noWalls = false) {
     colliders.push({ ...box, name: `boundary_${side.name}`, shootThrough: true, h: barrierHeight });
     // And the wall a player can see, which is what a shot bounces off below
     // `_wallHeight` and nothing at all above it. Tanks are the barrier's job.
-    colliders.push({ ...box, name: `boundary_${side.name}_wall`, driveThrough: true, h: WORLD_WALL_HEIGHT });
+    // A world whose `_wallHeight` is 0 has none, and every shot leaves it.
+    if (wallHeight > 0) {
+      colliders.push({ ...box, name: `boundary_${side.name}_wall`, driveThrough: true, h: wallHeight });
+    }
   }
   return colliders;
 }
 
 // Everything a tank or a shot can meet: the map's obstacles and its border.
-function buildCollisionColliders(obstacles, mapSize, noWalls = false) {
-  return [...(obstacles || []), ...buildWorldBorderColliders(mapSize, noWalls)];
+function buildCollisionColliders(obstacles, mapSize, noWalls = false, wallHeight = WORLD_WALL_HEIGHT) {
+  return [...(obstacles || []), ...buildWorldBorderColliders(mapSize, noWalls, wallHeight)];
 }
 
 module.exports = {

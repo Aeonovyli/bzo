@@ -1021,27 +1021,15 @@ const DEFAULT_SHOT_EFFECTS = Object.freeze({
   fireSound: 'fire',
 });
 
-const SHOT_EFFECTS = Object.freeze({
+const SHOT_EFFECTS = {
   F: Object.freeze({
     ...DEFAULT_SHOT_EFFECTS,
     velocityFactor: RAPID_FIRE_AD_VEL,
     rateFactor: RAPID_FIRE_AD_RATE,
     lifeFactor: 1 / RAPID_FIRE_AD_RATE,
   }),
-  MG: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    velocityFactor: MACHINE_GUN_AD_VEL,
-    rateFactor: MACHINE_GUN_AD_RATE,
-    lifeFactor: 1 / MACHINE_GUN_AD_RATE,
-  }),
-  L: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    velocityFactor: LASER_AD_VEL,
-    rateFactor: LASER_AD_RATE,
-    lifeFactor: LASER_AD_LIFE,
-    beam: true,
-    fireSound: 'laser',
-  }),
+  MG: machineGunEffects(),
+  L: laserEffects(),
   // GuidedMissileStrategy's constructor scales the lifetime and touches nothing
   // else: it never calls `setReloadTime`, and it leaves the shell at the world's
   // own speed. Everything that makes the flag is in the heading.
@@ -1071,12 +1059,7 @@ const SHOT_EFFECTS = Object.freeze({
   // ShockWaveStrategy's constructor shortens the shot and leaves the reload
   // alone: unlike every other variant it never calls `setReloadTime`, so a shock
   // wave comes round on the world's own interval however briefly each one lives.
-  SW: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    lifeFactor: SHOCK_AD_LIFE,
-    shockwave: true,
-    fireSound: 'shock',
-  }),
+  SW: shockWaveEffects(),
   // ThiefStrategy is LaserStrategy with different numbers and one different
   // ending: the same `makeSegments(Stop)` in the constructor, the same node per
   // segment drawn all at once, so it is a beam -- but eight times the speed
@@ -1091,7 +1074,59 @@ const SHOT_EFFECTS = Object.freeze({
     beamColor: THIEF_BEAM_COLOR,
     fireSound: 'thief',
   }),
-});
+};
+
+// A world's own tuning of the flags whose shots it can change, from the
+// config's copy of upstream's variables: Machine Gun's `_mGunAdVel`,
+// `_mGunAdRate` and `_mGunAdLife` (MGUN_AD_*), Laser's `_laserAd*` (LASER_AD_*),
+// and Shock Wave's `_shockAdLife`, `_shockInRadius` and `_shockOutRadius`
+// (SHOCK_*). Each host calls `configureShotEffects` with its world's config
+// whenever that changes; anything missing is upstream's default.
+function positive(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// A Machine Gun life the world leaves alone is upstream's default expression,
+// "1.0 / _mGunAdRate", so it follows the world's rate.
+function machineGunEffects(config = {}) {
+  const rate = positive(config.MGUN_AD_RATE, MACHINE_GUN_AD_RATE);
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    velocityFactor: positive(config.MGUN_AD_VEL, MACHINE_GUN_AD_VEL),
+    rateFactor: rate,
+    lifeFactor: positive(config.MGUN_AD_LIFE, 1 / rate),
+  });
+}
+
+function laserEffects(config = {}) {
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    velocityFactor: positive(config.LASER_AD_VEL, LASER_AD_VEL),
+    rateFactor: positive(config.LASER_AD_RATE, LASER_AD_RATE),
+    lifeFactor: positive(config.LASER_AD_LIFE, LASER_AD_LIFE),
+    beam: true,
+    fireSound: 'laser',
+  });
+}
+
+// A wave may start from nothing, so its inner radius may be 0.
+function shockWaveEffects(config = {}) {
+  const inner = config.SHOCK_IN_RADIUS;
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    lifeFactor: positive(config.SHOCK_AD_LIFE, SHOCK_AD_LIFE),
+    shockInRadius: Number.isFinite(inner) && inner >= 0 ? inner : SHOCK_IN_RADIUS,
+    shockOutRadius: positive(config.SHOCK_OUT_RADIUS, SHOCK_OUT_RADIUS),
+    shockwave: true,
+    fireSound: 'shock',
+  });
+}
+
+function configureShotEffects(config) {
+  SHOT_EFFECTS.MG = machineGunEffects(config || {});
+  SHOT_EFFECTS.L = laserEffects(config || {});
+  SHOT_EFFECTS.SW = shockWaveEffects(config || {});
+}
 
 function getShotEffects(abbreviation) {
   return SHOT_EFFECTS[abbreviation] || DEFAULT_SHOT_EFFECTS;
@@ -1122,9 +1157,10 @@ function getThiefDropReloadSeconds(shotLifetimeSeconds) {
 // ends run this: the server to decide who it reached, the client to decide how
 // big to draw it.
 function getShockWaveRadius(elapsed, lifetimeSeconds) {
-  if (!(lifetimeSeconds > 0)) return SHOCK_OUT_RADIUS;
+  const { shockInRadius, shockOutRadius } = SHOT_EFFECTS.SW;
+  if (!(lifetimeSeconds > 0)) return shockOutRadius;
   const t = Math.min(1, Math.max(0, elapsed / lifetimeSeconds));
-  return SHOCK_IN_RADIUS + ((SHOCK_OUT_RADIUS - SHOCK_IN_RADIUS) * t);
+  return shockInRadius + ((shockOutRadius - shockInRadius) * t);
 }
 
 // The same function's fade, 0.75 down to 0.25 as the wave grows.
@@ -1137,8 +1173,9 @@ function getShockWaveRadius(elapsed, lifetimeSeconds) {
 // as it swells. See "Fewer options than BZFlag": bzo picks one of upstream's own
 // variants rather than inventing a third.
 function getShockWaveAlpha(radius) {
-  const span = SHOCK_OUT_RADIUS - SHOCK_IN_RADIUS;
-  const frac = Math.min(1, Math.max(0, (radius - SHOCK_IN_RADIUS) / span));
+  const { shockInRadius, shockOutRadius } = SHOT_EFFECTS.SW;
+  const span = shockOutRadius - shockInRadius;
+  const frac = span > 0 ? Math.min(1, Math.max(0, (radius - shockInRadius) / span)) : 1;
   return 0.75 - (0.5 * frac);
 }
 
@@ -1888,8 +1925,8 @@ function getFlagFlightState(flag, elapsed, gravity) {
 
   return { x: position.x, y: position.y, z: position.z, alpha: 1, warp: 0, landed: false };
 }
+
 module.exports = {
-  findNearestGroundFlag,
   FLAG_STATUS,
   FLAG_ENDURANCE,
   FLAG_QUALITY,
@@ -1898,15 +1935,12 @@ module.exports = {
   FLAG_POLE_SIZE,
   FLAG_POLE_WIDTH,
   FLAG_CLEARANCE,
-  FLAG_EFFECT_TIME,
-  RADAR_JAM_DECAY_FLOOR,
-  SEER_REVEAL_ALPHA,
-  RADAR_JAM_DECAY_MIN,
-  MAX_FLAG_GRABS,
-  MAX_FLAG_GRABS_MIN,
-  NARROW_FACTOR,
   OBESE_FACTOR,
   TINY_FACTOR,
+  NARROW_FACTOR,
+  FLAG_EFFECT_TIME,
+  MAX_FLAG_GRABS,
+  MAX_FLAG_GRABS_MIN,
   BASE_SIZE,
   SHIELD_FLIGHT,
   RAPID_FIRE_AD_VEL,
@@ -1919,6 +1953,15 @@ module.exports = {
   SHOCK_AD_LIFE,
   SHOCK_IN_RADIUS,
   SHOCK_OUT_RADIUS,
+  GM_AD_LIFE,
+  GM_TURN_ANGLE,
+  GM_ACTIVATION_TIME,
+  LOCK_ON_ANGLE,
+  BURROW_DEPTH,
+  BURROW_SPEED_AD,
+  BURROW_ANGULAR_AD,
+  BURROW_GRAVITY_FACTOR,
+  BURROW_RADAR_FACTOR,
   SR_RADIUS_MULT,
   THIEF_VEL_AD,
   THIEF_TINY_FACTOR,
@@ -1963,81 +2006,77 @@ module.exports = {
   getFlagEndurance,
   canJump,
   normalizeShakeTimeout,
-  blanksTheView,
+  normalizeShakeWins,
+  getTankDimensionScale,
+  hidesFromRadar,
   cloaksTheTank,
   fakesTeamColor,
-  getNextRadarJamDecay,
+  seesThroughDisguises,
   getTankAlphaTarget,
-  getTankDimensionEase,
-  getTankDimensionScale,
+  SEER_REVEAL_ALPHA,
+  getVisibleTankAlpha,
+  blanksTheView,
+  jamsTheRadar,
+  hidesTeamColors,
+  RADAR_JAM_DECAY_MIN,
+  RADAR_JAM_DECAY_FLOOR,
+  getNextRadarJamDecay,
   getTankHitRadiusScale,
-  normalizeFlagGrabs,
+  usesNarrowHitBox,
+  getTankDimensionEase,
   getFlagGrabCount,
-  normalizeShakeWins,
+  normalizeFlagGrabs,
   getAntidoteCoordinate,
   canShakeFlag,
   hasAirControl,
-  getWingsJumpVelocity,
-  getWingsSlideVelocity,
-  getFlagTeamIndex,
-  getVisibleTankAlpha,
-  hidesFromRadar,
-  hidesTeamColors,
-  isBadFlag,
-  jamsTheRadar,
-  seesThroughDisguises,
-  usesNarrowHitBox,
-  formatFlagInfo,
-  parseFlagInfo,
-  getTeamFlagAbbreviation,
-  keepFlagIdentity,
-  computeFlagFlight,
-  getFlagFlightHeight,
-  getFlagHoverHeight,
-  getFlagFlightState,
+  configureShotEffects,
   getShotEffects,
   stealsFlags,
   getThiefDropReloadSeconds,
   getShockWaveRadius,
   getShockWaveAlpha,
+  steerGuidedShot,
+  TARGETING_ANGLE,
+  pickTargetInSights,
   shotRicochets,
-  shieldsAgainstShot,
   getMotionEffects,
   getMaxSpeedFactor,
   getMaxAngVelFactor,
-  getSpeedFactor,
   composeAccelerationLimit,
   getAccelerationLimits,
   applyAccelerationLimit,
   applyMotionInput,
-  getBounceState,
-  getBouncyJumpVelocity,
-  firesContinuously,
-  crushesOnContact,
-  killsWholeTeam,
-  getRunOverRadius,
-  getRunOverSeparation,
-  getFlagThrownAltitude,
-  GM_AD_LIFE,
-  GM_TURN_ANGLE,
-  GM_ACTIVATION_TIME,
-  LOCK_ON_ANGLE,
-  steerGuidedShot,
-  TARGETING_ANGLE,
-  pickTargetInSights,
   drivesThroughBuildings,
-  BURROW_DEPTH,
-  BURROW_SPEED_AD,
-  BURROW_ANGULAR_AD,
-  BURROW_GRAVITY_FACTOR,
-  BURROW_RADAR_FACTOR,
   isZoned,
   togglesZoneOnTeleport,
   shotPassesThroughTank,
   getFiredShotFlag,
   ZONED_TANK_ALPHA,
+  getBounceState,
+  getBouncyJumpVelocity,
+  firesContinuously,
+  getSpeedFactor,
   getGroundLimit,
   getBurrowFactors,
+  crushesOnContact,
   isCrushedByAnyone,
   canRunOver,
+  getRunOverRadius,
+  getRunOverSeparation,
+  killsWholeTeam,
+  shieldsAgainstShot,
+  getWingsJumpVelocity,
+  getWingsSlideVelocity,
+  findNearestGroundFlag,
+  getFlagTeamIndex,
+  keepFlagIdentity,
+  isBadFlag,
+  formatFlagInfo,
+  parseFlagInfo,
+  getTeamFlagAbbreviation,
+  getFlagThrownAltitude,
+  computeFlagFlight,
+  getFlagFlightHeight,
+  getFlagHoverHeight,
+  getFlagFlightState,
 };

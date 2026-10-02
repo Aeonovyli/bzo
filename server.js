@@ -47,6 +47,7 @@ const {
   BLOWED_UP,
   PLAYER_STATUS: BZFS_PLAYER_STATUS,
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
+  bzdbIsTrue,
 } = require('./server/bzfs-session.cjs');
 const {
   normalizeShotSlotCount,
@@ -129,6 +130,14 @@ const {
   isBadFlag,
   isTeamFlag,
   getFlagTeamIndex,
+  configureShotEffects,
+  LASER_AD_VEL,
+  LASER_AD_RATE,
+  LASER_AD_LIFE,
+  SHOCK_AD_LIFE,
+  SHOCK_IN_RADIUS,
+  MACHINE_GUN_AD_VEL,
+  MACHINE_GUN_AD_RATE,
 } = require('./server/flags.cjs');
 const {
   documentTitle,
@@ -159,6 +168,7 @@ const {
   traceShotStep,
   TANK_HEIGHT,
   buildCollisionColliders,
+  WORLD_WALL_HEIGHT,
 } = require('./server/collision.cjs');
 const {
   buildTeleporterIndex,
@@ -1263,6 +1273,7 @@ function publishWorldFacts(host, port) {
     variables: record?.variables?.length ? record.variables : undefined,
     // What an unregistered player may do there, where a visit has found out
     // (`server/bzfs-worlds.cjs`). Absent until it has.
+    guestWatch: guestAnswer(record?.guest?.watch),
     guestChat: guestAnswer(record?.guest?.chat),
     guestSpawn: guestAnswer(record?.guest?.spawn),
   };
@@ -1671,6 +1682,8 @@ function renderListReadout(entry, hidden) {
   // Whether a player without a bzflag.org login may play and talk there, which
   // no bzfs publishes and bzo learns by asking (`enterAndProbe`). Nothing at
   // all where it has not found out.
+  if (entry.guestWatch === 'yes') words.push('Guests Watch');
+  if (entry.guestWatch === 'no') words.push('No Guests');
   if (entry.guestSpawn === 'yes') words.push('Guests Play');
   if (entry.guestSpawn === 'no') words.push('Registered Only');
   if (entry.guestChat === 'yes') words.push('Guests Chat');
@@ -1984,7 +1997,14 @@ function renderFilterHelp(listId) {
       ['P replay', 'A replay server'],
       ['ov overview', 'The pane has a map overview'],
       ['t temp', 'A generated world, which usually changes on restart'],
+      ['b bots', 'Autopilot and robots allowed'],
+      ['gw guestWatch', 'Players with no bzflag.org login may join to observe'],
+      ['gu guests', 'Players with no bzflag.org login may spawn'],
+      ['gc guestChat', 'Players with no bzflag.org login may chat'],
     ])
+    + `<p>For <code>bots</code>, <code>guestWatch</code>, <code>guests</code> and <code>guestChat</code>,`
+    + ` a server bzo has not found out about matches neither <code>+</code> nor`
+    + ` <code>-</code>.</p>`
     + group('Numbers -- a name, then <code>&lt;</code> <code>&lt;=</code>'
       + ' <code>&gt;</code> <code>&gt;=</code> <code>=</code>, then a number', [
       ['s shots', 'Active shots a tank may have'],
@@ -2021,7 +2041,7 @@ function renderFilterHelp(listId) {
       ['/+rabbit,+rico,s=3', 'Rabbit chase, ricochet, three shots'],
       ['/+ctf/+rabbit', 'Either capture-the-flag or rabbit chase'],
       ['/-overview', 'No map overview yet'],
-      ['/v)_disableBots=*', 'Sets <code>_disableBots</code> at all'],
+      ['/v)_disableBots=*', 'Lists <code>_disableBots</code> at all, on or off; <code>-b</code> is the one that means off'],
     ])
     + `</div>`;
 }
@@ -2068,6 +2088,12 @@ function renderServerList(listId, filterId, unsorted) {
     im: entry.imported ? 1 : 0,
     ov: entry.overviewUrl ? 1 : 0,
     tmp: /^t/i.test(entry.hash || '') ? 1 : 0,
+    // Facts bzo may not have: 1 or 0 where it knows, null where it does not,
+    // so neither `+name` nor `-name` claims a server it has not asked.
+    bo: entry.disableBots ? 0 : (entry.botsKnown ? 1 : null),
+    gs: entry.guestSpawn === 'yes' ? 1 : (entry.guestSpawn === 'no' ? 0 : null),
+    gc: entry.guestChat === 'yes' ? 1 : (entry.guestChat === 'no' ? 0 : null),
+    gw: entry.guestWatch === 'yes' ? 1 : (entry.guestWatch === 'no' ? 0 : null),
     ow: entry.owner || '',
     ip: entry.ip || '',
     v: Array.isArray(entry.variables) ? entry.variables.map(([name, value]) => `${name}=${value}`) : [],
@@ -2211,9 +2237,12 @@ function renderListPage({
       owner: s.owner || '',
       ip: s.ip || '',
       variables: world.variables,
-      // `_disableBots` read as BZDB.isTrue does, `atoi(value) != 0`.
+      // `_disableBots` read as BZDB.isTrue does.
       disableBots: Array.isArray(world.variables)
-        && world.variables.some(([name, value]) => name === '_disableBots' && (parseInt(value, 10) || 0) !== 0),
+        && world.variables.some(([name, value]) => name === '_disableBots' && bzdbIsTrue(value)),
+      // Only a server whose variables bzo has read can be said to allow bots.
+      botsKnown: Array.isArray(world.variables) && world.variables.length > 0,
+      guestWatch: guestAnswer(world.guestWatch),
       guestChat: guestAnswer(world.guestChat),
       guestSpawn: guestAnswer(world.guestSpawn),
       desc: s.title,
@@ -2324,6 +2353,7 @@ function renderListPage({
       players: game.players,
       bots: game.bots,
       disableBots: game.disableBots === true,
+      botsKnown: true,
       maxPlayers: game.maxPlayers,
       observers: Array.isArray(game.teamCounts) ? game.teamCounts[5] : undefined,
       observerMax: maxima[5],
@@ -2841,6 +2871,24 @@ const GAME_CONFIG = {
   WINGS_JUMP_VELOCITY: null, // BZFlag _wingsJumpVelocity; defaults to JUMP_VELOCITY
   WINGS_GRAVITY: null, // BZFlag _wingsGravity magnitude; defaults to GRAVITY
   WINGS_SLIDE_TIME: DEFAULT_WINGS_SLIDE_TIME, // BZFlag _wingsSlideTime
+  // Machine Gun's three, locked upstream like the rest. The life is null for
+  // upstream's default, "1.0 / _mGunAdRate" (`configureShotEffects`).
+  MGUN_AD_VEL: MACHINE_GUN_AD_VEL, // BZFlag _mGunAdVel
+  MGUN_AD_RATE: MACHINE_GUN_AD_RATE, // BZFlag _mGunAdRate
+  MGUN_AD_LIFE: null, // BZFlag _mGunAdLife
+  LASER_AD_VEL, // BZFlag _laserAdVel
+  LASER_AD_RATE, // BZFlag _laserAdRate
+  LASER_AD_LIFE, // BZFlag _laserAdLife
+  SHOCK_AD_LIFE, // BZFlag _shockAdLife
+  SHOCK_IN_RADIUS, // BZFlag _shockInRadius
+  SHOCK_OUT_RADIUS, // BZFlag _shockOutRadius
+  // How high the visible border wall stands, which is where a shot stops
+  // bouncing off it. 0 is a world whose shots all leave it.
+  WALL_HEIGHT: WORLD_WALL_HEIGHT, // BZFlag _wallHeight
+  // How fast the sky's day runs against a real one: 1 is a real day, the 72
+  // here a 20-minute one, 0 a sky that stands still. bzo's own clock, not
+  // upstream's astronomy (AGENTS.md).
+  DAY_SPEED: 72,
   JUMP_COOLDOWN: 500, // ms between jumps
   FOG_MODE: 'none', // BZFlag _fogMode default
   FOG_DENSITY: 0.001, // BZFlag _fogDensity default
@@ -4587,6 +4635,12 @@ if (Number.isInteger(configWingsJumpCount) && configWingsJumpCount >= 0) {
   GAME_CONFIG.WINGS_JUMP_COUNT = configWingsJumpCount;
 }
 
+// The sky's clock: `timeOfDay` is the hour it starts at, 0-24 (random when
+// unset), and `daySpeed` how fast it runs.
+const configTimeOfDay = Number(serverConfig.timeOfDay ?? NaN);
+const configDaySpeed = Number(serverConfig.daySpeed ?? NaN);
+if (Number.isFinite(configDaySpeed) && configDaySpeed >= 0) GAME_CONFIG.DAY_SPEED = configDaySpeed;
+
 const configFlagGrabs = Number(serverConfig.maxFlagGrabs ?? NaN);
 if (Number.isFinite(configFlagGrabs)) {
   GAME_CONFIG.MAX_FLAG_GRABS = normalizeFlagGrabs(configFlagGrabs);
@@ -6057,10 +6111,24 @@ const MAP_PHYSICS_VARS = new Map([
   // `_explodeTime` and bzo keeps the one number for both, so only the
   // rejoin spelling is read -- `_explodeTime` on its own is how long the
   // explosion is drawn for, which is not what this delay is.
-  ['_rejoinTime', { key: 'RESPAWN_DELAY', transform: (n) => n * 1000 }],
+  // 0 is a world with no wait, which 54 of the public servers are.
+  ['_rejoinTime', { key: 'RESPAWN_DELAY', transform: (n) => n * 1000, allowZero: true }],
   // Seconds upstream, milliseconds here, and it is the *basis* a reload is
   // derived from rather than the reload itself -- see `deriveShotReloadTime`.
   ['_reloadTime', { key: 'SHOT_LIFETIME', transform: (n) => n * 1000 }],
+  ['_mGunAdVel', { key: 'MGUN_AD_VEL' }],
+  ['_mGunAdRate', { key: 'MGUN_AD_RATE' }],
+  ['_mGunAdLife', { key: 'MGUN_AD_LIFE' }],
+  ['_laserAdVel', { key: 'LASER_AD_VEL' }],
+  ['_laserAdRate', { key: 'LASER_AD_RATE' }],
+  ['_laserAdLife', { key: 'LASER_AD_LIFE' }],
+  ['_shockAdLife', { key: 'SHOCK_AD_LIFE' }],
+  // A wave may start from nothing.
+  ['_shockInRadius', { key: 'SHOCK_IN_RADIUS', allowZero: true }],
+  ['_shockOutRadius', { key: 'SHOCK_OUT_RADIUS' }],
+  // A wall 0 high is a real choice -- 37 of the public servers make it -- so
+  // zero is kept rather than read as unset.
+  ['_wallHeight', { key: 'WALL_HEIGHT', allowZero: true }],
 ]);
 
 const WEATHER_RAIN_TYPES = new Set(['rain', 'snow', 'fatrain', 'frog', 'particle', 'bubble']);
@@ -6334,13 +6402,20 @@ function parseBZWServerOptions(lines) {
         // of the flag variables next to them on purpose: those describe
         // superflags, and a Map Viewer preview has no flags in it (see
         // "Map physics" in docs/bzw.md).
-        const { key, transform } = MAP_PHYSICS_VARS.get(value);
+        const { key, transform, allowZero } = MAP_PHYSICS_VARS.get(value);
         const num = Number(setValue);
         if (Number.isFinite(num)) {
           const applied = transform ? transform(num) : num;
           // A switch is stated either way; a quantity only when positive.
-          if (typeof applied === 'boolean' || applied > 0) options.gameplay[key] = applied;
+          if (typeof applied === 'boolean' || applied > 0 || (allowZero && applied === 0)) {
+            options.gameplay[key] = applied;
+          }
         }
+      } else if (value === '_flagHeight') {
+        // The same number as the `world` block's `flagHeight`, which is how
+        // upstream saves it (CustomWorld.cxx:41-44); the block wins.
+        const height = Number(setValue);
+        if (Number.isFinite(height) && height >= 0) options.flagHeight = height;
       } else {
         options.unreadBZDBVars.push(value);
       }
@@ -10238,8 +10313,9 @@ if (MAP_SOURCE === 'random') {
     GAME_CONFIG.MAP_SIZE = mapData.mapSize;
     log(`Map option world size: MAP_SIZE=${GAME_CONFIG.MAP_SIZE}`);
   }
-  if (Number.isFinite(mapData.flagHeight)) {
-    FLAG_HEIGHT = mapData.flagHeight;
+  const flagHeight = Number.isFinite(mapData.flagHeight) ? mapData.flagHeight : mapData.serverOptions?.flagHeight;
+  if (Number.isFinite(flagHeight)) {
+    FLAG_HEIGHT = flagHeight;
     log(`Map option flagHeight: ${FLAG_HEIGHT}`);
   }
   mapNoWalls = mapData.noWalls;
@@ -10758,6 +10834,7 @@ setInterval(() => hashRemainingMapsInBackground(), 15 * 60 * 1000).unref?.();
     GAME_CONFIG.SHOT_DISTANCE = GAME_CONFIG.SHOT_RANGE;
     deriveShotReloadTime();
     resolveWingsAliases();
+    configureShotEffects(GAME_CONFIG);
     log(`Map physics: ${applied.join(', ')}, shotReloadTime=${GAME_CONFIG.SHOT_RELOAD_TIME}ms`);
   }
   // Upstream prints "WARNING: tanks will not be able to shoot" the moment it
@@ -11246,8 +11323,19 @@ function seededRandom(seed) {
 const players = new Map();
 const projectiles = new Map();
 let projectileIdCounter = 0;
-// Minecraft-style world time (0-23999, 20 min per day, 20 ticks/sec)
-let worldTime = Math.floor(Math.random() * 24000); // randomize start
+// Minecraft-style world time: 0-23999, 0 at 6:00 and 6000 at noon, a real
+// day's worth at `DAY_SPEED` 1. Read off the wall clock rather than counted, so
+// it is the same for every client that asks, however the game loop is paced.
+const WORLD_TICKS_PER_DAY = 24000;
+const WORLD_TICKS_PER_SECOND = WORLD_TICKS_PER_DAY / 86400;
+const worldTimeStart = Number.isFinite(configTimeOfDay) && configTimeOfDay >= 0 && configTimeOfDay <= 24
+  ? ((((configTimeOfDay - 6) / 24) * WORLD_TICKS_PER_DAY) + WORLD_TICKS_PER_DAY) % WORLD_TICKS_PER_DAY
+  : Math.floor(Math.random() * WORLD_TICKS_PER_DAY);
+const worldTimeEpoch = Date.now();
+function currentWorldTime(now = Date.now()) {
+  const elapsed = ((now - worldTimeEpoch) / 1000) * WORLD_TICKS_PER_SECOND * GAME_CONFIG.DAY_SPEED;
+  return (worldTimeStart + elapsed) % WORLD_TICKS_PER_DAY;
+}
 
 // Get next available player number
 // The lowest free slot, counting from zero as upstream does: bzfs hands a
@@ -13430,7 +13518,7 @@ function getBoxCollisionDistanceSquared(localX, localZ, halfW, halfD) {
 
 
 function getCollisionColliders() {
-  return buildCollisionColliders(OBSTACLES, GAME_CONFIG.MAP_SIZE, mapNoWalls);
+  return buildCollisionColliders(OBSTACLES, GAME_CONFIG.MAP_SIZE, mapNoWalls, GAME_CONFIG.WALL_HEIGHT);
 }
 
 // `options.rotation` selects BZFlag's two occupant shapes: a heading makes the
@@ -17277,12 +17365,9 @@ function flushMoveBroadcasts() {
 
 function gameLoop() {
 
-  // Advance world time (20 ticks/sec, 24000 ticks/day)
-  worldTime = (worldTime + 1) % 24000;
   const now = Date.now();
   const loopDeltaSeconds = Math.min(0.1, Math.max(0, (now - lastGameLoopAt) / 1000));
   lastGameLoopAt = now;
-  // No need to broadcast worldTime periodically; clients track it locally at 20 ticks/sec.
 
   if (now - lastVoiceRosterRefreshAt >= VOICE_ROSTER_REFRESH_INTERVAL) {
     refreshVoiceRosters();
@@ -18239,8 +18324,8 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
       TEAMS_ALLOWED: allowTeams(proxyGameType(session)),
       // `_disableBots`, which bzfs publishes so a client never asks: its
       // answer to asking anyway is a kick (`bzfs.cxx:2828`). Read as
-      // `BZDB.isTrue` reads it, `atoi(value) != 0`.
-      DISABLE_BOTS: (parseInt(session.state.vars.get('_disableBots'), 10) || 0) !== 0,
+      // `BZDB.isTrue` reads it.
+      DISABLE_BOTS: bzdbIsTrue(session.state.vars.get('_disableBots')),
       // What a native client does: `MaxUpdateTime` is one second, and
       // `isDeadReckoningWrong` returns true past it whatever the tank is doing
       // -- "otherwise always send at least one packet per second"
@@ -18293,7 +18378,7 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
     // one has to be said separately.
     localMap: MAP_SOURCE,
     flags: session.state.flags.filter(Boolean).map(proxyFlagState),
-    worldTime,
+    worldTime: currentWorldTime(),
     serverName: `${viewer.key} (proxied)`,
     description: '',
     motd: '',
@@ -18515,6 +18600,7 @@ async function handleProxyConnection(ws, req, request) {
     log(`[PROXY] ${key}: joined as id ${session.playerId},`
       + ` ${state.players.size} players, ${state.flags.filter(Boolean).length} flags,`
       + ` world ${mapEntry.fileName}`);
+    noteGuest({ watch: 'yes', watchDetail: '' });
     send(buildProxyInit(session, mapEntry, viewer, targetStatus, enterTeam));
     // What the target said to us on the way in -- its own greeting, and
     // whether the callsign we gave it is registered there.
@@ -19601,7 +19687,7 @@ function acceptConnection(ws, req) {
     // one has to be said separately.
     localMap: MAP_SOURCE,
     flags: getFlagStates(),
-    worldTime,
+    worldTime: currentWorldTime(),
     serverName: serverConfig.serverName || '',
     description: serverConfig.description || '',
     motd: serverConfig.motd || '',
@@ -21063,7 +21149,7 @@ function buildBotView(bot, self) {
       jumpVelocity: GAME_CONFIG.JUMP_VELOCITY,
       gravity: GAME_CONFIG.GRAVITY,
       lockOnAngle: LOCK_ON_ANGLE,
-      shockOutRadius: SHOCK_OUT_RADIUS,
+      shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
     isFoe: (player) => areFoes(player.team, me.team, TEAMS_ALLOWED),
     myBase: () => {

@@ -79,6 +79,10 @@ const BOOL_LABELS = {
   a: 'antidote', antidote: 'antidote',
   ov: 'overview', overview: 'overview',
   t: 'temp', temp: 'temp',
+  b: 'bots', bots: 'bots',
+  gw: 'guestWatch', guestWatch: 'guestWatch',
+  gu: 'guests', guests: 'guests',
+  gc: 'guestChat', guestChat: 'guestChat',
 };
 
 const RANGE_LABELS = {
@@ -269,6 +273,10 @@ function rangeValue(entry, key) {
   return undefined;
 }
 
+function knownBool(value) {
+  return value === 1 ? true : (value === 0 ? false : undefined);
+}
+
 function boolValue(entry, key) {
   switch (key) {
     case 'ffa': return entry.g === 'TeamFFA';
@@ -283,6 +291,11 @@ function boolValue(entry, key) {
     case 'antidote': return entry.an === 1;
     case 'overview': return entry.ov === 1;
     case 'temp': return entry.tmp === 1;
+    // Unknown is neither true nor false, so `+name` and `-name` both pass it by.
+    case 'bots': return knownBool(entry.bo);
+    case 'guestWatch': return knownBool(entry.gw);
+    case 'guests': return knownBool(entry.gs);
+    case 'guestChat': return knownBool(entry.gc);
     default: return false;
   }
 }

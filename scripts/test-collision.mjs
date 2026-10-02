@@ -1107,6 +1107,10 @@ for (const side of [client, server]) {
   assert.equal(border.filter((c) => c.driveThrough && c.h === client.WORLD_WALL_HEIGHT).length, 4, 'four shot walls');
   assert.ok(border.every((c) => Math.max(Math.abs(c.x), Math.abs(c.z)) === 202), 'just outside the map');
   assert.deepEqual(client.buildWorldBorderColliders(400, true), []);
+  const low = client.buildWorldBorderColliders(400, false, 0);
+  assert.equal(low.length, 4, 'a 0-high wall leaves only the tank barrier');
+  assert.ok(low.every((c) => c.shootThrough));
+  assert.ok(client.buildWorldBorderColliders(400, false, 20).filter((c) => c.driveThrough).every((c) => c.h === 20));
   const box = { type: 'box', x: 0, z: 0, w: 1, d: 1, h: 1 };
   assert.equal(client.buildCollisionColliders([box], 400)[0], box);
 }

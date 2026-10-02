@@ -7,7 +7,7 @@
  */
 
 // When the world tracker asks a bzfs what an unregistered player may do
-// (`server/bzfs-worlds.cjs`): chat on any visit that is due, spawning only with
+// (`server/bzfs-worlds.cjs`): watching and chat on any visit that is due, spawning only with
 // nobody on the server, a month's trust in an answer, a week before an
 // unanswered one is tried again, and a silence never over an answer.
 
@@ -23,7 +23,7 @@ const { createBzfsWorldTracker, GUEST_RECHECK_MS, GUEST_RETRY_MS } = require('..
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bzo-guest-'));
 const server = { host: 'example.org', port: 5154, title: 't', info: {} };
 let status = { worldHash: 'p'.padEnd(33, '0'), players: 0, observers: 0, full: false };
-let answer = { chat: 'yes', spawn: 'no', spawnDetail: 'spawning is off for guests' };
+let answer = { watch: 'yes', chat: 'yes', spawn: 'no', spawnDetail: 'spawning is off for guests' };
 const probes = [];
 const realNow = Date.now;
 let clock = 1e12;
@@ -35,7 +35,7 @@ const tracker = createBzfsWorldTracker({
   importWorld: async () => { throw new Error('no import expected'); },
   probeGuestAccess: async (host, port, questions) => {
     probes.push(questions);
-    return { chat: answer.chat, ...(questions.spawn ? { spawn: answer.spawn, spawnDetail: answer.spawnDetail } : {}) };
+    return { watch: answer.watch, chat: answer.chat, ...(questions.spawn ? { spawn: answer.spawn, spawnDetail: answer.spawnDetail } : {}) };
   },
   hasPicture: () => true,
   log: () => {},
@@ -50,6 +50,7 @@ const check = async (advance) => { clock += advance; await tracker.tick() };
 await check(25 * 60 * 60 * 1000);
 assert.deepEqual(probes.at(-1), { chat: true, spawn: true });
 let guest = tracker.recordFor(server.host, server.port).guest;
+assert.equal(guest.watch, 'yes', 'the join itself answers watching');
 assert.equal(guest.chat, 'yes');
 assert.equal(guest.spawn, 'no');
 
@@ -63,10 +64,11 @@ await check(GUEST_RECHECK_MS + 3600000);
 assert.deepEqual(probes.at(-1), { chat: true, spawn: false });
 
 // A silence keeps the answer it had, and waits its week.
-answer = { chat: 'unknown' };
+answer = { watch: 'unknown', chat: 'unknown' };
 await check(GUEST_RECHECK_MS + 3600000);
 guest = tracker.recordFor(server.host, server.port).guest;
 assert.equal(guest.chat, 'yes', 'a silence does not overwrite an answer');
+assert.equal(guest.watch, 'yes');
 const visits = probes.length;
 await check(25 * 60 * 60 * 1000);
 assert.equal(probes.length, visits, 'and is not retried the next day');

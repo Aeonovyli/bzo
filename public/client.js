@@ -293,12 +293,12 @@ import {
   GM_TURN_ANGLE,
   TARGETING_ANGLE,
   LOCK_ON_ANGLE,
-  SHOCK_OUT_RADIUS,
   pickTargetInSights,
   steerGuidedShot,
   canRunOver,
   getRunOverRadius,
   getRunOverSeparation,
+  configureShotEffects,
 } from './flags.mjs';
 import {
   normalizeShotSlotCount,
@@ -370,6 +370,7 @@ import {
   TANK_HEIGHT,
   traceShotStep,
   buildCollisionColliders,
+  WORLD_WALL_HEIGHT,
 } from './collision.mjs';
 import { meshArrays, FACE_NO_RADAR } from './mesh-arrays.mjs';
 import {
@@ -2617,7 +2618,7 @@ function applyWorldData(world) {
     : 0;
   renderManager.buildGround(currentWorldMapSize, world?.groundMaterial || null);
   renderManager.setGroundGridEnabled(showDebugGeometry, currentWorldMapSize);
-  renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls);
+  renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls, currentWallHeight());
   renderManager.createMountains(currentWorldMapSize);
   renderManager.buildWater(currentWorldMapSize, world?.waterLevel || null);
   renderManager.buildWeather(currentWorldMapSize, world?.weather || null, OBSTACLES);
@@ -2639,6 +2640,14 @@ function applyWorldData(world) {
 function applyWorldGameplay(gameplay) {
   if (!liveGameConfig) return;
   gameConfig = gameplay ? { ...liveGameConfig, ...gameplay } : liveGameConfig;
+  configureShotEffects(gameConfig);
+}
+
+// `_wallHeight`: the world's own, where it states one, before any game config
+// has arrived to carry it.
+function currentWallHeight() {
+  const height = currentWorldData?.gameplay?.WALL_HEIGHT ?? gameConfig?.WALL_HEIGHT;
+  return Number.isFinite(height) && height >= 0 ? height : WORLD_WALL_HEIGHT;
 }
 
 // How far inside the border wall a viewer brought back into bounds is put --
@@ -9793,7 +9802,8 @@ function showMessage(text) {
 
 function getCollisionColliders() {
   if (cachedCollisionColliders === null) {
-    cachedCollisionColliders = buildCollisionColliders(OBSTACLES, currentWorldMapSize ?? DEFAULT_MAP_SIZE, currentWorldNoWalls);
+    cachedCollisionColliders = buildCollisionColliders(
+      OBSTACLES, currentWorldMapSize ?? DEFAULT_MAP_SIZE, currentWorldNoWalls, currentWallHeight());
   }
   return cachedCollisionColliders;
 }
@@ -11832,7 +11842,7 @@ function buildAutopilotView() {
       jumpVelocity: gameConfig.JUMP_VELOCITY,
       gravity: gameConfig.GRAVITY,
       lockOnAngle: LOCK_ON_ANGLE,
-      shockOutRadius: SHOCK_OUT_RADIUS,
+      shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
     isFoe: (player) => areFoes(player.team, playerTeam, teamsAllowed),
     myBase: () => {
@@ -17067,9 +17077,10 @@ function animate(frameTime) {
   const deltaTime = Math.max(0, Math.min((now - lastTime) / 1000, MAX_FRAME_DELTA_SECONDS));
   lastTime = now;
 
-  // Advance worldTime so 24000 ticks = 20 minutes (1200 seconds)
-  // 24000 / 1200 = 20 ticks per second
-  worldTime = (worldTime + 20 * deltaTime) % 24000;
+  // A real day's 24000 ticks at the server's `DAY_SPEED` 1, its default 72 a
+  // 20-minute day, and 0 holds the sky where the server said it was.
+  const daySpeed = Number.isFinite(gameConfig?.DAY_SPEED) ? gameConfig.DAY_SPEED : 72;
+  worldTime = (worldTime + ((24000 / 86400) * daySpeed * deltaTime)) % 24000;
   renderManager.setWorldTime(worldTime);
 
   updateXRControllerInput();

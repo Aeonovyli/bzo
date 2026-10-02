@@ -1021,27 +1021,15 @@ const DEFAULT_SHOT_EFFECTS = Object.freeze({
   fireSound: 'fire',
 });
 
-const SHOT_EFFECTS = Object.freeze({
+const SHOT_EFFECTS = {
   F: Object.freeze({
     ...DEFAULT_SHOT_EFFECTS,
     velocityFactor: RAPID_FIRE_AD_VEL,
     rateFactor: RAPID_FIRE_AD_RATE,
     lifeFactor: 1 / RAPID_FIRE_AD_RATE,
   }),
-  MG: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    velocityFactor: MACHINE_GUN_AD_VEL,
-    rateFactor: MACHINE_GUN_AD_RATE,
-    lifeFactor: 1 / MACHINE_GUN_AD_RATE,
-  }),
-  L: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    velocityFactor: LASER_AD_VEL,
-    rateFactor: LASER_AD_RATE,
-    lifeFactor: LASER_AD_LIFE,
-    beam: true,
-    fireSound: 'laser',
-  }),
+  MG: machineGunEffects(),
+  L: laserEffects(),
   // GuidedMissileStrategy's constructor scales the lifetime and touches nothing
   // else: it never calls `setReloadTime`, and it leaves the shell at the world's
   // own speed. Everything that makes the flag is in the heading.
@@ -1071,12 +1059,7 @@ const SHOT_EFFECTS = Object.freeze({
   // ShockWaveStrategy's constructor shortens the shot and leaves the reload
   // alone: unlike every other variant it never calls `setReloadTime`, so a shock
   // wave comes round on the world's own interval however briefly each one lives.
-  SW: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    lifeFactor: SHOCK_AD_LIFE,
-    shockwave: true,
-    fireSound: 'shock',
-  }),
+  SW: shockWaveEffects(),
   // ThiefStrategy is LaserStrategy with different numbers and one different
   // ending: the same `makeSegments(Stop)` in the constructor, the same node per
   // segment drawn all at once, so it is a beam -- but eight times the speed
@@ -1091,7 +1074,59 @@ const SHOT_EFFECTS = Object.freeze({
     beamColor: THIEF_BEAM_COLOR,
     fireSound: 'thief',
   }),
-});
+};
+
+// A world's own tuning of the flags whose shots it can change, from the
+// config's copy of upstream's variables: Machine Gun's `_mGunAdVel`,
+// `_mGunAdRate` and `_mGunAdLife` (MGUN_AD_*), Laser's `_laserAd*` (LASER_AD_*),
+// and Shock Wave's `_shockAdLife`, `_shockInRadius` and `_shockOutRadius`
+// (SHOCK_*). Each host calls `configureShotEffects` with its world's config
+// whenever that changes; anything missing is upstream's default.
+function positive(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// A Machine Gun life the world leaves alone is upstream's default expression,
+// "1.0 / _mGunAdRate", so it follows the world's rate.
+function machineGunEffects(config = {}) {
+  const rate = positive(config.MGUN_AD_RATE, MACHINE_GUN_AD_RATE);
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    velocityFactor: positive(config.MGUN_AD_VEL, MACHINE_GUN_AD_VEL),
+    rateFactor: rate,
+    lifeFactor: positive(config.MGUN_AD_LIFE, 1 / rate),
+  });
+}
+
+function laserEffects(config = {}) {
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    velocityFactor: positive(config.LASER_AD_VEL, LASER_AD_VEL),
+    rateFactor: positive(config.LASER_AD_RATE, LASER_AD_RATE),
+    lifeFactor: positive(config.LASER_AD_LIFE, LASER_AD_LIFE),
+    beam: true,
+    fireSound: 'laser',
+  });
+}
+
+// A wave may start from nothing, so its inner radius may be 0.
+function shockWaveEffects(config = {}) {
+  const inner = config.SHOCK_IN_RADIUS;
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    lifeFactor: positive(config.SHOCK_AD_LIFE, SHOCK_AD_LIFE),
+    shockInRadius: Number.isFinite(inner) && inner >= 0 ? inner : SHOCK_IN_RADIUS,
+    shockOutRadius: positive(config.SHOCK_OUT_RADIUS, SHOCK_OUT_RADIUS),
+    shockwave: true,
+    fireSound: 'shock',
+  });
+}
+
+export function configureShotEffects(config) {
+  SHOT_EFFECTS.MG = machineGunEffects(config || {});
+  SHOT_EFFECTS.L = laserEffects(config || {});
+  SHOT_EFFECTS.SW = shockWaveEffects(config || {});
+}
 
 export function getShotEffects(abbreviation) {
   return SHOT_EFFECTS[abbreviation] || DEFAULT_SHOT_EFFECTS;
@@ -1122,9 +1157,10 @@ export function getThiefDropReloadSeconds(shotLifetimeSeconds) {
 // ends run this: the server to decide who it reached, the client to decide how
 // big to draw it.
 export function getShockWaveRadius(elapsed, lifetimeSeconds) {
-  if (!(lifetimeSeconds > 0)) return SHOCK_OUT_RADIUS;
+  const { shockInRadius, shockOutRadius } = SHOT_EFFECTS.SW;
+  if (!(lifetimeSeconds > 0)) return shockOutRadius;
   const t = Math.min(1, Math.max(0, elapsed / lifetimeSeconds));
-  return SHOCK_IN_RADIUS + ((SHOCK_OUT_RADIUS - SHOCK_IN_RADIUS) * t);
+  return shockInRadius + ((shockOutRadius - shockInRadius) * t);
 }
 
 // The same function's fade, 0.75 down to 0.25 as the wave grows.
@@ -1137,8 +1173,9 @@ export function getShockWaveRadius(elapsed, lifetimeSeconds) {
 // as it swells. See "Fewer options than BZFlag": bzo picks one of upstream's own
 // variants rather than inventing a third.
 export function getShockWaveAlpha(radius) {
-  const span = SHOCK_OUT_RADIUS - SHOCK_IN_RADIUS;
-  const frac = Math.min(1, Math.max(0, (radius - SHOCK_IN_RADIUS) / span));
+  const { shockInRadius, shockOutRadius } = SHOT_EFFECTS.SW;
+  const span = shockOutRadius - shockInRadius;
+  const frac = span > 0 ? Math.min(1, Math.max(0, (radius - shockInRadius) / span)) : 1;
   return 0.75 - (0.5 * frac);
 }
 

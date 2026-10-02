@@ -20,6 +20,7 @@ const {
   decodeScores,
   decodeCapture,
   decodeShotEnd,
+  bzdbIsTrue,
 } = require('../server/bzfs-session.cjs');
 
 // A chat line is read a byte at a time by `isSpamOrGarbage` and every byte is
@@ -85,5 +86,11 @@ assert.equal(toBzfsChatText('one\ntwo\ttab'), 'onetwotab');
   assert.equal(buildEnterPayload().readUInt16BE(0), TANK_PLAYER);
   assert.equal(buildEnterPayload({ type: COMPUTER_PLAYER }).readUInt16BE(0), 1);
 }
+
+// BZDB.isTrue, which is how bzfs reads `_disableBots` -- and `-disableBots`
+// sets it to "true", not 1.
+for (const on of ['true', '1', 'yes', 'on', '']) assert.equal(bzdbIsTrue(on), true, `"${on}" is on`);
+for (const off of ['0', 'false', 'FALSE', 'no', 'off', 'disable']) assert.equal(bzdbIsTrue(off), false, `"${off}" is off`);
+assert.equal(bzdbIsTrue(undefined), false, 'unset is off');
 
 console.log('bzfs session tests passed');

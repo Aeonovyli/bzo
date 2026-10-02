@@ -516,9 +516,14 @@ Whether a player with no bzflag.org login may chat or spawn on a server is a
 permission in that server's own groups file or a plugin, and no ping, list
 entry or BZDB variable carries it. So the world tracker
 (`server/bzfs-worlds.cjs`) asks, during the observer join it already makes
-for a world's variables, and /list shows the answer as **Guests Play** or
-**Registered Only**, and **Guests Chat** or **Guests Muted**:
+for a world's variables, and /list shows the answer as **Guests Watch** or
+**No Guests**, **Guests Play** or **Registered Only**, and **Guests Chat** or
+**Guests Muted**:
 
+- **Watch**: whether that unregistered join is let in at all. A refusal for
+  a full server or a ban says nothing either way; any other, such as a
+  plugin's `bz_eAllowPlayer`, is **No Guests**. Registered Only still lets
+  guests watch: bzfs checks the spawn permission only when a tank spawns.
 - **Chat**: one private message to itself, which bzfs returns to the sender
   alone. bzfs checks `TALK` and then `PRIVATEMESSAGE` and names the one it
   refused. Never a public line: chat relay plugins carry public chat to IRC

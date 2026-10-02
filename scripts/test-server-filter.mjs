@@ -166,6 +166,16 @@ assert.equal(matches('/op=0', server({ tc: null })), false);
 assert.equal(matches('/vt=3', server({ tm: null })), false);
 assert.equal(matches('/p>1', server({ tc: null, tm: null })), true, 'the rest still works');
 
+// --- facts bzo has to find out --------------------------------------------
+// Known yes, known no, and not asked yet: the last is on neither side.
+for (const [label, field] of [['guestWatch', 'gw'], ['gw', 'gw'], ['guests', 'gs'], ['gu', 'gs'], ['guestChat', 'gc'], ['gc', 'gc'], ['bots', 'bo'], ['b', 'bo']]) {
+  assert.equal(matches(`/+${label}`, server({ [field]: 1 })), true, `+${label} on a yes`);
+  assert.equal(matches(`/-${label}`, server({ [field]: 1 })), false, `-${label} on a yes`);
+  assert.equal(matches(`/-${label}`, server({ [field]: 0 })), true, `-${label} on a no`);
+  assert.equal(matches(`/+${label}`, server({ [field]: null })), false, `+${label} on unknown`);
+  assert.equal(matches(`/-${label}`, server({ [field]: null })), false, `-${label} on unknown`);
+}
+
 // --- what a bad filter says ----------------------------------------------
 // `.length`, not a deep compare against `[]`: the parser runs in its own vm
 // context, so its arrays have that realm's prototype and never look strictly

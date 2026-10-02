@@ -51,7 +51,7 @@ function recheckMs(worldHash) {
   return /^t/i.test(worldHash || '') ? TEMP_RECHECK_MS : RECHECK_MS;
 }
 
-// What an unregistered player may do there -- chat, spawn -- is asked during
+// What an unregistered player may do there -- watch, chat, spawn -- is asked during
 // the one join a server costs (`enterAndProbe` in remote-world-import.cjs) and
 // trusted for a month: an operator changes a groups file rarely, and a changed
 // list entry asks again sooner. An answer that did not come is tried again
@@ -82,7 +82,7 @@ function guestFactDue(guest, field, now, listChanged) {
 // server actually said, but it is dated, so the retry waits its week.
 function mergeGuest(previous, fresh, now) {
   const next = { ...(previous || {}) };
-  for (const field of ['chat', 'spawn']) {
+  for (const field of ['watch', 'chat', 'spawn']) {
     if (fresh?.[field] === undefined) continue;
     if (isGuestAnswer(fresh[field]) || !isGuestAnswer(next[field])) {
       next[field] = fresh[field];
@@ -201,6 +201,13 @@ function createBzfsWorldTracker(deps) {
             pruned += 1;
           }
         }
+        // A chat or spawn answer could only come from a join that got in, so
+        // a guest record from before watching was asked already says yes.
+        const g = value.guest;
+        if (g && g.watch === undefined) {
+          const answered = ['chat', 'spawn'].find((field) => isGuestAnswer(g[field]));
+          if (answered) Object.assign(g, { watch: 'yes', watchDetail: '', watchAt: g[`${answered}At`] });
+        }
         records.set(key, value);
       }
       log(`[WORLDS] restored ${records.size} tracked BZFlag world(s)`
@@ -295,7 +302,9 @@ function createBzfsWorldTracker(deps) {
     // moment, or for an admin's real visit to answer it (`noteGuest`).
     const listChanged = Boolean(record.fingerprint) && record.fingerprint !== fingerprint;
     const empty = status.players === 0 && status.observers === 0 && !status.full;
-    const wantChat = guestFactDue(record.guest, 'chat', now, listChanged);
+    // Watching is answered by the join the chat question already makes.
+    const wantChat = guestFactDue(record.guest, 'chat', now, listChanged)
+      || guestFactDue(record.guest, 'watch', now, listChanged);
     const wantSpawn = empty && guestFactDue(record.guest, 'spawn', now, listChanged);
     const guestQuestions = wantChat || wantSpawn ? { chat: true, spawn: wantSpawn } : null;
 
@@ -322,12 +331,14 @@ function createBzfsWorldTracker(deps) {
           // Dated all the same, so a server that will not take the join is
           // asked again in a week rather than on every check.
           guest = mergeGuest(guest, {
+            watch: 'unknown',
+            watchDetail: error.message,
             chat: 'unknown',
             chatDetail: error.message,
             ...(guestQuestions.spawn ? { spawn: 'unknown', spawnDetail: error.message } : {}),
           }, now);
         }
-        log(`[WORLDS] ${key} guests: chat ${guest.chat || '?'}`
+        log(`[WORLDS] ${key} guests: watch ${guest.watch || '?'}, chat ${guest.chat || '?'}`
           + `${guestQuestions.spawn ? `, spawn ${guest.spawn || '?'}` : ''}`);
       }
       records.set(key, {
@@ -378,7 +389,7 @@ function createBzfsWorldTracker(deps) {
       });
       const guest = records.get(key)?.guest;
       log(`[WORLDS] ${key} world ${status.worldHash || '(unhashed)'} imported as ${safeMapName}`
-        + (guestQuestions ? `; guests: chat ${guest?.chat || '?'}`
+        + (guestQuestions ? `; guests: watch ${guest?.watch || '?'}, chat ${guest?.chat || '?'}`
           + `${guestQuestions.spawn ? `, spawn ${guest?.spawn || '?'}` : ''}` : ''));
     } catch (error) {
       records.set(key, {

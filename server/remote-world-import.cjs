@@ -376,6 +376,18 @@ const GUEST_REPLIES = Object.freeze([
   { prefix: 'This callsign is registered', spawn: 'unknown', detail: 'the probe callsign is registered' },
 ]);
 
+// MsgReject's reasons (Protocol.h) that say nothing about guests: the server
+// is full, or has banned this host. Any other refusal of a well-formed join --
+// a plugin's `bz_eAllowPlayer` comes back as RejectBadRequest -- is one.
+const REJECT_NOT_ABOUT_GUESTS = new Set([
+  0x0004, // RejectTeamFull
+  0x0005, // RejectServerFull
+  0x0008, // RejectRejoinWaitTime
+  0x0009, // RejectIPBanned
+  0x000A, // RejectHostBanned
+  0x000B, // RejectIDBanned
+]);
+
 function guestReply(text) {
   return GUEST_REPLIES.find((reply) => text.startsWith(reply.prefix)) || null;
 }
@@ -402,11 +414,16 @@ async function enterAndProbe(socket, readFrame, selfId, probe = null, motto = IM
   const vars = new Map();
   let accepted = false;
   let gone = false;
+  let rejectCode = null;
   const deadline = Date.now() + ENTER_TIMEOUT_MS;
   for (;;) {
     const { code, payload } = await read(deadline);
     if (!code) break;
-    if (code === 'rj' || code === 'sk') { gone = true; break; }
+    if (code === 'rj' || code === 'sk') {
+      gone = true;
+      if (code === 'rj' && payload?.length >= 2) rejectCode = payload.readUInt16BE(0);
+      break;
+    }
     if (code === 'ac') { accepted = true; continue; }
     if (code === 'sv') { decodeSetVars(payload, vars); continue; }
     // MsgTeamUpdate is the first thing after the variables (`addPlayer`,
@@ -415,7 +432,20 @@ async function enterAndProbe(socket, readFrame, selfId, probe = null, motto = IM
     if (accepted && vars.size > 0) break;
   }
 
+  // Watch: whether this unregistered join was let in at all. Taken in, and
+  // still there once the variables are, is a yes; turned away for a reason
+  // that is not a full server or a ban is a no.
   const guest = {};
+  if (accepted && !gone) {
+    guest.watch = 'yes';
+    guest.watchDetail = '';
+  } else if (gone && !REJECT_NOT_ABOUT_GUESTS.has(rejectCode)) {
+    guest.watch = 'no';
+    guest.watchDetail = rejectCode === null ? 'removed on joining' : `rejected, code ${rejectCode}`;
+  } else {
+    guest.watch = 'unknown';
+    guest.watchDetail = gone ? `rejected, code ${rejectCode}` : 'no answer';
+  }
   if (chat && accepted && !gone) {
     const message = Buffer.alloc(1 + MESSAGE_LEN);
     message.writeUInt8(selfId, 0);

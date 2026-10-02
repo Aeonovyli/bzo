@@ -1159,8 +1159,17 @@ class BzfsSession {
   }
 }
 
+// StateDatabase::set's `isTrue`: any value but these, empty included, is on.
+// `-disableBots` publishes `_disableBots` as "true", which a number test reads
+// as off.
+const BZDB_FALSE_VALUES = new Set(['0', 'off', 'false', 'no', 'disable']);
+function bzdbIsTrue(value) {
+  return typeof value === 'string' && !BZDB_FALSE_VALUES.has(value.toLowerCase());
+}
+
 module.exports = {
   BzfsSession,
+  bzdbIsTrue,
   toBzfsChatText,
   CTF_TEAMS,
   PLAYER_STATUS,

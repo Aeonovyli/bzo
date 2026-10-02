@@ -286,15 +286,51 @@ What's left:
       frustum culling and nothing else, so this is a rendering-speed
       keyword with no gameplay meaning; last in line here for that reason.
 
+## BZDB variables
+
+Native bzfs variables (`server/bzdb-defaults.cjs`) that public servers set to
+something other than upstream's default and bzo does not yet read from a map's
+`-set` lines. Counts are servers of the 231 bzo had variables for on
+2026-10-02; plugin variables are left out. What bzo does read is the `-set`
+rows of `docs/bzw.md`'s options table.
+
+- [ ] Flags: `_gmTurnAngle` (40), `_gmActivationTime` (31), `_gmAdLife` (29),
+      `_gmSize` (19); `_srRadiusMult` (36); `_burrowAngularAd` (35),
+      `_burrowSpeedAd` (28); `_thiefAdShotVel` (26), `_thiefAdLife` (23),
+      `_thiefVelAd` (14), `_thiefAdRate` (7); `_squishFactor` (22),
+      `_squishTime` (15); `_rFireAdVel` (19), `_rFireAdRate` (18),
+      `_rFireAdLife` (16); `_velocityAd` (19); `_tinyFactor` (18);
+      `_agilityTimeWindow` (16), `_agilityAdVel` (7); `_angularAd` (7);
+      `_flagEffectTime` (5). Each is a constant in `public/flags.mjs` today,
+      and `configureShotEffects` is the pattern `_mGunAd*`, `_laserAd*` and
+      `_shock*` set.
+- [ ] Wings: `_wingsSlideTime` (31) and `_wingsJumpVelocity` (24),
+      `_wingsGravity` (13) -- server.json only, not from a map.
+- [ ] Driving: `_noClimb` (94, all set to 0), `_angleTolerance` (16),
+      `_tankLength` (12), `_boxHeight` (9).
+- [ ] Shots and explosions: `_explodeTime` (72; bzo folds it into
+      `_rejoinTime`), `_endShotDetection` (26), `_tankExplosionSize` (20).
+- [ ] Sky and fog: `_skyColor` (42), `_fogMode` (37), `_fogDensity` (33),
+      `_fogColor` (27) -- fog is server.json only; `_latitude` (16),
+      `_longitude` (15), `_syncTime` (7), `_syncLocation` (5).
+- [ ] Scene switches: `_drawMountains` (28), `_drawClouds` (20),
+      `_noShadows` (21), `_drawCelestial` (16), `_drawGroundLights` (12),
+      `_drawGround` (7), `_mirror` (9), `_trackFade` (10).
+- [ ] Radar: `_radarLimit` (44).
+- [ ] Flags on the field: `_flagAltitude` (7), `_flagPoleSize` (5).
+- [ ] Server rules: `_pauseDropTime` (13), `_speedChecksLogOnly` (12),
+      `_updateThrottleRate` (11), `_forbidMarkers` (6), `_spawnSafeRadMod`
+      (5).
+
+Not planned, as upstream's own collision and culling tree depths with no bzo
+equivalent: `_coldetDepth`, `_cullDepth`. `_rainBaseColor`
+and `_rainPuddleColor` are dropped on purpose (`docs/bzw.md`, **Weather**).
+
 ## Leftovers
 
 Small enough to fold into whichever section lands near them, or to take as a
 single pass once the rest of this plan is empty:
 
-- [ ] Any `-set` variable beyond the three bzo already threads through
-      (`_maxFlagGrabs`, `_wingsJumpCount`, `_maxBumpHeight`) stays a
-      map-by-map judgment call -- add a config knob for one only when a map
-      that needs it shows up, per `docs/flags.md`'s existing rule for these.
 - [ ] A real second-texture decal blend, matching the `combineMode: decal`
       default `BzMaterial::addTexture` already sets (`BzMaterial.cxx:825`)
       but no upstream renderer ever draws -- see "Materials" in

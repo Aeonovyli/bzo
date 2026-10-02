@@ -763,7 +763,15 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _shotRange <n>` | how far a shot travels before it dies |
 | `-set _shotRadius <n>` | a shot's own size |
 | `-set _reloadTime <seconds>` | how long a shot lives, and the basis each slot's reload is divided out of |
-| `-set _rejoinTime <seconds>` | how long a dead tank waits before it can spawn again |
+| `-set _rejoinTime <seconds>` | how long a dead tank waits before it can spawn again; `0` is no wait |
+| `-set _mGunAdVel <n>` | how much faster than a shell a `MG` Machine Gun shot flies |
+| `-set _mGunAdRate <n>` | how many times faster `MG` reloads |
+| `-set _mGunAdLife <n>` | how long an `MG` shot lives, as a share of an ordinary one's; upstream's default follows `_mGunAdRate` |
+| `-set _laserAdVel <n>`, `_laserAdRate <n>`, `_laserAdLife <n>` | `L` Laser's speed, reload rate and life, each a multiple of an ordinary shot's |
+| `-set _shockAdLife <n>` | how long an `SW` Shock Wave lasts, as a share of an ordinary shot's life |
+| `-set _shockInRadius <n>`, `_shockOutRadius <n>` | the radius a shock wave starts at (may be `0`) and grows to |
+| `-set _wallHeight <n>` | how high the border wall stands, which is where shots stop bouncing off it; `0` leaves only the tank barrier |
+| `-set _flagHeight <n>` | the clearance a flag spawns under; the `world` block's `flagHeight` wins, as upstream reads the options block first |
 | `-set _rainType <rain\|snow\|fatrain\|frog\|particle\|bubble>` | turns on weather -- see **Weather** |
 | `-srvmsg <text>` | a line the world says to each player as they join |
 | `-admsg <text>` | a line said to everyone already playing, repeated every 15 minutes |
@@ -982,6 +990,11 @@ Two of them are not quite a direct copy:
   spawn again. Upstream defaults it to `_explodeTime` and bzo keeps one
   number for both, so only this spelling is read: `_explodeTime` on its own
   is how long the explosion is drawn for, which is a different thing.
+
+`_mGunAdVel`, `_mGunAdRate`, `_mGunAdLife`, the three `_laserAd*`, the three
+`_shock*` and `_wallHeight` are Locked too and read the same way. `_wallHeight` may be 0: the visible wall is gone, every
+shot leaves the world over it, and tanks are still held at the edge, as by
+upstream's height-ignoring `WallObstacle`.
 
 `_wingsJumpVelocity` and `_wingsGravity` are aliases for `_jumpVelocity` and
 `_gravity` upstream, so a map that moves the world's gravity moves Wings' with
