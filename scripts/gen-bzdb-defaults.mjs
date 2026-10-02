@@ -6,7 +6,7 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
-// Turns upstream's `globalDBItems` table into `server/bzdb-defaults.cjs` --
+// Turns upstream's `globalDBItems` table into `public/bzdb-defaults.mjs` (mirrored to `server/bzdb-defaults.cjs`) --
 // the world variables every bzfs starts with, which is the only way to tell
 // a server's *deliberate* `-set` from the value it would have had anyway.
 // A remote import writes the difference into the map it exports (see
@@ -16,7 +16,8 @@
 // on a BZFlag checkout being present, and the table changes about once a
 // release. Regenerate against a newer upstream with:
 //
-//   node scripts/gen-bzdb-defaults.mjs ~/bzflag > server/bzdb-defaults.cjs
+//   node scripts/gen-bzdb-defaults.mjs ~/bzflag > public/bzdb-defaults.mjs
+//   node scripts/mirror-pair.mjs bzdb-defaults
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -63,11 +64,9 @@ const lines = [
   '// to a player who enters, with no indication of which values the operator',
   '// or the map actually changed, so this table is what tells the two apart.',
   '',
-  'const BZDB_DEFAULTS = Object.freeze({',
+  'export const BZDB_DEFAULTS = Object.freeze({',
   ...entries.map(([name, value]) => `  ${JSON.stringify(name).padEnd(width + 3)}: ${JSON.stringify(value)},`),
   '});',
-  '',
-  'module.exports = { BZDB_DEFAULTS };',
   '',
 ];
 process.stdout.write(lines.join('\n'));

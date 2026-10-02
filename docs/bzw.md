@@ -763,13 +763,40 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _shotRange <n>` | how far a shot travels before it dies |
 | `-set _shotRadius <n>` | a shot's own size |
 | `-set _reloadTime <seconds>` | how long a shot lives, and the basis each slot's reload is divided out of |
-| `-set _rejoinTime <seconds>` | how long a dead tank waits before it can spawn again; `0` is no wait |
+| `-set _explodeTime <seconds>` | how long a dead tank waits before it can spawn again, and how long its pieces tumble; `0` is no wait |
+| `-set _rejoinTime <seconds>` | how long a player who left after playing waits to spawn on coming back, told so in upstream's words; it spawns by itself once the wait is up. Upstream's default is `_explodeTime`; server.json's `rejoinTime` sets it too |
+| `-set _tankExplosionSize <n>` | how big a tank's explosion is; upstream's default is `3.5 * _tankLength` |
 | `-set _mGunAdVel <n>` | how much faster than a shell a `MG` Machine Gun shot flies |
 | `-set _mGunAdRate <n>` | how many times faster `MG` reloads |
 | `-set _mGunAdLife <n>` | how long an `MG` shot lives, as a share of an ordinary one's; upstream's default follows `_mGunAdRate` |
 | `-set _laserAdVel <n>`, `_laserAdRate <n>`, `_laserAdLife <n>` | `L` Laser's speed, reload rate and life, each a multiple of an ordinary shot's |
 | `-set _shockAdLife <n>` | how long an `SW` Shock Wave lasts, as a share of an ordinary shot's life |
 | `-set _shockInRadius <n>`, `_shockOutRadius <n>` | the radius a shock wave starts at (may be `0`) and grows to |
+| `-set _gmAdLife <n>`, `_gmTurnAngle <radians>`, `_gmActivationTime <seconds>` | `GM` Guided Missile's life as a share of an ordinary shot's, how fast it turns toward its lock each second, and how long it flies before it may hit anything (may be `0`) |
+| `-set _burrowSpeedAd <n>`, `_burrowAngularAd <n>` | how fast a `BU` Burrow tank drives and turns underground, as a share of an ordinary one's |
+| `-set _rFireAdVel <n>`, `_rFireAdRate <n>`, `_rFireAdLife <n>` | `F` Rapid Fire's speed, reload rate and life, each a multiple of an ordinary shot's; upstream's default life follows `_rFireAdRate` |
+| `-set _thiefAdShotVel <n>`, `_thiefAdRate <n>`, `_thiefAdLife <n>` | `TH` Thief's beam: speed, reload rate and life |
+| `-set _thiefVelAd <n>`, `_thiefTinyFactor <n>` | how fast a Thief tank drives, and how small it is |
+| `-set _thiefDropTime <seconds>` | the reload a Thief pays once the flag leaves it (may be `0`); upstream's default is half `_reloadTime` |
+| `-set _velocityAd <n>`, `_angularAd <n>` | how much faster `V` Velocity drives and `QT` Quick Turn turns |
+| `-set _tinyFactor <n>`, `_obeseFactor <n>`, `_narrowFactor <n>` | the size `T` Tiny, `O` Obesity and `N` Narrow make a tank |
+| `-set _agilityAdVel <n>`, `_agilityTimeWindow <seconds>`, `_agilityVelDelta <n>` | `A` Agility's burst: how fast, how long, and how big a change of speed sets it off |
+| `-set _srRadiusMult <n>` | how far `SR` Steamroller reaches, in tank radii |
+| `-set _flagEffectTime <seconds>` | how long a tank takes to change size, grow in on spawning, or fade (may be `0`) |
+| `-set _squishFactor <n>`, `_squishTime <seconds>` | how far a hard landing flattens a tank (may be `0`), and how long it takes to stand back up |
+| `-set _wingsJumpVelocity <n>`, `_wingsGravity <n>` | `WG` Wings' flap and its gravity; unset, they follow `_jumpVelocity` and `_gravity` |
+| `-set _wingsSlideTime <seconds>` | how long a Wings tank takes to reach a new speed in the air (`0`, the default, is at once) |
+| `-set _noClimb <0\|1>` | on, upstream's default, a jump from a slope -- a pyramid's side, a tetra, a sloped mesh face -- goes straight up; `0` lets a tank jump its way up one |
+| `-set _tankLength <n>`, `_tankWidth <n>`, `_tankHeight <n>` | the tank's size: how it collides, how it is hit, and how big it is drawn |
+| `-set _tankRadius <n>`, `_muzzleFront <n>`, `_muzzleHeight <n>` | the tank's radius, which a flag is grabbed within, and where its shots leave; upstream's defaults follow `_tankLength` |
+| `-set _boxBase <n>`, `_boxHeight <n>`, `_pyrBase <n>`, `_pyrHeight <n>` | the size of a `box` or `pyramid` that states none (bases are half widths); `_boxHeight` also sets how box walls tile, and how fast the radar's height box grows |
+| `-set _fogMode <none\|linear\|exp\|exp2>`, `_fogDensity <n>`, `_fogStart <n>`, `_fogEnd <n>`, `_fogColor <colour>` | the world's fog; any mode but `none` is fog, and one bzo does not know is `exp`, as upstream reads it |
+| `-set _skyColor <colour>` | a tint over the whole sky; `white` is none |
+| `-set _syncTime <seconds>`, `_longitude <degrees>` | hold the sky still at the hour that many seconds past the Unix epoch is at that longitude (west positive); `-synctime`'s `1` at upstream's default longitude is mid-afternoon |
+| `-set _drawMountains <0\|1>`, `_drawClouds`, `_drawCelestial`, `_drawGround` | whether the world draws its mountains, clouds, sun, moon and stars, and ground; a viewer's own settings can take away more, never put back |
+| `-set _noShadows <0\|1>` | no tank or building shadows on this world |
+| `-set _trackFade <seconds>` | how long tread marks last; `0` leaves none |
+| `-set _radarLimit <n>`, `-noradar` | the farthest the radar reaches (a quarter of it while burrowed); `0` or less, which `-noradar` sets, is no radar for anyone. Upstream's default is the world size |
 | `-set _wallHeight <n>` | how high the border wall stands, which is where shots stop bouncing off it; `0` leaves only the tank barrier |
 | `-set _flagHeight <n>` | the clearance a flag spawns under; the `world` block's `flagHeight` wins, as upstream reads the options block first |
 | `-set _rainType <rain\|snow\|fatrain\|frog\|particle\|bubble>` | turns on weather -- see **Weather** |
@@ -968,7 +995,7 @@ nor bzo's, and is read and dropped like any other unhandled token.)
 
 `_tankSpeed`, `_tankAngVel`, `_gravity`, `_jumpVelocity`, `_shotSpeed`,
 `_shotRange`, `_shotRadius`, `_shotsKeepVerticalVelocity`, `_reloadTime` and
-`_rejoinTime` are
+`_explodeTime` are
 `StateDatabase::Locked`
 upstream (`globalDBItems`, `src/common/global.cxx`), which means the server
 owns the value and every client is told it. That is already how bzo works, so
@@ -986,28 +1013,58 @@ Two of them are not quite a direct copy:
   states neither gets upstream's own default basis of
   `_shotRange / _shotSpeed`. A flag scales both halves and does not scale them
   equally -- see AGENTS.md's **Shot timing**.
-- `_rejoinTime` is upstream's own name for the wait before a dead tank may
-  spawn again. Upstream defaults it to `_explodeTime` and bzo keeps one
-  number for both, so only this spelling is read: `_explodeTime` on its own
-  is how long the explosion is drawn for, which is a different thing.
+- `_explodeTime` is the wait before a dead tank may spawn again -- bzfs
+  sets it as each victim's spawn delay (`bzfs.cxx:3371`) -- and how long the
+  tank's pieces tumble. `_rejoinTime`, which defaults to it, is something
+  else: how long a player who left the server, after playing, waits to spawn
+  on coming back (`RejoinList.cxx:73`). bzo keeps the wait and not the key
+  press: the tank spawns by itself once it is up. Coming back through the
+  entry dialog counts as leaving, as reconnecting does, since either is a new
+  spawn.
 
-`_mGunAdVel`, `_mGunAdRate`, `_mGunAdLife`, the three `_laserAd*`, the three
-`_shock*` and `_wallHeight` are Locked too and read the same way. `_wallHeight` may be 0: the visible wall is gone, every
+A colour is upstream's: three or four numbers, or a name from its X11 table
+(`black`, `grey3`, `DarkGrey`), optionally with an alpha (`red 0.5`).
+
+`_latitude` and `_syncLocation` are read by nothing: they place upstream's
+real sun and moon, and bzo's sky is a clock (AGENTS.md). `_longitude` only
+turns `_syncTime` into an hour.
+
+The flag variables in the options table, the tank and box sizes, `_squishFactor`,
+`_squishTime` and `_wallHeight` are Locked too and read the same way.
+
+A `-set` value may be a formula, as upstream's BZDB evaluates one -- `-set
+_boxHeight 12*_muzzleHeight` -- over the block's other `-set` lines and
+upstream's defaults. The whole block is read before any of it is used, as
+upstream reads the options block before the world, so its `_boxBase` sizes the
+boxes below it. And where upstream's own default is a formula over a variable
+the block changes, the default follows: `_tankLength 5` makes `_tankRadius`
+`0.72 * 5`, and with it `_muzzleFront`, `_shockInRadius`, `_wallHeight`,
+`_boxHeight`, `_pyrBase` and `_pyrHeight`.
+
+bzo's own hit radius (2, against upstream's 4.32), its collision height and its
+default muzzle are bzo's, and keep their ratio to upstream's figures when a
+world resizes the tank. `_wallHeight` may be 0: the
+visible wall is gone, every
 shot leaves the world over it, and tanks are still held at the edge, as by
 upstream's height-ignoring `WallObstacle`.
 
 `_wingsJumpVelocity` and `_wingsGravity` are aliases for `_jumpVelocity` and
 `_gravity` upstream, so a map that moves the world's gravity moves Wings' with
-it -- unless the server's own config pinned the wings value, which wins.
+it -- unless something states the wings value itself: the map, with its own
+`-set`, which wins as every map variable does, or the server's config.
 
-**A Map Viewer preview uses the previewed map's physics, not the live
-match's.** The per-map world file carries this same set (`gameplay` in the
-cached `/maps/<hash>.json`), and the client lays it over its own `gameConfig`
-for as long as that map is on screen. A variable the previewed map says
-nothing about keeps the live match's value, which is what upstream does with
-any BZDB variable a world leaves alone. Jumping and ricochet are not part of
-it -- bzo forces both on -- and neither are the flag variables, since a
-preview has no flags in it.
+**A world's variables travel as upstream's do: raw.** The server sends its
+BZDB in `init` as names and strings (`bzdb`), and each `/set` or `/reset`
+after it as a `setVar`, as upstream sends `MsgSetVar`. The browser evaluates
+them itself with the same `bzdb` pair the server uses (`worldConfig`), over
+the server's settings that are not BZDB. A proxied connection gets a bzfs
+target's own table the same way, every variable it sent.
+
+**A Map Viewer preview uses the previewed map's variables.** Its world file
+carries its `-set` lines raw (`bzdb` in the cached `/maps/<hash>.json`) and its
+`-ms` (`gameplay`), and the browser evaluates them over this server's own
+settings for as long as that map is on screen -- the map as it would play here.
+Jumping and ricochet are not part of it, since bzo forces both on.
 
 ## World fields
 

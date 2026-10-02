@@ -587,6 +587,22 @@ fell, teleported, zoned, burrowed -- and a host decides what to play, draw or
 send; nothing in it touches the page. A rule about how a tank moves goes there,
 never into one host.
 
+**One BZDB.** A world's variables are upstream's: names to raw strings, a
+map's `-set` lines, the server's `/set`s, or a bzfs target's whole table. The
+`bzdb` pair (`evalBzdb`, `bzdbIsTrue`, `parseColorString`, `BZDB_CONFIG_VARS`,
+`worldConfig`) turns them into config, and the server and every browser run it
+over the same strings -- `init.bzdb` and `setVar` carry them raw, as upstream
+carries them in `MsgSetVar`. A new world variable bzo reads is a row in
+`BZDB_CONFIG_VARS`, never a second reader on one side.
+
+**One world's tank and flags.** The tank's size is `TANK` in the `collision`
+pair, and a flag's numbers are the `flags` pair's own (`getShotEffects`,
+`getMotionEffects`, `getFlagTuning`), all set from a world's config by
+`configureTankDimensions` and `configureFlagEffects` -- the server on its live
+map, a browser on whatever world it shows. A module reads them there, never
+from a constant of its own, so a map's `-set _tankLength` or `_mGunAdVel`
+reaches collision, hits, bots, the autopilot and the drawing at once.
+
 ### Layout
 
 | Path | Role |
@@ -1572,15 +1588,12 @@ anything. A client fetches and renders whichever world it needs (live or
 previewed) through the same `loadWorldFile`/`applyWorldData` pair; there is no
 separate `worldOverride` message.
 
-**A preview drives by the previewed map's physics.** A map's own
-`_tankSpeed`/`_gravity`/`_jumpVelocity`/shot variables and its `-ms` ride the
-cached world file as `gameplay` (`deriveMapGameplay`, server.js), and
-`applyWorldData` lays them over the client's own `gameConfig` for as long as
-that map is on screen -- `liveGameConfig` keeps `init`'s copy so coming back
-is dropping the overlay rather than re-fetching. A variable the previewed map
-says nothing about keeps the live match's value. Jumping and ricochet are not
-in it (bzo forces both on) and neither are the flag variables, since a preview
-suppresses every flag anyway. See "Map physics" in `docs/bzw.md`.
+**A preview drives by the previewed map's variables.** Its `-set` lines ride
+the cached world file raw (`bzdb`), with its `-ms` (`gameplay`), and
+`configForWorld` evaluates them over `init`'s base for as long as that map is
+on screen -- the map as it would play on this server. `liveGameConfig` keeps
+the live world's, so coming back drops the preview's rather than re-fetching.
+Jumping and ricochet are not in it, since bzo forces both on. See "Map physics" in `docs/bzw.md`.
 
 **World size is the map's own data, not config.** `parseBZWMap` returns
 `mapSize` from a map's `world size` line rather than writing it into
@@ -2002,10 +2015,9 @@ prevent:
 - **The sustained rate** -- `_reloadTime / maxShots`. What `maxShots` slots each
   held for one reload works out to, and what `SHOT_RELOAD_TIME` carries.
 
-`SHOT_RELOAD_TIME` is derived after the `server.json` overrides are applied and
-again once the map's own physics are (its `-ms`, `_reloadTime`, `_shotSpeed` and
-`_shotRange` together, in one pass), so changing `shotMaxActive`, `shotSpeed` or
-`shotDistance` keeps the relation intact. With the defaults and one slot that is
+`SHOT_RELOAD_TIME` is derived by `worldConfig` from the world's whole BZDB and
+its `-ms` together, in one pass, so changing `shotMaxActive`, `_shotSpeed` or
+`_shotRange` keeps the relation intact. With the defaults and one slot that is
 3500ms; `maps/hix.bzw` asks for five and gets 700ms.
 
 ### A shot slot is a clock on the weapon, not a live shell
@@ -4230,10 +4242,8 @@ whatever map it names and nothing else, so it keeps bzo's two documented
 deviations -- jumping on, 16 superflag slots -- and a fresh install is playable
 without editing a map first.
 
-Two settings cannot move to a world at all, because both are BZDB variables
-reached only through `-set` and bzo does not read `-set`: `wingsJumpCount` and
-`wingsSlideTime` stay in the config at upstream's `_wingsJumpCount` and
-`_wingsSlideTime`. Raising the flap count to test `WG` means editing the config.
+Raising `WG`'s flap count to test it is `/set _wingsJumpCount <n>`, or a
+`-set` line in the map or server.json's `bzdb` block.
 - `SERVER_CONFIG_PATH` overrides the config path; `MAPS_PATH` overrides the
   writable runtime maps directory.
 - Obstacles are generated and resolved server-side and sent in the `init`

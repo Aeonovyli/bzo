@@ -12,7 +12,7 @@
 // to a player who enters, with no indication of which values the operator
 // or the map actually changed, so this table is what tells the two apart.
 
-const BZDB_DEFAULTS = Object.freeze({
+export const BZDB_DEFAULTS = Object.freeze({
   "_agilityAdVel"              : "2.25",
   "_agilityTimeWindow"         : "1.0",
   "_agilityVelDelta"           : "0.3",
@@ -181,7 +181,3 @@ const BZDB_DEFAULTS = Object.freeze({
   "_wingsSlideTime"            : "0.0",
   "_worldSize"                 : "800.0",
 });
-
-module.exports = {
-  BZDB_DEFAULTS,
-};

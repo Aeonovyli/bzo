@@ -52,7 +52,7 @@ two in step.
 - `` ` `` — toggle debug HUD
 - `=` or `+` or `Numpad +` — zoom radar out (increase range)
 - `-` or `Numpad -` — zoom radar in (decrease range)
-- `\` — reset radar zoom to the default medium range (0.5x shot-distance)
+- `\` — reset radar zoom to the default medium range (half the world's radar limit, which is the world size unless the map says otherwise)
 - `Settings -> Radar: ...` — cycle Short/Medium/Long radar presets
 - `B` — toggle the voice microphone
 - `Settings -> Audio Settings` — set the game, voice, and microphone levels, and choose the voice channel: All, Nearby, or Team

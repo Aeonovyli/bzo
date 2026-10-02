@@ -14,6 +14,9 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import {
   BASE_TOP_TOLERANCE,
+  BZFLAG_TANK_RADIUS,
+  configureTankDimensions,
+  TANK,
   getBaseTeamAtPoint,
   getBaseTopY,
   isOnBaseTop,
@@ -25,8 +28,8 @@ import {
   isColorTeamIndex,
 } from '../public/teams.mjs';
 import {
-  configureShotEffects,
-  BZFLAG_TANK_RADIUS,
+  configureFlagEffects,
+  getFlagTuning,
   GM_AD_LIFE,
   GM_ACTIVATION_TIME,
   GM_TURN_ANGLE,
@@ -58,7 +61,7 @@ import {
   usesNarrowHitBox,
   FLAG_CLEARANCE,
   FLAG_ENDURANCE,
-  FLAG_GRAB_RADIUS,
+  getFlagGrabRadius,
   FLAG_POLE_SIZE,
   FLAG_RADIUS,
   FLAG_STATUS,
@@ -185,7 +188,7 @@ assert.equal(FLAG_POLE_SIZE, 0.8);
 assert.equal(FLAG_CLEARANCE, 10.0);
 assert.equal(MAX_FLAG_GRABS, 4);
 assert.equal(BZFLAG_TANK_RADIUS, 4.32);
-close(FLAG_GRAB_RADIUS, 6.82, 'grab radius is BZFlag tank radius plus flag radius');
+close(getFlagGrabRadius(), 6.82, 'grab radius is BZFlag tank radius plus flag radius');
 
 // Flag.cxx:139 -- Useless is an unstable good superflag with no team.
 const useless = getFlagType('US');
@@ -1837,31 +1840,112 @@ for (const theirs of ['ST', 'CL', 'MQ', 'SE', null]) {
 // life defaults to "1.0 / _mGunAdRate", so it follows a rate the world sets.
 {
   assert.deepEqual([getShotEffects('MG').velocityFactor, getShotEffects('MG').rateFactor, getShotEffects('MG').lifeFactor], [1.5, 10, 0.1]);
-  configureShotEffects({ MGUN_AD_VEL: 4, MGUN_AD_RATE: 20 });
+  configureFlagEffects({ MGUN_AD_VEL: 4, MGUN_AD_RATE: 20 });
   assert.equal(getShotEffects('MG').velocityFactor, 4);
   assert.equal(getShotEffects('MG').lifeFactor, 1 / 20, 'life follows the rate');
-  configureShotEffects({ MGUN_AD_RATE: 20, MGUN_AD_LIFE: 0.02 });
+  configureFlagEffects({ MGUN_AD_RATE: 20, MGUN_AD_LIFE: 0.02 });
   assert.equal(getShotEffects('MG').lifeFactor, 0.02, 'a stated life wins');
   assert.equal(getShotEffects('F').rateFactor, 2, 'other flags untouched');
-  configureShotEffects({});
+  configureFlagEffects({});
   assert.equal(getShotEffects('MG').rateFactor, 10, 'and back to upstream');
 }
 
 // Laser's `_laserAd*` and Shock Wave's `_shockAdLife`, `_shockInRadius` and
 // `_shockOutRadius`, which the wave's growth and fade both follow.
 {
-  configureShotEffects({ LASER_AD_VEL: 20, LASER_AD_RATE: 1.5, LASER_AD_LIFE: 0.3 });
+  configureFlagEffects({ LASER_AD_VEL: 20, LASER_AD_RATE: 1.5, LASER_AD_LIFE: 0.3 });
   const laser = getShotEffects('L');
   assert.deepEqual([laser.velocityFactor, laser.rateFactor, laser.lifeFactor, laser.beam], [20, 1.5, 0.3, true]);
-  configureShotEffects({ SHOCK_AD_LIFE: 0.25, SHOCK_IN_RADIUS: 0, SHOCK_OUT_RADIUS: 80 });
+  configureFlagEffects({ SHOCK_AD_LIFE: 0.25, SHOCK_IN_RADIUS: 0, SHOCK_OUT_RADIUS: 80 });
   assert.equal(getShotEffects('SW').lifeFactor, 0.25);
   close(getShockWaveRadius(0, 1), 0, 'a wave may start from nothing');
   close(getShockWaveRadius(0.5, 1), 40, 'and grows to the world\'s radius');
   close(getShockWaveRadius(1, 1), 80);
   close(getShockWaveAlpha(80), 0.25, 'fading by the world\'s span');
-  configureShotEffects({});
+  configureFlagEffects({});
   close(getShockWaveRadius(1, 1), SHOCK_OUT_RADIUS, 'and back to upstream');
   assert.equal(getShotEffects('L').velocityFactor, LASER_AD_VEL);
+}
+
+// Guided Missile's `_gmAdLife`, `_gmTurnAngle` and `_gmActivationTime`, and
+// Burrow's `_burrowSpeedAd` and `_burrowAngularAd`, which only bite underground.
+{
+  configureFlagEffects({ GM_AD_LIFE: 0.8, GM_TURN_ANGLE: 1.0, GM_ACTIVATION_TIME: 0, BURROW_SPEED_AD: 1, BURROW_ANGULAR_AD: 1.25 });
+  const gm = getShotEffects('GM');
+  assert.deepEqual([gm.lifeFactor, gm.turnAngle, gm.activationTime, gm.guided], [0.8, 1.0, 0, true]);
+  assert.deepEqual(getBurrowFactors('BU', -1), { speed: 1, angVel: 1.25 });
+  assert.deepEqual(getBurrowFactors('BU', 0), { speed: 1, angVel: 1 }, 'above ground it costs nothing');
+  configureFlagEffects({});
+  assert.equal(getShotEffects('GM').turnAngle, GM_TURN_ANGLE);
+  assert.equal(getShotEffects('GM').activationTime, GM_ACTIVATION_TIME);
+  assert.deepEqual(getBurrowFactors('BU', -1), { speed: BURROW_SPEED_AD, angVel: BURROW_ANGULAR_AD });
+}
+
+// Rapid Fire's `_rFireAd*` (life following the rate unless stated) and
+// Thief's shot, speed, size and drop time.
+{
+  configureFlagEffects({
+    RFIRE_AD_VEL: 9, RFIRE_AD_RATE: 3.5,
+    THIEF_AD_SHOT_VEL: 20, THIEF_AD_RATE: 6, THIEF_AD_LIFE: 0.4,
+    THIEF_VEL_AD: 2, THIEF_TINY_FACTOR: 0.3, THIEF_DROP_TIME: 0,
+  });
+  const rf = getShotEffects('F');
+  assert.deepEqual([rf.velocityFactor, rf.rateFactor, rf.lifeFactor], [9, 3.5, 1 / 3.5]);
+  const th = getShotEffects('TH');
+  assert.deepEqual([th.velocityFactor, th.rateFactor, th.lifeFactor, th.steals, th.beam], [20, 6, 0.4, true, true]);
+  assert.equal(getMotionEffects('TH').speedFactor, 2);
+  assert.deepEqual(getTankDimensionScale('TH'), { length: 0.3, width: 0.3 });
+  assert.equal(getThiefDropReloadSeconds(3.5), 0, 'a stated drop time wins, 0 included');
+  configureFlagEffects({ RFIRE_AD_RATE: 4, RFIRE_AD_LIFE: 0.074 });
+  assert.equal(getShotEffects('F').lifeFactor, 0.074);
+  configureFlagEffects({});
+  assert.equal(getShotEffects('F').lifeFactor, 1 / RAPID_FIRE_AD_RATE);
+  assert.equal(getMotionEffects('TH').speedFactor, THIEF_VEL_AD);
+  assert.deepEqual(getTankDimensionScale('TH'), { length: THIEF_TINY_FACTOR, width: THIEF_TINY_FACTOR });
+  assert.equal(getThiefDropReloadSeconds(3.5), 1.75, 'and back to _reloadTime * 0.5');
+}
+
+// The scalar flag numbers: Velocity, Quick Turn, the size flags, Agility,
+// Steamroller and `_flagEffectTime`.
+{
+  configureFlagEffects({
+    VELOCITY_AD: 2, ANGULAR_AD: 3, TINY_FACTOR: 0.25, OBESE_FACTOR: 10, NARROW_FACTOR: 0.01,
+    AGILITY_AD_VEL: 3, AGILITY_TIME_WINDOW: 1.5, AGILITY_VEL_DELTA: 0.5, SR_RADIUS_MULT: 5, FLAG_EFFECT_TIME: 0,
+  });
+  assert.equal(getMotionEffects('V').speedFactor, 2);
+  assert.equal(getMotionEffects('QT').angVelFactor, 3);
+  assert.deepEqual(getTankDimensionScale('T'), { length: 0.25, width: 0.25 });
+  assert.deepEqual(getTankDimensionScale('O'), { length: 10, width: 10 });
+  assert.deepEqual(getTankDimensionScale('N'), { length: 1, width: 0.01 });
+  assert.equal(getMaxSpeedFactor('A'), 3);
+  assert.equal(getSpeedFactor('A', 0, 1, 0, 10).factor, 3, 'a jump past the world\'s delta boosts');
+  assert.equal(getSpeedFactor('A', 0, 0.4, -100, 10).factor, 1, 'one inside it does not');
+  assert.equal(getSpeedFactor('A', 1, 1, 9, 10.4).factor, 3, 'and the boost lasts the world\'s window');
+  assert.equal(getTankDimensionEase(1, 0.25, 0), 0.25, 'a flag effect time of 0 is at once');
+  close(getRunOverRadius(null, null, 1), 6, 'the roller reaches by the world\'s multiple');
+  configureFlagEffects({});
+  assert.equal(getMotionEffects('V').speedFactor, VELOCITY_AD);
+  assert.deepEqual(getTankDimensionScale('T'), { length: TINY_FACTOR, width: TINY_FACTOR });
+  assert.equal(getFlagTuning().flagEffectTime, FLAG_EFFECT_TIME);
+}
+
+// The world's tank (`_tankLength` and the rest). Upstream's formulas follow
+// it -- `_tankRadius` is `0.72 * _tankLength`, `_muzzleFront` `_tankRadius +
+// 0.1` -- and bzo's own figures keep their ratio to upstream's.
+{
+  configureTankDimensions({ TANK_LENGTH: 5 });
+  assert.equal(TANK.halfLength, 2.5);
+  close(TANK.radius, 3.6, '_tankRadius follows _tankLength');
+  close(TANK.hitRadius, 2 * (3.6 / 4.32), 'bzo\'s hit radius keeps its ratio');
+  close(getFlagGrabRadius(), 3.6 + (6.82 - 4.32), 'and so does the grab reach');
+  close(TANK.muzzleForward, 3.0 * (3.7 / 4.42), '_muzzleFront follows _tankRadius');
+  close(TANK.modelScale.length, 5 / 6);
+  assert.equal(TANK.modelScale.width, 1);
+  configureTankDimensions({ TANK_LENGTH: 5, TANK_RADIUS: 5 });
+  close(TANK.radius, 5, 'a stated radius wins');
+  configureTankDimensions({});
+  assert.equal(TANK.radius, BZFLAG_TANK_RADIUS);
+  assert.equal(TANK.halfLength, 3);
 }
 
 console.log('Flag flight and type tests passed');

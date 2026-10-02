@@ -5,6 +5,8 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
+const { TANK } = require('./collision.cjs');
+
 // Flag types, statuses, world constants, and the flight math. Mirrors BZFlag's
 // include/Flag.h, src/common/Flag.cxx and src/bzfs/FlagInfo.cxx.
 //
@@ -232,13 +234,15 @@ const BOUNCE_DELAY = 0.2;
 const BOUNCY_JUMP_MIN_FACTOR = 0.25;
 const BOUNCY_JUMP_RANGE = 0.75;
 
-// BZFlag's tank radius, deliberately not bzo's 2. The grab radius scales with
-// the world rather than with the vehicle, as the sound reference distance in
-// audio.js does: a bzo tank is half as wide as an upstream one, and building
-// the radius from it would mean driving almost dead centre over a flag to take
-// it. Tune this one figure if 6.82 plays badly.
-const BZFLAG_TANK_RADIUS = 4.32;
-const FLAG_GRAB_RADIUS = BZFLAG_TANK_RADIUS + FLAG_RADIUS;
+// BZFlag's tank radius (`TANK.radius`, the world's `_tankRadius`),
+// deliberately not bzo's hit radius. The grab radius scales with the world
+// rather than with the vehicle, as the sound reference distance in audio.js
+// does: a bzo tank is half as wide as an upstream one, and building the radius
+// from it would mean driving almost dead centre over a flag to take it. 6.82 on
+// upstream's default tank.
+function getFlagGrabRadius() {
+  return TANK.radius + FLAG_RADIUS;
+}
 // checkEnvironment() only grabs when the tank and the flag are on the same
 // level, and rate-limits requests to five a second.
 const FLAG_GRAB_LEVEL_TOLERANCE = 0.1;
@@ -783,10 +787,10 @@ function normalizeShakeWins(count) {
 // number. Every other flag, and no flag at all, is the tank's own size.
 function getTankDimensionScale(abbreviation) {
   switch (abbreviation) {
-    case 'O': return { length: OBESE_FACTOR, width: OBESE_FACTOR };
-    case 'T': return { length: TINY_FACTOR, width: TINY_FACTOR };
-    case 'TH': return { length: THIEF_TINY_FACTOR, width: THIEF_TINY_FACTOR };
-    case 'N': return { length: 1, width: NARROW_FACTOR };
+    case 'O': return { length: flagTuning.obeseFactor, width: flagTuning.obeseFactor };
+    case 'T': return { length: flagTuning.tinyFactor, width: flagTuning.tinyFactor };
+    case 'TH': return { length: thiefTinyFactor, width: thiefTinyFactor };
+    case 'N': return { length: 1, width: flagTuning.narrowFactor };
     default: return { length: 1, width: 1 };
   }
 }
@@ -910,8 +914,9 @@ function usesNarrowHitBox(abbreviation) {
 // straight interpolation from the scale in hand to the one the flag asks for.
 function getTankDimensionEase(fromScale, targetScale, elapsedSeconds) {
   if (!(elapsedSeconds >= 0)) return targetScale;
-  if (elapsedSeconds >= FLAG_EFFECT_TIME) return targetScale;
-  const t = elapsedSeconds / FLAG_EFFECT_TIME;
+  const { flagEffectTime } = flagTuning;
+  if (!(flagEffectTime > 0) || elapsedSeconds >= flagEffectTime) return targetScale;
+  const t = elapsedSeconds / flagEffectTime;
   return fromScale + ((targetScale - fromScale) * t);
 }
 
@@ -1022,24 +1027,10 @@ const DEFAULT_SHOT_EFFECTS = Object.freeze({
 });
 
 const SHOT_EFFECTS = {
-  F: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    velocityFactor: RAPID_FIRE_AD_VEL,
-    rateFactor: RAPID_FIRE_AD_RATE,
-    lifeFactor: 1 / RAPID_FIRE_AD_RATE,
-  }),
+  F: rapidFireEffects(),
   MG: machineGunEffects(),
   L: laserEffects(),
-  // GuidedMissileStrategy's constructor scales the lifetime and touches nothing
-  // else: it never calls `setReloadTime`, and it leaves the shell at the world's
-  // own speed. Everything that makes the flag is in the heading.
-  GM: Object.freeze({
-    ...DEFAULT_SHOT_EFFECTS,
-    lifeFactor: GM_AD_LIFE,
-    guided: true,
-    activationTime: GM_ACTIVATION_TIME,
-    fireSound: 'missile',
-  }),
+  GM: guidedMissileEffects(),
   SB: Object.freeze({
     ...DEFAULT_SHOT_EFFECTS,
     throughBuildings: true,
@@ -1064,26 +1055,48 @@ const SHOT_EFFECTS = {
   // ending: the same `makeSegments(Stop)` in the constructor, the same node per
   // segment drawn all at once, so it is a beam -- but eight times the speed
   // against a twentieth of the life leaves it four tenths of a shell's range.
-  TH: Object.freeze({
+  TH: thiefEffects(),
+};
+
+// A world's own tuning of its flags, from the config's copy of upstream's
+// variables: Machine Gun's `_mGunAdVel`, `_mGunAdRate` and `_mGunAdLife`
+// (MGUN_AD_*), Laser's `_laserAd*` (LASER_AD_*), Shock Wave's `_shockAdLife`,
+// `_shockInRadius` and `_shockOutRadius` (SHOCK_*), Guided Missile's
+// `_gmAdLife`, `_gmTurnAngle` and `_gmActivationTime` (GM_*), Burrow's
+// `_burrowSpeedAd` and `_burrowAngularAd` (BURROW_*), Rapid Fire's `_rFireAd*`
+// (RFIRE_AD_*), Thief's `_thiefAdShotVel`, `_thiefAdRate`, `_thiefAdLife`,
+// `_thiefVelAd`, `_thiefTinyFactor` and `_thiefDropTime` (THIEF_*), and the
+// scalars in `flagTuning` below (`getFlagTuning`). Each host calls
+// `configureFlagEffects` with its world's config whenever that changes;
+// anything missing is upstream's default.
+function positive(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// Rapid Fire's life, like Machine Gun's below, is upstream's default
+// expression "1.0 / <rate>" unless the world states one, so it follows the
+// world's rate.
+function rapidFireEffects(config = {}) {
+  const rate = positive(config.RFIRE_AD_RATE, RAPID_FIRE_AD_RATE);
+  return Object.freeze({
     ...DEFAULT_SHOT_EFFECTS,
-    velocityFactor: THIEF_AD_SHOT_VEL,
-    rateFactor: THIEF_AD_RATE,
-    lifeFactor: THIEF_AD_LIFE,
+    velocityFactor: positive(config.RFIRE_AD_VEL, RAPID_FIRE_AD_VEL),
+    rateFactor: rate,
+    lifeFactor: positive(config.RFIRE_AD_LIFE, 1 / rate),
+  });
+}
+
+function thiefEffects(config = {}) {
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    velocityFactor: positive(config.THIEF_AD_SHOT_VEL, THIEF_AD_SHOT_VEL),
+    rateFactor: positive(config.THIEF_AD_RATE, THIEF_AD_RATE),
+    lifeFactor: positive(config.THIEF_AD_LIFE, THIEF_AD_LIFE),
     beam: true,
     steals: true,
     beamColor: THIEF_BEAM_COLOR,
     fireSound: 'thief',
-  }),
-};
-
-// A world's own tuning of the flags whose shots it can change, from the
-// config's copy of upstream's variables: Machine Gun's `_mGunAdVel`,
-// `_mGunAdRate` and `_mGunAdLife` (MGUN_AD_*), Laser's `_laserAd*` (LASER_AD_*),
-// and Shock Wave's `_shockAdLife`, `_shockInRadius` and `_shockOutRadius`
-// (SHOCK_*). Each host calls `configureShotEffects` with its world's config
-// whenever that changes; anything missing is upstream's default.
-function positive(value, fallback) {
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  });
 }
 
 // A Machine Gun life the world leaves alone is upstream's default expression,
@@ -1122,10 +1135,77 @@ function shockWaveEffects(config = {}) {
   });
 }
 
-function configureShotEffects(config) {
-  SHOT_EFFECTS.MG = machineGunEffects(config || {});
-  SHOT_EFFECTS.L = laserEffects(config || {});
-  SHOT_EFFECTS.SW = shockWaveEffects(config || {});
+// GuidedMissileStrategy's constructor scales the lifetime and touches nothing
+// else: it never calls `setReloadTime`, and it leaves the shell at the world's
+// own speed. Everything that makes the flag is in the heading, which turns at
+// `turnAngle` radians a second (`steerGuidedShot`).
+function guidedMissileEffects(config = {}) {
+  const activation = config.GM_ACTIVATION_TIME;
+  return Object.freeze({
+    ...DEFAULT_SHOT_EFFECTS,
+    lifeFactor: positive(config.GM_AD_LIFE, GM_AD_LIFE),
+    guided: true,
+    turnAngle: positive(config.GM_TURN_ANGLE, GM_TURN_ANGLE),
+    activationTime: Number.isFinite(activation) && activation >= 0 ? activation : GM_ACTIVATION_TIME,
+    fireSound: 'missile',
+  });
+}
+
+let burrowFactors = Object.freeze({ speed: BURROW_SPEED_AD, angVel: BURROW_ANGULAR_AD });
+
+// The rest of the world's flag numbers: `V` Velocity's `_velocityAd`, `QT`
+// Quick Turn's `_angularAd`, the size flags' `_tinyFactor`, `_obeseFactor` and
+// `_narrowFactor`, `A` Agility's `_agilityAdVel`, `_agilityTimeWindow` and
+// `_agilityVelDelta`, `SR` Steamroller's `_srRadiusMult`, and
+// `_flagEffectTime`, how long a tank takes to change size or fade.
+function buildFlagTuning(config = {}) {
+  return Object.freeze({
+    velocityAd: positive(config.VELOCITY_AD, VELOCITY_AD),
+    angularAd: positive(config.ANGULAR_AD, ANGULAR_AD),
+    tinyFactor: positive(config.TINY_FACTOR, TINY_FACTOR),
+    obeseFactor: positive(config.OBESE_FACTOR, OBESE_FACTOR),
+    narrowFactor: positive(config.NARROW_FACTOR, NARROW_FACTOR),
+    agilityAdVel: positive(config.AGILITY_AD_VEL, AGILITY_AD_VEL),
+    agilityTimeWindow: positive(config.AGILITY_TIME_WINDOW, AGILITY_TIME_WINDOW),
+    agilityVelDelta: positive(config.AGILITY_VEL_DELTA, AGILITY_VEL_DELTA),
+    srRadiusMult: positive(config.SR_RADIUS_MULT, SR_RADIUS_MULT),
+    flagEffectTime: Number.isFinite(config.FLAG_EFFECT_TIME) && config.FLAG_EFFECT_TIME >= 0
+      ? config.FLAG_EFFECT_TIME
+      : FLAG_EFFECT_TIME,
+  });
+}
+let flagTuning = buildFlagTuning();
+
+function getFlagTuning() {
+  return flagTuning;
+}
+let thiefTinyFactor = THIEF_TINY_FACTOR;
+// Seconds, where the world states `_thiefDropTime`; null for upstream's own
+// "_reloadTime * 0.5" (`getThiefDropReloadSeconds`).
+let thiefDropTime = null;
+
+function configureFlagEffects(config) {
+  const tuning = config || {};
+  SHOT_EFFECTS.MG = machineGunEffects(tuning);
+  SHOT_EFFECTS.L = laserEffects(tuning);
+  SHOT_EFFECTS.SW = shockWaveEffects(tuning);
+  SHOT_EFFECTS.GM = guidedMissileEffects(tuning);
+  SHOT_EFFECTS.F = rapidFireEffects(tuning);
+  SHOT_EFFECTS.TH = thiefEffects(tuning);
+  MOTION_EFFECTS.TH = Object.freeze({
+    ...DEFAULT_MOTION_EFFECTS, speedFactor: positive(tuning.THIEF_VEL_AD, THIEF_VEL_AD),
+  });
+  thiefTinyFactor = positive(tuning.THIEF_TINY_FACTOR, THIEF_TINY_FACTOR);
+  flagTuning = buildFlagTuning(tuning);
+  MOTION_EFFECTS.V = Object.freeze({ ...DEFAULT_MOTION_EFFECTS, speedFactor: flagTuning.velocityAd });
+  MOTION_EFFECTS.QT = Object.freeze({ ...DEFAULT_MOTION_EFFECTS, angVelFactor: flagTuning.angularAd });
+  thiefDropTime = Number.isFinite(tuning.THIEF_DROP_TIME) && tuning.THIEF_DROP_TIME >= 0
+    ? tuning.THIEF_DROP_TIME
+    : null;
+  burrowFactors = Object.freeze({
+    speed: positive(tuning.BURROW_SPEED_AD, BURROW_SPEED_AD),
+    angVel: positive(tuning.BURROW_ANGULAR_AD, BURROW_ANGULAR_AD),
+  });
 }
 
 function getShotEffects(abbreviation) {
@@ -1147,7 +1227,7 @@ function stealsFlags(abbreviation) {
 // steal is the moment the flag is spent: putting it down by hand costs the same,
 // because upstream cannot tell the two apart and neither reading is unfair.
 function getThiefDropReloadSeconds(shotLifetimeSeconds) {
-  return shotLifetimeSeconds * THIEF_DROP_TIME_FACTOR;
+  return thiefDropTime ?? (shotLifetimeSeconds * THIEF_DROP_TIME_FACTOR);
 }
 
 // ShockWaveStrategy::update. The radius is a straight lerp from `_shockInRadius`
@@ -1323,7 +1403,7 @@ const DEFAULT_MOTION_EFFECTS = Object.freeze({
   momentum: false,
 });
 
-const MOTION_EFFECTS = Object.freeze({
+const MOTION_EFFECTS = {
   V: Object.freeze({ ...DEFAULT_MOTION_EFFECTS, speedFactor: VELOCITY_AD }),
   // Player::getMaxSpeed (Player.cxx:219) names Thief beside Velocity, and
   // `setDesiredSpeed` (LocalPlayer.cxx:1106) applies it the same way -- so it is
@@ -1339,7 +1419,7 @@ const MOTION_EFFECTS = Object.freeze({
   M: Object.freeze({ ...DEFAULT_MOTION_EFFECTS, momentum: true }),
   BY: Object.freeze({ ...DEFAULT_MOTION_EFFECTS, bouncy: true }),
   TR: Object.freeze({ ...DEFAULT_MOTION_EFFECTS, triggerHappy: true }),
-});
+};
 
 function getMotionEffects(abbreviation) {
   return MOTION_EFFECTS[abbreviation] || DEFAULT_MOTION_EFFECTS;
@@ -1352,7 +1432,7 @@ function getMotionEffects(abbreviation) {
 // speed -- outside the window it is an ordinary tank.
 function getMaxSpeedFactor(abbreviation) {
   const effects = getMotionEffects(abbreviation);
-  return effects.agility ? AGILITY_AD_VEL : effects.speedFactor;
+  return effects.agility ? flagTuning.agilityAdVel : effects.speedFactor;
 }
 
 function getMaxAngVelFactor(abbreviation) {
@@ -1568,14 +1648,15 @@ function firesContinuously(abbreviation) {
 function getSpeedFactor(abbreviation, previousFraction, requestedFraction, agilityStartedAt, now) {
   const effects = getMotionEffects(abbreviation);
   if (!effects.agility) return { factor: effects.speedFactor, agilityStartedAt };
-  if ((now - agilityStartedAt) < AGILITY_TIME_WINDOW) {
-    return { factor: AGILITY_AD_VEL, agilityStartedAt };
+  const { agilityAdVel, agilityTimeWindow, agilityVelDelta } = flagTuning;
+  if ((now - agilityStartedAt) < agilityTimeWindow) {
+    return { factor: agilityAdVel, agilityStartedAt };
   }
   const oldFraction = Math.max(-0.5, Math.min(1, previousFraction));
   // "if (fracOfMaxSpeed < 0.0f) limit /= 2.0f" -- a reverse is half the change.
-  const limit = requestedFraction < 0 ? AGILITY_VEL_DELTA / 2 : AGILITY_VEL_DELTA;
+  const limit = requestedFraction < 0 ? agilityVelDelta / 2 : agilityVelDelta;
   if (Math.abs(requestedFraction - oldFraction) > limit) {
-    return { factor: AGILITY_AD_VEL, agilityStartedAt: now };
+    return { factor: agilityAdVel, agilityStartedAt: now };
   }
   return { factor: 1, agilityStartedAt };
 }
@@ -1596,7 +1677,7 @@ function getGroundLimit(abbreviation) {
 // flag costs nothing and grants nothing.
 function getBurrowFactors(abbreviation, y) {
   if (abbreviation !== 'BU' || !(y < 0)) return { speed: 1, angVel: 1 };
-  return { speed: BURROW_SPEED_AD, angVel: BURROW_ANGULAR_AD };
+  return burrowFactors;
 }
 
 // Nothing about Burrow makes a tank harder to hit; it makes it *lower*. A tank
@@ -1650,7 +1731,7 @@ function canRunOver(rollerFlag, victimFlag, rollerY, rollerZoned = false) {
 // to run over things with.
 function getRunOverRadius(victimFlag, rollerFlag, tankRadius) {
   return (tankRadius * getTankHitRadiusScale(victimFlag))
-    + (SR_RADIUS_MULT * tankRadius * getTankHitRadiusScale(rollerFlag));
+    + (flagTuning.srRadiusMult * tankRadius * getTankHitRadiusScale(rollerFlag));
 }
 
 // And the distance it is compared against, which is not the plain one: upstream
@@ -1981,8 +2062,7 @@ module.exports = {
   BOUNCE_DELAY,
   BOUNCY_JUMP_MIN_FACTOR,
   BOUNCY_JUMP_RANGE,
-  BZFLAG_TANK_RADIUS,
-  FLAG_GRAB_RADIUS,
+  getFlagGrabRadius,
   FLAG_GRAB_LEVEL_TOLERANCE,
   FLAG_GRAB_INTERVAL_MS,
   SUPER_FLAG_HALF_LIFE_SECONDS,
@@ -2029,7 +2109,8 @@ module.exports = {
   getAntidoteCoordinate,
   canShakeFlag,
   hasAirControl,
-  configureShotEffects,
+  getFlagTuning,
+  configureFlagEffects,
   getShotEffects,
   stealsFlags,
   getThiefDropReloadSeconds,

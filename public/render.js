@@ -8,7 +8,6 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { AnaglyphEffect } from './anaglyph.js';
 import { meshArrays, meshDrawArrays, NO_INDEX } from './mesh-arrays.mjs';
-import { DEFAULT_MUZZLE_FORWARD, DEFAULT_MUZZLE_HEIGHT } from './drive.mjs';
 import { xrState } from './webxr.js';
 import { markFramePhase, noteProgramCount } from './perf.js';
 import {
@@ -32,11 +31,11 @@ import {
   loadAudioBuffer,
 } from './audio.js';
 import {
-  TANK_HEIGHT,
   WORLD_WALL_HEIGHT,
   findShotSegmentImpact,
   getObstacleHeight,
   getPyramidSurfaceLocalHeight,
+  TANK,
 } from './collision.mjs';
 import { createBuriedTriangleTest } from './face-trim.mjs';
 import {
@@ -87,7 +86,6 @@ import {
   loadExternalTexture,
 } from './texture.js';
 
-const BZFLAG_TANK_LENGTH = 6.0;
 // BZDB_MUZZLEFRONT (global.cxx: "_tankRadius + 0.1") is upstream's own
 // invariant: the muzzle never sits more than 0.1 past the tank's closest
 // possible approach to a wall, whatever the model looks like, so a shot can
@@ -100,7 +98,9 @@ const BZFLAG_TANK_LENGTH = 6.0;
 // (see _computeMuzzleFromBarrel below), but a long-barreled model can compute
 // a value past *this* tank's own closest approach -- letting the shot spawn
 // inside or past a thin wall (issue #83). Clamp to bzo's own invariant.
-const MAX_MUZZLE_FORWARD = (BZFLAG_TANK_LENGTH / 2) + 0.1;
+function maxMuzzleForward() {
+  return (TANK.length / 2) + 0.1;
+}
 const MUZZLE_TIP_EPSILON = 0.03;
 const BZFlag_DEFAULT_HORIZONTAL_FOV = 60;
 
@@ -178,7 +178,9 @@ const TANK_NAV_LIGHT_SIZE_MIN = 2;
 // Forty tank lengths puts the chase camera's twelve units at four and a half
 // times the far-field size, which is four pixels of difference rather than
 // none.
-const TANK_NAV_LIGHT_HOLD = 40 * BZFLAG_TANK_LENGTH;
+function tankNavLightHold() {
+  return 40 * TANK.length;
+}
 // How hard the size follows the distance. Solid geometry follows it exactly --
 // an exponent of 1, half the distance and twice the size -- and a light should
 // not, because what a light is worth at range is out of all proportion to how
@@ -227,7 +229,7 @@ void main() {
   float viewDistance = length(mvPosition.xyz);
   gl_PointSize = max(${TANK_NAV_LIGHT_SIZE_MIN.toFixed(1)}, clamp(
     held * pow(
-      ${TANK_NAV_LIGHT_HOLD.toFixed(1)} / max(viewDistance, 0.001),
+      ${tankNavLightHold().toFixed(1)} / max(viewDistance, 0.001),
       ${TANK_NAV_LIGHT_FALLOFF.toFixed(2)}
     ),
     held,
@@ -642,7 +644,9 @@ const TANK_IDL_PROJECT_DISTANCE = 2.0;
 const TANK_IDL_PROJECT_JITTER = 0.3;
 // The projection origin sits one tank length back from the plane, so the streaks
 // fan rather than run parallel.
-const TANK_IDL_ORIGIN_SETBACK = BZFLAG_TANK_LENGTH;
+function tankIdlOriginSetback() {
+  return TANK.length;
+}
 // Over the tank and the building both, being the seam between them.
 const TANK_IDL_RENDER_ORDER = 7;
 // Two triangles a face is the most a plane can cut from one, and the buffer is
@@ -653,7 +657,9 @@ const TANK_IDL_MAX_VERTICES = 26 * 6;
 // program the tank draws with -- on the way out, and again on the next wall.
 const TANK_CLIP_DISABLED_CONSTANT = 1e6;
 
-const BZFLAG_SHOT_EXPLOSION_SIZE = 1.2 * BZFLAG_TANK_LENGTH;
+function shotExplosionSize() {
+  return 1.2 * TANK.length;
+}
 const BZFLAG_SHOT_EXPLOSION_DURATION = 0.8;
 const BZFLAG_SHOT_EXPLOSION_LIGHT_FADE_START_RATIO = 0.7;
 const PROJECTED_SHADOW_MIN_LIGHT_Y = 0.05;
@@ -1294,7 +1300,9 @@ const WEATHER_PUDDLE_CAPACITY = 512;
 // test, not a shot's own collision radius.
 const WEATHER_ROOF_RAY_RADIUS = 0.1;
 // `120.0f * BZDBCache::tankHeight`, "same as the clouds" -- WeatherRenderer.cxx:351.
-const WEATHER_SKY_HEIGHT = 120 * TANK_HEIGHT;
+function weatherSkyHeight() {
+  return 120 * TANK.height;
+}
 
 // `WeatherRenderer::set()`'s per-`_rainType` deltas over its own outer
 // defaults (density 1000, speed -100/50, size 1x1, spin on, puddles on, white
@@ -1569,12 +1577,12 @@ class RenderManager {
 
   _computeMuzzleFromBarrel(barrel) {
     if (!barrel || !barrel.geometry) {
-      return { forward: DEFAULT_MUZZLE_FORWARD, height: DEFAULT_MUZZLE_HEIGHT };
+      return { forward: TANK.muzzleForward, height: TANK.muzzleHeight };
     }
 
     const position = barrel.geometry.getAttribute('position');
     if (!position || position.count === 0) {
-      return { forward: DEFAULT_MUZZLE_FORWARD, height: DEFAULT_MUZZLE_HEIGHT };
+      return { forward: TANK.muzzleForward, height: TANK.muzzleHeight };
     }
 
     barrel.updateMatrix();
@@ -1590,7 +1598,7 @@ class RenderManager {
 
     const tipPoints = points.filter((point) => point.z <= (minZ + MUZZLE_TIP_EPSILON));
     if (tipPoints.length === 0) {
-      return { forward: DEFAULT_MUZZLE_FORWARD, height: DEFAULT_MUZZLE_HEIGHT };
+      return { forward: TANK.muzzleForward, height: TANK.muzzleHeight };
     }
 
     const avg = tipPoints.reduce((acc, point) => {
@@ -1602,9 +1610,9 @@ class RenderManager {
     const avgY = avg.y / tipPoints.length;
     const avgZ = avg.z / tipPoints.length;
     const forward = Number.isFinite(avgZ)
-      ? Math.min(MAX_MUZZLE_FORWARD, Math.max(0.5, -avgZ))
-      : DEFAULT_MUZZLE_FORWARD;
-    const height = Number.isFinite(avgY) ? avgY : DEFAULT_MUZZLE_HEIGHT;
+      ? Math.min(maxMuzzleForward(), Math.max(0.5, -avgZ))
+      : TANK.muzzleForward;
+    const height = Number.isFinite(avgY) ? avgY : TANK.muzzleHeight;
 
     return { forward, height };
   }
@@ -1653,11 +1661,19 @@ class RenderManager {
   _applyFogConfig(gameConfig = null) {
     if (!this.scene) return;
 
-    const fogMode = typeof gameConfig?.FOG_MODE === 'string' ? gameConfig.FOG_MODE.toLowerCase() : 'none';
+    // SceneRenderer::setupBackgroundMaterials: any mode but `none` is fog, one
+    // that is not `linear` or `exp2` is `exp`, and the fog is `_fogColor`
+    // rather than the sky behind it.
+    const rawMode = typeof gameConfig?.FOG_MODE === 'string' ? gameConfig.FOG_MODE.toLowerCase() : 'none';
+    const fogMode = rawMode === 'none' || rawMode === 'linear' || rawMode === 'exp2' ? rawMode : 'exp';
     const fogDensity = Number.isFinite(gameConfig?.FOG_DENSITY) ? gameConfig.FOG_DENSITY : 0.001;
     const fogStart = Number.isFinite(gameConfig?.FOG_START) ? gameConfig.FOG_START : 50;
     const fogEnd = Number.isFinite(gameConfig?.FOG_END) ? gameConfig.FOG_END : 100;
-    const baseFogColor = this.scene.background?.clone?.() || new THREE.Color(0x87ceeb);
+    const fogRgb = Array.isArray(gameConfig?.FOG_COLOR) ? gameConfig.FOG_COLOR : [0.25, 0.25, 0.25];
+    const baseFogColor = new THREE.Color(fogRgb[0], fogRgb[1], fogRgb[2]);
+    // `_skyColor` multiplies every sky colour (daylight.cxx:368); white, or
+    // none, leaves them alone.
+    this._skyTint = Array.isArray(gameConfig?.SKY_COLOR) ? gameConfig.SKY_COLOR : null;
 
     if (fogMode === 'linear') {
       this.scene.fog = new THREE.Fog(baseFogColor, fogStart, fogEnd);
@@ -1755,7 +1771,9 @@ class RenderManager {
 
     const ambientThreeColor = toThreeColor(ambientColor);
     const directThreeColor = toThreeColor(directColor);
-    const backgroundColor = toThreeColor(lerpTriplet(skySunDirColor, skyZenithColor, 0.35));
+    const tint = this._skyTint;
+    const tinted = (rgb) => (tint ? rgb.map((value, i) => value * tint[i]) : rgb);
+    const backgroundColor = toThreeColor(lerpTriplet(tinted(skySunDirColor), tinted(skyZenithColor), 0.35));
 
     if (this.ambientLight) {
       this.ambientLight.color.copy(ambientThreeColor);
@@ -1781,9 +1799,6 @@ class RenderManager {
     }
 
     this.scene.background.copy(backgroundColor);
-    if (this.scene.fog) {
-      this.scene.fog.color.copy(backgroundColor);
-    }
 
     this._updateCelestialBodies({
       sunX,
@@ -2391,7 +2406,25 @@ class RenderManager {
   // stencil bits say what the machine can do, the knob says what this run is
   // measuring.
   _projectedShadowsActive() {
-    return this.projectedShadowsEnabled && this.canUseProjectedShadows();
+    return this.projectedShadowsEnabled && this._worldDraws('shadows') && this.canUseProjectedShadows();
+  }
+
+  // The world's own scene switches -- `_drawMountains`, `_drawClouds`,
+  // `_drawCelestial`, `_drawGround` and `_noShadows` -- which a server locks
+  // and every client obeys. They take away; the viewer's own settings can take
+  // away more.
+  setSceneSwitches(config = null) {
+    this._sceneSwitches = {
+      mountains: config?.DRAW_MOUNTAINS !== false,
+      clouds: config?.DRAW_CLOUDS !== false,
+      celestial: config?.DRAW_CELESTIAL !== false,
+      ground: config?.DRAW_GROUND !== false,
+      shadows: config?.NO_SHADOWS !== true,
+    };
+  }
+
+  _worldDraws(part) {
+    return this._sceneSwitches?.[part] !== false;
   }
 
   canUseProjectedShadows() {
@@ -3754,6 +3787,7 @@ class RenderManager {
   buildGround(mapSize, groundMaterial = null) {
     if (!this.scene) return;
     this.clearGround();
+    if (!this._worldDraws('ground')) return;
 
     const groundExtent = mapSize * 10;
     const groundGeometry = this._buildCenteredGroundGeometry(groundExtent);
@@ -3927,8 +3961,8 @@ class RenderManager {
     let startZ = weather.startZ;
     let endZ = weather.endZ;
     if (!Number.isFinite(startZ) && !Number.isFinite(endZ)) {
-      startZ = falling ? WEATHER_SKY_HEIGHT : 0;
-      endZ = falling ? 0 : WEATHER_SKY_HEIGHT;
+      startZ = falling ? weatherSkyHeight() : 0;
+      endZ = falling ? 0 : weatherSkyHeight();
     } else {
       startZ = Number.isFinite(startZ) ? startZ : 0;
       endZ = Number.isFinite(endZ) ? endZ : 0;
@@ -4353,7 +4387,8 @@ class RenderManager {
             const nz = normal.getZ(vertex);
             const u = (position.getX(vertex) * nz) - (position.getZ(vertex) * nx);
             const v = position.getY(vertex);
-            bucket.uvs.push(u / BOX_TEXTURE_SCALES.sideScale, v / BOX_TEXTURE_SCALES.sideScale);
+            const { sideScale } = this._boxTextureScales();
+            bucket.uvs.push(u / sideScale, v / sideScale);
           } else {
             bucket.uvs.push(uv.getX(vertex), uv.getY(vertex));
           }
@@ -4730,7 +4765,7 @@ class RenderManager {
           // BoxSceneNodeGenerator.cxx:66, in its own words: "Don't generate the
           // bottom polygon if on the ground (or lower)".
           this._prepareBoxGeometry(obs.w, h, obs.d, {
-            ...BOX_TEXTURE_SCALES,
+            ...this._boxTextureScales(),
             omitFaces: baseY > 0 ? [] : [BOX_FACE.NY],
           }),
           obstacleMatrix(),
@@ -5529,9 +5564,21 @@ class RenderManager {
   // neighbouring obstacle (four overlapping boxes making an octagon, say) has
   // an inside just as buried, and this shell has no other way to learn that:
   // it is built from scratch rather than sliced out of that merge.
+  // How a box's walls and roof tile, with the world's `_boxHeight`: upstream
+  // tiles them at `0.2 * _boxHeight` (SceneBuilder.cxx:198), so a world with
+  // taller default boxes tiles them bigger. 9.42 is upstream's default.
+  setBoxHeight(boxHeight) {
+    this._boxTextureFactor = Number.isFinite(boxHeight) && boxHeight > 0 ? boxHeight / (6.0 * 1.57) : 1;
+  }
+
+  _boxTextureScales() {
+    const factor = this._boxTextureFactor || 1;
+    return { sideScale: BOX_TEXTURE_SCALES.sideScale * factor, capScale: BOX_TEXTURE_SCALES.capScale * factor };
+  }
+
   _buildBoxInsideBuildingShell(obs, height) {
     const geometry = this._filterBuriedShellGeometry(this._prepareBoxGeometry(obs.w, height, obs.d, {
-      ...BOX_TEXTURE_SCALES,
+      ...this._boxTextureScales(),
       omitFaces: (obs.baseY || 0) > 0 ? [] : [BOX_FACE.NY],
     }), obs, height);
     const wallTexture = resolveObstacleTextureFactory(
@@ -5917,9 +5964,9 @@ class RenderManager {
     let vertexCount = 0;
 
     // One tank length in from the wall, which is where the streaks fan from.
-    const projectOriginX = originX - plane.x * TANK_IDL_ORIGIN_SETBACK;
-    const projectOriginY = originY - plane.y * TANK_IDL_ORIGIN_SETBACK;
-    const projectOriginZ = originZ - plane.z * TANK_IDL_ORIGIN_SETBACK;
+    const projectOriginX = originX - plane.x * tankIdlOriginSetback();
+    const projectOriginY = originY - plane.y * tankIdlOriginSetback();
+    const projectOriginZ = originZ - plane.z * tankIdlOriginSetback();
 
     const cross = [0, 0, 0, 0, 0, 0];
     for (const face of TANK_IDL_FACES) {
@@ -6172,6 +6219,7 @@ class RenderManager {
   createMountains(mapSize) {
     if (!this.scene) return;
     this.clearMountains();
+    if (!this._worldDraws('mountains')) return;
 
     this._ensureMountainViewDistance(mapSize);
 
@@ -6259,7 +6307,7 @@ class RenderManager {
     sunRadius, moonRadius, sunVisible = true, moonVisible = true,
   }) {
     if (!this.scene || !this.worldGroup) return;
-    if (!this.celestialEnabled) {
+    if (!this.celestialEnabled || !this._worldDraws('celestial')) {
       this.clearCelestialBodies();
       return;
     }
@@ -6390,6 +6438,7 @@ class RenderManager {
   createClouds(cloudsData = []) {
     if (!this.scene) return;
     this.clearClouds();
+    if (!this._worldDraws('clouds')) return;
 
     cloudsData.forEach((cloudData) => {
       const cloud = this._tagDraws(
@@ -7995,7 +8044,7 @@ class RenderManager {
     const origin = new THREE.Vector3(position.x, position.y, position.z);
     const sprite = new THREE.Sprite(material);
     sprite.position.copy(origin);
-    sprite.scale.set(BZFLAG_SHOT_EXPLOSION_SIZE, BZFLAG_SHOT_EXPLOSION_SIZE, 1);
+    sprite.scale.set(shotExplosionSize(), shotExplosionSize(), 1);
     sprite.renderOrder = SHOT_EXPLOSION_RENDER_ORDER;
     this.worldGroup.add(this._tagDraws(sprite, 'effect'));
     // A shot ends on the surface it struck, and a quad standing on that point
@@ -8043,7 +8092,7 @@ class RenderManager {
     eye.sub(origin);
     const distance = eye.length();
     if (!(distance > 1e-6)) return;
-    eye.multiplyScalar((BZFLAG_SHOT_EXPLOSION_SIZE * 0.5) / distance);
+    eye.multiplyScalar((shotExplosionSize() * 0.5) / distance);
     sprite.position.copy(origin).add(eye);
   }
 
@@ -8863,8 +8912,14 @@ class RenderManager {
   // is announced with, because upstream picks it off the reason rather than
   // always exploding: being run over plays SFX_RUNOVER *instead of*
   // SFX_EXPLOSION, so a squish sounds like a squish.
-  createExplosion(position, tank, sound = 'explosion') {
+  // `explodeTime` is the world's `_explodeTime`, how long a dead tank's pieces
+  // tumble (the body for all of it, as upstream's Exploding state lasts), and
+  // `size` its `_tankExplosionSize`, which the burst scales with against
+  // upstream's default of 3.5 tank lengths.
+  createExplosion(position, tank, sound = 'explosion', { explodeTime = 5, size = 21 } = {}) {
     if (!this.scene || !position) return;
+    const burst = size > 0 ? size / 21 : 1;
+    const tumble = explodeTime >= 0 ? explodeTime / 5 : 1;
     this.playSound(sound, position);
 
     // Dynamic lighting flash
@@ -8880,13 +8935,13 @@ class RenderManager {
       lightIntensity = explosionLight.intensity;
     }
 
-    const geometry = new THREE.SphereGeometry(2, 16, 16);
+    const geometry = new THREE.SphereGeometry(2 * burst, 16, 16);
     const material = new THREE.MeshBasicMaterial({ color: 0xff4500, transparent: true, opacity: 0.8 });
     const explosion = new THREE.Mesh(geometry, material);
     explosion.position.copy(position);
     this.worldGroup.add(this._tagDraws(explosion, 'effect'));
 
-    const shockwaveGeometry = new THREE.TorusGeometry(1.6, 0.12, 8, 48);
+    const shockwaveGeometry = new THREE.TorusGeometry(1.6 * burst, 0.12 * burst, 8, 48);
     const shockwaveMaterial = new THREE.MeshBasicMaterial({
       color: 0xffd27a,
       transparent: true,
@@ -8952,7 +9007,7 @@ class RenderManager {
 
         const debrisPiece = this._launchTankPart(part, tankWorldPos, debrisPieces, speedMultiplier, {
           isFollowTarget: sourcePart === tank.userData.body,
-          maxLifetime: sourcePart === tank.userData.body ? 5.0 : 3.2
+          maxLifetime: (sourcePart === tank.userData.body ? 5.0 : 3.2) * tumble
         });
         if (sourcePart === tank.userData.body && debrisPiece) {
           followTarget = debrisPiece.mesh;
@@ -8962,8 +9017,8 @@ class RenderManager {
 
     const debrisCount = 15;
     for (let i = 0; i < debrisCount; i += 1) {
-      const size = Math.random() * 0.5 + 0.3;
-      const debrisGeom = new THREE.BoxGeometry(size, size, size);
+      const pieceSize = (Math.random() * 0.5 + 0.3) * burst;
+      const debrisGeom = new THREE.BoxGeometry(pieceSize, pieceSize, pieceSize);
       const debrisMat = new THREE.MeshLambertMaterial({
         color: i % 3 === 0 ? 0x4caf50 : (i % 3 === 1 ? 0x666666 : 0xff5722),
       });
@@ -8972,7 +9027,7 @@ class RenderManager {
 
       const angle = Math.random() * Math.PI * 2;
       const elevation = (Math.random() - 0.3) * Math.PI / 3;
-      const speed = Math.random() * 15 + 10;
+      const speed = (Math.random() * 15 + 10) * burst;
       debris.velocity = new THREE.Vector3(
         Math.cos(angle) * Math.cos(elevation) * speed,
         Math.sin(elevation) * speed + 5,
@@ -9237,7 +9292,7 @@ class RenderManager {
     const debrisPiece = {
       mesh: part,
       lifetime: 0,
-      maxLifetime: options.maxLifetime || (options.isFollowTarget ? 3.5 : 2.0)
+      maxLifetime: options.maxLifetime ?? (options.isFollowTarget ? 3.5 : 2.0)
     };
     debrisPieces.push(debrisPiece);
     return debrisPiece;
@@ -10588,7 +10643,7 @@ class RenderManager {
         this.worldGroup.rotation.y = 0;
         const cameraHeight = Number.isFinite(myTank.userData.cameraHeight)
           ? myTank.userData.cameraHeight
-          : DEFAULT_MUZZLE_HEIGHT;
+          : TANK.muzzleHeight;
         this.camera.position.set(
           myTank.position.x,
           myTank.position.y + cameraHeight,

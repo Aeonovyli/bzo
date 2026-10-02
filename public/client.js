@@ -243,13 +243,12 @@ import {
 } from './voice-channels.mjs';
 import {
   ANTIDOTE_FLAG_COLOR,
-  BZFLAG_TANK_RADIUS,
-  FLAG_EFFECT_TIME,
+  getFlagTuning,
   RADAR_JAM_DECAY_MIN,
   FLAG_ENDURANCE,
   FLAG_GRAB_INTERVAL_MS,
   FLAG_GRAB_LEVEL_TOLERANCE,
-  FLAG_GRAB_RADIUS,
+  getFlagGrabRadius,
   BAD_FLAG_COLOR,
   FLAG_RADIUS,
   FLAG_STATUS,
@@ -290,7 +289,6 @@ import {
   findNearestGroundFlag,
   IDENTIFY_RANGE,
   shotRicochets,
-  GM_TURN_ANGLE,
   TARGETING_ANGLE,
   LOCK_ON_ANGLE,
   pickTargetInSights,
@@ -298,7 +296,7 @@ import {
   canRunOver,
   getRunOverRadius,
   getRunOverSeparation,
-  configureShotEffects,
+  configureFlagEffects,
 } from './flags.mjs';
 import {
   normalizeShotSlotCount,
@@ -358,26 +356,23 @@ import {
   findMeshHitFace,
   findMeshHitFaceOriented,
   resolvePhysicsDriverAt,
-  TANK_HIT_RADIUS,
   isOverFlatTop,
   getPyramidHeight,
   isPyramidFlatTop,
   reflectShotDirection,
   findShotSegmentImpact,
   testOrigRectCircle,
-  TANK_HALF_LENGTH,
-  TANK_HALF_WIDTH,
-  TANK_HEIGHT,
   traceShotStep,
   buildCollisionColliders,
+  configureTankDimensions,
+  DEFAULT_MUZZLE_FORWARD,
+  DEFAULT_MUZZLE_HEIGHT,
   WORLD_WALL_HEIGHT,
+  TANK,
 } from './collision.mjs';
 import { meshArrays, FACE_NO_RADAR } from './mesh-arrays.mjs';
 import {
   AIR_VELOCITY_THRESHOLD,
-  DEFAULT_MUZZLE_FORWARD,
-  DEFAULT_MUZZLE_HEIGHT,
-  TANK_COLLISION_HEIGHT,
   createDriveState,
   findInsideBuildings,
   isDrivenUpward,
@@ -387,6 +382,7 @@ import {
   shotFromTank,
   stepDrive,
 } from './drive.mjs';
+import { bzdbFromObject, worldConfig as evaluateWorldConfig } from './bzdb.mjs';
 import { normalizeAngle } from './motion.mjs';
 import {
   buildTeleporterIndex,
@@ -403,6 +399,7 @@ import {
   TRACK_UPDATE_TIME,
   getTrackMarkPlacement,
   getTrackMarkSides,
+  setTrackFadeTime
 } from './tracks.mjs';
 
 // Register the service worker that makes the game installable and serves its
@@ -556,6 +553,27 @@ let gameConfig = null;
 // coming back from a Map Viewer preview is a matter of dropping the overlay
 // rather than asking the server for the config again.
 let liveGameConfig = null;
+// What `liveGameConfig` is made of, as an upstream client holds it: the
+// server's settings that are not BZDB, and the world's BZDB as raw strings
+// (`init.bzdb`, kept up to date by `setVar`), evaluated over them by the same
+// `worldConfig` the server runs.
+let worldBaseConfig = null;
+let liveBzdb = new Map();
+// The server's own `-set`s (server.json's `bzdb`), which a previewed map's
+// lines go over as the live map's do.
+let serverBzdb = new Map();
+function recomputeLiveConfig() {
+  if (worldBaseConfig) liveGameConfig = evaluateWorldConfig(worldBaseConfig, liveBzdb);
+}
+
+// The config a world plays by here: the live world's, or a previewed map's own
+// BZDB and `-ms` over this server's -- the map as it would play here.
+function configForWorld(world) {
+  if (!worldBaseConfig) return liveGameConfig;
+  if (!isPreviewingAltWorld()) return liveGameConfig;
+  const bzdb = new Map([...serverBzdb, ...bzdbFromObject(world?.bzdb)]);
+  return evaluateWorldConfig({ ...worldBaseConfig, ...(world?.gameplay || {}) }, bzdb);
+}
 let serverDescriptionText = '';
 let serverMotdText = '';
 let serverNameText = '';
@@ -691,7 +709,9 @@ const PAUSE_ALERT_SLOT = 1;
 const PAUSE_ALERT_SECONDS = 1;
 // Player.cxx:1006 sizes the paused sphere at one and a half tank radii, which is
 // wide enough to enclose the tank it is drawn around.
-const PAUSED_SPHERE_RADIUS = 1.5 * BZFLAG_TANK_RADIUS;
+function pausedSphereRadius() {
+  return 1.5 * TANK.radius;
+}
 const RADAR_ZOOM_LEVELS = [0.25, 0.5, 1.0];
 const RADAR_ZOOM_LABELS = ['Short', 'Medium', 'Long'];
 // BZFlag's displayRadarRange default (defaultBZDB.cxx). The level is deliberately
@@ -2560,6 +2580,11 @@ function announceWorldMessages(world) {
 // match state and does not come from here.
 function applyWorldData(world) {
   currentWorldData = world;
+  // The world's own scene switches and track fade, before anything below
+  // builds the scenery they switch.
+  const sceneConfig = configForWorld(world) || {};
+  renderManager.setSceneSwitches(sceneConfig);
+  setTrackFadeTime(sceneConfig.TRACK_FADE);
   if (world && world.obstacles) {
     OBSTACLES = world.obstacles;
   } else {
@@ -2572,6 +2597,7 @@ function applyWorldData(world) {
   // shared fragment buffer it merges into. `setMeshes` is a mesh's own render
   // path instead, so each half of the split list gets only the shapes it
   // knows how to draw.
+  renderManager.setBoxHeight(sceneConfig.BOX_HEIGHT);
   renderManager.setObstacles(OBSTACLES.filter((obs) => obs.type !== 'mesh'));
   // `drawnByInstance` marks a mesh whose geometry a batch below already
   // draws (#153). It stays in `OBSTACLES` because collision reads it; it
@@ -2622,7 +2648,7 @@ function applyWorldData(world) {
   renderManager.createMountains(currentWorldMapSize);
   renderManager.buildWater(currentWorldMapSize, world?.waterLevel || null);
   renderManager.buildWeather(currentWorldMapSize, world?.weather || null, OBSTACLES);
-  applyWorldGameplay(world?.gameplay || null);
+  applyWorldGameplay(world);
   confineViewerToWorld();
 }
 
@@ -2637,16 +2663,33 @@ function applyWorldData(world) {
 // variable a world leaves alone. Jumping and ricochet are not in here (bzo
 // forces both on) and neither are the flag variables, since a preview
 // suppresses every flag along with every other player's tank.
-function applyWorldGameplay(gameplay) {
+function applyWorldGameplay(world) {
   if (!liveGameConfig) return;
-  gameConfig = gameplay ? { ...liveGameConfig, ...gameplay } : liveGameConfig;
-  configureShotEffects(gameConfig);
+  gameConfig = configForWorld(world);
+  configureFlagEffects(gameConfig);
+  configureTankDimensions(gameConfig);
+  renderManager._applyFogConfig(gameConfig);
+}
+
+// Where this tank's shots leave from: its model's own muzzle, moved as the
+// world's `_muzzleFront` and `_muzzleHeight` move it, or the world's default
+// where there is no model.
+function myMuzzle() {
+  const data = myTank?.userData;
+  return {
+    forward: Number.isFinite(data?.muzzleForward)
+      ? data.muzzleForward * (TANK.muzzleForward / DEFAULT_MUZZLE_FORWARD)
+      : TANK.muzzleForward,
+    height: Number.isFinite(data?.muzzleHeight)
+      ? data.muzzleHeight * (TANK.muzzleHeight / DEFAULT_MUZZLE_HEIGHT)
+      : TANK.muzzleHeight,
+  };
 }
 
 // `_wallHeight`: the world's own, where it states one, before any game config
 // has arrived to carry it.
 function currentWallHeight() {
-  const height = currentWorldData?.gameplay?.WALL_HEIGHT ?? gameConfig?.WALL_HEIGHT;
+  const height = (configForWorld(currentWorldData) || gameConfig)?.WALL_HEIGHT;
   return Number.isFinite(height) && height >= 0 ? height : WORLD_WALL_HEIGHT;
 }
 
@@ -5550,10 +5593,10 @@ function getMotionSurfaceOutlinePoints(obstacle) {
     // surface regardless of which side the backoff nudged it to.
     const DEBUG_OUTLINE_SLACK = 0.5;
     const tankScale = getMyTankScale();
-    const halfWidth = (TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1)) + DEBUG_OUTLINE_SLACK;
-    const halfLength = (TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1)) + DEBUG_OUTLINE_SLACK;
+    const halfWidth = (TANK.halfWidth * (tankScale ? tankScale.width : 1)) + DEBUG_OUTLINE_SLACK;
+    const halfLength = (TANK.halfLength * (tankScale ? tankScale.length : 1)) + DEBUG_OUTLINE_SLACK;
     const queryY = playerY - DEBUG_OUTLINE_SLACK;
-    const queryHeight = TANK_COLLISION_HEIGHT + (2 * DEBUG_OUTLINE_SLACK);
+    const queryHeight = TANK.collisionHeight + (2 * DEBUG_OUTLINE_SLACK);
     // A face is its index in the mesh now (issue #153), and index zero is a
     // real face and a falsy number -- so both the fallback and the "none"
     // test compare against -1 rather than leaning on truthiness.
@@ -5590,7 +5633,7 @@ function getMotionSurfaceOutlinePoints(obstacle) {
 
   if (obstacle.type === 'pyramid' && !isPyramidFlatTop(obstacle)) {
     const normal = getTankHitNormal(
-      obstacle, playerX, playerY, playerZ, playerRotation, playerY, TANK_COLLISION_HEIGHT);
+      obstacle, playerX, playerY, playerZ, playerRotation, playerY, TANK.collisionHeight);
     const base = obstacle.baseY || 0;
     const apex = base + getPyramidHeight(obstacle);
     const local = getColliderLocalPoint(playerX, playerZ, obstacle);
@@ -7241,11 +7284,14 @@ function handleServerMessage(message) {
       message.flags.forEach((state) => setFlagState(state));
 
       myPlayerId = message.player.id;
-      liveGameConfig = message.config;
+      worldBaseConfig = message.config;
+      liveBzdb = bzdbFromObject(message.bzdb);
+      serverBzdb = bzdbFromObject(message.serverBzdb);
+      recomputeLiveConfig();
       // Whatever world is already on screen keeps its own physics: the entry
       // dialog renders a preview before a join, so `init` can arrive with a
       // previewed map already applied underneath it.
-      applyWorldGameplay(currentWorldData?.gameplay || null);
+      applyWorldGameplay(currentWorldData);
       setAvailablePlayerTeams(message.teamMode.teams);
       setAvailableProxies(message.proxies, message.localTeams, message.localMap);
       teamScores = message.teamScores || [];
@@ -7956,6 +8002,22 @@ function handleServerMessage(message) {
       handleServerConfigUpdate(message);
       break;
 
+    // MsgSetVar: one world variable set, or with a null value reset, by the
+    // server's `/set` or a bzfs target's. The live world is rebuilt under it,
+    // so its scenery switches and sizes follow too; a preview keeps its own
+    // map's until it ends.
+    case 'setVar':
+      if (typeof message.name !== 'string') break;
+      if (message.value === null || message.value === undefined) liveBzdb.delete(message.name);
+      else liveBzdb.set(message.name, String(message.value));
+      recomputeLiveConfig();
+      if (!isPreviewingAltWorld() && currentWorldData) {
+        applyWorldData(currentWorldData);
+      } else {
+        applyWorldGameplay(currentWorldData);
+      }
+      break;
+
     case 'reload':
       // The server usually says this on its way out -- a map change restarts it
       // -- so the reload waits for it to come back rather than racing it.
@@ -8164,7 +8226,7 @@ function setTankPausedState(playerId, paused, position = null) {
 
 function createPausedSphere(playerId, x, y, z) {
   removePausedSphere(playerId);
-  const sphere = renderManager.createPausedSphere({ x, y, z, radius: PAUSED_SPHERE_RADIUS });
+  const sphere = renderManager.createPausedSphere({ x, y, z, radius: pausedSphereRadius() });
   if (!sphere) return;
   playerPausedSpheres.set(playerId, sphere);
 }
@@ -8622,7 +8684,10 @@ function handlePlayerHit(message) {
     victimTank.visible = false;
     // Create explosion with tank parts
     const explosionResult = renderManager.createExplosion(
-      victimTank.position, victimTank, deathSound
+      victimTank.position, victimTank, deathSound, {
+        explodeTime: Number.isFinite(gameConfig?.RESPAWN_DELAY) ? gameConfig.RESPAWN_DELAY / 1000 : 5,
+        size: Number.isFinite(gameConfig?.TANK_EXPLOSION_SIZE) ? gameConfig.TANK_EXPLOSION_SIZE : 3.5 * TANK.length,
+      },
     );
     if (message.victimId === myPlayerId) {
       deathCameraActive = true;
@@ -9258,7 +9323,7 @@ function handleServerConfigUpdate(message) {
   // the match either way, and `applyWorldGameplay` below rebuilds the overlay
   // on top of it. The two are the same object whenever no preview is up.
   if (Number.isFinite(message.shotMaxActive) && liveGameConfig) {
-    liveGameConfig.SHOT_MAX_ACTIVE = message.shotMaxActive;
+    worldBaseConfig.SHOT_MAX_ACTIVE = message.shotMaxActive;
   }
 
   if (typeof message.ricochet === 'boolean') {
@@ -9266,22 +9331,23 @@ function handleServerConfigUpdate(message) {
   }
 
   if (Number.isFinite(message.timeLimit) && liveGameConfig) {
-    liveGameConfig.TIME_LIMIT = message.timeLimit;
+    worldBaseConfig.TIME_LIMIT = message.timeLimit;
   }
   if (typeof message.timeManualStart === 'boolean' && liveGameConfig) {
-    liveGameConfig.TIME_MANUAL_START = message.timeManualStart;
+    worldBaseConfig.TIME_MANUAL_START = message.timeManualStart;
   }
   if (Number.isFinite(message.maxPlayerScore) && liveGameConfig) {
-    liveGameConfig.MAX_PLAYER_SCORE = message.maxPlayerScore;
+    worldBaseConfig.MAX_PLAYER_SCORE = message.maxPlayerScore;
   }
   if (Number.isFinite(message.maxTeamScore) && liveGameConfig) {
-    liveGameConfig.MAX_TEAM_SCORE = message.maxTeamScore;
+    worldBaseConfig.MAX_TEAM_SCORE = message.maxTeamScore;
   }
   if (Number.isFinite(message.botFill)) serverOperatorConfig.botFill = message.botFill;
   if (typeof message.botPilot === 'string') serverOperatorConfig.botPilot = message.botPilot;
   // Whatever world is on screen keeps its own physics over the top of the
   // values that just moved.
-  applyWorldGameplay(currentWorldData?.gameplay || null);
+  recomputeLiveConfig();
+  applyWorldGameplay(currentWorldData);
   // An applied change is now the server's value, so the panel starts from it.
   // A staged edit survives: it belongs to whoever is typing, not to the update.
   if (!operatorStaged) syncOperatorPanelFromServer();
@@ -10022,12 +10088,17 @@ let localTeleportReentryBlockDistance = 0;
 let localTeleportReentryBlockUntil = 0;
 let localTeleportCooldownUntil = 0;
 let suppressLocalTeleportFxUntil = 0;
-const LANDING_SQUISH_FACTOR = 1.0;
-const LANDING_SQUISH_TIME = 1.0;
+// `_squishFactor` and `_squishTime`, upstream's landing squash: how far a hard
+// landing flattens a tank, and how long it takes to stand back up.
+function landingSquishFactor() {
+  return Number.isFinite(gameConfig?.SQUISH_FACTOR) && gameConfig.SQUISH_FACTOR >= 0 ? gameConfig.SQUISH_FACTOR : 1.0;
+}
+function landingSquishTime() {
+  return gameConfig?.SQUISH_TIME > 0 ? gameConfig.SQUISH_TIME : 1.0;
+}
 // BZFlag Player::spawnEffect(): a spawning tank starts at 1% on every axis and
 // grows to full size over _flagEffectTime. It shares dimensionsScale with the
 // landing squish, so both converge through the same loop (Player.cxx:520).
-const SPAWN_GROW_TIME = 0.64;
 const SPAWN_START_SCALE = 0.01;
 const PLAYER_TELEPORT_REENTRY_BLOCK_DISTANCE = 5.0;
 const PLAYER_TELEPORT_REENTRY_BLOCK_MIN_MS = 250;
@@ -10040,7 +10111,7 @@ function ensureTankDimensionState(tank) {
   if (!Number.isFinite(tank.userData.baseScaleY)) tank.userData.baseScaleY = tank.scale.y;
   if (!Number.isFinite(tank.userData.baseScaleZ)) tank.userData.baseScaleZ = tank.scale.z;
   if (!Number.isFinite(tank.userData.landingSquishScaleY)) tank.userData.landingSquishScaleY = 1;
-  if (!Number.isFinite(tank.userData.landingSquishRecoverRate)) tank.userData.landingSquishRecoverRate = 1 / LANDING_SQUISH_TIME;
+  if (!Number.isFinite(tank.userData.landingSquishRecoverRate)) tank.userData.landingSquishRecoverRate = 1 / landingSquishTime();
   if (!Number.isFinite(tank.userData.spawnScale)) tank.userData.spawnScale = 1;
   // Player::dimensionsScale / Target / Rate, for the drawn tank only. The
   // gameplay size is the target from the moment the flag changes hands.
@@ -10147,13 +10218,13 @@ function applyLandingSquish(tank, impactSpeed = 0) {
     : 9.8;
   const velocity = Math.max(0, impactSpeed || 0);
   let k = 0.1 / (2 * gravity * gravity);
-  k *= LANDING_SQUISH_FACTOR;
+  k *= landingSquishFactor();
 
   const targetScaleY = 1 / (1 + (k * velocity * velocity));
   if (targetScaleY < tank.userData.landingSquishScaleY) {
     tank.userData.landingSquishScaleY = targetScaleY;
   }
-  tank.userData.landingSquishRecoverRate = 1 / LANDING_SQUISH_TIME;
+  tank.userData.landingSquishRecoverRate = 1 / landingSquishTime();
 }
 
 // A nametag sprite is a child of the tank (or ghost) group it labels, so it
@@ -10181,12 +10252,12 @@ function updateTankDimensions(deltaTime) {
     const target = getTankDimensionScale(getPlayerFlag(playerId)?.type ?? null);
     if (tank.userData.dimensionTargetLength !== target.length) {
       tank.userData.dimensionRateLength =
-        (target.length - tank.userData.dimensionScaleLength) / FLAG_EFFECT_TIME;
+        (target.length - tank.userData.dimensionScaleLength) / getFlagTuning().flagEffectTime;
       tank.userData.dimensionTargetLength = target.length;
     }
     if (tank.userData.dimensionTargetWidth !== target.width) {
       tank.userData.dimensionRateWidth =
-        (target.width - tank.userData.dimensionScaleWidth) / FLAG_EFFECT_TIME;
+        (target.width - tank.userData.dimensionScaleWidth) / getFlagTuning().flagEffectTime;
       tank.userData.dimensionTargetWidth = target.width;
     }
     tank.userData.dimensionScaleLength = easeTankDimension(
@@ -10208,7 +10279,7 @@ function updateTankDimensions(deltaTime) {
     const alphaTarget = getTankAlphaTarget(getPlayerFlagType(playerId));
     if (tank.userData.cloakAlphaTarget !== alphaTarget) {
       tank.userData.cloakAlphaRate =
-        (alphaTarget - tank.userData.cloakAlpha) / FLAG_EFFECT_TIME;
+        (alphaTarget - tank.userData.cloakAlpha) / getFlagTuning().flagEffectTime;
       tank.userData.cloakAlphaTarget = alphaTarget;
     }
     tank.userData.cloakAlpha = easeTankDimension(
@@ -10309,7 +10380,7 @@ function updateTankDimensions(deltaTime) {
     if (squishScaleY < 1) {
       const recoverRate = Number.isFinite(tank.userData.landingSquishRecoverRate)
         ? tank.userData.landingSquishRecoverRate
-        : (1 / LANDING_SQUISH_TIME);
+        : (1 / landingSquishTime());
       squishScaleY = Math.min(1, squishScaleY + recoverRate * deltaTime);
       tank.userData.landingSquishScaleY = squishScaleY;
     }
@@ -10317,16 +10388,19 @@ function updateTankDimensions(deltaTime) {
     let spawnScale = tank.userData.spawnScale;
     if (!Number.isFinite(spawnScale)) spawnScale = 1;
     if (spawnScale < 1) {
-      spawnScale = Math.min(1, spawnScale + (deltaTime / SPAWN_GROW_TIME));
+      const growTime = getFlagTuning().flagEffectTime;
+      spawnScale = growTime > 0 ? Math.min(1, spawnScale + (deltaTime / growTime)) : 1;
       tank.userData.spawnScale = spawnScale;
     }
 
     // bzo's tank faces -Z, so the model's Z is its length and its X is its
-    // width -- the two axes a flag scales.
+    // width -- the two axes a flag scales -- and the world's own tank size
+    // scales all three (`TANK.modelScale`).
+    const { modelScale } = TANK;
     tank.scale.set(
-      baseScaleX * tank.userData.dimensionScaleWidth * spawnScale,
-      baseScaleY * squishScaleY * spawnScale,
-      baseScaleZ * tank.userData.dimensionScaleLength * spawnScale
+      baseScaleX * modelScale.width * tank.userData.dimensionScaleWidth * spawnScale,
+      baseScaleY * modelScale.height * squishScaleY * spawnScale,
+      baseScaleZ * modelScale.length * tank.userData.dimensionScaleLength * spawnScale
     );
     counterScaleNameLabel(tank.userData.nameLabel, tank.scale);
 
@@ -10337,9 +10411,9 @@ function updateTankDimensions(deltaTime) {
     const ghost = tank.userData.ghostMesh;
     if (ghost) {
       ghost.scale.set(
-        GHOST_SCALE * tank.userData.dimensionScaleWidth,
-        GHOST_SCALE,
-        GHOST_SCALE * tank.userData.dimensionScaleLength
+        GHOST_SCALE * modelScale.width * tank.userData.dimensionScaleWidth,
+        GHOST_SCALE * modelScale.height,
+        GHOST_SCALE * modelScale.length * tank.userData.dimensionScaleLength
       );
       counterScaleNameLabel(ghost.userData.nameLabel, ghost.scale);
     }
@@ -10864,7 +10938,7 @@ function getLockTargetTank(shooterId) {
 // the hit cylinder -- see `getLockAimPoint` in `server.js` for why bzo aims at
 // that rather than at a muzzle.
 function getLockAimPoint(tank) {
-  return { x: tank.position.x, y: tank.position.y + (TANK_HEIGHT / 2), z: tank.position.z };
+  return { x: tank.position.x, y: tank.position.y + (TANK.height / 2), z: tank.position.z };
 }
 
 // playing.cxx:3537. The tank a missile is coming for is told so -- once, and not
@@ -10972,7 +11046,7 @@ function updateLockOnMarker() {
     return;
   }
   renderManager.setLockOnMarker(
-    { x: target.position.x, y: target.position.y + (TANK_HEIGHT / 2), z: target.position.z },
+    { x: target.position.x, y: target.position.y + (TANK.height / 2), z: target.position.z },
     getLockTargetColor(target),
   );
 }
@@ -11220,7 +11294,7 @@ function showHuntAlert(playerId) {
 function getTankEyeHeight(tank) {
   return Number.isFinite(tank?.userData?.cameraHeight)
     ? tank.userData.cameraHeight
-    : DEFAULT_MUZZLE_HEIGHT;
+    : TANK.muzzleHeight;
 }
 
 // Each view resolved to a concrete eye and look point, so render.js only has to
@@ -11400,7 +11474,7 @@ function handleRoamMotion(deltaTime) {
   // between myTank.position.y and cameraHeight.
   const eyeHeight = Number.isFinite(myTank.userData?.cameraHeight)
     ? myTank.userData.cameraHeight
-    : DEFAULT_MUZZLE_HEIGHT;
+    : TANK.muzzleHeight;
   if (!roamCamera) {
     // Upstream's resetCamera() starts at the origin, which it gets away with
     // because its default view is fps and never free. Starting there here drops
@@ -11804,8 +11878,8 @@ function buildAutopilotView() {
       teamColor: myTeamColor,
       zoned: amZoned(),
       inAir: isInAir,
-      muzzleForward: Number.isFinite(myTank.userData?.muzzleForward) ? myTank.userData.muzzleForward : 3.0,
-      muzzleHeight: Number.isFinite(myTank.userData?.muzzleHeight) ? myTank.userData.muzzleHeight : 1.57,
+      muzzleForward: myMuzzle().forward,
+      muzzleHeight: myMuzzle().height,
       shotSpeed: getShotSpeed(getMyShotFlag()),
       shotLifetime: getShotLifetimeSeconds(getMyShotFlag()),
       ricochet: shotRicochets(getMyShotFlag(), gameConfig?.ALL_SHOTS_RICOCHET),
@@ -11834,8 +11908,8 @@ function buildAutopilotView() {
       waterLevel: currentWorldWaterHeight > 0 ? currentWorldWaterHeight : null,
       shotSpeed: Number.isFinite(gameConfig.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100,
       maxShots: normalizeShotSlotCount(gameConfig.SHOT_MAX_ACTIVE),
-      tankHeight: TANK_HEIGHT,
-      tankLength: TANK_HALF_LENGTH * 2,
+      tankHeight: TANK.height,
+      tankLength: TANK.halfLength * 2,
       tankAngVel: gameConfig.TANK_ROTATION_SPEED,
       tankSpeed: gameConfig.TANK_SPEED,
       shakeTimeout: normalizeShakeTimeout(gameConfig.FLAG_SHAKE_TIMEOUT),
@@ -12621,8 +12695,8 @@ function shoot() {
     tankVelocity: shotTankVelocity,
     config: gameConfig,
     shockwave: myShot.shockwave,
-    muzzleForward: Number.isFinite(myTank?.userData?.muzzleForward) ? myTank.userData.muzzleForward : DEFAULT_MUZZLE_FORWARD,
-    muzzleHeight: Number.isFinite(myTank?.userData?.muzzleHeight) ? myTank.userData.muzzleHeight : DEFAULT_MUZZLE_HEIGHT,
+    muzzleForward: myMuzzle().forward,
+    muzzleHeight: myMuzzle().height,
   });
   const shotX = shotMessage.x;
   const shotY = shotMessage.y;
@@ -12653,7 +12727,9 @@ function shoot() {
 // _tankRadius (global.cxx:155): 0.72 * tankLength, the bounding-circle radius
 // used only for this proximity test -- everywhere else a tank is the
 // rectangle collision.mjs already carries.
-const TELEPORTER_PROXIMITY_RADIUS = 0.72 * (2 * TANK_HALF_LENGTH);
+function teleporterProximityRadius() {
+  return 0.72 * (2 * TANK.halfLength);
+}
 
 // Teleporter::getProximity (Teleporter.cxx:373): how close a point is to
 // being swallowed by this portal, 0 (clear) to 1 (centred in the opening).
@@ -12665,7 +12741,7 @@ function getTeleporterProximity(x, y, z, obs) {
   const border = obs.border;
   const activeHalfD = obs.d / 2 - border;
   const activeH = obs.h - border;
-  const gate = 1.2 * TELEPORTER_PROXIMITY_RADIUS;
+  const gate = 1.2 * teleporterProximityRadius();
 
   const local = getColliderLocalPoint(x, z, obs);
   if (!testOrigRectCircle(halfW, activeHalfD, local.x, local.z, gate)) return 0;
@@ -12675,7 +12751,7 @@ function getTeleporterProximity(x, y, z, obs) {
 
   const absX = Math.abs(local.x);
   const absZ = Math.abs(local.z);
-  let t = 1.2 - absX / TELEPORTER_PROXIMITY_RADIUS;
+  let t = 1.2 - absX / teleporterProximityRadius();
 
   if (absZ > activeHalfD) {
     const f = (2 / Math.PI) * Math.atan2(absX, absZ - activeHalfD);
@@ -13703,7 +13779,7 @@ function checkFlagGrab() {
   if (now - lastGrabRequestAt < FLAG_GRAB_INTERVAL_MS) return;
 
   const tankY = myTank.position.y;
-  const reachSquared = FLAG_GRAB_RADIUS * FLAG_GRAB_RADIUS;
+  const reachSquared = getFlagGrabRadius() * getFlagGrabRadius();
   flags.forEach((flag) => {
     if (flag.status !== FLAG_STATUS.ON_GROUND) return;
     if (Math.abs(tankY - flag.position.y) >= FLAG_GRAB_LEVEL_TOLERANCE) return;
@@ -14121,7 +14197,7 @@ function checkOwnRunOver() {
       myTank.position.y - tank.position.y,
       myTank.position.z - tank.position.z,
     );
-    if (separation >= getRunOverRadius(myFlagType, rollerFlagType, TANK_HIT_RADIUS)) continue;
+    if (separation >= getRunOverRadius(myFlagType, rollerFlagType, TANK.hitRadius)) continue;
 
     reportedOwnDeath = true;
     sendOwnDeath({ reason: 'runOver', killerId: playerId, shotId: null, flag: null });
@@ -14166,7 +14242,7 @@ function updateProjectiles(deltaTime) {
           },
           projectile.position,
           target ? getLockAimPoint(target) : null,
-          GM_TURN_ANGLE,
+          getShotEffects('GM').turnAngle,
           SHOT_SIM_STEP_SECONDS,
         );
         projectile.userData.dirX = steered.x;
@@ -15082,7 +15158,9 @@ const RADAR_TANK_ARROW_EXTENT_PX = 10;
 // RadarRenderer::drawFlag and drawFlagOnTank size their crosses in world units
 // with a pixel floor, so a distant flag stays visible at any radar range.
 const RADAR_FLAG_MIN_HALF_PX = 3;
-const RADAR_FLAG_ON_TANK_RADII = 2.5 * BZFLAG_TANK_RADIUS;
+function radarFlagOnTankRadii() {
+  return 2.5 * TANK.radius;
+}
 const RADAR_FLAG_ON_TANK_MIN_HALF_PX = 4;
 
 function getRadarWorldHalfExtent(radius) {
@@ -15389,6 +15467,32 @@ const RADAR_MARKER_RING_WIDTH = 1.5;
 // cross is sized in world units and has grown past the default radius.
 const RADAR_MARKER_RING_GAP = 3;
 
+// RadarRenderer::drawTank's height box: a diamond round the tank that grows
+// with its height over the world's `_boxHeight`, half again as wide at one box
+// up, so a tank on a building reads as one (RadarRenderer.cxx:204). Upstream
+// starts it at the tank's own blip size, as this does at its arrow's; a tank
+// below the ground starts it small. Drawn in the tank's own frame, which is
+// screen-aligned here, as upstream's is.
+const RADAR_HEIGHT_BOX_BURROWED_PX = 3;
+function drawRadarHeightBox(height, style) {
+  const boxHeight = gameConfig?.BOX_HEIGHT > 0 ? gameConfig.BOX_HEIGHT : 6.0 * 1.57;
+  const y = Number.isFinite(height) ? height : 0;
+  const base = y < 0 ? RADAR_HEIGHT_BOX_BURROWED_PX : RADAR_TANK_ARROW_EXTENT_PX;
+  const half = Math.max(1, base * (1 + (0.5 * (y / boxHeight))));
+  radarCtx.save();
+  radarCtx.strokeStyle = style;
+  radarCtx.lineWidth = 1;
+  radarCtx.globalAlpha = 0.9;
+  radarCtx.beginPath();
+  radarCtx.moveTo(-half, 0);
+  radarCtx.lineTo(0, -half);
+  radarCtx.lineTo(half, 0);
+  radarCtx.lineTo(0, half);
+  radarCtx.closePath();
+  radarCtx.stroke();
+  radarCtx.restore();
+}
+
 function drawRadarMarkerRing(x, y, style, radius = RADAR_MARKER_RING_RADIUS) {
   radarCtx.save();
   radarCtx.globalAlpha = 1;
@@ -15492,10 +15596,20 @@ function drawJammedRadar(size) {
   radarCtx.restore();
 }
 
+// The world's `_radarLimit`: none means upstream's default, the world's size.
+function worldRadarLimit() {
+  return Number.isFinite(gameConfig?.RADAR_LIMIT) ? gameConfig.RADAR_LIMIT : (currentWorldMapSize ?? DEFAULT_MAP_SIZE);
+}
+
 function updateRadar() {
   if (!radarCtx || !myTank || !gameConfig) return;
   // Declare radar variables only once
   const size = radarCanvas.width;
+  // RadarRenderer::render: a world with a radar limit of 0 or less -- upstream's
+  // `-noradar` -- has no radar for anyone (RadarRenderer.cxx:377).
+  const radarLimit = worldRadarLimit();
+  radarCanvas.style.visibility = radarLimit > 0 ? '' : 'hidden';
+  if (!(radarLimit > 0)) return;
 
   // `bzfrand() > decay` is upstream's roll, and the decay it leaves behind is
   // what makes a jammed radar break through for a frame or two at a time rather
@@ -15514,15 +15628,14 @@ function updateRadar() {
   const center = size / 2;
   const radius = center * 0.95;
   const radarWorldHalfExtent = getRadarWorldHalfExtent(radius);
-  const baseRadarDistance = gameConfig.SHOT_DISTANCE || 50;
-  // RadarRenderer::render (RadarRenderer.cxx:403): "when burrowed, limit radar
-  // range" to a quarter. Upstream caps the range rather than scaling it, so a
-  // player already zoomed further in than the cap keeps their own setting -- and
-  // gets it back untouched when they surface, since nothing here is written down.
-  const burrowedRadarLimit = (getMyFlag()?.type ?? null) === 'BU' && myTank.position.y < 0
-    ? baseRadarDistance * BURROW_RADAR_FACTOR
-    : Infinity;
-  const radarDistance = Math.min(baseRadarDistance * radarZoomLevel, burrowedRadarLimit);
+  // RadarRenderer::render (RadarRenderer.cxx:400): the range is the zoom times
+  // the world's radar limit, and never past the limit -- a quarter of it while
+  // burrowed, "when burrowed, limit radar range". Upstream caps the range rather
+  // than scaling it, so a player already zoomed further in than the cap keeps
+  // their own setting, and gets it back untouched on surfacing.
+  const burrowed = (getMyFlag()?.type ?? null) === 'BU' && myTank.position.y < 0;
+  const maxRange = burrowed ? radarLimit * BURROW_RADAR_FACTOR : radarLimit;
+  const radarDistance = Math.min(radarLimit * radarZoomLevel, maxRange);
   const tankArrowWorldMargin = radarPixelsToWorldDistance(
     RADAR_TANK_ARROW_EXTENT_PX,
     radarDistance,
@@ -16098,6 +16211,7 @@ function updateRadar() {
 
     radarCtx.save();
     radarCtx.translate(pos.x, pos.y);
+    drawRadarHeightBox(tank.position.y, playerColor);
     if (playerId === myPlayerId) {
       // Player tank: always point up (no rotation needed)
       radarCtx.beginPath();
@@ -16132,7 +16246,7 @@ function updateRadar() {
     const pixelsPerWorldUnit = radarWorldHalfExtent / Math.max(radarDistance, 1e-6);
     const crossHalf = Math.max(FLAG_RADIUS * pixelsPerWorldUnit, RADAR_FLAG_MIN_HALF_PX);
     const tankCrossHalf = Math.max(
-      RADAR_FLAG_ON_TANK_RADII * pixelsPerWorldUnit,
+      radarFlagOnTankRadii() * pixelsPerWorldUnit,
       RADAR_FLAG_ON_TANK_MIN_HALF_PX
     );
     // Crosses that share a colour and an altitude go into one path and one

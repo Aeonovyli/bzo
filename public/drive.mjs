@@ -53,25 +53,22 @@ import {
   getTankHitNormal,
   getTankLocalAngle,
   isPyramidFlatTop,
+  meshFlatTopYsAt,
   movingTankOverlapsHeight,
   pyramidIntersectsTank,
   resolvePhysicsDriverAt,
-  TANK_HALF_LENGTH,
-  TANK_HALF_WIDTH,
   testOrigRectTank,
+  TANK,
 } from './collision.mjs';
 import { normalizeAngle, resolveTankMotion } from './motion.mjs';
 import { getMuzzleVelocity } from './shots.mjs';
 
 // The occupant height the collision test uses for a tank.
-export const TANK_COLLISION_HEIGHT = 2;
 // A change in an airborne tank's horizontal velocity worth a move of its own.
 export const AIR_VELOCITY_THRESHOLD = 0.35;
 // The muzzle a tank model reports when there is no model to ask. The height is
 // BZDB_MUZZLEHEIGHT, and also the floor the roaming camera rests on, so an
 // observer sits at the eye height of a tank on the ground.
-export const DEFAULT_MUZZLE_FORWARD = 3.0;
-export const DEFAULT_MUZZLE_HEIGHT = 1.57;
 const GROUND_LIMIT_TOLERANCE = 0.01;
 
 
@@ -164,6 +161,18 @@ function isBelowGroundLimit(y, groundLimit) {
   return y < groundLimit - GROUND_LIMIT_TOLERANCE;
 }
 
+// Obstacle::isFlatTop for what a tank stands on: a box's or an arc's top, an
+// inverted pyramid's, or a mesh face that faces straight up. An upright
+// pyramid's sides and a tetra's never are, and a mesh is flat where the tank
+// stands on one of its level faces.
+function standsOnFlatTop(obs, x, y, z) {
+  if (!obs) return true;
+  if (obs.type === 'pyramid') return isPyramidFlatTop(obs);
+  if (obs.type === 'tetra') return false;
+  if (obs.type === 'mesh') return meshFlatTopYsAt(obs, x, z).some((top) => Math.abs(top - y) < 0.05);
+  return true;
+}
+
 // LocalPlayer::doJump's vertical component. Wings has its own; Bouncy's bounce
 // is a random quarter-to-full of the world's, so no two are the same height.
 function jumpVelocityFor(tank, airControl, verticalVelocity, config, clock) {
@@ -207,8 +216,8 @@ export function findInsideBuildings(colliders, topOf, x, y, z, rotation, tankSca
     } else if (obs.type === 'mesh') {
       // `< 0` and not a truth test: face zero is a real face (issue #153).
       if (findMeshHitFaceOriented(obs, x, y, z, rotation,
-        TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
-        TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1), 2) < 0) continue;
+        TANK.halfWidth * (tankScale ? tankScale.width : 1),
+        TANK.halfLength * (tankScale ? tankScale.length : 1), 2) < 0) continue;
     } else {
       const local = getColliderLocalPoint(x, z, obs);
       if (!testOrigRectTank(
@@ -315,16 +324,16 @@ function resolveStep(state, velocityX, velocityY, velocityZ, angularVelocity, dt
       fromY,
       fromX,
       fromZ,
-      radius: TANK_COLLISION_HEIGHT,
+      radius: TANK.collisionHeight,
       tankScale,
       phased,
       reversingOnGround: phased && intended.phasedReverse && toY <= 0,
     }),
     getNormal: (obs, px, py, pz, paz, hitX, hitY, hitZ, hitAz, fromX, fromZ, fromAz, toX, toZ, toAz) => (
-      getTankHitNormal(obs, px, py, pz, paz, hitY, TANK_COLLISION_HEIGHT, {
+      getTankHitNormal(obs, px, py, pz, paz, hitY, TANK.collisionHeight, {
         fromX, fromZ, fromAz, toX, toZ, toAz, hitX, hitZ,
-        halfWidth: TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
-        halfLength: TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1),
+        halfWidth: TANK.halfWidth * (tankScale ? tankScale.width : 1),
+        halfLength: TANK.halfLength * (tankScale ? tankScale.length : 1),
       })),
     isFlatTop: (obs) => {
       if (!obs || obs.collisionKind === 'boundary') return false;
@@ -465,10 +474,19 @@ export function stepDrive(state, intended, tank, world, clock, dt) {
   // `readDriveInput` already asked canJump, which refuses a second jump in mid
   // air -- and grants one to Wings, which may flap there.
   const jumpStarted = intended.jumpTriggered;
+  // `_noClimb`, on unless the world turns it off: a jump from a slope goes
+  // straight up rather than up it (LocalPlayer.cxx:386).
+  const climbBlocked = jumpStarted && config.NO_CLIMB !== false && state.onObstacle
+    && !standsOnFlatTop(state.lastObstacle, state.x, state.y, state.z);
   if (jumpStarted) {
     state.verticalVelocity = jumpVelocityFor(tank, airControl, state.verticalVelocity || 0, config, clock);
-    state.jumpForwardSpeed = forwardInput;
-    state.fallForwardSpeed = forwardInput;
+    if (climbBlocked) {
+      velocityX = 0;
+      velocityZ = 0;
+    }
+    const launchSpeed = climbBlocked ? 0 : forwardInput;
+    state.jumpForwardSpeed = launchSpeed;
+    state.fallForwardSpeed = launchSpeed;
     state.slideDirection = undefined;
     events.forceSend = true;
     events.jumpStarted = { flap: airControl };
@@ -574,7 +592,7 @@ export function stepDrive(state, intended, tank, world, clock, dt) {
     state.jumpDirection = state.rotation;
     // The stick is a fraction of this tank's own maximum; the air velocity is a
     // fraction of the world's, so the boost comes with it.
-    const v = airVelocityFor(state.jumpDirection, forwardInput * speedFactor, config);
+    const v = airVelocityFor(state.jumpDirection, (climbBlocked ? 0 : forwardInput) * speedFactor, config);
     setAirVelocity(state, v.x, v.z, config);
   }
 
@@ -621,7 +639,7 @@ export function stepDrive(state, intended, tank, world, clock, dt) {
         events.forceSend = true;
       }
     } else if (jumpStarted) {
-      const v = airVelocityFor(state.jumpDirection, intended.forward * speedFactor, config);
+      const v = airVelocityFor(state.jumpDirection, (climbBlocked ? 0 : intended.forward) * speedFactor, config);
       setAirVelocity(state, v.x, v.z, config);
     }
   }
@@ -708,7 +726,7 @@ export function packetVelocity(fields, config) {
 // (LocalPlayer.cxx:1230) -- with upstream's velocity, or none for a wave.
 export function shotFromTank({
   x, y, z, rotation, tankVelocity, config, shockwave = false,
-  muzzleForward = DEFAULT_MUZZLE_FORWARD, muzzleHeight = DEFAULT_MUZZLE_HEIGHT,
+  muzzleForward = TANK.muzzleForward, muzzleHeight = TANK.muzzleHeight,
 }) {
   const dirX = -Math.sin(rotation);
   const dirZ = -Math.cos(rotation);

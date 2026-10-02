@@ -27,7 +27,6 @@ const {
   decodeSetVars,
 } = require('./remote-world-import.cjs');
 // Upstream's own defaults, for a name the target never mentioned.
-const { BZDB_DEFAULTS } = require('./bzdb-defaults.cjs');
 
 // `CtfTeams` (`global.h`): the teams MsgTeamUpdate can carry, which stops
 // before observer -- rogue, red, green, blue, purple.
@@ -409,89 +408,6 @@ function decodePlayerInfo(payload) {
   return info;
 }
 
-// BZDB holds expressions, not just numbers. On a stock server `_reloadTime` is
-// `_shotRange / _shotSpeed`, `_muzzleFront` is `_tankRadius + 0.1` and
-// `_tankRadius` is `0.72 * _tankLength` (`global.cxx`), and a live target
-// sends all 168 entries exactly as written. Upstream reads them through
-// `BZDB.eval` (`StateDatabase::evaluate`) and compares a shot against the
-// result, so a proxied shot has to arrive at the same number -- parsing the
-// string as a float would give NaN for a good part of the table and every
-// shot built on one would be dropped without a word.
-//
-// Arithmetic only: four operators, parentheses and a sign, which is all the
-// stock table uses. Never `eval`, because these values come off the wire from
-// a machine this one does not own. A name that resolves to nothing, or to a
-// cycle, is NaN rather than a guess.
-const BZDB_TOKENS = /\d+\.?\d*(?:[eE][-+]?\d+)?|[A-Za-z_][A-Za-z0-9_]*|[-+*/()]|\s+/g;
-
-function tokenizeBzdb(text) {
-  const tokens = [];
-  let consumed = 0;
-  for (const match of text.matchAll(BZDB_TOKENS)) {
-    // A gap means something the grammar does not cover, so the whole value is
-    // refused rather than silently read as the part that did parse.
-    if (match.index !== consumed) return null;
-    consumed = match.index + match[0].length;
-    if (match[0].trim() !== '') tokens.push(match[0]);
-  }
-  return consumed === text.length ? tokens : null;
-}
-
-function parseBzdb(tokens, resolve) {
-  let at = 0;
-  const peek = () => tokens[at];
-  const expression = () => {
-    let value = term();
-    while (peek() === '+' || peek() === '-') {
-      const operator = tokens[at]; at += 1;
-      const right = term();
-      value = operator === '+' ? value + right : value - right;
-    }
-    return value;
-  };
-  const term = () => {
-    let value = signed();
-    while (peek() === '*' || peek() === '/') {
-      const operator = tokens[at]; at += 1;
-      const right = signed();
-      value = operator === '*' ? value * right : value / right;
-    }
-    return value;
-  };
-  const signed = () => {
-    if (peek() === '-') { at += 1; return -signed(); }
-    if (peek() === '+') { at += 1; return signed(); }
-    return atom();
-  };
-  const atom = () => {
-    const token = tokens[at]; at += 1;
-    if (token === undefined) return NaN;
-    if (token === '(') {
-      const value = expression();
-      if (tokens[at] !== ')') return NaN;
-      at += 1;
-      return value;
-    }
-    if (/^[A-Za-z_]/.test(token)) return resolve(token);
-    return Number(token);
-  };
-  const value = expression();
-  // Trailing tokens mean the value was not one expression, so it is no answer.
-  return at === tokens.length ? value : NaN;
-}
-
-function evalBzdb(vars, name, seen = new Set()) {
-  if (seen.has(name)) return NaN;
-  const raw = (vars && vars.get(name) !== undefined) ? vars.get(name) : BZDB_DEFAULTS[name];
-  if (raw === undefined || String(raw).trim() === '') return NaN;
-  const direct = Number(raw);
-  if (Number.isFinite(direct)) return direct;
-  const tokens = tokenizeBzdb(String(raw));
-  if (tokens === null) return NaN;
-  const outer = new Set(seen).add(name);
-  return parseBzdb(tokens, (reference) => evalBzdb(vars, reference, outer));
-}
-
 // What a bzfs will accept in a chat line, which is printable ASCII and
 // nothing else. `isSpamOrGarbage` walks the message a **byte** at a time and
 // asks `TextUtils::isVisible` of each (`bzfs.cxx:4474`, `TextUtils.h:218`),
@@ -675,9 +591,15 @@ class BzfsSession {
   // arrive an hour later are read by the same code.
   handleFrame(code, payload) {
     switch (code) {
-      case 'sv':
-        decodeSetVars(payload, this.state.vars);
+      case 'sv': {
+        // MsgSetVar: the burst every joiner gets, and each `/set` after it,
+        // passed on so a browser keeps the same BZDB this session does.
+        const changed = new Map();
+        decodeSetVars(payload, changed);
+        for (const [name, value] of changed) this.state.vars.set(name, value);
+        this.emit('vars', changed);
         break;
+      }
       case 'tu': {
         const teams = decodeTeamUpdate(payload);
         for (const team of teams) {
@@ -1159,17 +1081,9 @@ class BzfsSession {
   }
 }
 
-// StateDatabase::set's `isTrue`: any value but these, empty included, is on.
-// `-disableBots` publishes `_disableBots` as "true", which a number test reads
-// as off.
-const BZDB_FALSE_VALUES = new Set(['0', 'off', 'false', 'no', 'disable']);
-function bzdbIsTrue(value) {
-  return typeof value === 'string' && !BZDB_FALSE_VALUES.has(value.toLowerCase());
-}
 
 module.exports = {
   BzfsSession,
-  bzdbIsTrue,
   toBzfsChatText,
   CTF_TEAMS,
   PLAYER_STATUS,
@@ -1185,7 +1099,6 @@ module.exports = {
   decodePlayerUpdate,
   decodeAlive,
   decodeNearFlag,
-  evalBzdb,
   BLOWED_UP,
   decodeKilled,
   decodeScores,

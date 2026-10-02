@@ -15,14 +15,13 @@
 
 const {
   createDriveState,
-  DEFAULT_MUZZLE_FORWARD,
-  DEFAULT_MUZZLE_HEIGHT,
   movePacketFields,
   packetVelocity,
   readDriveInput,
   shotFromTank,
   stepDrive,
 } = require('./drive.cjs');
+const { TANK } = require('./collision.cjs');
 const { getFiredShotFlag, getShotEffects } = require('./flags.cjs');
 
 // The fill rule: bots make up the playing roster to `fill`, and there are none
@@ -114,8 +113,8 @@ class BotDriver {
       z: d.z,
       rotation: d.rotation,
       inAir,
-      muzzleForward: DEFAULT_MUZZLE_FORWARD,
-      muzzleHeight: DEFAULT_MUZZLE_HEIGHT,
+      muzzleForward: TANK.muzzleForward,
+      muzzleHeight: TANK.muzzleHeight,
       // How the tank is moving, which a shot inherits -- as the client's view
       // says it.
       velocity: inAir

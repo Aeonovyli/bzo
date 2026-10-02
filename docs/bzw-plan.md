@@ -294,36 +294,30 @@ something other than upstream's default and bzo does not yet read from a map's
 2026-10-02; plugin variables are left out. What bzo does read is the `-set`
 rows of `docs/bzw.md`'s options table.
 
-- [ ] Flags: `_gmTurnAngle` (40), `_gmActivationTime` (31), `_gmAdLife` (29),
-      `_gmSize` (19); `_srRadiusMult` (36); `_burrowAngularAd` (35),
-      `_burrowSpeedAd` (28); `_thiefAdShotVel` (26), `_thiefAdLife` (23),
-      `_thiefVelAd` (14), `_thiefAdRate` (7); `_squishFactor` (22),
-      `_squishTime` (15); `_rFireAdVel` (19), `_rFireAdRate` (18),
-      `_rFireAdLife` (16); `_velocityAd` (19); `_tinyFactor` (18);
-      `_agilityTimeWindow` (16), `_agilityAdVel` (7); `_angularAd` (7);
-      `_flagEffectTime` (5). Each is a constant in `public/flags.mjs` today,
-      and `configureShotEffects` is the pattern `_mGunAd*`, `_laserAd*` and
-      `_shock*` set.
-- [ ] Wings: `_wingsSlideTime` (31) and `_wingsJumpVelocity` (24),
-      `_wingsGravity` (13) -- server.json only, not from a map.
-- [ ] Driving: `_noClimb` (94, all set to 0), `_angleTolerance` (16),
-      `_tankLength` (12), `_boxHeight` (9).
-- [ ] Shots and explosions: `_explodeTime` (72; bzo folds it into
-      `_rejoinTime`), `_endShotDetection` (26), `_tankExplosionSize` (20).
-- [ ] Sky and fog: `_skyColor` (42), `_fogMode` (37), `_fogDensity` (33),
-      `_fogColor` (27) -- fog is server.json only; `_latitude` (16),
-      `_longitude` (15), `_syncTime` (7), `_syncLocation` (5).
-- [ ] Scene switches: `_drawMountains` (28), `_drawClouds` (20),
-      `_noShadows` (21), `_drawCelestial` (16), `_drawGroundLights` (12),
-      `_drawGround` (7), `_mirror` (9), `_trackFade` (10).
-- [ ] Radar: `_radarLimit` (44).
+- [ ] Remove server.json's old names for BZDB variables once every running
+      server has moved them into its `bzdb` block: `LEGACY_BZDB_KEYS`,
+      `shotDuration` and `shotDistance` in `readServerBzdb` (server.js), and
+      the paragraph on them in docs/installation.md. The startup log line
+      "server.json keys read as BZDB" says which servers still have some.
+- [ ] `_mirror` (9): upstream's mirror ground, the scene reflected under a
+      tint (`black` on five of the nine). A second render of the world, which
+      the Orin client cannot afford every frame as things stand.
 - [ ] Flags on the field: `_flagAltitude` (7), `_flagPoleSize` (5).
 - [ ] Server rules: `_pauseDropTime` (13), `_speedChecksLogOnly` (12),
       `_updateThrottleRate` (11), `_forbidMarkers` (6), `_spawnSafeRadMod`
       (5).
 
 Not planned, as upstream's own collision and culling tree depths with no bzo
-equivalent: `_coldetDepth`, `_cullDepth`. `_rainBaseColor`
+equivalent: `_coldetDepth`, `_cullDepth`. Nor `_drawGroundLights` (12): it
+turns off the meshes upstream lays under each light so its vertex-lit ground
+can show the light, and three.js lights every pixel, so there is nothing to
+turn off. Nor `_endShotDetection` (26): bzfs kicks a client that reports more shot
+endings than its shots allow, and a bzo server ends every shot itself. Nor
+`_angleTolerance` (16): upstream
+sends a move when its dead reckoning drifts past it, and bzo sends one when a
+speed changes, so there is no tolerance to set. Nor `_gmSize` (19): it sizes only the
+modelled missile upstream draws at its highest quality, and its default draws
+the billboard bzo does. `_rainBaseColor`
 and `_rainPuddleColor` are dropped on purpose (`docs/bzw.md`, **Weather**).
 
 ## Leftovers

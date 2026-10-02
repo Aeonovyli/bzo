@@ -20,9 +20,9 @@
 // plus a quarter turn. A positive rotation turns left in both.
 
 import {
-  AGILITY_TIME_WINDOW, AGILITY_VEL_DELTA, canRunOver, getRunOverRadius, isBadFlag,
+  canRunOver, getFlagTuning, getRunOverRadius, isBadFlag,
 } from './flags.mjs';
-import { SHOT_COLLISION_RADIUS, TANK_HIT_RADIUS, traceShotStep } from './collision.mjs';
+import { SHOT_COLLISION_RADIUS, traceShotStep, TANK } from './collision.mjs';
 import { buildNavGraph, NAV_CELL, planJump } from './nav.mjs';
 import { normalizeAngle } from './motion.mjs';
 
@@ -749,7 +749,8 @@ export class Ace extends Roger {
   paceAgility(view, out) {
     const self = view.self;
     const last = this.lastSpeedCommand ?? 0;
-    const limitFor = (speed) => (speed < 0 ? AGILITY_VEL_DELTA / 2 : AGILITY_VEL_DELTA);
+    const { agilityVelDelta } = getFlagTuning();
+    const limitFor = (speed) => (speed < 0 ? agilityVelDelta / 2 : agilityVelDelta);
     if (self.flag === 'A' && !self.inAir && out.intent.mode !== 'dodge') {
       const limit = limitFor(out.speed) * AGILITY_PACE_SHARE;
       if (Math.abs(out.speed - last) > limit) {
@@ -758,7 +759,7 @@ export class Ace extends Roger {
       }
     }
     if (self.flag === 'A' && Math.abs(out.speed - last) > limitFor(out.speed)) {
-      this.agilityUntil = view.now + AGILITY_TIME_WINDOW;
+      this.agilityUntil = view.now + getFlagTuning().agilityTimeWindow;
     }
     if (self.flag === 'A' && out.jump && out.intent.mode !== 'dodge' && view.now < (this.agilityUntil ?? -Infinity)) {
       out.jump = false;
@@ -827,7 +828,7 @@ export class Ace extends Roger {
     // gets that high is in the shot's path all along.
     const disc = (p.vz * p.vz) + (2 * g * (p.z - muzzleZ));
     const enter = disc < 0 ? 0 : Math.max(0, (p.vz + Math.sqrt(disc)) / g);
-    const reach = Math.max(0, distance2D(me, landing) - me.muzzleForward - TANK_HIT_RADIUS);
+    const reach = Math.max(0, distance2D(me, landing) - me.muzzleForward - TANK.hitRadius);
     return { landing, reach, enter, distance: distance2D(me, landing) };
   }
 
@@ -860,7 +861,7 @@ export class Ace extends Roger {
         const distance = distance2D(me, point);
         plans.push({
           landing: point,
-          reach: Math.max(0, distance - me.muzzleForward - TANK_HIT_RADIUS),
+          reach: Math.max(0, distance - me.muzzleForward - TANK.hitRadius),
           enter: a,
           distance,
           landsAt,
@@ -1178,7 +1179,7 @@ export class Ace extends Roger {
       y: self.y + self.muzzleHeight,
       z: self.z + (dirZ * self.muzzleForward),
     };
-    const reach = TANK_HIT_RADIUS + SELF_HIT_MARGIN;
+    const reach = TANK.hitRadius + SELF_HIT_MARGIN;
     const shot = this.shotVelocity(ctx);
     const segments = view.traceShot(muzzle, shot.dir, shot.speed, self.shotLifetime, true);
     this.lastTrace = segments;
@@ -1209,7 +1210,7 @@ export class Ace extends Roger {
           out.intent.mode === 'dodge' ? { ...range, low: preferred, high: preferred } : range);
         if (!Number.isFinite(shot.flight)) continue;
         const miss = plan.distance * Math.abs(Math.sin(normalizeAngle(shot.azimuth - me.azimuth)));
-        if (miss > TANK_HIT_RADIUS / 2) continue;
+        if (miss > TANK.hitRadius / 2) continue;
         if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z }, plan.landing)) continue;
         out.fire = true;
         out.shotTargetId = p.id;
@@ -1248,7 +1249,7 @@ export class Ace extends Roger {
     const onLine = (p) => {
       const rx = p.x - me.x;
       const ry = -p.z - me.y;
-      return (rx * ux) + (ry * uy) > 0 && Math.abs((rx * uy) - (ry * ux)) < TANK_HIT_RADIUS * AIR_SHOT_SHARE;
+      return (rx * ux) + (ry * uy) > 0 && Math.abs((rx * uy) - (ry * ux)) < TANK.hitRadius * AIR_SHOT_SHARE;
     };
     const grounded = {
       ...view,
@@ -1322,7 +1323,7 @@ export class Ace extends Roger {
     for (const p of this.remotePlayers(view)) {
       if (!p.alive || p.paused) continue;
       if (!canRunOver(p.flag ?? null, 'BU', p.z, p.zoned === true)) continue;
-      const clearance = getRunOverRadius('BU', p.flag ?? null, TANK_HIT_RADIUS) + SQUASH_MARGIN;
+      const clearance = getRunOverRadius('BU', p.flag ?? null, TANK.hitRadius) + SQUASH_MARGIN;
       const rx = me.x - p.x;
       const ry = me.y - p.y;
       const speed2 = (p.vx * p.vx) + (p.vy * p.vy);
@@ -1345,7 +1346,7 @@ export class Ace extends Roger {
   // put: when it passes closest, by how much, and which way is away from it.
   soonestHit(ctx) {
     const { view, me } = ctx;
-    const clearance = TANK_HIT_RADIUS + SHOT_COLLISION_RADIUS + DODGE_CLEARANCE;
+    const clearance = TANK.hitRadius + SHOT_COLLISION_RADIUS + DODGE_CLEARANCE;
     let best = null;
     for (const shot of view.shots) {
       if (shot.ownerId === me.id) continue;

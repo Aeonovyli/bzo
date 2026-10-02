@@ -21,7 +21,7 @@
 // and no setting: the fade runs at the full `_trackFade` and the air culling is
 // upstream's default `FullAirCull`.
 
-import { TANK_HALF_LENGTH } from './collision.mjs';
+import { TANK } from './collision.mjs';
 
 // `TrackMarks::updateTime`. A mark every twentieth of a second, whatever the
 // frame rate, so a trail is the same density on every client.
@@ -98,7 +98,7 @@ export function getTrackMarkPlacement({
   else if (speed < -TRACK_MIN_SPEED) direction = 1;
   else return null;
 
-  const distance = direction * TANK_HALF_LENGTH * scaleLength * TRACK_MARK_LENGTH_FRACTION;
+  const distance = direction * TANK.halfLength * scaleLength * TRACK_MARK_LENGTH_FRACTION;
   const onGround = Math.abs(y) <= TRACK_SURFACE_TOLERANCE;
   // A tank settling onto the floor sits a hair above zero for a frame or two,
   // and every mark of a trail on the flat should be coplanar with the rest of
@@ -138,7 +138,15 @@ export function getTrackMarkSides(mark, isSupported) {
   return sides;
 }
 
-// `drawTreads`: a mark starts opaque and is gone at `TrackFadeTime`.
+// The world's `_trackFade`; a host sets it from its world's config.
+let trackFadeTime = TRACK_FADE_TIME;
+export function setTrackFadeTime(seconds) {
+  trackFadeTime = Number.isFinite(seconds) && seconds >= 0 ? seconds : TRACK_FADE_TIME;
+}
+
+// `drawTreads`: a mark starts opaque and is gone at `TrackFadeTime`. A world
+// whose fade is 0 or less draws none (`TrackMarks::update`, TrackMarks.cxx:541).
 export function getTrackMarkAlpha(age) {
-  return 1 - (age / TRACK_FADE_TIME);
+  if (!(trackFadeTime > 0)) return 0;
+  return 1 - (age / trackFadeTime);
 }

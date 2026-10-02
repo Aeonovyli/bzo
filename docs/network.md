@@ -127,7 +127,7 @@ omitted rather than sent null.
 
 | type | fields | meaning |
 |---|---|---|
-| `init` | `clientBuild`, `serverVersion`, `player`, `players`, `config`, `teamMode`, `teamScores`, `liveConfigKeys`, `operatorConfig`, `listServer`, `rabbitId`, `timeLeft`, `gameOver`, `voiceRtcConfig`, `world`, `viewableMaps`, `flags`, `worldTime`, `serverName`, `description`, `motd` | everything, once, on connect |
+| `init` | `clientBuild`, `serverVersion`, `player`, `players`, `config`, `bzdb`, `teamMode`, `teamScores`, `liveConfigKeys`, `operatorConfig`, `listServer`, `rabbitId`, `timeLeft`, `gameOver`, `voiceRtcConfig`, `world`, `viewableMaps`, `flags`, `worldTime`, `serverName`, `description`, `motd` | everything, once, on connect |
 | `pmBatch` | `moves` | one tick's accepted moves, one entry per mover. The normal motion path |
 | `pm` | `id`,`x`,`y`,`z`,`r`,`fs`,`rs`,`vv`,`vx`,`vz` | a single move, outside the batch |
 | `pt` | as `pm` plus `fromFaceId`,`toFaceId`,`jd`,`d?` | an accepted teleport |
@@ -155,6 +155,7 @@ omitted rather than sent null.
 | `message` | `src`, `dst`, `msgType`, `text`, `ts` | chat, in and out |
 | `lag` | `lagMs` | the server's measurement of *your* lag |
 | `serverConfigUpdate` | `serverName`, `motd`, `shotMaxActive`, `ricochet`, `timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore` | live config changed |
+| `setVar` | `name`, `value` | one world variable set, or with a null value reset (`MsgSetVar`); the client evaluates it with the `bzdb` pair |
 | `mapList` | `maps`, `viewableMaps`, `currentMap`, `shotMaxActive`, `ricochet` | operator map list |
 | `remoteServerList` | `servers` | the list-server answer |
 | `importMapResult` / `importMapForViewResult` | `success`, `file`, ... | import outcome |
@@ -298,7 +299,7 @@ the mapping is mostly one to one:
 | `MsgAutoPilot` | `autopilot`, both ways |
 | `MsgNewRabbit` | `newRabbit` |
 | `MsgMessage` | `message` |
-| `MsgSetVar` / `MsgGameSettings` | `init.config` / `serverConfigUpdate` |
+| `MsgSetVar` / `MsgGameSettings` | `init.bzdb` and `setVar` / `init.config` and `serverConfigUpdate` |
 | `MsgGetWorld` / `MsgWantWHash` | `init.world` + HTTP |
 | `MsgGMUpdate` | `gmUpdate` inbound -- the target half only, since bzo flies the missile itself rather than being told where it is. `lockTarget` outbound, which does carry the missile's state because upstream's receivers re-anchor on it |
 | `MsgKilled` (outbound) | `killed` / `selfDestruct` -- the victim declaring it, which is bzfs's direction and the reverse of bzo's own |

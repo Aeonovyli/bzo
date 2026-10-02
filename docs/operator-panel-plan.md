@@ -265,8 +265,9 @@ exactly what somebody using a panel does not have to hand.
 
 - **`adminGroups`, `localAdmin`.** An operator editing who is an operator is a
   privilege-escalation path.
-- **The physics constants** -- `tankSpeed`, `tankRotationSpeed`, `gravity`,
-  `jumpVelocity`, `shotSpeed`, `shotRange`, the `wings*` set, the inertia pair.
+- **The physics variables** -- server.json's `bzdb` block (`_tankSpeed`,
+  `_tankAngVel`, `_gravity`, `_jumpVelocity`, `_shotSpeed`, `_shotRange`, the
+  `_wings*` set) and the inertia pair. `/set` reaches the variables.
   Clients predict against every one of them, so a wrong value makes the game
   unplayable with no in-game way back. They are also rarely changed, and a
   stepper over a continuous physics value is a poor control on any surface -- so

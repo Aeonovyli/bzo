@@ -5,7 +5,7 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
-const { getSegmentTankHitFraction, TANK_HIT_HEIGHT } = require('./collision.cjs');
+const { getSegmentTankHitFraction, TANK } = require('./collision.cjs');
 const {
   cloaksTheTank,
   getTankHitRadiusScale,
@@ -277,7 +277,7 @@ function getShotTankHit(shot, from, to, tank, rules = {}) {
 
   // The tank's height gate, asked where the shot entered its footprint.
   const y = from.y + ((to.y - from.y) * fraction);
-  if (y < tank.position.y || y > tank.position.y + TANK_HIT_HEIGHT) return null;
+  if (y < tank.position.y || y > tank.position.y + TANK.hitHeight) return null;
 
   return {
     fraction,

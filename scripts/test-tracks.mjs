@@ -18,6 +18,7 @@ import {
   TRACK_UPDATE_TIME,
   TREAD_MIDDLE,
   getTrackMarkAlpha,
+  setTrackFadeTime,
   getTrackMarkPlacement,
   getTrackMarkSides,
 } from '../public/tracks.mjs';
@@ -116,5 +117,13 @@ near(turnedAsked[0].x - turnedRoof.x, 0, 'and leave the axis they were on');
 near(getTrackMarkAlpha(0), 1, 'a fresh mark is opaque');
 near(getTrackMarkAlpha(TRACK_FADE_TIME / 2), 0.5, 'half way through it is half gone');
 assert.ok(getTrackMarkAlpha(TRACK_FADE_TIME) <= 0, 'and at the end there is nothing left');
+
+// The world's `_trackFade`: marks last that long, and 0 draws none.
+setTrackFadeTime(12);
+near(getTrackMarkAlpha(6), 0.5, 'half way through a 12 s fade');
+setTrackFadeTime(0);
+near(getTrackMarkAlpha(0), 0, 'a fade of 0 draws no marks');
+setTrackFadeTime(undefined);
+near(getTrackMarkAlpha(1.5), 0.5, 'and back to upstream\'s 3 s');
 
 console.log('tracks: ok');

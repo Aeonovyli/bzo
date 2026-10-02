@@ -165,8 +165,8 @@ function testOrigRectTank(halfW, halfD, localX, localZ, tankAngle, slack = 0, ta
   // Player::getDimensions, which a flag scales on the lateral and forward axes
   // and never on height. `null` is the tank's own size, which is every tank
   // without one of the three dimension flags.
-  const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
-  const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+  const halfWidth = TANK.halfWidth * (tankScale ? tankScale.width : 1);
+  const halfLength = TANK.halfLength * (tankScale ? tankScale.length : 1);
   // Slack shrinks the tank, never the obstacle, mirroring how the circle path
   // reduces the tested radius.
   const trim = Math.max(0, Math.min(slack, halfWidth));
@@ -725,8 +725,8 @@ function findMeshHitFaceOriented(
 }
 
 function meshIntersectsTank(obs, x, y, z, rotation, height, slack = 0, tankScale = null, direction = null) {
-  const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
-  const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+  const halfWidth = TANK.halfWidth * (tankScale ? tankScale.width : 1);
+  const halfLength = TANK.halfLength * (tankScale ? tankScale.length : 1);
   const trim = Math.max(0, Math.min(slack, halfWidth));
   return findMeshHitFaceOriented(
     obs, x, y, z, rotation, halfWidth - trim, halfLength - trim, height, 'driveThrough', direction,
@@ -962,8 +962,8 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
   // `findMeshHitFaceOriented` already computes for the identical reason.
   const boundsMargin = useTankBox
     ? Math.hypot(
-      TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
-      TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1),
+      TANK.halfWidth * (tankScale ? tankScale.width : 1),
+      TANK.halfLength * (tankScale ? tankScale.length : 1),
     )
     : radius;
 
@@ -1024,8 +1024,8 @@ function findTankObstacle(obstacles, x, y, z, options = {}) {
 
     if (obs.type === 'mesh') {
       if (useTankBox) {
-        const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
-        const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+        const halfWidth = TANK.halfWidth * (tankScale ? tankScale.width : 1);
+        const halfLength = TANK.halfLength * (tankScale ? tankScale.length : 1);
         const trim = Math.max(0, Math.min(slack, halfWidth));
         collectMeshHitFacesTank(
           obs, x, y, z, rotation, halfWidth - trim, halfLength - trim, height, 'driveThrough', direction,
@@ -1294,8 +1294,8 @@ function phasedObstacleExpels(obs, reversingOnGround = false) {
 // the reason a tank swallowed whole by a building gets no lights: every corner
 // is inside, so there is no wall for the effect to hang off.
 function tankRectInsideOrigRect(halfW, halfD, localX, localZ, tankAngle, tankScale = null) {
-  const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
-  const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+  const halfWidth = TANK.halfWidth * (tankScale ? tankScale.width : 1);
+  const halfLength = TANK.halfLength * (tankScale ? tankScale.length : 1);
   const cos = Math.cos(tankAngle);
   const sin = Math.sin(tankAngle);
   for (const [sw, sl] of [[1, 1], [1, -1], [-1, -1], [-1, 1]]) {
@@ -1335,7 +1335,7 @@ function getBoxCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
   // inBox's height term. A tank clear of the obstacle vertically is not in it,
   // whatever its footprint says -- this is what stops a tank driving over a
   // low wall from wearing lights.
-  if (y >= base + height || y + TANK_HEIGHT <= base) return null;
+  if (y >= base + height || y + TANK.height <= base) return null;
 
   const halfW = obs.w / 2;
   const halfD = obs.d / 2;
@@ -1396,8 +1396,8 @@ function getBoxCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
 // it.
 function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
   if (!obs) return null;
-  const halfWidth = TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1);
-  const halfLength = TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1);
+  const halfWidth = TANK.halfWidth * (tankScale ? tankScale.width : 1);
+  const halfLength = TANK.halfLength * (tankScale ? tankScale.length : 1);
   // Every face the tank is touching, not just the first one, because the
   // first one is not necessarily a face it is *crossing*. `getBoxCrossingPlane`
   // answers "entirely inside is not crossing" with `tankRectInsideOrigRect`
@@ -1413,7 +1413,7 @@ function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
   // long as it is inside, so the wall it is genuinely half-through is never
   // the first face hit.
   const hits = collectMeshHitFacesTank(
-    obs, x, y, z, rotation, halfWidth, halfLength, TANK_HEIGHT, 'driveThrough', null, [],
+    obs, x, y, z, rotation, halfWidth, halfLength, TANK.height, 'driveThrough', null, [],
   );
   if (!hits.length) return null;
 
@@ -1439,7 +1439,7 @@ function getMeshCrossingPlane(obs, x, y, z, rotation, tankScale = null) {
     for (const [cx, cz] of corners) {
       const horizontal = nx * cx + nz * cz + d;
       if (horizontal + ny * y > ZERO_TOLERANCE
-        || horizontal + ny * (y + TANK_HEIGHT) > ZERO_TOLERANCE) {
+        || horizontal + ny * (y + TANK.height) > ZERO_TOLERANCE) {
         return { x: nx, y: ny, z: nz, d };
       }
     }
@@ -2533,6 +2533,53 @@ function traceShotStep({
 const TANK_HIT_RADIUS = 2;
 const TANK_HIT_HEIGHT = TANK_HEIGHT;
 
+// Upstream's `_tankRadius` (`0.72 * _tankLength`) and `_muzzleHeight`, and the
+// muzzle a tank model reports when there is no model to ask.
+const BZFLAG_TANK_RADIUS = 4.32;
+const DEFAULT_MUZZLE_FORWARD = 3.0;
+const DEFAULT_MUZZLE_HEIGHT = 1.57;
+const BZFLAG_TANK_LENGTH = 6.0;
+const BZFLAG_TANK_WIDTH = 2.8;
+const BZFLAG_MUZZLE_FRONT = BZFLAG_TANK_RADIUS + 0.1;
+const TANK_COLLISION_HEIGHT_DEFAULT = 2;
+
+// The world's tank: `_tankLength`, `_tankWidth`, `_tankHeight`, `_tankRadius`,
+// `_muzzleHeight` and `_muzzleFront`, which the config carries as TANK_LENGTH,
+// TANK_WIDTH, TANK_HEIGHT, TANK_RADIUS, MUZZLE_HEIGHT and MUZZLE_FRONT. One
+// object every module holds, so a world that resizes it resizes it everywhere:
+// each host calls `configureTankDimensions` with its world's config.
+//
+// bzo's own figures that differ from upstream's on purpose -- the hit radius 2
+// against upstream's 4.32, a collision height of 2, the 3.0 muzzle -- scale
+// with the world's tank, so the ratio between the two is kept.
+const TANK = {};
+
+function configureTankDimensions(config = {}) {
+  const positive = (value, fallback) => (Number.isFinite(value) && value > 0 ? value : fallback);
+  const length = positive(config.TANK_LENGTH, BZFLAG_TANK_LENGTH);
+  const width = positive(config.TANK_WIDTH, BZFLAG_TANK_WIDTH);
+  const height = positive(config.TANK_HEIGHT, TANK_HEIGHT);
+  const radius = positive(config.TANK_RADIUS, 0.72 * length);
+  const muzzleFront = positive(config.MUZZLE_FRONT, radius + 0.1);
+  Object.assign(TANK, {
+    length,
+    width,
+    halfLength: length / 2,
+    halfWidth: width / 2,
+    height,
+    hitHeight: height,
+    radius,
+    hitRadius: TANK_HIT_RADIUS * (radius / BZFLAG_TANK_RADIUS),
+    collisionHeight: TANK_COLLISION_HEIGHT_DEFAULT * (height / TANK_HEIGHT),
+    muzzleHeight: positive(config.MUZZLE_HEIGHT, DEFAULT_MUZZLE_HEIGHT),
+    muzzleForward: DEFAULT_MUZZLE_FORWARD * (muzzleFront / BZFLAG_MUZZLE_FRONT),
+    // How a tank model is drawn against upstream's: TankGeometryMgr scales the
+    // geometry by each dimension over its default (TankGeometryMgr.cxx:343).
+    modelScale: { length: length / BZFLAG_TANK_LENGTH, width: width / BZFLAG_TANK_WIDTH, height: height / TANK_HEIGHT },
+  });
+}
+configureTankDimensions();
+
 // How far along a segment a shot first comes within a tank radius of one tank's
 // centre, or null if it never does. This is SegmentedShotStrategy::checkHit's
 // ray test reduced to bzo's upright cylinder: upstream tests the frame's whole
@@ -2559,12 +2606,12 @@ function getSegmentTankHitFraction(from, to, tank, shape = {}) {
       // a player names it `rotation`. Both reach here.
       getTankLocalAngle(Number.isFinite(tank.r) ? tank.r : (tank.rotation || 0)),
       shotRadius,
-      TANK_HALF_LENGTH
+      TANK.halfLength
     );
   }
   // Every other flag, and no flag, meets the sphere -- scaled by the length
   // factor, which is the axis Player::getRadius reads.
-  const radius = TANK_HIT_RADIUS * radiusScale;
+  const radius = TANK.hitRadius * radiusScale;
   const dx = to.x - from.x;
   const dz = to.z - from.z;
   const fx = from.x - tank.x;
@@ -2711,6 +2758,11 @@ module.exports = {
   traceShotStep,
   TANK_HIT_RADIUS,
   TANK_HIT_HEIGHT,
+  BZFLAG_TANK_RADIUS,
+  DEFAULT_MUZZLE_FORWARD,
+  DEFAULT_MUZZLE_HEIGHT,
+  TANK,
+  configureTankDimensions,
   getSegmentTankHitFraction,
   buildWorldBorderColliders,
   buildCollisionColliders,
