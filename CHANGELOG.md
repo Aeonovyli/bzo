@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.102] - 2026-10-02
+
 ### Fixed
 - A flag's fade and warp-in effects are freed when they end, instead of
   piling up hidden for every flag that ever respawned.
