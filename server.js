@@ -1011,7 +1011,9 @@ app.get('/login/:returnPage?/:returnView?/:returnTeam?', loginRateLimit, async (
       for (const line of result.messages) log(`[PROXY] < ${sanitizeServerText(line)}`);
       // Plain text, never the HTML `res.send` assumes for a string: the lines
       // are the target's own words, and a target is a server nobody here runs.
-      res.type('text/plain').send(`${probe.key}: ${result.verdict}\n`
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.set('X-Content-Type-Options', 'nosniff');
+      res.send(`${probe.key}: ${result.verdict}\n`
         + `entered: ${result.accepted}\n`
         + (result.reason ? `reason: ${sanitizeServerText(result.reason)}\n` : '')
         + result.messages.map((line) => `< ${sanitizeServerText(line)}\n`).join(''));
