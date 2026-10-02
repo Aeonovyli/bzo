@@ -6,6 +6,39 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.100] - 2026-10-02
+
+### Added
+- `_mirror`: a world can have a mirror ground, the world reflected in it
+  under the mirror's colour.
+- Spawns follow upstream's SpawnPolicy: a tank does not spawn in front of a
+  Laser, inside a Shock Wave's reach, beside a Steamroller or Burrow tank,
+  or under a nearby tank's gun, and spawns as far from enemies as it can.
+  `_spawnSafeRadMod`, `_spawnSafeSRMod`, `_spawnSafeSWMod` and
+  `_spawnMaxCompTime` tune it.
+- More world variables: `_flagAltitude`, `_flagPoleSize`, `_pauseDropTime`,
+  `_speedChecksLogOnly`, `_updateThrottleRate` and `_forbidMarkers`.
+- A world weapon's `color` sets the team its shots are fired for and drawn
+  in.
+- server.json's `puffClouds` brings back bzo's own puff clouds.
+
+### Changed
+- Clouds are upstream's single flat cloud layer, drawn behind the world
+  (#165).
+- Lasers look like upstream's, textured and tinted in the shooter's colour,
+  or the weapon's team colour (#159).
+- A client sends up to `_updateThrottleRate` (30) position updates a second,
+  as upstream's does, rather than 10.
+
+### Fixed
+- Server bots see other tanks again, so they chase, fight and fire (#167).
+- An observer stays an observer when the server restarts: the entry
+  dialog's team choice is kept across reloads (#163).
+- Switching to observer lands the autopilot, and the scoreboard no longer
+  shows it; it takes over again when you play (#164).
+- Clouds were drawn on the ground on the live map (#165).
+- A watched server's world-weapon lasers showed in the wrong colour (#159).
+
 ## [1.2.99] - 2026-10-02
 
 ### Added
