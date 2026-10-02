@@ -6,6 +6,7 @@
  */
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
 import { AnaglyphEffect } from './anaglyph.js';
 import { meshArrays, meshDrawArrays, NO_INDEX } from './mesh-arrays.mjs';
 import { xrState } from './webxr.js';
@@ -59,7 +60,7 @@ import {
   getTeamFromColorIndex,
 } from './teams.mjs';
 import {
-  FLAG_POLE_SIZE,
+  getFlagTuning,
   FLAG_POLE_WIDTH,
   getShotEffects,
   SUPER_FLAG_COLOR,
@@ -774,6 +775,16 @@ const CELESTIAL_GLOW_RATIO = 1.5;
 // first, which is why `createMountains` also turns off `transparent` --
 // see the comment there.
 const MOUNTAIN_RENDER_ORDER = -500;
+// Upstream's cloud layer (BackgroundRenderer.cxx:1829): `clouds.png` on a plane
+// 120 tank heights up, as wide as the ground plane (ten world sizes either
+// way), opaque over the middle quarter of it and fading out to its edge,
+// repeated three times across and drifting (`addCloudDrift`, playing.cxx:
+// 5966). Drawn with the mountains, before the scene and without depth.
+const BZFLAG_CLOUD_LAYER_TEXTURE = '/textures/clouds.png';
+const BZFLAG_CLOUD_REPEATS = 3.0;
+const BZFLAG_CLOUD_INNER_SCALE = 0.25;
+const BZFLAG_CLOUD_HEIGHT_TANK_HEIGHTS = 120;
+const CLOUD_LAYER_RENDER_ORDER = MOUNTAIN_RENDER_ORDER + 1;
 // And the ground goes *before* them, which is the whole reason that works.
 // Upstream's order is fixed by `SceneRenderer`: `renderGround` lays the
 // ground down first (`BackgroundRenderer.cxx:605-609`), `renderGroundEffects`
@@ -795,6 +806,32 @@ const GROUND_RENDER_ORDER = -600;
 // How far a wall texture and a roof texture stretch, in metres per tile. These
 // were the divisors on the per-face texture repeats and are now the divisors on
 // the baked UVs, so the tiling is unchanged.
+// The mirror ground's compositing, upstream's tint quad over its reflection:
+// `reflection * (1 - a) + tint * a`.
+const BZFLAG_MIRROR_SHADER = {
+  name: 'BzflagMirror',
+  uniforms: {
+    color: { value: null },
+    tDiffuse: { value: null },
+    textureMatrix: { value: null },
+    tintAlpha: { value: 0.5 },
+  },
+  vertexShader: Reflector.ReflectorShader.vertexShader,
+  fragmentShader: /* glsl */`
+    uniform vec3 color;
+    uniform float tintAlpha;
+    uniform sampler2D tDiffuse;
+    varying vec4 vUv;
+    #include <logdepthbuf_pars_fragment>
+    void main() {
+      #include <logdepthbuf_fragment>
+      vec4 base = texture2DProj( tDiffuse, vUv );
+      gl_FragColor = vec4( mix( base.rgb, color, tintAlpha ), 1.0 );
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`,
+};
+
 const BOX_TEXTURE_SCALES = { sideScale: 8, capScale: 2 };
 // `MeshSceneNodeGenerator::makeTexcoords`'s own `uvScale` -- upstream's tile
 // size for a mesh face's planar-projected default UVs, when it states none
@@ -1554,10 +1591,36 @@ const BZFLAG_SHOT_LIGHT_SCALE = 1.5;          // BoltSceneNode.cxx:85
 // LaserSceneNode::renderGeoLaser (LaserSceneNode.cxx:178): a bright core inside a
 // faint glow, both cylinders the length of the segment. That is upstream's
 // untextured laser, and bzo ships no laser texture, so it is the one bzo draws.
-const BZFLAG_LASER_LAYERS = Object.freeze([
-  Object.freeze([0.0625, 0.85]),
-  Object.freeze([0.1, 0.125]),
-]);
+const BZFLAG_LASER_TEXTURE = '/textures/rabbit_laser.png';
+
+// renderFlatLaser's geometry for a segment one unit long, running up +Y from
+// the origin: the start star (a fan of four triangles across the beam, its
+// centre at the middle of the texture and its rim at the corner, as upstream
+// writes it) and the two crossed quads, `u` across their width and `v` along
+// their length.
+function buildFlatLaserGeometry() {
+  const positions = [];
+  const uvs = [];
+  const quad = (a, b, c, d) => {
+    positions.push(...a.p, ...b.p, ...c.p, ...b.p, ...d.p, ...c.p);
+    uvs.push(...a.uv, ...b.uv, ...c.uv, ...b.uv, ...d.uv, ...c.uv);
+  };
+  const rim = [[0, 0, 1], [1, 0, 0], [0, 0, -1], [-1, 0, 0]];
+  for (let i = 0; i < 4; i++) {
+    const p0 = rim[i];
+    const p1 = rim[(i + 1) % 4];
+    positions.push(0, 0, 0, ...p0, ...p1);
+    uvs.push(0.5, 0.5, 0, 0, 0, 0);
+  }
+  quad({ p: [0, 0, 1], uv: [0, 0] }, { p: [0, 1, 1], uv: [0, 1] },
+    { p: [0, 0, -1], uv: [1, 0] }, { p: [0, 1, -1], uv: [1, 1] });
+  quad({ p: [1, 0, 0], uv: [0, 0] }, { p: [1, 1, 0], uv: [0, 1] },
+    { p: [-1, 0, 0], uv: [1, 0] }, { p: [-1, 1, 0], uv: [1, 1] });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  return geometry;
+}
 const BZFLAG_SHOT_IMPACT_LIGHT_SCALE = 1.2;   // playing.cxx:3636, scaled by size/tankLength
 const BZFLAG_EXPLOSION_LIGHT_SCALE = 9.6;     // playing.cxx:3654, colour * lightGain
 const BZFLAG_JUMPJET_LIGHT_SCALE = 3.0;       // TankSceneNode.cxx:308, (1.5,1,0.5) * 2
@@ -2746,6 +2809,7 @@ class RenderManager {
     if (this.cloudsHiddenForOverview === hidden) return;
     this.cloudsHiddenForOverview = hidden;
     this.clouds.forEach((cloud) => { cloud.visible = !hidden; });
+    if (this.cloudLayer) this.cloudLayer.visible = !hidden;
   }
 
   // Where a camera has to stand to hold the whole world in frame, and what it
@@ -3291,6 +3355,12 @@ class RenderManager {
   }
 
   clearGround() {
+    if (this.mirror) {
+      this.worldGroup.remove(this.mirror);
+      this.mirror.dispose();
+      this.mirror.geometry.dispose();
+      this.mirror = null;
+    }
     this._animatedMaterials = this._animatedMaterials.filter((entry) => entry.source !== 'ground');
     // The material's `dispose` does not reach its map, and the zone ground is a
     // second texture the material is not holding when the standard one is up.
@@ -3784,9 +3854,45 @@ class RenderManager {
   // checkerboard (`BackgroundRenderer::setupGroundMaterials`,
   // `BackgroundRenderer.cxx:265-303` -- falls back to `stdGroundTexture`
   // the same way when no material named `GroundMaterial` is registered).
+  // `_mirror`: the world under a mirror ground (SceneRenderer.cxx:748). Upstream
+  // draws the scene once flipped about the ground, lays the mirror's colour
+  // over all of it at the colour's alpha, and draws the real scene on top with
+  // no ground at all -- so where the ground would be, a player sees the
+  // reflection under that tint. A `Reflector` is the same picture: the mirrored
+  // view rendered into the ground's own place, composited as upstream's quad
+  // composites it. Half resolution, since it is a second render of the world.
+  setMirror(rgba) {
+    this._mirrorColor = Array.isArray(rgba) ? rgba : null;
+  }
+
+  _buildMirror(groundExtent) {
+    const [r, g, b, a] = this._mirrorColor;
+    const pixelRatio = this.renderer?.getPixelRatio?.() || 1;
+    const width = Math.max(256, Math.floor((window.innerWidth * pixelRatio) / 2));
+    const height = Math.max(256, Math.floor((window.innerHeight * pixelRatio) / 2));
+    const mirror = new Reflector(new THREE.PlaneGeometry(groundExtent, groundExtent), {
+      color: new THREE.Color(r, g, b),
+      textureWidth: width,
+      textureHeight: height,
+      clipBias: 0.003,
+      multisample: 0,
+      shader: BZFLAG_MIRROR_SHADER,
+    });
+    mirror.material.uniforms.tintAlpha.value = a;
+    mirror.rotation.x = -Math.PI / 2;
+    mirror.receiveShadow = false;
+    this.mirror = mirror;
+    this.worldGroup.add(this._tagDraws(mirror, 'world'));
+  }
+
   buildGround(mapSize, groundMaterial = null) {
     if (!this.scene) return;
     this.clearGround();
+    // A mirror world draws no ground, whatever `_drawGround` says.
+    if (this._mirrorColor) {
+      this._buildMirror(mapSize * 10);
+      return;
+    }
     if (!this._worldDraws('ground')) return;
 
     const groundExtent = mapSize * 10;
@@ -6435,7 +6541,84 @@ class RenderManager {
     return geometry;
   }
 
-  createClouds(cloudsData = []) {
+  buildCloudLayer(mapSize) {
+    this.clearCloudLayer();
+    if (!this.scene || !this._worldDraws('clouds')) return;
+    const groundSize = 10 * mapSize;
+    const inner = BZFLAG_CLOUD_INNER_SCALE * groundSize;
+    const corners = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+    const positions = [];
+    const uvs = [];
+    const colors = [];
+    // Inner corners 0-3 at full opacity, outer 4-7 faded to nothing.
+    [inner, groundSize].forEach((extent, ring) => {
+      corners.forEach(([cx, cz]) => {
+        positions.push(cx * extent, 0, cz * extent);
+        uvs.push((cx * extent / groundSize) * BZFLAG_CLOUD_REPEATS, (cz * extent / groundSize) * BZFLAG_CLOUD_REPEATS);
+        colors.push(1, 1, 1, ring === 0 ? 1 : 0);
+      });
+    });
+    const index = [0, 1, 2, 0, 2, 3];
+    for (let i = 0; i < 4; i++) {
+      const next = (i + 1) % 4;
+      index.push(i, 4 + i, 4 + next, i, 4 + next, next);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+    geometry.setIndex(index);
+    const texture = this._createSharedImageTexture(BZFLAG_CLOUD_LAYER_TEXTURE);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    // Blended but not `transparent`: three draws every transparent object after
+    // every opaque one, whatever its render order, so a transparent layer drawn
+    // without depth would paint over the whole world. In the opaque list it
+    // sorts by `renderOrder` -- after the mountains, before everything else --
+    // and the custom blend keeps its faded edge and the texture's own alpha.
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      vertexColors: true,
+      transparent: false,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      fog: false,
+    });
+    // Ten world sizes out is far past the camera's far plane, which only
+    // reaches the mountains. Drawn without depth, the layer has no use for its
+    // depth either, so every vertex is put just inside the far plane and none of
+    // it is clipped away -- the whole layer out to its faded edge, as upstream's.
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <project_vertex>',
+        '#include <project_vertex>\n  gl_Position.z = gl_Position.w * 0.9999;',
+      );
+    };
+    const layer = new THREE.Mesh(geometry, material);
+    layer.position.y = BZFLAG_CLOUD_HEIGHT_TANK_HEIGHTS * TANK.height;
+    layer.renderOrder = CLOUD_LAYER_RENDER_ORDER;
+    layer.frustumCulled = false;
+    layer.visible = !this.cloudsHiddenForOverview;
+    this.cloudLayer = layer;
+    this.worldGroup.add(this._tagDraws(layer, 'scenery'));
+  }
+
+  clearCloudLayer() {
+    if (!this.cloudLayer) return;
+    this.worldGroup.remove(this.cloudLayer);
+    this.cloudLayer.geometry.dispose();
+    this.cloudLayer.material.map?.dispose();
+    this.cloudLayer.material.dispose();
+    this.cloudLayer = null;
+  }
+
+  // `cloudBase` is where a sky beacon hangs from: the server's lowest cloud
+  // height, a jump above the world's tallest obstacle.
+  createClouds(cloudsData = [], cloudBase = null) {
     if (!this.scene) return;
     this.clearClouds();
     if (!this._worldDraws('clouds')) return;
@@ -6464,7 +6647,7 @@ class RenderManager {
     // falls back to a length of its own.
     this.skyBeaconTopY = this.clouds.reduce(
       (lowest, cloud) => Math.min(lowest, cloud.position.y),
-      Infinity,
+      Number.isFinite(cloudBase) ? cloudBase : Infinity,
     );
     if (!Number.isFinite(this.skyBeaconTopY)) this.skyBeaconTopY = 0;
   }
@@ -8333,9 +8516,11 @@ class RenderManager {
     this.overlayLines.visible = true;
   }
 
-  setLockOnMarker(position, color) {
+  // `_forbidMarkers` takes it away, as it does upstream's whole
+  // `drawMarkersInView` (HUDRenderer.cxx:1761).
+  setLockOnMarker(position, color, forbidden = false) {
     if (!this.scene) return;
-    if (!position) {
+    if (!position || forbidden) {
       if (this.lockOnMarker) this.lockOnMarker.visible = false;
       return;
     }
@@ -8721,6 +8906,20 @@ class RenderManager {
   // upstream textures its beam and bzo has no such texture, which is the only
   // difference. The group sits at the muzzle so the shot still has a position
   // for the radar and for its sounds.
+  // Upstream's grey laser (`rabbit_laser.png`, the one team laser with no hue
+  // of its own) in a shooter's colour, by the same tint shell bolts take, kept
+  // per colour since a beam lives a fraction of a second.
+  _getLaserTexture(color) {
+    if (!this._laserTextures) this._laserTextures = new Map();
+    let texture = this._laserTextures.get(color);
+    if (!texture) {
+      texture = this._createTintedTexture(
+        BZFLAG_LASER_TEXTURE, 64, 64, this._paintTintedBZFlagBoltTexture, color);
+      this._laserTextures.set(color, texture);
+    }
+    return texture;
+  }
+
   createShotBeam(data) {
     if (!this.scene) return null;
     const beamColor = typeof data.color === 'number' ? data.color : 0xffff00;
@@ -8730,20 +8929,21 @@ class RenderManager {
     group.position.set(origin.x, origin.y, origin.z);
     group.renderOrder = SHOT_RENDER_ORDER;
 
-    // One instanced draw per layer, however many bends the beam has: a
-    // ricocheting laser on an enclosed map runs to makeSegments' hundred
-    // segments, and a mesh apiece would be a hundred geometries built and thrown
-    // away inside a third of a second.
-    if (!this._laserGeometry) {
-      this._laserGeometry = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
-    }
+    // LaserSceneNode::renderFlatLaser, upstream's laser at its default quality:
+    // two crossed quads along each segment, two units wide, the laser texture
+    // across their width and stretched once along their length, with a small
+    // star facing down the beam where each segment starts. Drawn white over the
+    // texture, so the colour is the texture's own -- here, upstream's grey
+    // laser in the shooter's colour (`_getLaserTexture`) -- and added in
+    // (`GL_SRC_ALPHA, GL_ONE`) with nothing culled. One instanced draw for every
+    // segment, however many bends a ricochet gives the beam.
+    if (!this._laserGeometry) this._laserGeometry = buildFlatLaserGeometry();
     const materials = [];
     const layers = [];
     const up = new THREE.Vector3(0, 1, 0);
     const from = new THREE.Vector3();
     const to = new THREE.Vector3();
     const direction = new THREE.Vector3();
-    const midpoint = new THREE.Vector3();
     const orientation = new THREE.Quaternion();
     const scale = new THREE.Vector3();
     const matrix = new THREE.Matrix4();
@@ -8751,14 +8951,14 @@ class RenderManager {
       && Math.hypot(segment.to.x - segment.from.x, segment.to.y - segment.from.y,
         segment.to.z - segment.from.z) > 0.01);
 
-    for (const [radius, alpha] of BZFLAG_LASER_LAYERS) {
-      if (drawn.length === 0) break;
+    if (drawn.length > 0) {
       const material = new THREE.MeshBasicMaterial({
-        color: beamColor,
+        map: this._getLaserTexture(beamColor),
+        color: 0xffffff,
         transparent: true,
-        opacity: alpha,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        side: THREE.DoubleSide,
       });
       const mesh = new THREE.InstancedMesh(this._laserGeometry, material, drawn.length);
       mesh.frustumCulled = false;
@@ -8769,9 +8969,8 @@ class RenderManager {
         direction.subVectors(to, from);
         const length = direction.length();
         orientation.setFromUnitVectors(up, direction.divideScalar(length));
-        midpoint.addVectors(from, to).multiplyScalar(0.5).sub(group.position);
-        scale.set(radius, length, radius);
-        mesh.setMatrixAt(index, matrix.compose(midpoint, orientation, scale));
+        scale.set(1, length, 1);
+        mesh.setMatrixAt(index, matrix.compose(from.sub(group.position), orientation, scale));
       });
       mesh.instanceMatrix.needsUpdate = true;
       group.add(mesh);
@@ -9721,7 +9920,7 @@ class RenderManager {
       // The vertices move every frame, so the bounding sphere is set once to
       // cover the whole ripple rather than recomputed for each step.
       geometry.boundingSphere = new THREE.Sphere(
-        new THREE.Vector3(BZFLAG_FLAG_WIDTH / 2, FLAG_POLE_SIZE + (BZFLAG_FLAG_HEIGHT / 2), 0),
+        new THREE.Vector3(BZFLAG_FLAG_WIDTH / 2, getFlagTuning().flagPoleSize + (BZFLAG_FLAG_HEIGHT / 2), 0),
         BZFLAG_FLAG_WIDTH
       );
       this._flagWaveSets.push({
@@ -9759,8 +9958,9 @@ class RenderManager {
         const wave1 = damp * (Math.sin(angle2) + sinRipple2Shifted);
         const wave2 = wave0 + (damp * sinRipple2);
         const x = BZFLAG_FLAG_WIDTH * along;
-        positions.setXYZ(chunk * 2, x, FLAG_POLE_SIZE + BZFLAG_FLAG_HEIGHT - wave0, wave1);
-        positions.setXYZ((chunk * 2) + 1, x, FLAG_POLE_SIZE - wave0, wave2);
+        const poleSize = getFlagTuning().flagPoleSize;
+        positions.setXYZ(chunk * 2, x, poleSize + BZFLAG_FLAG_HEIGHT - wave0, wave1);
+        positions.setXYZ((chunk * 2) + 1, x, poleSize - wave0, wave2);
       }
       positions.needsUpdate = true;
     });
@@ -9843,7 +10043,7 @@ class RenderManager {
     // The pole stands on the flag's position, so its offset is baked into the
     // geometry and the instance matrix carries nothing but the flag's place and
     // the way it faces.
-    const poleHeight = FLAG_POLE_SIZE + BZFLAG_FLAG_HEIGHT;
+    const poleHeight = getFlagTuning().flagPoleSize + BZFLAG_FLAG_HEIGHT;
     const poleGeometry = new THREE.PlaneGeometry(2 * FLAG_POLE_WIDTH, poleHeight)
       .translate(0, poleHeight / 2, 0);
 
@@ -9932,7 +10132,7 @@ class RenderManager {
       side: THREE.DoubleSide,
       depthWrite: false,
     });
-    const poleHeight = FLAG_POLE_SIZE + BZFLAG_FLAG_HEIGHT;
+    const poleHeight = getFlagTuning().flagPoleSize + BZFLAG_FLAG_HEIGHT;
     const pole = new THREE.Mesh(new THREE.PlaneGeometry(2 * FLAG_POLE_WIDTH, poleHeight), poleMaterial);
     pole.position.y = poleHeight / 2;
     pole.renderOrder = FLAG_RENDER_ORDER;
@@ -9991,7 +10191,7 @@ class RenderManager {
     if (showLabel) {
       const sprite = this._ensureFlagLabel(record);
       this.updateSpriteLabel(sprite, label, color);
-      sprite.position.set(x, y + BZFLAG_FLAG_HEIGHT + FLAG_POLE_SIZE + 1, z);
+      sprite.position.set(x, y + BZFLAG_FLAG_HEIGHT + getFlagTuning().flagPoleSize + 1, z);
       sprite.visible = true;
     } else if (record.label) {
       record.label.visible = false;
@@ -10489,6 +10689,12 @@ class RenderManager {
   }
 
   updateClouds(deltaTime, mapSize) {
+    // `addCloudDrift(1.0 * dt, 0.731 * dt)`, a hundredth of a repeat a unit.
+    const layerMap = this.cloudLayer?.material.map;
+    if (layerMap) {
+      layerMap.offset.x = (layerMap.offset.x + ((0.01 * deltaTime) / BZFLAG_CLOUD_REPEATS)) % 1;
+      layerMap.offset.y = (layerMap.offset.y + ((0.01 * 0.731 * deltaTime) / BZFLAG_CLOUD_REPEATS)) % 1;
+    }
     const mapBoundary = mapSize / 2;
     this.clouds.forEach((cloud) => {
       cloud.position.x += cloud.userData.velocity * deltaTime;

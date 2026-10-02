@@ -178,24 +178,18 @@ These are deliberate. Do not "fix" them without being asked.
   clock. The server reads it off the wall clock (`currentWorldTime`), so
   every joiner is told the same time.
 
-- **Sky clouds are real 3D puff-sphere meshes with ordinary depth testing, not
-  upstream's flat billboard texture.** `BackgroundRenderer::renderGroundEffects`
-  draws its cloud layer (`cloudsGState`, `BackgroundRenderer.cxx:698-709`) in the
-  same depth-test-off pass as the sky and the mountains, before the real scene
-  -- it stays behind everything solid purely because of *when* it is drawn, the
-  same trick `MOUNTAIN_RENDER_ORDER` uses (see `createMountains`). bzo's clouds
-  (`puffs` in `server.js`, `_buildCloudGeometry`/`_getCloudMaterial` in
-  `public/render.js`) are real geometry instead -- five to twelve overlapping
-  spheres per cloud, sitting in the world and drifting through it, so a tank can
-  fly up into one. That needs the opposite of the mountain trick: a `transparent:
-  true` cloud material keeps ordinary depth testing on purpose, because
-  disabling it would paint a cloud over every already-drawn box, mesh and tank
-  unconditionally (`_getCloudMaterial`'s own comment). The cost is the occasional
-  close-up z-fight against something right up against a cloud -- issue #92's "to
-  a lesser extent" comment. Accepted for now, and may change -- do not report the
-  z-fight as the same bug as #92's mountain one, and do not "fix" it by copying
-  the mountain's no-zbuffer approach without being asked: that would trade the
-  z-fight for a cloud that paints over the whole scene.
+- **The sky's clouds are upstream's flat layer** (`buildCloudLayer`, from
+  `BackgroundRenderer.cxx:1829`): `clouds.png` 120 tank heights up across the
+  whole ground plane, drawn with the mountains in the depth-test-off pass, and
+  switched by `_drawClouds`. bzo's own puff clouds -- five to twelve spheres
+  each, real geometry a tank can fly into, with ordinary depth testing on
+  purpose (`_getCloudMaterial`) -- are a bzo setting, server.json's
+  `puffClouds`, off by default. Either way the server sends each world a
+  `cloudBase`, a jump above its tallest obstacle, which is where a sky beacon
+  hangs from. With puffs on, their close-up z-fight against something right
+  up against a cloud is accepted (issue #92's "to a lesser extent"); do not
+  "fix" it by copying the mountain's no-zbuffer approach, which would paint a
+  puff over the whole scene.
 
 - **The radar range is not saved between sessions.** BZFlag persists
   `displayRadarRange` with the rest of BZDB. bzo starts every session at

@@ -1156,8 +1156,8 @@ let burrowFactors = Object.freeze({ speed: BURROW_SPEED_AD, angVel: BURROW_ANGUL
 // The rest of the world's flag numbers: `V` Velocity's `_velocityAd`, `QT`
 // Quick Turn's `_angularAd`, the size flags' `_tinyFactor`, `_obeseFactor` and
 // `_narrowFactor`, `A` Agility's `_agilityAdVel`, `_agilityTimeWindow` and
-// `_agilityVelDelta`, `SR` Steamroller's `_srRadiusMult`, and
-// `_flagEffectTime`, how long a tank takes to change size or fade.
+// `_agilityVelDelta`, `SR` Steamroller's `_srRadiusMult`, `_flagEffectTime`,
+// how long a tank takes to change size or fade, and the flags' own two below.
 function buildFlagTuning(config = {}) {
   return Object.freeze({
     velocityAd: positive(config.VELOCITY_AD, VELOCITY_AD),
@@ -1172,6 +1172,10 @@ function buildFlagTuning(config = {}) {
     flagEffectTime: Number.isFinite(config.FLAG_EFFECT_TIME) && config.FLAG_EFFECT_TIME >= 0
       ? config.FLAG_EFFECT_TIME
       : FLAG_EFFECT_TIME,
+    // `_flagAltitude`, how high a flag is thrown or flies in from, and
+    // `_flagPoleSize`, how tall its pole is drawn.
+    flagAltitude: positive(config.FLAG_ALTITUDE, FLAG_ALTITUDE),
+    flagPoleSize: positive(config.FLAG_POLE_SIZE, FLAG_POLE_SIZE),
   });
 }
 let flagTuning = buildFlagTuning();
@@ -1894,7 +1898,8 @@ function getTeamFlagAbbreviation(colorIndex) {
 // addFlag settles its arc before it picks a type (FlagInfo.cxx:116), so a Shield
 // arrives like anything else and only leaves differently.
 function getFlagThrownAltitude(abbreviation) {
-  return abbreviation === 'SH' ? SHIELD_FLIGHT * FLAG_ALTITUDE : FLAG_ALTITUDE;
+  const { flagAltitude } = flagTuning;
+  return abbreviation === 'SH' ? SHIELD_FLIGHT * flagAltitude : flagAltitude;
 }
 
 // FlagInfo::addFlag and FlagInfo::dropFlag both derive the flight from one

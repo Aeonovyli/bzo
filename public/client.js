@@ -930,7 +930,30 @@ function getDisplayedMatchTimeLeft() {
   const elapsed = (frameEpochMs - matchTimeReceivedAt) / 1000;
   return Math.max(0, Math.round(matchTimeLeft - elapsed));
 }
-let selectedPlayerTeam = PLAYER_TEAM.AUTOMATIC;
+// The team row's choice, kept like the name and the tank (issue #163): a
+// server restart reloads every client onto its new build, and an observer has
+// to come back an observer. What is kept is the choice -- Automatic stays
+// Automatic, never the team it landed on -- and only one the player made: a
+// link that stages a team decides that page load and nothing after it.
+const PLAYER_TEAM_STORAGE_KEY = 'playerTeam';
+function readStoredPlayerTeam() {
+  try {
+    const stored = localStorage.getItem(PLAYER_TEAM_STORAGE_KEY);
+    return stored ? stored : null;
+  } catch {
+    return null;
+  }
+}
+function storePlayerTeamChoice(team) {
+  try {
+    // Map Viewer needs its map, which its own link carries; without one the
+    // nearest thing is to watch.
+    localStorage.setItem(PLAYER_TEAM_STORAGE_KEY, team === PLAYER_TEAM.MAP_VIEWER ? PLAYER_TEAM.OBSERVER : team);
+  } catch {
+    /* ignore storage errors */
+  }
+}
+let selectedPlayerTeam = normalizePlayerTeamSelection(readStoredPlayerTeam() ?? PLAYER_TEAM.AUTOMATIC);
 let availablePlayerTeams = [PLAYER_TEAM.ROGUE, PLAYER_TEAM.OBSERVER];
 // `?follow=leader` -- the link to hand somebody who wants to watch a match. It
 // joins as an observer in the follow view on whoever is leading, and does not
@@ -1366,6 +1389,7 @@ function selectRelativePlayerTeam(direction) {
   const currentIndex = teamSelections.indexOf(selectedPlayerTeam);
   const nextIndex = (currentIndex + direction + teamSelections.length) % teamSelections.length;
   selectedPlayerTeam = teamSelections[nextIndex];
+  storePlayerTeamChoice(selectedPlayerTeam);
   // After the selector, not before: `getSelectedPlayerTeam` reads the row's
   // own dataset, which `syncPlayerTeamSelector` is what writes.
   syncPlayerTeamSelector();
@@ -2584,6 +2608,7 @@ function applyWorldData(world) {
   // builds the scenery they switch.
   const sceneConfig = configForWorld(world) || {};
   renderManager.setSceneSwitches(sceneConfig);
+  renderManager.setMirror(sceneConfig.MIRROR ?? null);
   setTrackFadeTime(sceneConfig.TRACK_FADE);
   if (world && world.obstacles) {
     OBSTACLES = world.obstacles;
@@ -2623,7 +2648,7 @@ function applyWorldData(world) {
   debugLog(`world.teleporters count=${TELEPORTER_GRAPH.teleporters.length} links=${TELEPORTER_GRAPH.links.length}`);
 
   if (world && world.clouds) {
-    renderManager.createClouds(world.clouds);
+    renderManager.createClouds(world.clouds, world.cloudBase);
   } else {
     renderManager.clearClouds();
   }
@@ -2646,6 +2671,7 @@ function applyWorldData(world) {
   renderManager.setGroundGridEnabled(showDebugGeometry, currentWorldMapSize);
   renderManager.createMapBoundaries(currentWorldMapSize, currentWorldNoWalls, currentWallHeight());
   renderManager.createMountains(currentWorldMapSize);
+  renderManager.buildCloudLayer(currentWorldMapSize);
   renderManager.buildWater(currentWorldMapSize, world?.waterLevel || null);
   renderManager.buildWeather(currentWorldMapSize, world?.weather || null, OBSTACLES);
   applyWorldGameplay(world);
@@ -4019,14 +4045,12 @@ function lightenHexColor(colorValue, mix = 0.45) {
   return color;
 }
 
-function getPlayerShotColor(playerId) {
+function getPlayerShotColor(playerId, team = null) {
   // A world weapon's shot has no shooter to take a colour from. Upstream draws
-  // one in its `shot.team`'s colour, which `CustomWeapon` leaves at rogue, so
-  // that is the colour bzo gives it -- and rogue is a colour no player of a
-  // colour team wears, which is what makes a world weapon's shot readable as
-  // nobody's.
-  if (playerId === WORLD_WEAPON_PLAYER_ID) {
-    return lightenHexColor(getPlayerTeamColor(WORLD_WEAPON_TEAM), 0.45);
+  // one in its `shot.team`'s colour: the weapon's own `color`, or rogue, which
+  // no player of a colour team wears and so reads as nobody's.
+  if (String(playerId) === String(WORLD_WEAPON_PLAYER_ID)) {
+    return lightenHexColor(getPlayerTeamColor(team || WORLD_WEAPON_TEAM), 0.45);
   }
   const tank = tanks.get(playerId);
   const playerColor = tank?.userData?.playerState?.color;
@@ -4050,12 +4074,11 @@ function getPlayerShotColor(playerId) {
 // Upstream asks the same question and answers it the same way -- its shots take
 // `Team::getRadarColor` (RadarRenderer.cxx:671), the radar palette, not the
 // lightened `Team::getShotColor` the bolt itself is drawn with.
-function getShotRadarColor(playerId) {
-  // A world weapon has no tank to match, so it keeps rogue -- the colour no
-  // player of a colour team wears, which is what makes its shots read as
-  // nobody's.
-  if (playerId === WORLD_WEAPON_PLAYER_ID) {
-    return colorToCSS(getPlayerTeamRadarColor(WORLD_WEAPON_TEAM));
+function getShotRadarColor(playerId, team = null) {
+  // A world weapon has no tank to match, so it takes its shot's team -- the
+  // weapon's own `color`, or rogue, which reads as nobody's.
+  if (String(playerId) === String(WORLD_WEAPON_PLAYER_ID)) {
+    return colorToCSS(getPlayerTeamRadarColor(team || WORLD_WEAPON_TEAM));
   }
   // The one blip bzo paints from a team rather than from the player, for the
   // reason spelled out where the blip itself is drawn: the rabbit's grey is the
@@ -4198,6 +4221,7 @@ function resetEntrySelectionsToDefault() {
   const mottoInput = document.getElementById('entryMottoInput');
   if (mottoInput) mottoInput.value = '';
   selectedPlayerTeam = PLAYER_TEAM.AUTOMATIC;
+  storePlayerTeamChoice(selectedPlayerTeam);
   syncPlayerTeamSelector();
   setSelectedTankModel(getDefaultTankModel().id);
 }
@@ -7466,13 +7490,23 @@ function handleServerMessage(message) {
         announceWorldMessages(currentWorldData);
         playerTeam = normalizePlayerTeam(message.player.team);
         // A reconnect is a new player to the server, but the same pilot here;
-        // a reload finds it in storage, and is not a fresh enable.
-        if (autopilotOn) {
-          sendToServer({ type: 'autopilot', on: true, pilot: getAutopilotName(autopilotId) });
-        } else if (autopilotRestoreId && canUseAutopilot() && !isObserver()) {
-          setAutopilot(autopilotRestoreId);
+        // a reload finds it in storage, and is not a fresh enable. An observer
+        // has no tank to fly (issue #164): the pilot lands, and is kept --
+        // in storage too -- to take the controls again the next time this
+        // player joins to play.
+        if (isObserver()) {
+          if (autopilotOn) {
+            autopilotRestoreId = autopilotId;
+            setAutopilot(null, { remember: false });
+          }
+        } else {
+          if (autopilotOn) {
+            sendToServer({ type: 'autopilot', on: true, pilot: getAutopilotName(autopilotId) });
+          } else if (autopilotRestoreId && canUseAutopilot()) {
+            setAutopilot(autopilotRestoreId);
+          }
+          autopilotRestoreId = null;
         }
-        autopilotRestoreId = null;
         // The view the spectator link asked for. Applied on every join rather
         // than once: a reconnect is how this client comes back from a server
         // restart, and a link left running on a screen somewhere should come
@@ -8253,7 +8287,7 @@ function createProjectile(data) {
     // A laser wears its shooter's colour; a thief's beam is cyan for everybody,
     // because `thiefNodes[i]->setColor(0, 1, 1)` never asks who fired it.
     const beamColor = effects.beamColor === null
-      ? getPlayerShotColor(data.playerId)
+      ? getPlayerShotColor(data.playerId, data.team)
       : new THREE.Color(effects.beamColor);
     // A proxied target leaves the path to each of its clients, so a beam that
     // arrives without one is traced here, minus the tank hits that stay the
@@ -8277,7 +8311,7 @@ function createProjectile(data) {
     if (!beam) return;
     beam.userData.playerId = data.playerId;
     beam.userData.createdAt = data.createdAt;
-    beam.userData.radarColor = getShotRadarColor(data.playerId);
+    beam.userData.radarColor = getShotRadarColor(data.playerId, data.team);
     beam.userData.flag = data.flag ?? null;
     beam.userData.segments = segments;
     beam.userData.lifetimeSeconds = getShotLifetimeSeconds(data.flag ?? null);
@@ -8317,7 +8351,7 @@ function createProjectile(data) {
     }
   }
 
-  const shotColor = getPlayerShotColor(data.playerId);
+  const shotColor = getPlayerShotColor(data.playerId, data.team);
   // Keep remote shot starts authoritative to avoid cross-machine clock skew.
   // BZFlag does not rely on sender wall-clock deltas to place remote shots.
   //
@@ -8342,7 +8376,7 @@ function createProjectile(data) {
   projectile.userData.playerId = data.playerId;
   projectile.userData.createdAt = data.createdAt;
   projectile.userData.dirY = Number.isFinite(data.dirY) ? data.dirY : 0;
-  projectile.userData.radarColor = getShotRadarColor(projectile.userData.playerId);
+  projectile.userData.radarColor = getShotRadarColor(projectile.userData.playerId, data.team);
   // The flag a shot was fired with, as upstream's FiringInfo carries it, and the
   // one thing bzo reads off it so far: whether the shot bounces.
   projectile.userData.flag = data.flag ?? null;
@@ -8477,7 +8511,7 @@ function handlePlayerHit(message) {
   // in shots.mjs for what upstream does have. Nothing reads a callsign off it,
   // because upstream's notice for this kill is a whole phrase rather than a
   // prefix and a name: "Killed by the server".
-  const killedByWorld = message.shooterId === WORLD_WEAPON_PLAYER_ID;
+  const killedByWorld = String(message.shooterId) === String(WORLD_WEAPON_PLAYER_ID);
   // What each tank held when it happened, from the message rather than from the
   // world: the victim's has been dropped by now, and the killer may have changed
   // theirs. Upstream's MsgKilled carries the same thing for the same reason.
@@ -9143,6 +9177,7 @@ function renderServerTable() {
 // switch.
 function viewMapFile(file) {
   selectedPlayerTeam = PLAYER_TEAM.MAP_VIEWER;
+  storePlayerTeamChoice(selectedPlayerTeam);
   selectedViewMapFile = file;
   syncPlayerTeamSelector();
   const entry = viewableMapEntries.find((candidate) => candidate.file === file);
@@ -11048,6 +11083,7 @@ function updateLockOnMarker() {
   renderManager.setLockOnMarker(
     { x: target.position.x, y: target.position.y + (TANK.height / 2), z: target.position.z },
     getLockTargetColor(target),
+    gameConfig?.FORBID_MARKERS === true,
   );
 }
 
@@ -12497,7 +12533,10 @@ function handleMotion(deltaTime) {
   if (timeSinceLastSend > getMaxUpdateInterval()) reasons.push(`time:${(timeSinceLastSend/1000).toFixed(1)}s`);
 
   // Minimum 100ms between non-forced updates to prevent rapid-fire from calculation noise
-  const minTimeBetweenUpdates = 100; // ms
+  // `_updateThrottleRate`: no more than that many a second (Player.cxx:1268),
+  // and 0 is no limit.
+  const throttleRate = Number.isFinite(gameConfig?.UPDATE_THROTTLE_RATE) ? gameConfig.UPDATE_THROTTLE_RATE : 30;
+  const minTimeBetweenUpdates = throttleRate > 0 ? 1000 / throttleRate : 0; // ms
   const canSendVelocityUpdate = forceMoveSend || timeSinceLastSend > minTimeBetweenUpdates;
 
   const shouldSendUpdate =

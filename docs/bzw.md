@@ -794,9 +794,16 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _skyColor <colour>` | a tint over the whole sky; `white` is none |
 | `-set _syncTime <seconds>`, `_longitude <degrees>` | hold the sky still at the hour that many seconds past the Unix epoch is at that longitude (west positive); `-synctime`'s `1` at upstream's default longitude is mid-afternoon |
 | `-set _drawMountains <0\|1>`, `_drawClouds`, `_drawCelestial`, `_drawGround` | whether the world draws its mountains, clouds, sun, moon and stars, and ground; a viewer's own settings can take away more, never put back |
+| `-set _mirror <colour\|none>` | a mirror ground: the world reflected in it under the colour as a tint, at the colour's alpha (half when it states none, or states 1, as upstream reads it) |
 | `-set _noShadows <0\|1>` | no tank or building shadows on this world |
 | `-set _trackFade <seconds>` | how long tread marks last; `0` leaves none |
 | `-set _radarLimit <n>`, `-noradar` | the farthest the radar reaches (a quarter of it while burrowed); `0` or less, which `-noradar` sets, is no radar for anyone. Upstream's default is the world size |
+| `-set _flagAltitude <n>`, `_flagPoleSize <n>` | how high a flag is thrown or flies in from (Shield goes higher still), and how tall its pole is drawn |
+| `-set _pauseDropTime <seconds>` | how long a paused tank keeps its flag (may be `0`) |
+| `-set _speedChecksLogOnly <0\|1>` | a speed finding is logged and not refused, whatever the anti-cheat mode |
+| `-set _updateThrottleRate <n>` | the most position updates a client sends a second; `0` is no limit |
+| `-set _forbidMarkers <0\|1>` | no Guided Missile lock-on bracket |
+| `-set _spawnSafeRadMod <n>`, `_spawnSafeSRMod <n>`, `_spawnSafeSWMod <n>`, `_spawnMaxCompTime <seconds>` | upstream's spawn search: tank radii a spot must keep from a tank facing it and from a Steamroller or Burrow tank, the share of a Shock Wave's reach, and how long to look before taking the farthest-from-enemies spot found |
 | `-set _wallHeight <n>` | how high the border wall stands, which is where shots stop bouncing off it; `0` leaves only the tank barrier |
 | `-set _flagHeight <n>` | the clearance a flag spawns under; the `world` block's `flagHeight` wins, as upstream reads the options block first |
 | `-set _rainType <rain\|snow\|fatrain\|frog\|particle\|bubble>` | turns on weather -- see **Weather** |

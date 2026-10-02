@@ -299,13 +299,6 @@ rows of `docs/bzw.md`'s options table.
       `shotDuration` and `shotDistance` in `readServerBzdb` (server.js), and
       the paragraph on them in docs/installation.md. The startup log line
       "server.json keys read as BZDB" says which servers still have some.
-- [ ] `_mirror` (9): upstream's mirror ground, the scene reflected under a
-      tint (`black` on five of the nine). A second render of the world, which
-      the Orin client cannot afford every frame as things stand.
-- [ ] Flags on the field: `_flagAltitude` (7), `_flagPoleSize` (5).
-- [ ] Server rules: `_pauseDropTime` (13), `_speedChecksLogOnly` (12),
-      `_updateThrottleRate` (11), `_forbidMarkers` (6), `_spawnSafeRadMod`
-      (5).
 
 Not planned, as upstream's own collision and culling tree depths with no bzo
 equivalent: `_coldetDepth`, `_cullDepth`. Nor `_drawGroundLights` (12): it

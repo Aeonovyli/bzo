@@ -134,6 +134,18 @@ export function parseColorString(text) {
   return null;
 }
 
+// SceneRenderer::render's `_mirror` (SceneRenderer.cxx:742): anything but
+// "none" is a mirror, its colour the tint laid over the reflection. A colour
+// that will not parse is black at half, and a fully opaque one "probably a
+// mistake", so half too. Null is no mirror.
+export function parseMirror(text) {
+  const value = String(text ?? '');
+  if (value === 'none') return null;
+  const color = parseColorString(value);
+  if (!color) return [0, 0, 0, 0.5];
+  return [color[0], color[1], color[2], color[3] === 1 ? 0.5 : color[3]];
+}
+
 export function parseFogMode(text) {
   const mode = String(text || '').trim().toLowerCase();
   if (mode === 'none' || mode === 'linear' || mode === 'exp2') return mode;
@@ -154,6 +166,22 @@ export const BZDB_CONFIG_VARS = new Map([
   ['_maxFlagGrabs', { key: 'MAX_FLAG_GRABS', transform: normalizeFlagGrabs, allowZero: true }],
   ['_wingsJumpCount', { key: 'WINGS_JUMP_COUNT', transform: Math.round, allowZero: true }],
   ['_maxBumpHeight', { key: 'MAX_BUMP_HEIGHT', allowZero: true }],
+  // Flags on the field: how high one is thrown or flies in from, and its pole.
+  ['_flagAltitude', { key: 'FLAG_ALTITUDE' }],
+  ['_flagPoleSize', { key: 'FLAG_POLE_SIZE' }],
+  // The server's rules. Seconds upstream, milliseconds here for the two times.
+  ['_pauseDropTime', { key: 'PAUSE_DROP_TIME', transform: (n) => n * 1000, allowZero: true }],
+  ['_speedChecksLogOnly', { key: 'SPEED_CHECKS_LOG_ONLY', parse: bzdbIsTrue }],
+  // Updates a second at most; 0 is no limit (Player.cxx:1268).
+  ['_updateThrottleRate', { key: 'UPDATE_THROTTLE_RATE', allowZero: true }],
+  ['_forbidMarkers', { key: 'FORBID_MARKERS', parse: bzdbIsTrue }],
+  // SpawnPolicy's: tank radii to keep from a tank facing the spot, from a
+  // Steamroller or Burrow, the share of a Shock Wave's reach, and how long the
+  // search may take.
+  ['_spawnSafeRadMod', { key: 'SPAWN_SAFE_RAD_MOD', allowZero: true }],
+  ['_spawnSafeSRMod', { key: 'SPAWN_SAFE_SR_MOD', allowZero: true }],
+  ['_spawnSafeSWMod', { key: 'SPAWN_SAFE_SW_MOD', allowZero: true }],
+  ['_spawnMaxCompTime', { key: 'SPAWN_MAX_COMP_TIME', transform: (n) => n * 1000, allowZero: true }],
   ['_tankSpeed', { key: 'TANK_SPEED' }],
   ['_tankAngVel', { key: 'TANK_ROTATION_SPEED' }],
   // Upstream states gravity as a negative acceleration and bzo keeps the
@@ -231,6 +259,7 @@ export const BZDB_CONFIG_VARS = new Map([
   ['_fogStart', { key: 'FOG_START', allowZero: true }],
   ['_fogEnd', { key: 'FOG_END' }],
   ['_fogColor', { key: 'FOG_COLOR', parse: (text) => (parseColorString(text) || [0.1, 0.1, 0.1]).slice(0, 3) }],
+  ['_mirror', { key: 'MIRROR', parse: parseMirror }],
   ['_skyColor', { key: 'SKY_COLOR', parse: (text) => parseColorString(text)?.slice(0, 3) ?? null }],
   ['_syncTime', { key: 'SYNC_TIME', any: true }],
   ['_longitude', { key: 'LONGITUDE', any: true }],

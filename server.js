@@ -65,7 +65,7 @@ const {
 const {
   BASE_SIZE,
   FLAG_ABBREVIATIONS,
-  FLAG_ALTITUDE,
+  getFlagTuning,
   FLAG_CLEARANCE,
   FLAG_ENDURANCE,
   FLAG_GRAB_LEVEL_TOLERANCE,
@@ -127,6 +127,8 @@ const {
   isTeamFlag,
   getFlagTeamIndex,
   configureFlagEffects,
+  FLAG_ALTITUDE,
+  FLAG_POLE_SIZE,
   VELOCITY_AD,
   ANGULAR_AD,
   TINY_FACTOR,
@@ -2950,6 +2952,18 @@ const GAME_CONFIG = {
   // BZFlag _radarLimit: the farthest the radar reaches, and with 0 or less
   // (`-noradar`) no radar at all. Null is upstream's default, the world size.
   RADAR_LIMIT: null,
+  // Flags on the field (`flagTuning`): how high one is thrown, its pole.
+  FLAG_ALTITUDE, // BZFlag _flagAltitude
+  FLAG_POLE_SIZE, // BZFlag _flagPoleSize
+  SPEED_CHECKS_LOG_ONLY: false, // BZFlag _speedChecksLogOnly
+  UPDATE_THROTTLE_RATE: 30, // BZFlag _updateThrottleRate, updates a second at most
+  FORBID_MARKERS: false, // BZFlag _forbidMarkers
+  // SpawnPolicy (`findSafeSpawn`): tank radii from a tank facing the spot, from
+  // a Steamroller or Burrow, the share of a Shock Wave's reach, and ms to look.
+  SPAWN_SAFE_RAD_MOD: 20, // BZFlag _spawnSafeRadMod
+  SPAWN_SAFE_SR_MOD: 3, // BZFlag _spawnSafeSRMod
+  SPAWN_SAFE_SW_MOD: 1.5, // BZFlag _spawnSafeSWMod
+  SPAWN_MAX_COMP_TIME: 10, // BZFlag _spawnMaxCompTime
   // The tank itself (`configureTankDimensions`). Null radius and muzzle front
   // are upstream's own formulas, `0.72 * _tankLength` and `_tankRadius + 0.1`.
   TANK_LENGTH: 6.0, // BZFlag _tankLength
@@ -2980,6 +2994,7 @@ const GAME_CONFIG = {
   FOG_START: null, // Defaults to 0.5 * map size like BZFlag
   FOG_END: null, // Defaults to map size like BZFlag
   FOG_COLOR: [0.25, 0.25, 0.25], // BZFlag _fogColor default
+  MIRROR: null, // BZFlag _mirror: [r, g, b, a] tint over a mirrored ground, null for none
   // BZFlag _skyColor, which tints the sky; null is upstream's "white", no tint.
   SKY_COLOR: null,
   // BZFlag _syncTime: 0 or more freezes every viewer's sky at that many seconds
@@ -4747,6 +4762,10 @@ function readServerBzdb(config) {
   return vars;
 }
 const SERVER_BZDB = readServerBzdb(serverConfig);
+// bzo's own puff clouds, off unless server.json's `puffClouds` asks for them:
+// upstream's sky is one flat cloud layer, which every client draws for itself
+// (`_drawClouds`).
+const PUFF_CLOUDS = serverConfig.puffClouds === true;
 
 const configReverseSpeedRatio = Number(serverConfig.reverseSpeedRatio);
 if (Number.isFinite(configReverseSpeedRatio) && configReverseSpeedRatio >= 0 && configReverseSpeedRatio <= 1) {
@@ -7480,6 +7499,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       if (token === 'tilt') {
         const [, deg] = line.split(/\s+/);
         currentWeapon.tilt = (parseFloat(deg) || 0) * Math.PI / 180;
+        continue;
+      }
+      // `color <team>` (CustomWeapon.cxx:81): the team its shots are drawn in
+      // and fired for, by upstream's own number -- 0 rogue, 1 red, 2 green,
+      // 3 blue, 4 purple. Rogue when a map says nothing.
+      if (token === 'color') {
+        const team = getTeamFromColorIndex(parseInt(line.split(/\s+/)[1], 10));
+        if (team) currentWeapon.team = team;
         continue;
       }
       if (token === 'type') {
@@ -10379,7 +10406,11 @@ function registerMapFile(
     obstacles,
     teleporterGraph,
     teamMode,
-    clouds: generateClouds(obstacles, seededRandom(seed)),
+    // Where a sky beacon hangs from, and bzo's puffs float from when asked for.
+    cloudBase: getCloudBaseY(obstacles, serverOptions?.bzdbVars),
+    clouds: PUFF_CLOUDS
+      ? generateClouds(getCloudBaseY(obstacles, serverOptions?.bzdbVars), seededRandom(seed))
+      : [],
     // A Map Viewer's ground plane, boundary walls and mountains (issue #68)
     // need to match whichever map it is looking at, not the live match's --
     // see the client's `applyWorldData`.
@@ -11224,25 +11255,32 @@ function getMaxObstacleTopY(obstacles = []) {
 // a flap taken at the top of the last one adds another whole apex. Upstream asks
 // the same question in getMaxWorldHeight (bzfs.cxx:1264) and answers it with a
 // deliberately generous over-estimate; this is the arithmetic behind it.
-function getJumpApexHeight() {
+//
+// `config` is the world's own (`worldConfig`), so the answer is that map's.
+function getJumpApexHeight(config) {
   const apex = (velocity, gravity) => (velocity * velocity) / (2 * gravity);
   return Math.max(
-    apex(GAME_CONFIG.JUMP_VELOCITY, GAME_CONFIG.GRAVITY),
-    GAME_CONFIG.WINGS_JUMP_COUNT * apex(GAME_CONFIG.WINGS_JUMP_VELOCITY, GAME_CONFIG.WINGS_GRAVITY)
+    apex(config.JUMP_VELOCITY, config.GRAVITY),
+    config.WINGS_JUMP_COUNT * apex(config.WINGS_JUMP_VELOCITY, config.WINGS_GRAVITY)
   );
 }
+
+// How high a map's cloud base is: a jump above its tallest obstacle, as that
+// map plays here -- this server's `-set`s with the map's own over them.
+function getCloudBaseY(obstacles, bzdbVars) {
+  const config = worldConfig(GAME_CONFIG, new Map([...SERVER_BZDB, ...(bzdbVars || [])]));
+  return getMaxObstacleTopY(obstacles) + getJumpApexHeight(config);
+}
+
 
 // Generate random clouds with fractal patter. `random` defaults to `Math.random`
 // but `registerMapFile` passes a seeded one: clouds ride into the hashed,
 // cached world file (see `MAP_REGISTRY`), and a hash that changed every boot
 // for the same map -- because the decoration on top of it kept re-rolling --
 // would defeat the whole reason that cache exists.
-function generateClouds(obstacles = OBSTACLES, random = Math.random) {
+function generateClouds(cloudBaseY, random = Math.random) {
   const clouds = [];
   const numClouds = 15;
-  const maxObstacleTopY = getMaxObstacleTopY(obstacles);
-  const jumpApexHeight = getJumpApexHeight();
-  const cloudBaseY = maxObstacleTopY + jumpApexHeight;
 
   for (let i = 0; i < numClouds; i++) {
     // Random position in sky
@@ -13696,9 +13734,97 @@ function getSpawnPosition(player) {
   // only forces `restartOnBase` back to true on a capture, never on a kill --
   // so a `team` zone is what a self-destructed or shot-down colour tank comes
   // back on, not only what rogue always does.
-  const zoneSpawn = getTeamZoneSpawnPosition(colorIndex);
-  if (zoneSpawn) return zoneSpawn;
-  return findValidSpawnPosition();
+  return findSafeSpawnPosition(player,
+    () => getTeamZoneSpawnPosition(colorIndex) || findValidSpawnPosition());
+}
+
+// SpawnPolicy::getPosition's search (SpawnPolicy.cxx:83): try spots for as long
+// as `_spawnMaxCompTime` allows, refuse any that is imminently dangerous, and
+// keep the one farthest from the nearest enemy -- done as soon as one is
+// `worldSize / _spawnSafeSRMod` clear, with that bar lowered by 1% a try. Out
+// of time with nothing safe, the last spot is used anyway, upstream's "drop
+// the sucka in, and pray". A spot the player is put in danger at faces away
+// from the nearest enemy (`getAzimuth`); any other faces anywhere.
+function findSafeSpawnPosition(player, nextCandidate) {
+  const started = Date.now();
+  const budgetMs = Number.isFinite(GAME_CONFIG.SPAWN_MAX_COMP_TIME) ? GAME_CONFIG.SPAWN_MAX_COMP_TIME : 10;
+  let minProximity = GAME_CONFIG.MAP_SIZE / (GAME_CONFIG.SPAWN_SAFE_SR_MOD || 3);
+  let best = null;
+  let bestDist = -1;
+  let last = null;
+  do {
+    const spot = nextCandidate();
+    last = spot;
+    if (isSpawnImminentlyDangerous(spot)) continue;
+    const { distance: dist } = nearestSpawnEnemy(player, spot);
+    if (dist > bestDist) {
+      bestDist = dist;
+      best = spot;
+    }
+    if (bestDist >= minProximity) break;
+    minProximity *= 0.99;
+  } while (Date.now() - started <= budgetMs);
+  const chosen = best || last;
+  const enemy = nearestSpawnEnemy(player, chosen);
+  const rotation = isSpawnImminentlyDangerous(chosen) && enemy.rotation !== null
+    ? enemy.rotation + Math.PI
+    : Math.random() * Math.PI * 2;
+  return { ...chosen, rotation };
+}
+
+// SpawnPolicy::isFacing: whether a tank at `enemy`, heading `rotation`, points
+// within `deviation` of the spot, ignoring one more than two tank heights above
+// or below it.
+function isFacingSpawn(enemy, spot, deviation) {
+  if (Math.abs(enemy.y - spot.y) > 2 * TANK.height) return false;
+  const toX = spot.x - enemy.x;
+  const toZ = spot.z - enemy.z;
+  const length = Math.hypot(toX, toZ);
+  if (length < 1e-6) return true;
+  const forwardX = -Math.sin(enemy.rotation);
+  const forwardZ = -Math.cos(enemy.rotation);
+  const cos = ((forwardX * toX) + (forwardZ * toZ)) / length;
+  return Math.acos(Math.max(-1, Math.min(1, cos))) < deviation / 2;
+}
+
+// SpawnPolicy::isImminentlyDangerous, over every living tank, foe or not, as
+// upstream's is: a Laser looking at the spot, a Shock Wave that reaches it, a
+// Steamroller or Burrow tank close enough to squash or be squashed, or any tank
+// within `_spawnSafeRadMod` tank radii looking at it.
+function isSpawnImminentlyDangerous(spot) {
+  const twentyDegrees = Math.PI / 9;
+  const tankRadius = TANK.radius;
+  const safeDistance = tankRadius * GAME_CONFIG.SPAWN_SAFE_RAD_MOD;
+  const safeSRRadius = tankRadius * GAME_CONFIG.SPAWN_SAFE_SR_MOD;
+  const safeSWRadius = (getShotEffects('SW').shockOutRadius + tankRadius) * GAME_CONFIG.SPAWN_SAFE_SW_MOD;
+  for (const other of players.values()) {
+    if (!other.joined || !other.alive || isObserverTeam(other.team)) continue;
+    const distance3 = Math.hypot(other.x - spot.x, other.y - spot.y, other.z - spot.z);
+    const flag = getPlayerFlag(other.id)?.type ?? null;
+    if (flag === 'L' && isFacingSpawn(other, spot, twentyDegrees)) return true;
+    if (flag === 'SW' && distance3 < safeSWRadius) return true;
+    if ((flag === 'SR' || flag === 'BU') && distance3 < safeSRRadius) return true;
+    if (distance3 < safeDistance && isFacingSpawn(other, spot, twentyDegrees)) return true;
+  }
+  return false;
+}
+
+// SpawnPolicy::enemyProximityCheck: the nearest living foe on the spot's own
+// level, and the way it faces; no foe is as far as can be.
+function nearestSpawnEnemy(player, spot) {
+  let best = Infinity;
+  let rotation = null;
+  for (const other of players.values()) {
+    if (other === player || !other.joined || !other.alive) continue;
+    if (!areFoes(other.team, player.team, TEAMS_ALLOWED)) continue;
+    if (Math.abs(other.y - spot.y) >= 1) continue;
+    const dist = Math.hypot(other.x - spot.x, other.z - spot.z);
+    if (dist < best) {
+      best = dist;
+      rotation = other.rotation;
+    }
+  }
+  return { distance: best === Infinity ? 1e12 : best, rotation };
 }
 
 // WorldInfo::getPlayerSpawnPoint, picked uniformly among every zone that
@@ -15113,7 +15239,7 @@ function addFlag(flag) {
   // never draws from the pool.
   const pool = flag.requiredType === null ? getSuperFlagPool() : null;
   if (pool !== null && pool.length === 0) return;
-  const flight = computeFlagFlight(FLAG_ALTITUDE, GAME_CONFIG.GRAVITY);
+  const flight = computeFlagFlight(getFlagTuning().flagAltitude, GAME_CONFIG.GRAVITY);
   flag.type = flag.requiredType ?? pool[Math.floor(Math.random() * pool.length)];
   flag.status = FLAG_STATUS.COMING;
   flag.owner = null;
@@ -16550,8 +16676,9 @@ function fireWorldWeaponShot(weapon, now) {
     weapon.type,
     now
   );
-  // The shot's team, since there is no player to read one off.
-  proj.team = WORLD_WEAPON_TEAM;
+  // The shot's team, since there is no player to read one off: the map's own
+  // `color`, or rogue.
+  proj.team = weapon.team || WORLD_WEAPON_TEAM;
   projectiles.set(id, proj);
   // A beam's whole path is walked when it is fired, as it is for a tank's, and a
   // world weapon can be a `L` Laser -- `fountains.bzw` mounts two.
@@ -16571,6 +16698,8 @@ function fireWorldWeaponShot(weapon, now) {
     flag: proj.flag,
     ricochet: proj.ricochet,
     segments: proj.segments,
+    // FiringInfo's `shot.team`, which a world weapon's shot is drawn in.
+    team: proj.team,
     // A world weapon locks onto nobody: upstream targets a `GM` world weapon
     // through the API rather than from a map, which bzo has no equivalent of.
     target: null,
@@ -18225,6 +18354,8 @@ function proxyShot(shot, ricochetAll) {
     type: 'shotBegin',
     id: `${shot.player}-${shot.id}`,
     playerId: String(shot.player),
+    // FiringInfo's `shot.team`, which a world weapon's shot is drawn in.
+    team: getTeamFromColorIndex(shot.team),
     x: round2(position.x),
     y: round2(position.y),
     z: round2(position.z),
@@ -20045,12 +20176,15 @@ function acceptConnection(ws, req) {
             const fsExceeded = Math.abs(limitedFS - requestedFS) > SPEED_QUANTIZATION_SLACK;
             const rsExceeded = Math.abs(limitedRS - requestedRS) > SPEED_QUANTIZATION_SLACK;
             if (fsExceeded || rsExceeded) {
+              // `_speedChecksLogOnly`: upstream's speed check logs and does
+              // not kick (bzfs.cxx:5404), so this one logs and does not refuse.
               const refused = reportCheat(player, 'speedClamped',
                 `SPEED CHANGED TOO FAST: fs ${(player.forwardSpeed || 0).toFixed(2)}->${requestedFS.toFixed(2)}`
                 + ` (limit ${limitedFS.toFixed(2)}),`
                 + ` rs ${(player.rotationSpeed || 0).toFixed(2)}->${requestedRS.toFixed(2)}`
                 + ` (limit ${limitedRS.toFixed(2)}),`
-                + ` window=${accelWindow.toFixed(3)}s (arrival ${deltaTime.toFixed(3)}s, client ${message.sdt})`);
+                + ` window=${accelWindow.toFixed(3)}s (arrival ${deltaTime.toFixed(3)}s, client ${message.sdt})`,
+                null, GAME_CONFIG.SPEED_CHECKS_LOG_ONLY !== true);
               if (refused) {
                 fs = limitedFS;
                 rs = limitedRS;
@@ -20314,6 +20448,10 @@ function acceptConnection(ws, req) {
             flag: proj.flag,
             ricochet: proj.ricochet,
             segments: proj.segments,
+            // FiringInfo's `shot.team`: the shooter's team as it fired. Only
+            // carried, as upstream's is -- who a shot may hit is still asked of
+            // the shooter (`getShotTeam`).
+            team: player.team,
             // Who the shooter has locked, so a client that has not seen a
             // `gmUpdate` for them yet still steers this missile from its first
             // frame -- and so the tank being shot at learns of it, which is when
@@ -20535,8 +20673,17 @@ function acceptConnection(ws, req) {
           // own `MOTTO_LEN` to respect.
           player.motto = sanitizeMotto(message.motto);
           // A rejoin while flying keeps the pilot on the scoreboard, and the
-          // motto it brought is the one to give back on landing.
-          if (player.autopilot) {
+          // motto it brought is the one to give back on landing -- unless it is
+          // a rejoin as an observer, who has no tank to fly: the pilot lands,
+          // and everyone is told, as upstream's autopilot can only fly a tank.
+          if (player.autopilot && isObserverTeam(assignedTeam)) {
+            const previousName = player.autopilotName;
+            player.autopilot = false;
+            player.autopilotName = null;
+            player.savedMotto = null;
+            log(`Player ${player.id} "${joinName}" autopilot off (observing)`);
+            broadcastAll({ type: 'autopilot', playerId: player.id, on: false, pilot: previousName });
+          } else if (player.autopilot) {
             player.savedMotto = player.motto;
             player.motto = player.autopilotName;
           }
@@ -21147,12 +21294,12 @@ function buildBotView(bot, self) {
   const myFlag = getPlayerFlag(me.id);
   const myType = myFlag?.type ?? null;
   const teamColor = getTeamColorIndex(me.team);
-  const players = [];
+  const others = [];
   for (const other of players.values()) {
     if (other.id === me.id || !other.joined || isObserverTeam(other.team)) continue;
     const flag = getPlayerFlag(other.id);
     const position = other.getExtrapolatedPosition(now);
-    players.push({
+    others.push({
       id: other.id,
       x: position.x,
       y: position.y,
@@ -21217,7 +21364,7 @@ function buildBotView(bot, self) {
       ricochet: shotRicochets(myType, GAME_CONFIG.ALL_SHOTS_RICOCHET),
       canFire: findFreeShotSlot(me.shotSlotFreeAt, maxShots, now) >= 0,
     },
-    players,
+    players: others,
     shots,
     flags: viewFlags,
     world: {

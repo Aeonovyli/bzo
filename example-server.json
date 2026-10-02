@@ -67,6 +67,7 @@
   "teamKillerDies": true,
   "timeOfDay": null,
   "daySpeed": 72,
+  "puffClouds": false,
   "shotMaxActive": 1,
   "shotTailLength": 4.0,
   "superFlags": {
