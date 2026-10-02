@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A flag's fade and warp-in effects are freed when they end, instead of
+  piling up hidden for every flag that ever respawned.
+- The proxy's token probe answers in plain text, so a remote server's words
+  cannot be read as markup.
+- brace-expansion updated in the development tools for a CPU denial of
+  service advisory.
+
+### Added
+- `renderer.stats` lines name the commonest scene objects (`objectKinds`),
+  so a count that climbs says what is climbing.
+
 ## [1.2.101] - 2026-10-02
 
 ### Added

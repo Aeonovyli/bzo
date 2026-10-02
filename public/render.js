@@ -2488,7 +2488,13 @@ class RenderManager {
     // "something is being added and not removed" whatever the something is.
     // `textures` and `geometries` count what Three has uploaded and miss a node
     // holding a shared one; this counts the nodes.
-    if (deep) stats.objects = this._countSceneObjects();
+    if (deep) {
+      const { count, kinds } = this._countSceneObjects();
+      stats.objects = count;
+      // The commonest kinds by type and draw group, so a count that climbs
+      // names what is climbing (`Mesh/effect:120`).
+      stats.objectKinds = kinds;
+    }
     // Only when it has happened, so the field's presence is the finding.
     if (this.contextLostCount) stats.contextLost = this.contextLostCount;
     if (this.contextRestoredCount) stats.contextRestored = this.contextRestoredCount;
@@ -2500,10 +2506,17 @@ class RenderManager {
   // this exists is a suspicion that one of them is not. Only walked for a `deep`
   // sample, which is the logged series and not the HUD's twice-a-second poll.
   _countSceneObjects() {
-    if (!this.scene) return 0;
+    if (!this.scene) return { count: 0, kinds: '' };
     let count = 0;
-    this.scene.traverse(() => { count += 1; });
-    return count;
+    const byKind = new Map();
+    this.scene.traverse((object) => {
+      count += 1;
+      const kind = `${object.type}/${object.userData?.drawGroup || '-'}`;
+      byKind.set(kind, (byKind.get(kind) || 0) + 1);
+    });
+    const kinds = [...byKind].sort((a, b) => b[1] - a[1]).slice(0, 6)
+      .map(([kind, n]) => `${kind}:${n}`).join(',');
+    return { count, kinds };
   }
 
   canUseDynamicLighting() {
@@ -10393,10 +10406,12 @@ class RenderManager {
       record.label.visible = false;
     }
 
-    if (warp > 0 || record.warp) {
+    if (warp > 0) {
       const flagWarp = this._ensureFlagWarp(record);
-      flagWarp.group.visible = warp > 0;
+      flagWarp.group.visible = true;
       flagWarp.group.position.set(x, y, z);
+    } else {
+      this._releaseFlagWarp(record);
     }
     if (warp > 0) {
       record.warp.rings.forEach((ring, index2) => {
@@ -10411,8 +10426,8 @@ class RenderManager {
     const record = this.flagRecords?.get(index);
     if (!record) return;
     record.visible = false;
-    if (record.fade) record.fade.group.visible = false;
-    if (record.warp) record.warp.group.visible = false;
+    this._releaseFlagFade(record);
+    this._releaseFlagWarp(record);
     if (record.label) record.label.visible = false;
   }
 
@@ -10490,27 +10505,39 @@ class RenderManager {
     this.skyBeaconGeometry = null;
   }
 
+  // A fading flag's own mesh and a warp's disc stack exist only while the fade
+  // or the warp lasts, and go as soon as it ends. Kept, they piled up one set
+  // per flag that had ever faded: a world of 242 respawning flags grew by
+  // eight flags' worth every twenty seconds, hidden but still walked by every
+  // frame's matrix update. The cloth geometry is shared by every flag, so only
+  // what a record owns outright is disposed.
+  _releaseFlagFade(record) {
+    if (!record.fade) return;
+    record.fade.group.parent?.remove(record.fade.group);
+    record.fade.clothMaterial.dispose();
+    record.fade.poleMaterial.dispose();
+    record.fade.pole.geometry.dispose();
+    record.fade = null;
+  }
+
+  _releaseFlagWarp(record) {
+    if (!record.warp) return;
+    record.warp.group.parent?.remove(record.warp.group);
+    record.warp.geometry.dispose();
+    record.warp.rings.forEach((ring) => ring.material.dispose());
+    record.warp = null;
+  }
+
   clearFlags() {
     this._disposeFlagBatch();
     if (!this.flagRecords) return;
     this.flagRecords.forEach((record) => {
-      // The cloth geometry is shared by every flag, so only what a record owns
-      // outright is disposed here.
-      if (record.fade) {
-        record.fade.group.parent?.remove(record.fade.group);
-        record.fade.clothMaterial.dispose();
-        record.fade.poleMaterial.dispose();
-        record.fade.pole.geometry.dispose();
-      }
+      this._releaseFlagFade(record);
+      this._releaseFlagWarp(record);
       if (record.label) {
         record.label.parent?.remove(record.label);
         record.label.material.map?.dispose();
         record.label.material.dispose();
-      }
-      if (record.warp) {
-        record.warp.group.parent?.remove(record.warp.group);
-        record.warp.geometry.dispose();
-        record.warp.rings.forEach((ring) => ring.material.dispose());
       }
     });
     this.flagRecords.clear();
@@ -10559,14 +10586,17 @@ class RenderManager {
 
     this.flagRecords.forEach((record) => {
       if (record.warp?.group.visible) this._perturbFlagWarp(record.warp);
-      if (!record.visible) return;
+      if (!record.visible) {
+        this._releaseFlagFade(record);
+        return;
+      }
 
       const yaw = Math.atan2(camera.x - record.x, camera.z - record.z);
       matrix.makeRotationY(yaw);
       matrix.setPosition(record.x, record.y, record.z);
 
       if (record.alpha >= 1) {
-        if (record.fade) record.fade.group.visible = false;
+        this._releaseFlagFade(record);
         const cloth = batch.cloth[record.waveSet];
         const slot = cloth.count;
         cloth.setMatrixAt(slot, matrix);
