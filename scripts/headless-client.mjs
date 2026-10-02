@@ -29,7 +29,9 @@
 // types chat lines (newline-separated) into the chat box before the drive,
 // which is how a probe reaches anything that only a command can set up.
 // `--hop 3` taps jump every three seconds instead of sitting still, for a
-// target that is in the air on a schedule.
+// target that is in the air on a schedule. `--fire 1` taps the trigger once a
+// second of the drive, and half a second into each hop, for a shot fired on the
+// move or in the air.
 
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -52,6 +54,7 @@ const evalExpression = args.get('eval') || '';
 const settleSeconds = Number(args.get('seconds') || 10);
 const driveSeconds = Number(args.get('drive') || 0);
 const steerMode = args.get('steer') || 'none';
+const fireOnMove = args.get('fire') === '1';
 const port = Number(args.get('port') || 9333);
 // SwiftShader's cost is per pixel, so the window size is the frame rate. The
 // default draws a plausible screenshot at single-digit fps; a small one runs
@@ -238,6 +241,11 @@ if (driveSeconds > 0 && joined.startsWith('joined')) {
   const pollMs = 1000;
   for (let second = 1; second <= Math.ceil(driveSeconds); second += 1) {
     await sleep(pollMs);
+    if (fireOnMove) {
+      await keyDown('Enter');
+      await sleep(60);
+      await keyUp('Enter');
+    }
     const self = await fetchSelf();
     if (!self) {
       driveLog.push(`t=${second}s: not in /api/players`);
@@ -273,7 +281,13 @@ if (hopSeconds > 0 && joined.startsWith('joined')) {
     await keyDown('Tab');
     await sleep(150);
     await keyUp('Tab');
-    await sleep(Math.max(0, Math.min(hopSeconds * 1000 - 150, settleEnd - Date.now())));
+    if (fireOnMove) {
+      await sleep(350);
+      await keyDown('Enter');
+      await sleep(60);
+      await keyUp('Enter');
+    }
+    await sleep(Math.max(0, Math.min(hopSeconds * 1000 - (fireOnMove ? 560 : 150), settleEnd - Date.now())));
   }
 } else {
   await sleep(settleSeconds * 1000);

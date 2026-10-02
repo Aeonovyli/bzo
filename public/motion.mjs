@@ -22,6 +22,14 @@
 
 const MIN_SEARCH_STEP = 0.0001;
 const MAX_SEARCH_STEPS = 7;
+// An angle brought into [-pi, pi].
+export function normalizeAngle(angle) {
+  let normalized = Number(angle) || 0;
+  while (normalized > Math.PI) normalized -= Math.PI * 2;
+  while (normalized < -Math.PI) normalized += Math.PI * 2;
+  return normalized;
+}
+
 export const TINY_DISTANCE = 0.001;
 export const MAX_BUMP_HEIGHT = 0.33;
 const ZERO_TOLERANCE = 1e-8;

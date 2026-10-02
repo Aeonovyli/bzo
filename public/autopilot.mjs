@@ -19,17 +19,15 @@
 // the only crossings: bzf(x, y, z) = (x, -z, y), and an azimuth is a heading
 // plus a quarter turn. A positive rotation turns left in both.
 
-import { isBadFlag } from './flags.mjs';
+import {
+  AGILITY_TIME_WINDOW, AGILITY_VEL_DELTA, canRunOver, getRunOverRadius, isBadFlag,
+} from './flags.mjs';
 import { SHOT_COLLISION_RADIUS, TANK_HIT_RADIUS, traceShotStep } from './collision.mjs';
 import { buildNavGraph, NAV_CELL, planJump } from './nav.mjs';
+import { normalizeAngle } from './motion.mjs';
 
 const HALF_PI = Math.PI / 2;
 
-function normalizeAngle(angle) {
-  if (angle < -Math.PI) angle += 2 * Math.PI;
-  if (angle > Math.PI) angle -= 2 * Math.PI;
-  return angle;
-}
 
 function toBzf(p) {
   return { x: p.x, y: -p.z, z: p.y };
@@ -149,7 +147,14 @@ export class Roger {
   think(view) {
     const ctx = {
       view,
-      me: { ...view.self, ...toBzf(view.self), azimuth: view.self.rotation + HALF_PI },
+      me: {
+        ...view.self,
+        ...toBzf(view.self),
+        azimuth: view.self.rotation + HALF_PI,
+        vx: view.self.velocity?.x ?? 0,
+        vy: -(view.self.velocity?.z ?? 0),
+        vz: view.self.velocity?.y ?? 0,
+      },
       out: {
         rotation: 0, speed: 0, jump: false, fire: false, dropFlag: false, targetId: null, shotTargetId: null,
         // What the pilot is doing and why, for whoever wants to show it: a
@@ -171,6 +176,7 @@ export class Roger {
       intent.mode = intent.mode || 'wander';
     }
     this.avoidDeathFall(ctx);
+    this.checkProgress(ctx);
     this.fireAtTank(ctx);
     if (ctx.out.fire && !intent.shot) intent.shot = this.muzzleRay(ctx);
     this.count(ctx);
@@ -320,6 +326,11 @@ export class Roger {
     this.stuckSpeed = out.speed;
     return true;
   }
+
+  // Whether what was asked of the tank is happening. Upstream's pilot has no
+  // such check -- its wall test above is a look ahead, not a measurement -- so
+  // Roger's is empty.
+  checkProgress() {}
 
   findBestTarget(ctx, players) {
     const { view, me } = ctx;
@@ -557,12 +568,20 @@ const DODGE_CLEARANCE = 1;
 const DODGE_HORIZON_SECONDS = 3;
 const DODGE_MARGIN_SECONDS = 0.1;
 const DODGE_DEAD_ON = 0.5;
+// Burrowed: how far ahead a tank about to drive over him is looked for, and
+// the room past its reach he wants.
+const SQUASH_HORIZON_SECONDS = 1.5;
+const SQUASH_MARGIN = 1;
 // The antidote is worth the drive when shaking the flag off takes longer than
 // the drive there, with this much to spare.
 const ANTIDOTE_DRIVE_FACTOR = 1.5;
 const ANTIDOTE_SPARE_SECONDS = 2;
-// How close a foe has to be to pull Ace off a capture.
+// How close a foe has to be to pull Ace off a capture, and how far it has to
+// get before he goes back to it. The gap is what keeps him from flipping
+// between the two at one distance.
 const CAPTURE_CHASE_RANGE = 50;
+const CAPTURE_RELEASE_RANGE = 75;
+const CHASE_DEST_SLACK = 40;
 // A step a tank drives up without a jump: `_maxBumpHeight`'s default.
 const MAX_STEP_UP = 0.33;
 // How much of one jump's height a flag may sit above Ace, and still be worth
@@ -580,11 +599,49 @@ const FLIGHT_TAKEOFF_SLACK = 3;
 const FLIGHT_AIM_TOLERANCE = 0.05;
 // How many frames before a drive-off leaves the edge the landing turn goes on.
 const FLIGHT_SPIN_FRAMES = 1.5;
+// How near the planned speed a jump under an acceleration limit waits to be.
+const JUMP_SPEED_SLACK = 1;
+// How close a bearing is, as seconds of turning at full rate, before a route
+// stops turning at full rate onto it.
+const ROUTE_TURN_SECONDS = 0.3;
+// A drive-off taken straight at its landing: how far past the edge the tank's
+// centre goes before it tips, and the slowest it drives off at.
+const DRIVE_OFF_TIP = 1;
+const DRIVE_OFF_SLOWEST = 0.3;
+// Nearer the edge than this, it goes over only lined up.
+const DRIVE_OFF_LINE_UP = 6;
+// Intercepting a foe in the air: how finely its flight is searched for the
+// stretches its body is at the muzzle's height, and the longest piece one is
+// cut into -- a quarter-second at tank speed is more drift than a hit allows.
+const INTERCEPT_STEP = 0.02;
+const INTERCEPT_PIECE_SECONDS = 0.08;
+// How much of a tank's hit radius a shot from the air may pass from its
+// centre and still be taken.
+const AIR_SHOT_SHARE = 0.6;
+// A foe passed sooner than this into a flight is too soon to turn to.
+const FOE_PASS_SOONEST = 0.3;
+// How much of Agility's threshold a step in speed may use, so rounding never
+// tips one over it.
+const AGILITY_PACE_SHARE = 0.9;
+// How far along the route past a landing its turn is aimed.
+const LANDING_AIM_REACH = 16;
+// A flag is dropped at no less than this share of top speed, turning no more
+// than this, and the tank drives on for this long after.
+const DROP_MIN_SPEED_SHARE = 0.5;
+const DROP_MAX_TURN = 0.3;
+const DROP_DRIVE_SECONDS = 1;
 const UNSTICK_SECONDS = 0.5;
 const UNSTICK_BACKOFF_SECONDS = 0.6;
+// Then forward on the new heading for a moment, as Roger does, which is what
+// carries the tank along a wall rather than back square into it.
+const UNSTICK_DRIVE_SECONDS = 0.4;
 const UNSTICK_SPEED = -0.5;
 const UNSTICK_TURN = 0.05;
 const UNSTICK_MOVE = 0.3;
+// Less than this share of the distance asked for is not getting anywhere,
+// however far it comes to: a tank grinding along a wall at full throttle
+// covers a unit or two a second where it asked for twenty-five.
+const UNSTICK_SHARE = 0.25;
 const ROUTE_LOOKAHEAD = 16;
 // How Ace drives a route, as numbers a benchmark can vary
 // (scripts/bench-pilot.mjs): `follow` is `nodes` -- the next node, or a few
@@ -618,6 +675,11 @@ export const ACE_TUNING = Object.freeze({
 });
 // Half a tank's width, plus a little, for the lane check.
 const LANE_HALF_WIDTH = 1.6;
+// How far the tank moves before the lane to the node it aims at is tested
+// again.
+const AIM_RECHECK_DISTANCE = 2;
+// Just over the bump a tank drives up without noticing.
+const AIM_LANE_LIFT = 0.4;
 const ROUTE_REPLAN_SECONDS = 3;
 const ROUTE_STRAY = 12;
 const ROUTE_DEST_SLACK = 8;
@@ -641,12 +703,20 @@ export class Ace extends Roger {
     // Whether a route is getting anywhere, and how long a back-off has left.
     this.progress = null;
     this.unstickUntil = -Infinity;
+    this.unstickTurn = 0;
+    this.sightLift = 0;
+    this.aimCache = null;
+    this.shedOnTakeoff = false;
+    this.shedAirborne = false;
+    this.dropDriveUntil = -Infinity;
     this.lastTrace = null;
     this.extraReport = (stats) => `, routes ${stats.plans} (${stats.unreachable} none),`
       + ` unsticks ${stats.unsticks}, held shots ${stats.held}`;
     // The landing each airborne foe has been shot at for, as a clock time, so
     // one jump costs one shot.
     this.landingShots = new Map();
+    // The foe Ace has stopped a capture to fight, until it is out of reach.
+    this.fightId = null;
     this.lastThinkAt = null;
   }
 
@@ -663,7 +733,47 @@ export class Ace extends Roger {
         this.knownFlagTypes.set(player.flagIndex, player.flag);
       }
     }
-    return super.think(view);
+    const out = super.think(view);
+    this.paceAgility(view, out);
+    return out;
+  }
+
+  // Agility multiplies the speed for a second whenever the asked-for speed
+  // jumps by more than `AGILITY_VEL_DELTA` at once (`getSpeedFactor`), and a
+  // jump leaves at whatever speed the tank has. Lining up from a standstill
+  // and then asking for the jump's speed is exactly such a change, so the
+  // tank went off at twice and more the speed planned and sailed past the
+  // landing. Holding A, Ace changes speed in steps under the threshold --
+  // except to dodge, which is what the burst is for -- and does not jump
+  // while a burst he set off is still running.
+  paceAgility(view, out) {
+    const self = view.self;
+    const last = this.lastSpeedCommand ?? 0;
+    const limitFor = (speed) => (speed < 0 ? AGILITY_VEL_DELTA / 2 : AGILITY_VEL_DELTA);
+    if (self.flag === 'A' && !self.inAir && out.intent.mode !== 'dodge') {
+      const limit = limitFor(out.speed) * AGILITY_PACE_SHARE;
+      if (Math.abs(out.speed - last) > limit) {
+        out.speed = last + (Math.sign(out.speed - last) * limit);
+        out.jump = false;
+      }
+    }
+    if (self.flag === 'A' && Math.abs(out.speed - last) > limitFor(out.speed)) {
+      this.agilityUntil = view.now + AGILITY_TIME_WINDOW;
+    }
+    if (self.flag === 'A' && out.jump && out.intent.mode !== 'dodge' && view.now < (this.agilityUntil ?? -Infinity)) {
+      out.jump = false;
+    }
+    this.lastSpeedCommand = out.speed;
+  }
+
+  // Roger sights from tank bottom to tank bottom. A shot leaves at the
+  // muzzle's height, though, and from beside a raised surface a foe stands on
+  // the bottoms' line runs through the surface's edge where the shot skims
+  // over it -- so while Ace is choosing a shot, both ends are lifted to it.
+  isObscured(ctx, from, to) {
+    const lift = this.sightLift || 0;
+    if (!lift) return super.isObscured(ctx, from, to);
+    return super.isObscured(ctx, { ...from, z: from.z + lift }, { ...to, z: to.z + lift });
   }
 
   // A type this pilot has learned is one it can refuse.
@@ -717,19 +827,144 @@ export class Ace extends Roger {
     // gets that high is in the shot's path all along.
     const disc = (p.vz * p.vz) + (2 * g * (p.z - muzzleZ));
     const enter = disc < 0 ? 0 : Math.max(0, (p.vz + Math.sqrt(disc)) / g);
-    const azimuth = azimuthTo(me, landing);
-    const reach = distance2D(me, landing) - me.muzzleForward - TANK_HIT_RADIUS;
-    const flight = Math.max(0, reach) / me.shotSpeed;
-    return { landing, azimuth, flight, enter, distance: distance2D(me, landing) };
+    const reach = Math.max(0, distance2D(me, landing) - me.muzzleForward - TANK_HIT_RADIUS);
+    return { landing, reach, enter, distance: distance2D(me, landing) };
+  }
+
+  // Every chance a level shot fired now has at an airborne foe: where it
+  // lands, if it lands with the muzzle's height inside its body, and each
+  // stretch of its flight when its body passes through the muzzle's height,
+  // rising or falling -- from the ground, a platform beside its jump or the
+  // air, since a shot keeps the height it is fired at. Each stretch is cut
+  // into pieces short enough that the foe's drift across one stays inside a
+  // hit, and each is a point and a window of time in the shape
+  // `landingShotSpeed` reads, earliest first: up the way it rose is the
+  // soonest kill. `landsAt` is the jump's own landing, which one shot per jump
+  // is counted against.
+  planShots(ctx, p) {
+    const { view, me } = ctx;
+    const landing = this.predictLanding(ctx, p);
+    if (!landing) return [];
+    const landsAt = view.now + landing.t;
+    const plans = [];
+    const atLanding = this.planLandingShot(ctx, p);
+    if (atLanding) plans.push({ ...atLanding, landsAt });
+    const muzzleZ = me.z + me.muzzleHeight;
+    const tall = view.world.tankHeight;
+    const g = p.gravity;
+    const piece = (from, to) => {
+      for (let a = from; a < to - 1e-6; a += INTERCEPT_PIECE_SECONDS) {
+        const b = Math.min(to, a + INTERCEPT_PIECE_SECONDS);
+        const mid = (a + b) / 2;
+        const point = { x: p.x + (p.vx * mid), y: p.y + (p.vy * mid), z: muzzleZ, t: b };
+        const distance = distance2D(me, point);
+        plans.push({
+          landing: point,
+          reach: Math.max(0, distance - me.muzzleForward - TANK_HIT_RADIUS),
+          enter: a,
+          distance,
+          landsAt,
+        });
+      }
+    };
+    let start = null;
+    for (let t = 0; t <= landing.t; t += INTERCEPT_STEP) {
+      const z = p.z + (p.vz * t) - (0.5 * g * t * t);
+      const inside = muzzleZ >= z && muzzleZ <= z + tall;
+      if (inside && start === null) start = t;
+      if (!inside && start !== null) {
+        piece(start, t);
+        start = null;
+      }
+    }
+    if (start !== null) piece(start, landing.t);
+    return plans.sort((a, b) => a.enter - b.enter);
+  }
+
+  // A shot's speed is its tank's velocity plus the shot speed (FiringInfo,
+  // ShotPath.cxx:29), so Ace's own speed is part of his aim. This is a shot
+  // fired this frame at `point`: the barrel heading that sends it there, and
+  // how fast it goes. On the ground he is moving along his barrel at `speed`,
+  // which only changes how fast the shot goes. In the air his velocity is the
+  // one he left with, and the part of it across the line bends the shot off
+  // his barrel, so the barrel turns into it. A Guided Missile keeps the shot
+  // speed whatever the tank does (GuidedMissleStrategy.cxx:75). Null when the
+  // drift across the line is more than the shot can make up.
+  shotToward(ctx, point, speed) {
+    const { view, me } = ctx;
+    const base = view.world.shotSpeed;
+    const scale = me.flag === 'GM' ? null : (me.shotSpeed / base);
+    const toward = azimuthTo(me, point);
+    if (!me.inAir) {
+      return { azimuth: toward, speed: scale === null ? base : (base + speed) * scale };
+    }
+    const barrel = skewedBarrel(me.vx, me.vy, toward, base);
+    if (!barrel) return null;
+    return { azimuth: barrel.azimuth, speed: scale === null ? base : barrel.speed * scale };
+  }
+
+  // The speeds Ace can be doing along his barrel by the end of this frame:
+  // half speed back to full ahead, and within one frame's acceleration of
+  // where he is on a world that limits it.
+  speedRange(ctx) {
+    const { view, me } = ctx;
+    const top = me.topSpeed ?? view.world.tankSpeed;
+    let low = -0.5 * top;
+    let high = top;
+    if (me.accel > 0) {
+      const step = me.accel * (this.frameSeconds || 0);
+      low = Math.max(low, (me.speed ?? 0) - step);
+      high = Math.min(high, (me.speed ?? 0) + step);
+    }
+    return { low, high, top };
+  }
+
+  // Whether the landing shot can go now, and at what speed of Ace's own. It has
+  // to arrive while the tank's body is coming down through its height: no
+  // sooner than `enter`, no later than touchdown. On the ground the speed is
+  // his to pick, so of the ones that make it he takes the one nearest
+  // `preferred` -- what he was doing anyway -- and the window opens sooner for
+  // it: backing off slows the shot, so a near jumper can be shot at while
+  // still high and Ace is free again sooner; driving at it speeds the shot up
+  // to reach a far one in time. `late` and `early` say which way he is out
+  // when no speed makes it.
+  landingShotSpeed(ctx, plan, preferred, range = this.speedRange(ctx)) {
+    const fixed = ctx.me.inAir || ctx.me.flag === 'GM';
+    // A speed of his own choosing can put the shot there at touchdown exactly;
+    // one he cannot change gets a frame's grace.
+    const latest = plan.landing.t + (fixed ? 0.05 : 0);
+    const flightAt = (speed) => {
+      const shot = this.shotToward(ctx, plan.landing, speed);
+      if (!shot || !(shot.speed > 0)) return null;
+      return { ...shot, flight: plan.reach / shot.speed, speed };
+    };
+    const fits = (shot) => shot && shot.flight >= plan.enter && shot.flight <= latest;
+    const want = Math.max(range.low, Math.min(range.high, preferred));
+    const atWant = flightAt(want);
+    if (fixed || fits(atWant)) {
+      if (fits(atWant)) return atWant;
+      return { late: !atWant || atWant.flight > latest, early: !!atWant && atWant.flight < plan.enter };
+    }
+    // Shot speed is the tank's plus a constant, so the speeds that fit are one
+    // interval: the slowest shot that is not late to the fastest not early.
+    const scale = ctx.me.shotSpeed / ctx.view.world.shotSpeed;
+    const base = ctx.view.world.shotSpeed;
+    const slowest = (plan.reach / latest) / scale - base;
+    const fastest = plan.enter > 0 ? (plan.reach / plan.enter) / scale - base : Infinity;
+    const low = Math.max(range.low, slowest);
+    const high = Math.min(range.high, fastest);
+    if (low > high) return { late: range.high < slowest, early: range.low > fastest };
+    const chosen = flightAt(Math.max(low, Math.min(high, want)));
+    return fits(chosen) ? chosen : { late: false, early: false };
   }
 
   // Turn to a heading in one step where one step reaches it: Roger's own
   // `rotation = difference` closes a gap over seconds, which is no way to aim
   // at a moment.
   aimAt(ctx, azimuth) {
-    const { view, me, out } = ctx;
+    const { me, out } = ctx;
     const diff = normalizeAngle(azimuth - me.azimuth);
-    const step = (view.world.tankAngVel || 0) * (this.frameSeconds || 0);
+    const step = this.turnRate(ctx) * (this.frameSeconds || 0);
     out.rotation = step > 0 ? Math.max(-1, Math.min(1, diff / step)) : Math.sign(diff);
     return diff;
   }
@@ -742,19 +977,145 @@ export class Ace extends Roger {
     if (ctx.me.flagTeam !== null) return false;
     if (this.antidoteTarget(ctx)) return false;
     // A capture to make wins over a chase, except a foe close enough to be a
-    // threat rather than a detour.
-    if (this.captureTarget(ctx) && !this.foeWithin(ctx, CAPTURE_CHASE_RANGE)) return false;
+    // threat rather than a detour -- which he stands and fights.
+    if (this.captureTarget(ctx)) {
+      const foe = this.closeFoe(ctx);
+      return foe ? this.fightClose(ctx, foe) : false;
+    }
+    this.fightId = null;
+    const ambush = this.ambushTarget(ctx);
+    if (ambush) return this.ambush(ctx, ambush);
     const chased = super.chasePlayer(ctx);
     const target = ctx.view.players.find((p) => p.id === ctx.out.targetId);
+    if (chased && target && !target.airborne) return this.chaseAround(ctx, target) || chased;
     if (!chased || !target?.airborne) return chased;
-    const plan = this.planLandingShot(ctx, this.remotePlayers({ players: [target] })[0]);
-    if (!plan) return chased;
-    ctx.out.intent.mode = 'ambush';
-    ctx.out.intent.landing = toBzo(plan.landing);
-    this.aimAt(ctx, plan.azimuth);
-    // Standing still while the shot is lined up keeps the muzzle where the plan
-    // put it.
-    ctx.out.speed = 0;
+    // An airborne foe with no landing shot to wait for -- out of reach, or
+    // already shot at -- is nothing to do until it lands, so Ace gets on with
+    // something else.
+    const { out } = ctx;
+    out.rotation = 0;
+    out.speed = 0;
+    out.targetId = null;
+    out.intent.target = null;
+    return false;
+  }
+
+  // Roger chases in a straight line, which a wall between him and the foe
+  // turns into driving at the wall. Ace takes the route there instead while
+  // the foe is out of sight, and Roger's straight chase again once it is in
+  // it. The route is kept until the foe has moved `CHASE_DEST_SLACK`, so a
+  // moving foe is not a new search every frame.
+  chaseAround(ctx, target) {
+    const { view, me } = ctx;
+    if (typeof view.findRoute !== 'function') return false;
+    const foe = this.remotePlayers({ players: [target] })[0];
+    if (!this.isObscured(ctx, { x: me.x, y: me.y, z: me.z + 1 }, { x: foe.x, y: foe.y, z: foe.z + 1 })) return false;
+    const route = this.routeTo(ctx, { x: foe.x, y: foe.y, z: foe.z }, CHASE_DEST_SLACK);
+    if (!route) return false;
+    // Roger's chase may have asked for its jump over the building in the way,
+    // at its own rough speed; the route decides whether there is one, and
+    // jumps it as planned.
+    const rogerJump = ctx.out.jump;
+    ctx.out.jump = false;
+    if (!this.followRoute(ctx, route)) {
+      ctx.out.jump = rogerJump;
+      return false;
+    }
+    ctx.out.intent.mode = 'chase';
+    return true;
+  }
+
+  // The foe close enough to stop a capture for: one Ace could shoot -- in
+  // sight and on his level -- within `CAPTURE_CHASE_RANGE`, or the one he is
+  // already fighting until it gets past `CAPTURE_RELEASE_RANGE`. A foe he
+  // cannot shoot is only a reason to stall.
+  closeFoe(ctx) {
+    const { view, me } = ctx;
+    let nearest = null;
+    let kept = null;
+    for (const p of this.remotePlayers(view)) {
+      if (!p.alive || p.paused || !view.isFoe(p)) continue;
+      if (p.zoned && !me.zoned) continue;
+      if (Math.abs(p.z - me.z) >= 2 * view.world.tankHeight) continue;
+      const d = distance2D(me, p);
+      if (d >= CAPTURE_RELEASE_RANGE) continue;
+      if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z + 1 }, { x: p.x, y: p.y, z: p.z + 1 })) continue;
+      if (p.id === this.fightId) kept = p;
+      if (d < CAPTURE_CHASE_RANGE && (!nearest || d < nearest.d)) nearest = { p, d };
+    }
+    const foe = kept ?? nearest?.p ?? null;
+    this.fightId = foe ? foe.id : null;
+    return foe;
+  }
+
+  // Roger backs away from a foe inside half a shot's range, which here would
+  // only carry Ace out past the release range and back to the capture that
+  // brought him in again. He holds his ground and turns on it instead; a shot
+  // coming at him is the dodge's business, which comes first.
+  fightClose(ctx, foe) {
+    const { out } = ctx;
+    out.targetId = foe.id;
+    out.intent.target = { ...toBzo(foe), id: foe.id };
+    out.intent.mode = 'fight';
+    this.aimAt(ctx, azimuthTo(ctx.me, predict(foe)));
+    out.speed = 0;
+    return true;
+  }
+
+  // The foe in the air whose landing Ace can still put a shot into, nearest
+  // first, at any distance a shot carries: it is the surest kill there is.
+  // Too late once he has turned to it is too late for good -- the shot is
+  // faster than the tank, so driving closer loses more time than it saves --
+  // and a foe already shot at is left to that shot.
+  ambushTarget(ctx) {
+    const { view, me } = ctx;
+    const top = me.topSpeed ?? view.world.tankSpeed;
+    const full = { low: -0.5 * top, high: top, top };
+    let best = null;
+    for (const p of this.remotePlayers(view)) {
+      if (!p.airborne || !p.alive || p.paused || !view.isFoe(p)) continue;
+      if (p.zoned && !me.zoned) continue;
+      for (const plan of this.planShots(ctx, p)) {
+        const shotAt = this.landingShots.get(p.id);
+        if (shotAt !== undefined && Math.abs(shotAt - plan.landsAt) < 0.5) break;
+        // Judged from when he will be facing it, since turning takes time too.
+        const turn = Math.abs(normalizeAngle(azimuthTo(me, plan.landing) - me.azimuth))
+          / this.turnRate(ctx);
+        if (turn >= plan.landing.t) continue;
+        const aimed = {
+          ...plan,
+          enter: Math.max(0, plan.enter - turn),
+          landing: { ...plan.landing, t: plan.landing.t - turn },
+        };
+        if (this.landingShotSpeed(ctx, aimed, 0, full).late) continue;
+        if (plan.reach > (me.shotSpeed + top) * (me.shotLifetime ?? Infinity)) continue;
+        if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z }, plan.landing)) continue;
+        // The soonest chance at this foe is the one to line up for.
+        if (!best || plan.distance < best.plan.distance) best = { p, plan };
+        break;
+      }
+    }
+    return best;
+  }
+
+  // Lined up on the landing at whatever speed lets the shot go soonest: the
+  // one it fires at, if one fits now (`chooseShot` sets it); full reverse when
+  // the shot would still be early, since backing off along the line makes it
+  // later without spoiling the aim; full ahead if it would be late.
+  ambush(ctx, { p, plan }) {
+    const { out } = ctx;
+    out.targetId = p.id;
+    out.intent.target = { ...toBzo(p), id: p.id };
+    out.intent.mode = 'ambush';
+    out.intent.landing = toBzo(plan.landing);
+    const range = this.speedRange(ctx);
+    const now = this.landingShotSpeed(ctx, plan, 0, range);
+    const shot = this.shotToward(ctx, plan.landing, Number.isFinite(now.speed) ? now.speed : 0)
+      || { azimuth: azimuthTo(ctx.me, plan.landing) };
+    this.aimAt(ctx, shot.azimuth);
+    if (now.late) out.speed = 1;
+    else if (now.early && this.openDistance(ctx, ctx.me, ctx.me.azimuth + Math.PI) > 4) out.speed = -0.5;
+    else out.speed = Number.isFinite(now.speed) ? now.speed / range.top : 0;
     return true;
   }
 
@@ -763,12 +1124,14 @@ export class Ace extends Roger {
   fireAtTank(ctx) {
     const lastShot = this.lastShot;
     const landingShots = new Map(this.landingShots);
+    const speed = ctx.out.speed;
     this.chooseShot(ctx);
     if (!ctx.out.fire) return;
-    const shot = this.muzzleRay(ctx);
+    const shot = { ...this.muzzleRay(ctx), ...this.shotVelocity(ctx) };
     if (this.shotEndangersSelf(ctx)) {
       ctx.out.fire = false;
       ctx.out.shotTargetId = null;
+      ctx.out.speed = speed;
       this.lastShot = lastShot;
       this.landingShots = landingShots;
       this.stats.held++;
@@ -777,6 +1140,28 @@ export class Ace extends Roger {
       return;
     }
     ctx.out.intent.shot = { ...shot, segments: this.lastTrace };
+  }
+
+  // The shot a trigger pulled this frame fires, in bzo's frame: upstream's
+  // velocity -- this frame's own speed along the barrel on the ground, the one
+  // he left with in the air -- as its strategy scales it.
+  shotVelocity(ctx) {
+    const { view, me, out } = ctx;
+    const self = view.self;
+    const base = view.world.shotSpeed;
+    const dirX = -Math.sin(self.rotation);
+    const dirZ = -Math.cos(self.rotation);
+    const range = this.speedRange(ctx);
+    const own = me.inAir
+      ? { x: self.velocity?.x ?? 0, z: self.velocity?.z ?? 0 }
+      : { x: dirX * out.speed * range.top, z: dirZ * out.speed * range.top };
+    const vx = own.x + (base * dirX);
+    const vz = own.z + (base * dirZ);
+    const length = Math.hypot(vx, vz) || 1;
+    return {
+      dir: { x: vx / length, y: 0, z: vz / length },
+      speed: me.flag === 'GM' ? base : length * (self.shotSpeed / base),
+    };
   }
 
   // Whether the shot about to be fired comes back to where Ace is. Only a
@@ -794,7 +1179,8 @@ export class Ace extends Roger {
       z: self.z + (dirZ * self.muzzleForward),
     };
     const reach = TANK_HIT_RADIUS + SELF_HIT_MARGIN;
-    const segments = view.traceShot(muzzle, { x: dirX, y: 0, z: dirZ }, self.shotSpeed, self.shotLifetime, true);
+    const shot = this.shotVelocity(ctx);
+    const segments = view.traceShot(muzzle, shot.dir, shot.speed, self.shotLifetime, true);
     this.lastTrace = segments;
     for (const segment of segments) {
       if (segment.t0 < SELF_HIT_GRACE_SECONDS) continue;
@@ -812,27 +1198,63 @@ export class Ace extends Roger {
     for (const p of players) {
       if (!p.airborne || !p.alive || p.paused || !view.isFoe(p)) continue;
       if (!me.canFire) continue;
-      const plan = this.planLandingShot(ctx, p);
-      if (!plan) continue;
-      const landsAt = view.now + plan.landing.t;
-      const shotAt = this.landingShots.get(p.id);
-      if (shotAt !== undefined && Math.abs(shotAt - landsAt) < 0.5) continue;
-      // Late is a miss; early waits for a later frame.
-      if (plan.flight < plan.enter || plan.flight > plan.landing.t + 0.05) continue;
-      const miss = plan.distance * Math.abs(Math.sin(normalizeAngle(plan.azimuth - me.azimuth)));
-      if (miss > TANK_HIT_RADIUS / 2) continue;
-      if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z }, plan.landing)) continue;
-      out.fire = true;
-      out.shotTargetId = p.id;
-      this.landingShots.set(p.id, landsAt);
-      this.lastShot = view.now;
-      return;
+      for (const plan of this.planShots(ctx, p)) {
+        const shotAt = this.landingShots.get(p.id);
+        if (shotAt !== undefined && Math.abs(shotAt - plan.landsAt) < 0.5) break;
+        // Late is a miss; early waits for a later frame. A dodge has already
+        // picked the speed, and the shot has to make do with it.
+        const range = this.speedRange(ctx);
+        const preferred = out.speed * range.top;
+        const shot = this.landingShotSpeed(ctx, plan, preferred,
+          out.intent.mode === 'dodge' ? { ...range, low: preferred, high: preferred } : range);
+        if (!Number.isFinite(shot.flight)) continue;
+        const miss = plan.distance * Math.abs(Math.sin(normalizeAngle(shot.azimuth - me.azimuth)));
+        if (miss > TANK_HIT_RADIUS / 2) continue;
+        if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z }, plan.landing)) continue;
+        out.fire = true;
+        out.shotTargetId = p.id;
+        if (!me.inAir) out.speed = shot.speed / range.top;
+        this.landingShots.set(p.id, plan.landsAt);
+        this.lastShot = view.now;
+        return;
+      }
     }
-    // A tank with a landing shot already on its way is left to it.
+    // His own shots are sighted muzzle to muzzle (`isObscured`).
+    this.sightLift = me.muzzleHeight ?? 1.57;
+    try {
+      this.fireAtGrounded(ctx);
+    } finally {
+      this.sightLift = 0;
+    }
+  }
+
+  fireAtGrounded(ctx) {
+    const { view, me } = ctx;
+    // A tank with a landing shot already on its way is left to it. From the
+    // air a shot goes out level at the muzzle's height, so only a foe whose
+    // body that height is inside is worth one: Roger's two tank heights
+    // either way would put most of them over its head on the way down.
+    // And from the air there is one pass through that height, so the shot goes
+    // only when its line runs through the foe, not merely near the heading
+    // Roger's trigger takes: a tenth of a radian is several units at range.
+    const muzzle = me.z + (me.muzzleHeight ?? 1.57);
+    // The line the shot itself takes: barrel plus the tank's own velocity.
+    const base = view.world.shotSpeed;
+    const sx = (me.vx ?? 0) + (base * Math.cos(me.azimuth));
+    const sy = (me.vy ?? 0) + (base * Math.sin(me.azimuth));
+    const length = Math.hypot(sx, sy) || 1;
+    const ux = sx / length;
+    const uy = sy / length;
+    const onLine = (p) => {
+      const rx = p.x - me.x;
+      const ry = -p.z - me.y;
+      return (rx * ux) + (ry * uy) > 0 && Math.abs((rx * uy) - (ry * ux)) < TANK_HIT_RADIUS * AIR_SHOT_SHARE;
+    };
     const grounded = {
       ...view,
       players: view.players.filter((p) => !p.airborne
-        && !(view.now <= (this.landingShots.get(p.id) ?? -Infinity) + 0.5)),
+        && !(view.now <= (this.landingShots.get(p.id) ?? -Infinity) + 0.5)
+        && (!me.inAir || (muzzle >= p.y && muzzle <= p.y + view.world.tankHeight && onLine(p)))),
     };
     super.fireAtTank({ ...ctx, view: grounded });
   }
@@ -845,8 +1267,14 @@ export class Ace extends Roger {
   // before it arrives; and otherwise dodges as Roger does.
   avoidBullet(ctx) {
     const { view, me, out } = ctx;
-    const threat = this.soonestHit(ctx);
+    const shot = this.soonestHit(ctx);
+    const squash = this.squashThreat(ctx);
+    const threat = squash && (!shot || squash.time < shot.time) ? squash : shot;
     if (!threat) return false;
+    // Underground nothing but another burrowed tank's shot reaches him, and
+    // a jump would lift him into all of them: he drives out of the way or
+    // takes it.
+    const burrowed = me.flag === 'BU' && me.z < 0;
     const heading = { x: Math.cos(me.azimuth), y: Math.sin(me.azimuth) };
     let lateral = (heading.x * threat.away.x) + (heading.y * threat.away.y);
     // Dead on, neither side is nearer, so take the one ahead: forward is
@@ -865,12 +1293,52 @@ export class Ace extends Roger {
         return true;
       }
     }
+    // Underground and about to be driven over with no way to drive clear --
+    // head on, forward is into it and reverse is too slow -- a jump is the way
+    // out: shots may find him up there, the tank certainly would down here.
+    if (threat === squash) {
+      if (me.inAir || this.jumpReach(ctx) <= 0) return false;
+      out.jump = true;
+      out.speed = 0;
+      return true;
+    }
+    if (burrowed) return false;
     if (this.canJumpClear(ctx, threat)) {
       out.jump = true;
       out.speed = speed;
       return true;
     }
     return super.avoidBullet(ctx);
+  }
+
+  // Burrowed, the one thing that kills him from above ground is being driven
+  // over (`canRunOver`): any tank on the ground or above that passes within
+  // the run-over reach. The soonest such pass in the next moment, in the
+  // shape `soonestHit` gives a shot, or null.
+  squashThreat(ctx) {
+    const { view, me } = ctx;
+    if (me.flag !== 'BU' || !(me.z < 0)) return null;
+    let best = null;
+    for (const p of this.remotePlayers(view)) {
+      if (!p.alive || p.paused) continue;
+      if (!canRunOver(p.flag ?? null, 'BU', p.z, p.zoned === true)) continue;
+      const clearance = getRunOverRadius('BU', p.flag ?? null, TANK_HIT_RADIUS) + SQUASH_MARGIN;
+      const rx = me.x - p.x;
+      const ry = me.y - p.y;
+      const speed2 = (p.vx * p.vx) + (p.vy * p.vy);
+      if (speed2 < 1e-6) continue;
+      const time = ((rx * p.vx) + (ry * p.vy)) / speed2;
+      if (time <= 0 || time > SQUASH_HORIZON_SECONDS) continue;
+      const mx = rx - (p.vx * time);
+      const my = ry - (p.vy * time);
+      const miss = Math.hypot(mx, my);
+      if (miss >= clearance) continue;
+      if (best && time >= best.time) continue;
+      const length = Math.sqrt(speed2);
+      const away = miss > 1e-6 ? { x: mx / miss, y: my / miss } : { x: -p.vy / length, y: p.vx / length };
+      best = { time, miss, away, clearance };
+    }
+    return best;
   }
 
   // Of the shots Ace can see, the one that will hit him soonest if he stays
@@ -888,7 +1356,12 @@ export class Ace extends Roger {
       const vy = -shot.vz;
       const speed2 = (vx * vx) + (vy * vy);
       if (speed2 < 1e-6) continue;
-      if (shot.flag !== 'GM' && Math.abs(pos.z - (me.z + 1)) > view.world.tankHeight) continue;
+      // Only a shot at the height of his body: a burrowed tank's body is
+      // mostly below the ground, and the shells of a tank on the ground fly
+      // over it -- dodging those, by a jump of all things, gives up the one
+      // thing Burrow is for.
+      if (shot.flag !== 'GM' && (pos.z < me.z - SHOT_COLLISION_RADIUS
+        || pos.z > me.z + view.world.tankHeight + SHOT_COLLISION_RADIUS)) continue;
       const rx = me.x - pos.x;
       const ry = me.y - pos.y;
       const time = ((rx * vx) + (ry * vy)) / speed2;
@@ -971,11 +1444,6 @@ export class Ace extends Roger {
     return (view.world.jumpVelocity * view.world.jumpVelocity) / (2 * view.world.gravity);
   }
 
-  foeWithin(ctx, range) {
-    return this.remotePlayers(ctx.view).some((p) => p.alive && !p.paused
-      && ctx.view.isFoe(p) && distance2D(ctx.me, p) < range);
-  }
-
   lookForFlag(ctx) {
     const antidote = this.antidoteTarget(ctx);
     if (antidote) return this.goTo(ctx, antidote, 'antidote');
@@ -1041,12 +1509,14 @@ export class Ace extends Roger {
   // The route to `dest` (upstream's frame), planned when the destination moves,
   // when Ace has strayed from it, or every few seconds; a destination no route
   // reaches is not asked about again for a while.
-  routeTo(ctx, dest) {
+  // `slack` is how far the destination may move before it is a new one: a
+  // chased tank moves all the time, and every new destination costs a search.
+  routeTo(ctx, dest, slack = ROUTE_DEST_SLACK) {
     const { view, me } = ctx;
     const here = { x: me.x, y: me.z, z: -me.y };
     const there = { x: dest.x, y: dest.z, z: -dest.y };
     const current = this.route;
-    const sameDest = current && Math.hypot(current.dest.x - there.x, current.dest.z - there.z) < ROUTE_DEST_SLACK
+    const sameDest = current && Math.hypot(current.dest.x - there.x, current.dest.z - there.z) < slack
       && Math.abs(current.dest.y - there.y) < 1;
     if (sameDest && !current.nodes) {
       return view.now - current.plannedAt < UNREACHABLE_SECONDS ? null : this.plan(view, here, there);
@@ -1061,15 +1531,21 @@ export class Ace extends Roger {
     const nodes = view.findRoute(here, there);
     this.stats.plans++;
     if (!nodes) this.stats.unreachable++;
-    this.route = { dest: there, nodes, at: 0, plannedAt: view.now };
+    this.route = { dest: there, from: here, nodes, at: 0, plannedAt: view.now };
     return nodes ? this.route : null;
   }
 
   // Measured from the last node reached rather than the next, which across a
   // jump is the far side of it.
   strayed(route, here) {
-    const last = route.nodes[Math.max(0, Math.min(route.at, route.nodes.length) - 1)];
-    return !last || Math.hypot(last.x - here.x, last.z - here.z) > ROUTE_STRAY;
+    const nodes = route.nodes;
+    if (!nodes?.length) return true;
+    const at = Math.min(route.at, nodes.length - 1);
+    const last = at > 0 ? nodes[at - 1] : route.from;
+    if (!last) return true;
+    // Off the leg being driven, not just far from its start: a straightened
+    // route's legs run tens of units.
+    return segmentDistance2D(last, nodes[at], here) > ROUTE_STRAY;
   }
 
   // One frame along a route: on to the next node, past the ones on the same
@@ -1104,8 +1580,10 @@ export class Ace extends Roger {
     out.intent.route = nodes.slice(route.at);
     const next = nodes[route.at];
     if (next.flight && !me.inAir) {
-      this.fly(ctx, here, route.at > 0 ? nodes[route.at - 1] : here, next.flight, next, nodes[route.at + 1]);
-      this.unstick(ctx);
+      if (next.y > MAX_STEP_UP) this.shedPhasingOnTakeoff(ctx);
+      if (!next.flight.jump && this.driveOffDirect(ctx, here, next)) return true;
+      this.fly(ctx, here, route.at > 0 ? nodes[route.at - 1] : here, next.flight, next,
+        this.landingAim(nodes, route.at));
       return true;
     }
     let aim = next;
@@ -1113,10 +1591,7 @@ export class Ace extends Roger {
       if (tuning.follow === 'pursuit') {
         aim = this.pursuitPoint(ctx, here, nodes, route.at, raised);
       } else if (!raised) {
-        for (let k = route.at + 1; k < Math.min(nodes.length, route.at + tuning.groundLookahead); k++) {
-          if (nodes[k].jump || nodes[k].bridge || Math.abs(nodes[k].y - next.y) > 0.5) break;
-          aim = nodes[k];
-        }
+        aim = this.groundAim(ctx, here, nodes, route.at, tuning.groundLookahead);
       }
     }
     out.rotation = normalizeAngle(azimuthTo(me, toBzf(aim)) - me.azimuth);
@@ -1135,38 +1610,82 @@ export class Ace extends Roger {
     if (next.jump && !next.flight && !me.inAir) this.lineUpJump(ctx, here, next);
     // A gap is crossed square to it, or a corner of the tank drops into it.
     if (next.bridge && Math.abs(out.rotation) >= BRIDGE_AIM_TOLERANCE) out.speed = 0;
-    this.unstick(ctx);
+    // Everything above reads `out.rotation` as the bearing off the aim; the
+    // tank is steered by it only now. A turn in proportion to the bearing --
+    // Roger's -- closes it slowly, which on a long straight leg means curving
+    // wide at full speed into whatever is beside the line. Full turn until
+    // the bearing is a fraction of a second's turning away, then in
+    // proportion to it.
+    out.rotation = this.steer(ctx, out.rotation);
+    return true;
+  }
+
+  // How fast this tank turns at full stick: the world's rate as its flag
+  // leaves it -- Burrow, underground, at a little over half -- where the view
+  // says, the world's otherwise.
+  turnRate(ctx) {
+    return ctx.me.turnRate || ctx.view.world.tankAngVel || (Math.PI / 4);
+  }
+
+  steer(ctx, bearing) {
+    const rate = this.turnRate(ctx);
+    return Math.max(-1, Math.min(1, bearing / (rate * ROUTE_TURN_SECONDS)));
+  }
+
+  // Roger's wall test fires on a wall within five units ahead, moving or not,
+  // and then drives a fixed second of back-and-forward -- which on a route
+  // that runs beside a wall throws the route away, and against a corner the
+  // forward half drives straight back into it. Ace backs off only when
+  // `checkProgress` has measured that he is stuck, in whatever he was doing.
+  stuckOnWall(ctx) {
+    const { view, out } = ctx;
+    if (view.now >= this.unstickUntil + UNSTICK_DRIVE_SECONDS) return false;
+    out.speed = view.now < this.unstickUntil ? UNSTICK_SPEED : 1;
+    out.rotation = this.unstickTurn;
     return true;
   }
 
   // A tank asked to turn or to move that does neither is against something:
-  // a wall refuses a turn that would swing the tank into it. Roger's own check
-  // only looks straight ahead. Back off for a moment, turning, and try again.
-  unstick(ctx) {
+  // a wall refuses a turn that would swing the tank into it, and one met at a
+  // slant lets it grind along at a fraction of the speed asked for. Measured
+  // over half a second against what was asked in that time, in every mode, so
+  // a chase into a wall is caught as surely as a route that cuts a corner.
+  checkProgress(ctx) {
     const { view, me, out } = ctx;
-    if (view.now < this.unstickUntil) {
-      out.speed = UNSTICK_SPEED;
-      out.intent.mode = 'unstick';
-      return;
-    }
+    if (view.now < this.unstickUntil + UNSTICK_DRIVE_SECONDS) return;
+    const top = me.topSpeed ?? view.world.tankSpeed;
     const sample = this.progress;
     const trying = Math.abs(out.rotation) > 0.1 || Math.abs(out.speed) > 0.1;
+    const restart = () => {
+      this.progress = { t: view.now, x: me.x, y: me.y, azimuth: me.azimuth, asked: 0 };
+    };
     if (!sample || !trying || me.inAir) {
-      this.progress = { t: view.now, x: me.x, y: me.y, azimuth: me.azimuth };
+      restart();
       return;
     }
+    sample.asked += Math.abs(out.speed) * top * (this.frameSeconds || 0);
     const turned = Math.abs(normalizeAngle(me.azimuth - sample.azimuth));
     const moved = Math.hypot(me.x - sample.x, me.y - sample.y);
-    if (turned > UNSTICK_TURN || moved > UNSTICK_MOVE) {
-      this.progress = { t: view.now, x: me.x, y: me.y, azimuth: me.azimuth };
+    if (turned > UNSTICK_TURN || moved > Math.max(UNSTICK_MOVE, UNSTICK_SHARE * sample.asked)) {
+      restart();
       return;
     }
-    if (view.now - sample.t > UNSTICK_SECONDS) {
-      this.unstickUntil = view.now + UNSTICK_BACKOFF_SECONDS;
-      this.progress = null;
-      this.stats.unsticks++;
-      out.speed = UNSTICK_SPEED;
+    if (view.now - sample.t <= UNSTICK_SECONDS) return;
+    // Back off turning: the way it was trying to turn, where a wall refused
+    // the turn, and otherwise toward the more open side, as Roger chooses.
+    if (Math.abs(out.rotation) > 0.2) {
+      this.unstickTurn = Math.sign(out.rotation);
+    } else {
+      const left = this.openDistance(ctx, me, me.azimuth + (Math.PI / 4));
+      const right = this.openDistance(ctx, me, me.azimuth - (Math.PI / 4));
+      this.unstickTurn = left > right ? 1 : -1;
     }
+    this.unstickUntil = view.now + UNSTICK_BACKOFF_SECONDS;
+    this.progress = null;
+    this.stats.unsticks++;
+    out.speed = UNSTICK_SPEED;
+    out.rotation = this.unstickTurn;
+    out.intent.mode = 'unstick';
   }
 
   // The nearest point to `here` on the legs ending at nodes `at` onward --
@@ -1267,17 +1786,194 @@ export class Ace extends Roger {
     return Math.min(1, distance / (2 * sine * turnRadius));
   }
 
+  // How far along a ground route to aim: the furthest of the next few nodes on
+  // the same level with a tank's width of open drive to it. Aiming past the
+  // node ahead is what straightens a route's zigzag, and without the lane test
+  // it also aims straight through whatever the route goes round -- a support
+  // truss's ribs on hix, which the tank drives into and wedges against. Kept
+  // while the tank is on the same leg and has not moved far, since each test
+  // is three rays.
+  groundAim(ctx, here, nodes, at, lookahead) {
+    const cached = this.aimCache;
+    if (cached && cached.nodes === nodes && cached.at === at
+      && Math.hypot(cached.x - here.x, cached.z - here.z) < AIM_RECHECK_DISTANCE) {
+      return nodes[cached.k];
+    }
+    const next = nodes[at];
+    let k = at;
+    for (let j = at + 1; j < Math.min(nodes.length, at + lookahead); j++) {
+      const node = nodes[j];
+      if (node.jump || node.bridge || Math.abs(node.y - next.y) > 0.5) break;
+      const length = Math.hypot(node.x - here.x, node.z - here.z) || 1;
+      if (!this.laneClear(ctx, here, node, (node.x - here.x) / length, (node.z - here.z) / length,
+        AIM_LANE_LIFT)) break;
+      k = j;
+    }
+    this.aimCache = { nodes, at, x: here.x, z: here.z, k };
+    return nodes[k];
+  }
+
   // A tank's width of open drive from here to there: the centre line and one
-  // either side.
-  laneClear(ctx, here, there, ux, uz) {
+  // either side, `lift` above the surface. Low enough to meet a pyramid's
+  // sloping end, which a ray at a tank's middle passes over.
+  laneClear(ctx, here, there, ux, uz, lift = 1) {
     for (const side of [0, -LANE_HALF_WIDTH, LANE_HALF_WIDTH]) {
       const ox = -uz * side;
       const oz = ux * side;
-      const from = { x: here.x + ox, y: here.y + 1, z: here.z + oz };
-      const to = { x: there.x + ox, y: there.y + 1, z: there.z + oz };
+      const from = { x: here.x + ox, y: here.y + lift, z: here.z + oz };
+      const to = { x: there.x + ox, y: there.y + lift, z: there.z + oz };
       if (ctx.view.isObscured(from, to)) return false;
     }
     return true;
+  }
+
+  // A flag let go by a tank standing still or turning on the spot lands under
+  // it, and the tank picks it straight back up: Ace home on his own base with
+  // his team flag dropped it, sat turning for his next move, and was carrying
+  // it again. So a drop waits until he is moving and near enough straight,
+  // and he keeps going for a moment after, which leaves the flag behind. In
+  // the air a drop falls away below, so that one goes at once. Before the
+  // death-fall check, which still has the last word on the speed.
+  avoidDeathFall(ctx) {
+    this.dropOnTheMove(ctx);
+    super.avoidDeathFall(ctx);
+  }
+
+  dropOnTheMove(ctx) {
+    const { view, me, out } = ctx;
+    const turn = (rotation) => Math.max(-DROP_MAX_TURN, Math.min(DROP_MAX_TURN, rotation));
+    if (view.now < this.dropDriveUntil) {
+      out.speed = 1;
+      out.rotation = turn(out.rotation);
+      out.dropFlag = Boolean(me.flag);
+      return;
+    }
+    if (!out.dropFlag || !me.flag || me.inAir) return;
+    const top = me.topSpeed ?? view.world.tankSpeed;
+    out.rotation = turn(out.rotation);
+    if (Math.abs(me.speed ?? 0) < DROP_MIN_SPEED_SHARE * top) {
+      out.dropFlag = false;
+      out.speed = 1;
+      return;
+    }
+    out.speed = 1;
+    this.dropDriveUntil = view.now + DROP_DRIVE_SECONDS;
+  }
+
+  // A drive-off taken from wherever the tank is rather than from its planned
+  // takeoff. The route graph flies its arcs from column centres in eight
+  // directions, so following it to the letter means driving to that spot,
+  // stopping and turning square to it -- on a base, every time it is left. A
+  // drive-off has no takeoff to be square to: the tank leaves the edge at
+  // whatever speed it has and comes down where that speed and the drop put
+  // it. So if a straight line from here to the landing crosses one clear edge,
+  // and some speed brings the tank down on the landing's level, it drives
+  // straight at it at that speed; otherwise the planned takeoff it is.
+  driveOffDirect(ctx, here, landing) {
+    const { view, me, out } = ctx;
+    const drop = here.y - landing.y;
+    if (drop <= MAX_STEP_UP || !(view.world.gravity > 0)) return false;
+    const dx = landing.x - here.x;
+    const dz = landing.z - here.z;
+    const length = Math.hypot(dx, dz);
+    if (length < NAV_CELL) return false;
+    const ux = dx / length;
+    const uz = dz / length;
+    let edge = null;
+    for (let s = 1; s < length; s += 1) {
+      const y = this.surfaceAt(view, here.x + (ux * s), here.z + (uz * s), here.y);
+      if (Math.abs(y - here.y) > MAX_STEP_UP) {
+        edge = s;
+        break;
+      }
+    }
+    if (edge === null) return false;
+    const brink = { x: here.x + (ux * edge), y: here.y, z: here.z + (uz * edge) };
+    if (!this.laneClear(ctx, here, brink, ux, uz, AIM_LANE_LIFT)) return false;
+    const top = me.topSpeed ?? view.world.tankSpeed;
+    const fall = Math.sqrt((2 * drop) / view.world.gravity);
+    // The tank tips once its centre is past the edge.
+    const leave = edge + DRIVE_OFF_TIP;
+    const speed = Math.min(top, Math.max(DRIVE_OFF_SLOWEST * top, (length - leave) / fall));
+    const reach = leave + (speed * fall);
+    const down = { x: here.x + (ux * reach), y: landing.y, z: here.z + (uz * reach) };
+    if (Math.abs(this.surfaceAt(view, down.x, down.z, here.y) - landing.y) > MAX_STEP_UP) return false;
+    const below = { x: brink.x, y: landing.y, z: brink.z };
+    if (!this.laneClear(ctx, below, down, ux, uz)) return false;
+    const bearing = normalizeAngle(Math.atan2(-dz, dx) - me.azimuth);
+    out.rotation = this.steer(ctx, bearing);
+    // Square to it before going over: a tank keeps the turn it leaves the edge
+    // with all the way down.
+    const lined = Math.abs(bearing) < FLIGHT_AIM_TOLERANCE;
+    if (edge < DRIVE_OFF_LINE_UP && !lined) out.speed = 0;
+    else out.speed = Math.abs(bearing) > this.tuning.turnInPlace ? 0 : speed / top;
+    if (lined) {
+      this.lastFlight = {
+        at: view.now, jump: false, air: fall, turn: 0, rotation: out.rotation,
+        aim: { x: landing.x, z: landing.z }, landing: { x: landing.x, y: landing.y, z: landing.z },
+      };
+    }
+    return true;
+  }
+
+  // The height of whatever a tank would stand on at (x, z), looking down from
+  // just above `fromY`: the ground where there is nothing.
+  surfaceAt(view, x, z, fromY) {
+    const hit = view.firstHit({ x, y: fromY + 0.5, z }, { x, y: -0.1, z });
+    return hit ? Math.max(0, hit.y) : 0;
+  }
+
+  // When and where in a flight the tank's muzzle is level with the middle of
+  // a foe's body: rising, if the foe stands above the takeoff, else falling.
+  // Null where the flight never gets there, or gets there too soon to turn.
+  foePass(ctx, here, flight, foe) {
+    const { view, me } = ctx;
+    const g = view.world.gravity;
+    if (!(g > 0)) return null;
+    const vy = flight.jump ? view.world.jumpVelocity : 0;
+    const rise = (foe.y + (view.world.tankHeight / 2) - (me.muzzleHeight ?? 1.57)) - here.y;
+    const disc = (vy * vy) - (2 * g * rise);
+    if (disc < 0) return null;
+    const root = Math.sqrt(disc);
+    const up = (vy - root) / g;
+    const down = (vy + root) / g;
+    const t = up > FOE_PASS_SOONEST ? up : down;
+    if (!(t > FOE_PASS_SOONEST) || t > flight.air) return null;
+    const travel = flight.speed * view.world.tankSpeed * t;
+    return { t, x: here.x + (flight.dx * travel), z: here.z + (flight.dz * travel) };
+  }
+
+  // The nearest live foe on the surface a flight comes down on, within
+  // `CAPTURE_CHASE_RANGE` of the landing, in bzo's frame -- or null.
+  foeAtLanding(ctx, landing) {
+    const { view, me } = ctx;
+    let best = null;
+    for (const p of view.players) {
+      if (!p.alive || p.paused || !view.isFoe(p)) continue;
+      if (p.zoned && !me.zoned) continue;
+      if (Math.abs(p.y - landing.y) > 1) continue;
+      const d = Math.hypot(p.x - landing.x, p.z - landing.z);
+      if (d < CAPTURE_CHASE_RANGE && (!best || d < best.d)) best = { x: p.x, y: p.y, z: p.z, d };
+    }
+    return best;
+  }
+
+  // Where the route goes on to after a landing, for the turn a flight puts on
+  // as it leaves: the furthest node on the landing's level within
+  // `LANDING_AIM_REACH` of it. Not the next node, a column on: a tank comes
+  // down a few units past the landing node as often as not, and from there a
+  // node four units beyond it can be beside or behind -- so the tank turned to
+  // face it lands facing the wrong way.
+  landingAim(nodes, at) {
+    const landing = nodes[at];
+    let aim = nodes[at + 1] || null;
+    for (let k = at + 1; k < nodes.length; k++) {
+      const node = nodes[k];
+      if (node.jump || node.flight || node.bridge || Math.abs(node.y - landing.y) > 0.5) break;
+      aim = node;
+      if (Math.hypot(node.x - landing.x, node.z - landing.z) >= LANDING_AIM_REACH) break;
+    }
+    return aim;
   }
 
   // A flight as planned: from its takeoff, square to its heading, at its
@@ -1298,25 +1994,108 @@ export class Ace extends Roger {
     const along = (rx * flight.dx) + (rz * flight.dz);
     const across = Math.abs((rx * flight.dz) - (rz * flight.dx));
     const furthest = flight.jump ? FLIGHT_TAKEOFF_SLACK : flight.launch + FLIGHT_TAKEOFF_SLACK + NAV_CELL;
-    if (across > FLIGHT_TAKEOFF_SLACK || along < -FLIGHT_TAKEOFF_SLACK || along > furthest) {
+    // Under an acceleration limit a jump needs a run-up to leave at its speed:
+    // the distance that speed takes to reach, behind the takeoff.
+    const planned = flight.speed * ctx.view.world.tankSpeed;
+    const runup = flight.jump && me.accel > 0 ? (planned * planned) / (2 * me.accel) : 0;
+    // A jump overshot by a little is backed straight up to, on its line: turning
+    // round to drive back and turning again to face it costs more than either.
+    if (flight.jump && across <= FLIGHT_TAKEOFF_SLACK && along > furthest && along < furthest + (2 * NAV_CELL)) {
+      this.aimAt(ctx, Math.atan2(-flight.dz, flight.dx));
+      out.speed = -0.5;
+      return;
+    }
+    if (across > FLIGHT_TAKEOFF_SLACK || along < -(FLIGHT_TAKEOFF_SLACK + runup) || along > furthest) {
       out.rotation = normalizeAngle(azimuthTo(me, toBzf(takeoff)) - me.azimuth);
       out.speed = Math.abs(out.rotation) > this.tuning.turnInPlace ? 0 : HALF_PI - Math.abs(out.rotation);
       return;
     }
     const heading = Math.atan2(-flight.dz, flight.dx);
+    const speed = flight.speed;
     const off = this.aimAt(ctx, heading);
     const aligned = Math.abs(off) < FLIGHT_AIM_TOLERANCE;
-    out.speed = aligned ? flight.speed : 0;
+    out.speed = aligned ? speed : 0;
     if (!aligned) return;
+    // A jump keeps the speed the tank has, not the one asked for, and under a
+    // world's acceleration limit the two differ until it has got there. Short
+    // of the speed and too near the takeoff to reach it, back straight off
+    // along the line for the run-up.
+    const atSpeed = !(me.accel > 0) || Math.abs((me.speed ?? planned) - planned) <= JUMP_SPEED_SLACK;
+    if (flight.jump && !atSpeed && along > -runup + FLIGHT_TAKEOFF_SLACK && Math.abs(me.speed ?? 0) < planned / 2) {
+      out.speed = this.backingUp || (me.speed ?? 0) <= 0 ? -0.5 : 0;
+      this.backingUp = true;
+      return;
+    }
+    if (along <= -runup + FLIGHT_TAKEOFF_SLACK) this.backingUp = false;
     // Leaving now: a jump at once, a drive-off on its last frame of ground.
     const step = flight.speed * ctx.view.world.tankSpeed * (this.frameSeconds || 0.05);
     const leaving = flight.jump || along >= flight.launch - (FLIGHT_SPIN_FRAMES * step);
-    if (flight.jump) out.jump = true;
+    if (flight.jump && atSpeed) out.jump = true;
     if (leaving && after && flight.air > 0) {
-      const nextHeading = Math.atan2(-(after.z - landing.z), after.x - landing.x);
-      const turn = normalizeAngle(nextHeading - heading);
-      const rate = ctx.view.world.tankAngVel || (Math.PI / 4);
-      out.rotation = Math.max(-1, Math.min(1, turn / (flight.air * rate)));
+      const rate = this.turnRate(ctx);
+      // A foe on the level being landed on is the reason for the turn: the
+      // tank is turned to face it at the moment its muzzle passes through the
+      // foe's height -- on the way up, beside the edge, where a level shot
+      // skims the top straight at it -- so one shot settles it, and the flag
+      // is collected after. Otherwise the turn faces the way on at landing.
+      const foe = this.foeAtLanding(ctx, landing);
+      const pass = foe ? this.foePass(ctx, here, flight, foe) : null;
+      let turn;
+      let over;
+      if (pass) {
+        // The barrel that puts the shot -- the tank's velocity and its own --
+        // on the foe from where the tank will be, not the bearing itself.
+        const toward = Math.atan2(-(foe.z - pass.z), foe.x - pass.x);
+        const u = flight.speed * ctx.view.world.tankSpeed;
+        const barrel = skewedBarrel(flight.dx * u, -flight.dz * u, toward, ctx.view.world.shotSpeed);
+        turn = normalizeAngle((barrel ? barrel.azimuth : toward) - heading);
+        over = pass.t;
+      } else {
+        turn = normalizeAngle(Math.atan2(-(after.z - landing.z), after.x - landing.x) - heading);
+        over = flight.air;
+      }
+      // Without Wings the turn through the air is only what the tank leaves
+      // the ground with, and under an angular acceleration limit that is as
+      // far toward the asked-for rate as one frame's change allows.
+      let wanted = turn / over;
+      if (me.angAccel > 0) {
+        const reach = me.angAccel * (this.frameSeconds || 0.05);
+        const current = me.angVel ?? 0;
+        wanted = Math.max(current - reach, Math.min(current + reach, wanted));
+      }
+      out.rotation = Math.max(-1, Math.min(1, wanted / rate));
+      // What the flight was meant to do, for whoever wants to check it
+      // against what it did (client.js's flight log).
+      this.lastFlight = {
+        at: ctx.view.now, jump: flight.jump, air: flight.air, turn, rotation: out.rotation,
+        aim: { x: after.x, z: after.z }, landing: { x: landing.x, y: landing.y, z: landing.z },
+      };
+    }
+  }
+
+  // Oscillation Overthruster lets a tank through a building's sides, and
+  // with it a building does not push the tank back out (`getHitBuilding`,
+  // LocalPlayer.cxx:916): a jump onto a top that meets its side goes into it
+  // rather than up onto it, and falls back. So the flag goes at liftoff,
+  // which costs no time on the ground: dropped there it falls back to the
+  // level the tank left, and the tank lands a level up from it, where it does
+  // not pick it straight up again.
+  shedPhasingOnTakeoff(ctx) {
+    if (ctx.me.flag === 'OO') this.shedOnTakeoff = true;
+  }
+
+  dropHardFlags(ctx) {
+    super.dropHardFlags(ctx);
+    const { me, out } = ctx;
+    if (!this.shedOnTakeoff) return;
+    if (me.flag !== 'OO' || (this.shedAirborne && !me.inAir)) {
+      this.shedOnTakeoff = false;
+      this.shedAirborne = false;
+      return;
+    }
+    if (me.inAir) {
+      this.shedAirborne = true;
+      out.dropFlag = true;
     }
   }
 
@@ -1346,6 +2125,7 @@ export class Ace extends Roger {
     } else {
       out.speed = plan.speed;
       out.jump = true;
+      if (rise > MAX_STEP_UP) this.shedPhasingOnTakeoff(ctx);
     }
     return true;
   }
@@ -1473,6 +2253,27 @@ export function createWorldProbes({
 }
 
 // The nearest a segment comes to a point, on the ground plane.
+// The barrel heading that sends a shot along `toward` (an azimuth, upstream's
+// frame) from a tank moving at (vx, vy): the shot leaves with the tank's
+// velocity plus `base` along the barrel, so the part of the tank's velocity
+// across the line has to be cancelled by turning into it. With the shot's
+// speed along the line; null where the drift across is more than the shot can
+// make up.
+function skewedBarrel(vx, vy, toward, base) {
+  const ux = Math.cos(toward);
+  const uy = Math.sin(toward);
+  const along = (vx * ux) + (vy * uy);
+  const acrossX = vx - (along * ux);
+  const acrossY = vy - (along * uy);
+  const drift = ((acrossX * acrossX) + (acrossY * acrossY)) / (base * base);
+  if (drift >= 1) return null;
+  const forward = Math.sqrt(1 - drift);
+  return {
+    azimuth: Math.atan2((forward * uy) - (acrossY / base), (forward * ux) - (acrossX / base)),
+    speed: along + (base * forward),
+  };
+}
+
 function segmentDistance2D(from, to, point) {
   const dx = to.x - from.x;
   const dz = to.z - from.z;
@@ -1494,9 +2295,13 @@ export function createRouter(world) {
     if (!built || built.obstacles !== current.obstacles || built.mapSize !== current.mapSize) {
       built = { obstacles: current.obstacles, mapSize: current.mapSize, graph: buildNavGraph(current) };
     }
-    return built.graph.findRoute(from, to);
+    return built.graph.smoothRoute(built.graph.findRoute(from, to), from);
   };
 }
+
+// The pilot used where nobody has chosen one: `9` with the Settings row on
+// None, and a server's bots. Ace, the more capable; Roger is the reference.
+export const DEFAULT_PILOT = 'ace';
 
 // What the Settings row offers, in order, and the key each is chosen by.
 export const AUTOPILOTS = Object.freeze([

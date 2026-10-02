@@ -89,7 +89,8 @@ outbound connection.
 
 `proxies` is the operator's list of servers a browser may *play* on. Watching
 is a separate thing with a separate rule: `?watch=<host>_<port>` reaches any
-server on the public BZFlag list, as an observer, and nothing else.
+server on the public BZFlag list, as an observer -- or, with `&team=`, plays
+there as a guest (below).
 
 It is not a second implementation. A watch is a proxy with the team forced and
 the token withheld, so both spellings resolve into one request and only the
@@ -97,11 +98,11 @@ authorisation differs. Nor is the connection new: `performRemoteMapImport`
 already joins any listed server as an observer to take its world and leave,
 and watching is that same connection not hung up.
 
-**Who may.** A signed-in admin of this instance. Narrow while the feature is
-being tried out, and each half answers something: the global login is what
-makes the name sendable, because the remote is shown the forum callsign bzo
-verified and bzo will not claim one it did not check; admin is the gate on
-connecting somewhere the instance's own operator never configured. The
+**Who may.** An admin of this instance: a signed-in member of `adminGroups`,
+or a local admin (`localAdmin`, this machine or the whitelist). Admin is the
+gate on connecting somewhere the instance's own operator never configured. A
+signed-in watcher is shown as the forum callsign bzo verified; a local admin
+with no login as `bzo-local`, which claims to be nobody. The
 session is checked before any network work, and a public list that could not
 be fetched refuses rather than allowing -- a check that did not happen is not
 a check that passed.
@@ -130,6 +131,16 @@ the connection announces itself, and it says only that.
   from unauthenticated observers refuses it and says so. That refusal is an
   ordinary server message and reaches the browser like any other, so nothing
   here has to explain it. Watching works on both.
+
+**Playing as a guest.** `&team=` (the /list row's **Play**) enters on that
+team as `bzo-<callsign>`, unregistered. A forum callsign is registered, and
+bzfs removes a registered name that has not identified the moment it spawns;
+the token that would identify it cannot be forwarded to a server outside this
+instance's network (above). An unregistered name spawns wherever the server
+lets guests spawn, which is upstream's default and which an operator turns off
+in the groups file (`EVERYONE: -SPAWN`) or with a plugin. Nothing published
+says which, so bzo finds out ("Guest access", below), and a row it knows
+refuses guests offers no Play.
 
 **Bans are collective here, unlike playing.** A proxied *player* carries a
 real token, so a target can `/idban` one of them by BZID. A watcher carries
@@ -498,3 +509,30 @@ prints it as plain text without creating a session.
 - **An operator surface that knows it is proxied.** A proxied admin is shown
   bzo's own operator panel because the target says they are an admin. It is
   display only -- those messages are dropped -- but it should not be offered.
+
+## Guest access
+
+Whether a player with no bzflag.org login may chat or spawn on a server is a
+permission in that server's own groups file or a plugin, and no ping, list
+entry or BZDB variable carries it. So the world tracker
+(`server/bzfs-worlds.cjs`) asks, during the observer join it already makes
+for a world's variables, and /list shows the answer as **Guests Play** or
+**Registered Only**, and **Guests Chat** or **Guests Muted**:
+
+- **Chat**: one private message to itself, which bzfs returns to the sender
+  alone. bzfs checks `TALK` and then `PRIVATEMESSAGE` and names the one it
+  refused. Never a public line: chat relay plugins carry public chat to IRC
+  or Discord even from an empty game.
+- **Spawn**: only on a server with no players or observers on it, joining as
+  a player instead and sending one `MsgAlive`; the tank spawns or bzfs refuses
+  (`playerAlive`, bzfs.cxx:3211), and the visit ends at once.
+- **When**: with every import, which happens anyway when a world changes; on
+  its own otherwise, a month after the last answer or sooner if the list
+  entry changes, a week after a check that got no answer, and no more than
+  one such visit every ten minutes across the whole list.
+- **For free**: a guest's real visit through the proxy records what bzfs did
+  -- spawned it, refused it, echoed or refused its chat.
+
+The visitor is `bzo-import` with the motto `bzo server check --
+<publicUrl>/list`, so an operator who sees it knows where the answers are.
+

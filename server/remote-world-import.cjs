@@ -59,7 +59,9 @@ const COMPUTER_PLAYER = 1;
 // first three numbers with `sscanf(..., "%d.%d.%d", ...)` and keeps the rest
 // as typed, so an operator reading their log sees which bzo called on them.
 const IMPORT_CALLSIGN = 'bzo-import';
-const IMPORT_MOTTO = 'bzo map import -- https://github.com/timriker/bzo';
+// The motto an operator reads off the visitor. A bzo with a `publicUrl` names
+// its own /list page, where what it learned is shown; this is the fallback.
+const IMPORT_MOTTO = 'bzo server check -- https://github.com/timriker/bzo';
 const IMPORT_CLIENT_VERSION = (() => {
   // Never a made-up number: a release bzo cannot read is said as `unknown`,
   // which `sscanf` declines rather than believing.
@@ -73,6 +75,7 @@ const IMPORT_CLIENT_VERSION = (() => {
 // short enough that a server which answers neither does not hold the import
 // open. Failure here is never fatal: the map still imports, without `-set`.
 const ENTER_TIMEOUT_MS = 8000;
+const SERVER_PLAYER_ID = 253;
 
 function findPublicServer(servers, host, port) {
   if (!Array.isArray(servers) || typeof host !== 'string' || host === ''
@@ -339,6 +342,189 @@ function decodeSetVars(payload, into) {
   return into;
 }
 
+// ---------------------------------------------------------------------------
+// The one join the world import makes, and what an unregistered player may do
+// while it is there. bzfs publishes neither answer: who may chat and who may
+// spawn are permissions in the operator's own groups file (`EVERYONE: -TALK`,
+// `-SPAWN`) or a plugin's spawn hook, and nothing in the ping, the list entry
+// or the BZDB carries them. Asking is the only way to know, so this asks in
+// the quietest way each question allows.
+//
+// Chat: one private message to ourselves, which bzfs routes back to us alone
+// (`sendFilteredMessage`, bzfs.cxx:1600). It checks `TALK` and then
+// `PRIVATEMESSAGE`, and says which it refused, so a line nobody else sees
+// answers both. Not a public line, ever: a server's chat relay plugins carry
+// public chat to IRC or Discord even when the game is empty.
+//
+// Spawn: only asked when `spawn` is set, which the caller does only for a
+// server with nobody on it. The join is as a player instead of an observer,
+// and one MsgAlive either brings the tank in or draws bzfs's refusal
+// (`playerAlive`, bzfs.cxx:3211); either way the visit ends at once.
+// ---------------------------------------------------------------------------
+
+const GUEST_CHAT_TEXT = 'bzo server check';
+const GUEST_REPLY_TIMEOUT_MS = 4000;
+const MESSAGE_LEN = 128;
+
+// How each answer reads, in bzfs's own words. A spawn a plugin refuses comes
+// with whatever the plugin chose to say, so a server line after MsgAlive that
+// is none of these still counts as a refusal.
+const GUEST_REPLIES = Object.freeze([
+  { prefix: "We're sorry, you are not allowed to talk", chat: 'no', detail: 'chat is off for guests' },
+  { prefix: 'You are not allowed to send private messages', chat: 'yes', detail: 'private messages are off' },
+  { prefix: 'You do not have permission to spawn', spawn: 'no', detail: 'spawning is off for guests' },
+  { prefix: 'This callsign is registered', spawn: 'unknown', detail: 'the probe callsign is registered' },
+]);
+
+function guestReply(text) {
+  return GUEST_REPLIES.find((reply) => text.startsWith(reply.prefix)) || null;
+}
+
+async function enterAndProbe(socket, readFrame, selfId, probe = null, motto = IMPORT_MOTTO) {
+  const spawn = probe?.spawn === true;
+  const chat = probe?.chat === true;
+  const read = (until) => {
+    let timer = null;
+    return Promise.race([
+      readFrame(),
+      new Promise((res) => {
+        timer = setTimeout(() => res({ code: '', payload: null }), Math.max(0, until - Date.now()));
+      }),
+    ]).finally(() => clearTimeout(timer));
+  };
+  const serverLine = (payload) => (payload.readUInt8(0) === SERVER_PLAYER_ID
+    ? payload.toString('latin1', 3).replace(/\0.*$/s, '') : null);
+
+  // Enter, take the BZDB dump bzfs sends every accepted player. Bounded by
+  // its own clock rather than the caller's watchdog: a server that accepts
+  // the join and then says nothing must not strand a world already fetched.
+  sendFrame(socket, 'en', buildEnterPayload({ motto, team: spawn ? AUTOMATIC_TEAM : OBSERVER_TEAM }));
+  const vars = new Map();
+  let accepted = false;
+  let gone = false;
+  const deadline = Date.now() + ENTER_TIMEOUT_MS;
+  for (;;) {
+    const { code, payload } = await read(deadline);
+    if (!code) break;
+    if (code === 'rj' || code === 'sk') { gone = true; break; }
+    if (code === 'ac') { accepted = true; continue; }
+    if (code === 'sv') { decodeSetVars(payload, vars); continue; }
+    // MsgTeamUpdate is the first thing after the variables (`addPlayer`,
+    // bzfs.cxx:2385-2387), so anything else once they have started arriving
+    // means there are no more coming.
+    if (accepted && vars.size > 0) break;
+  }
+
+  const guest = {};
+  if (chat && accepted && !gone) {
+    const message = Buffer.alloc(1 + MESSAGE_LEN);
+    message.writeUInt8(selfId, 0);
+    message.write(GUEST_CHAT_TEXT, 1, MESSAGE_LEN - 1, 'ascii');
+    sendFrame(socket, 'mg', message);
+    guest.chat = 'unknown';
+    guest.chatDetail = 'no answer';
+    const until = Date.now() + GUEST_REPLY_TIMEOUT_MS;
+    for (;;) {
+      const { code, payload } = await read(until);
+      if (!code) break;
+      if (code === 'sk' || code === 'rj') {
+        gone = true;
+        guest.chat = 'no';
+        guest.chatDetail = 'removed for chatting';
+        break;
+      }
+      if (code !== 'mg') continue;
+      if (payload.readUInt8(0) === selfId && payload.readUInt8(1) === selfId) {
+        guest.chat = 'yes';
+        guest.chatDetail = '';
+        break;
+      }
+      const reply = guestReply(serverLine(payload) || '');
+      if (reply?.chat) {
+        guest.chat = reply.chat;
+        guest.chatDetail = reply.detail;
+        break;
+      }
+    }
+  }
+
+  if (spawn && accepted && !gone) {
+    sendFrame(socket, 'al');
+    guest.spawn = 'unknown';
+    guest.spawnDetail = 'no answer';
+    let refusal = null;
+    const until = Date.now() + GUEST_REPLY_TIMEOUT_MS;
+    for (;;) {
+      const { code, payload } = await read(until);
+      if (!code) break;
+      if (code === 'al' && payload.readUInt8(0) === selfId) {
+        guest.spawn = 'yes';
+        guest.spawnDetail = '';
+        break;
+      }
+      if (code === 'sk' || code === 'rj') {
+        gone = true;
+        guest.spawn = refusal?.spawn ?? 'no';
+        guest.spawnDetail = refusal?.detail ?? 'removed on spawning';
+        break;
+      }
+      if (code !== 'mg') continue;
+      const line = serverLine(payload);
+      if (line === null) continue;
+      const reply = guestReply(line);
+      if (reply?.spawn) refusal = reply;
+      else if (!refusal) refusal = { spawn: 'no', detail: line.slice(0, 120) };
+    }
+    if (guest.spawn === 'unknown' && refusal) {
+      guest.spawn = refusal.spawn;
+      guest.spawnDetail = refusal.detail;
+    }
+  }
+
+  // Leave whether or not anything arrived: a server that is told frees the
+  // slot now rather than waiting out a timeout on it.
+  try { sendFrame(socket, 'ex'); } catch { /* already gone */ }
+  return { variables: vars.size > 0 ? vars : null, guest: chat || spawn ? guest : null };
+}
+
+// The same visit without the world: for a server whose world bzo already holds
+// but whose guest answers are missing or old. Everything before MsgEnter is the
+// handshake alone, so it costs the target what the import's join does and no
+// more.
+function probeGuestAccess(host, port, { spawn = false, motto, timeout = 20000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host, port, family: 4 });
+    const { readExact, readFrame } = createFrameReader(socket);
+    let settled = false;
+    const watchdog = setTimeout(() => done(new Error('timed out')), timeout);
+    function done(err, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(value);
+    }
+    socket.on('error', done);
+    socket.on('close', () => done(new Error('connection closed')));
+    socket.on('connect', async () => {
+      try {
+        socket.write('BZFLAG\r\n\r\n');
+        const version = (await readExact(8)).toString('ascii');
+        const playerId = (await readExact(1)).readUInt8(0);
+        if (version !== PROTOCOL_VERSION) {
+          throw new Error(`protocol ${version} (bzo speaks ${PROTOCOL_VERSION})`);
+        }
+        if (playerId === 0xff) throw new Error('rejected (full, banned, or closed)');
+        const { guest } = await enterAndProbe(socket, readFrame, playerId, { chat: true, spawn }, motto);
+        done(null, guest || {});
+      } catch (err) {
+        done(err);
+      }
+    });
+  });
+}
+
 function fetchWorldFromServer(host, port, timeout, options = {}) {
   return new Promise((resolve, reject) => {
     // Upstream bzfs does not support IPv6; force IPv4 so dual-stack hosts
@@ -368,37 +554,6 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
 
     socket.on('error', fail);
     socket.on('close', () => fail(new Error('connection closed')));
-
-    // Enter as an observer, take the BZDB dump bzfs sends every accepted
-    // player, and leave. Bounded by its own clock rather than the outer
-    // watchdog: a server that accepts the join and then says nothing must not
-    // strand a world that has already arrived.
-    async function collectVariables() {
-      sendFrame(socket, 'en', buildEnterPayload());
-      const deadline = Date.now() + ENTER_TIMEOUT_MS;
-      const vars = new Map();
-      let accepted = false;
-      for (;;) {
-        if (Date.now() > deadline) break;
-        const { code, payload } = await Promise.race([
-          readFrame(),
-          new Promise((res) => setTimeout(() => res({ code: '', payload: null }), deadline - Date.now())),
-        ]);
-        if (!code) break;
-        if (code === 'rj' || code === 'sk') break;
-        if (code === 'ac') { accepted = true; continue; }
-        if (code === 'sv') { decodeSetVars(payload, vars); continue; }
-        // MsgTeamUpdate is the first thing after the variables (`addPlayer`,
-        // bzfs.cxx:2385-2387), so anything else once they have started
-        // arriving means there are no more coming.
-        if (accepted && vars.size > 0) break;
-      }
-      // Leave whether or not anything arrived. The socket is destroyed
-      // immediately after this resolves, but a server that is told is a
-      // server that does not wait out a timeout on an empty slot.
-      try { sendFrame(socket, 'ex'); } catch { /* already gone */ }
-      return vars.size > 0 ? vars : null;
-    }
 
     socket.on('connect', async () => {
       try {
@@ -478,9 +633,12 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
         // already got: everything above is answered to an un-entered
         // connection, and only the variables need a seat.
         let variables = null;
+        let guest = null;
         if (options.enterForVariables !== false) {
           try {
-            variables = await collectVariables();
+            const joined = await enterAndProbe(socket, readFrame, playerId, options.guest, options.motto);
+            variables = joined.variables;
+            guest = joined.guest;
           } catch {
             variables = null;
           }
@@ -491,6 +649,7 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
           gameSettings,
           queryGame,
           variables,
+          guest,
           worldHash: /^[pt][0-9a-f]{32}$/.test(worldHash) ? worldHash : '',
         });
       } catch (err) {
@@ -649,7 +808,6 @@ function queryServerStatus(host, port, timeout = 8000) {
 // under your own callsign while you are not otherwise on the target.
 // ---------------------------------------------------------------------------
 
-const SERVER_PLAYER_ID = 253;
 const PROBE_CALLSIGN_MOTTO = 'bzo global-login probe -- https://github.com/timriker/bzo';
 // Long enough for bzfs to reach my.bzflag.org and hear back on its own
 // schedule, short enough that a target which never answers is an error rather
@@ -1907,6 +2065,8 @@ module.exports = {
   findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
+  probeGuestAccess,
+  guestReply,
   queryServerStatus,
   AUTOMATIC_TEAM,
   probeGlobalToken,

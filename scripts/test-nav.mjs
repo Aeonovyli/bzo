@@ -90,4 +90,32 @@ const box = (name, x, z, w, d, h, baseY = 0) => ({
   assert.equal(wide.findRoute({ x: -50, y: 22, z: 0 }, { x: 30, y: 22, z: 0 }), null, 'a gap wider than a tank is not');
 }
 
+// Round the end of a thin wall a route keeps a tank's half length clear of
+// it, not the standing circle: a tank turning round a corner it shaves catches
+// it and wedges, as on hix's support ribs.
+{
+  const nav = buildNavGraph({ obstacles: [box('rib', 0, 0, 2, 40, 5)], mapSize: 200, jump: null });
+  const route = nav.findRoute({ x: -20, y: 0, z: 0 }, { x: 20, y: 0, z: 0 });
+  assert.ok(route, 'there is a way round');
+  const tip = Math.min(...route.map((node) => Math.hypot(node.x, Math.max(0, Math.abs(node.z) - 20))));
+  assert.ok(tip >= 3, `the route passes ${tip.toFixed(1)} from the end, not shaving it`);
+}
+
+// A slow jump climbs a couple of metres between two steps across, so a floor
+// slab hanging just above the takeoff has to be met by the time step, not
+// stepped over: eroah's low boxes sit under one, and a jump from beneath it
+// hits it and falls back.
+{
+  const deck = box('deck', 20, 0, 16, 40, 4);
+  const slab = box('slab', -12, 0, 24, 40, 1, 3);
+  const nav = buildNavGraph({ obstacles: [deck, slab], mapSize: 200, jump: JUMP });
+  const route = nav.findRoute({ x: -12, y: 0, z: 0 }, { x: 20, y: 4, z: 0 });
+  assert.ok(route, 'the deck is reachable');
+  const at = route.findIndex((node) => node.jump);
+  const takeoff = route[at - 1];
+  const under = (node) => node.x > -24 && node.x < 0 && Math.abs(node.z) < 20;
+  assert.ok(takeoff && !under(takeoff),
+    `the jump leaves from clear of the slab, not from (${takeoff?.x}, ${takeoff?.z}) under it`);
+}
+
 console.log('nav tests passed');

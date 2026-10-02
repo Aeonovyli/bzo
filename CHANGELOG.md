@@ -6,6 +6,42 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.98] - 2026-10-02
+
+### Added
+- Autopilot in menus (#162): with a pilot chosen in Settings -> Autopilot,
+  opening a menu hands the tank to the pilot instead of pausing, and closing
+  it takes the tank back. With `None`, or where the server refuses bots, a
+  menu pauses as before.
+- Guest access on `/list`: bzo checks whether a server lets unregistered
+  players chat and spawn, and shows **Guests Play** / **Registered Only** and
+  **Guests Chat** / **Guests Muted**. Admins can play there as
+  `bzo-<callsign>` where guests may spawn. See docs/proxy.md, "Guest access".
+- `/list` has a footer naming bzo, its version, license and source.
+- docs/controls.md has every control: keyboard, mouse, touch, gamepad and XR.
+
+### Changed
+- Ace lands facing where he is going, jumps onto buildings from where he will
+  make it, drops a flag only while moving, and lets go of Oscillation
+  Overthruster before landing on a building.
+- Ace aims from the air and at tanks in the air, and paces his speed to time
+  the shot; jumping onto a guarded flag he turns to face the tank and fires
+  on the way up.
+- Ace with Burrow no longer dodges shots by jumping out of the ground; he
+  moves only to keep from being driven over.
+- Ace takes fewer waypoints, drives straight lines, and keeps clear of
+  building edges and support bases; base-to-base runs on hix are about 20%
+  faster.
+- Server bots drive, fire and collide with the same code as a player's tank
+  and the autopilot, so every Ace improvement reaches them too.
+- Shells and lasers are traced by the same code on the server and in the
+  browser, through teleporters, off buildings and out at the world's edge.
+
+### Fixed
+- Autopiloted tanks look smooth to other players instead of jerky.
+- A shot fired from the top of a box is no longer refused as too fast.
+- The world's border walls follow a map change that happens mid-game.
+
 ## [1.2.97] - 2026-10-01
 
 ### Added

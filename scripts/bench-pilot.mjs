@@ -69,6 +69,9 @@ const CONFIG = {
   JUMP_VELOCITY: 19,
   ALLOW_JUMPING: true,
   MAX_BUMP_HEIGHT: 0.33,
+  // BZFlag's `-a <linear> <angular>`, off unless BENCH_ACCEL says otherwise.
+  LINEAR_ACCELERATION: Number((process.env.BENCH_ACCEL || '0 0').split(' ')[0]) || 0,
+  ANGULAR_ACCELERATION: Number((process.env.BENCH_ACCEL || '0 0').split(' ')[1]) || 0,
 };
 const probes = createWorldProbes({
   obstacles: () => obstacles,
@@ -130,6 +133,12 @@ function run(tuning, from, to) {
   const phases = { ground: 0, raised: 0, lineup: 0, air: 0, unstick: 0, idle: 0 };
   let jumps = 0;
   let falls = 0;
+  // A jump that does not come down on the level it was for: hit the edge and
+  // fell back, or fell short.
+  let missed = 0;
+  let jumpTarget = null;
+  let flightAfter = null;
+  let flightInfo = null;
   let wasAir = false;
   let travelled = 0;
   let last = { x: start.x, z: start.z };
@@ -158,16 +167,53 @@ function run(tuning, from, to) {
     last = { x: driver.x, z: driver.z };
     const air = driver.jumpDirection !== null;
     if (air && !wasAir) {
-      if (driver.vy > 10) jumps++;
-      else falls++;
+      const node = pilot.route?.nodes?.[pilot.route.at];
+      flightAfter = node?.flight ? pilot.landingAim(pilot.route.nodes, pilot.route.at)
+        : (pilot.route?.nodes?.[pilot.route.at] || null);
+      flightInfo = node?.flight ? { t, r: driver.r, w: driver.angVel, air: node.flight.air, jump: node.flight.jump,
+        landing: node, from: { x: driver.x, z: driver.z } }
+        : { t, r: driver.r, w: driver.angVel, air: 0, jump: driver.vy > 10, unplanned: true,
+          landing: node || { x: NaN, z: NaN }, from: { x: driver.x, z: driver.z }, y: driver.y };
+      if (driver.vy > 10) {
+        jumps++;
+        const node = pilot.route?.nodes?.[pilot.route.at];
+        jumpTarget = node?.jump ? node.y : null;
+      } else falls++;
+    }
+    if (!air && wasAir && process.env.BENCH_FACING) {
+      // How far the landing heading is from the way the route goes on.
+      const next = flightAfter;
+      flightAfter = null;
+      if (next) {
+        const want = Math.atan2(-(next.x - driver.x), -(next.z - driver.z));
+        const off = Math.abs(((driver.r - want + (3 * Math.PI)) % (2 * Math.PI)) - Math.PI);
+        if (Math.hypot(next.x - driver.x, next.z - driver.z) > 2) {
+          const fi = flightInfo;
+          console.log(`    landed facing ${(off * 180 / Math.PI).toFixed(0)} deg off the route,`
+            + ` at (${driver.x.toFixed(0)},${driver.z.toFixed(0)})`
+            + (fi ? ` | ${fi.unplanned ? 'UNPLANNED ' : ''}${fi.jump ? 'jump' : 'drive-off'} planned air ${fi.air.toFixed(2)} actual ${(t - fi.t).toFixed(2)}`
+              + ` r ${fi.r.toFixed(2)}->${driver.r.toFixed(2)} w ${fi.w.toFixed(2)} want ${want.toFixed(2)}`
+              + ` landing node (${fi.landing.x},${fi.landing.z}) after (${next.x},${next.z})`
+              + ` from (${fi.from.x.toFixed(0)},${fi.from.z.toFixed(0)})` : ''));
+        }
+      }
+    }
+    if (!air && wasAir && jumpTarget !== null) {
+      if (Math.abs(driver.y - jumpTarget) > 0.5) {
+        missed++;
+        if (process.env.BENCH_JUMPS) {
+          console.log(`    missed jump to y=${jumpTarget} landed y=${driver.y.toFixed(1)} at (${driver.x.toFixed(0)},${driver.z.toFixed(0)})`);
+        }
+      }
+      jumpTarget = null;
     }
     wasAir = air;
     const radius = Math.min(to.w, to.d) / 2;
     if (Math.hypot(driver.x - to.x, driver.z - to.z) < radius && Math.abs(driver.y - target.y) < 0.5) {
-      return { arrived: true, time: t, jumps, falls, travelled, phases };
+      return { arrived: true, time: t, jumps, falls, missed, travelled, phases };
     }
   }
-  return { arrived: false, time: timeLimit, jumps, falls, travelled, phases };
+  return { arrived: false, time: timeLimit, jumps, falls, missed, travelled, phases };
 }
 
 const only = args.get('only') ? args.get('only').split(',') : null;
@@ -186,7 +232,7 @@ for (const from of bases) {
   }
 }
 console.log(`${mapName}: ${pairs.length} base-to-base runs per strategy, ${timeLimit}s limit`);
-console.log('strategy           arrived  mean s  worst s  falls  jumps  units');
+console.log('strategy           arrived  mean s  worst s  falls  jumps  missed  units');
 for (const [name, change] of Object.entries(strategies)) {
   const tuning = { ...ACE_TUNING, ...change };
   const results = pairs.map(([from, to]) => run(tuning, from, to));
@@ -197,6 +243,7 @@ for (const [name, change] of Object.entries(strategies)) {
   console.log(`${name.padEnd(18)} ${`${arrived.length}/${results.length}`.padStart(7)}`
     + `  ${mean.toFixed(1).padStart(6)}  ${worst.toFixed(1).padStart(7)}`
     + `  ${String(total('falls')).padStart(5)}  ${String(total('jumps')).padStart(5)}`
+    + `  ${String(total('missed')).padStart(6)}`
     + `  ${total('travelled').toFixed(0).padStart(5)}`);
   if (args.get('detail')) {
     results.forEach((r, i) => {

@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { AnaglyphEffect } from './anaglyph.js';
 import { meshArrays, meshDrawArrays, NO_INDEX } from './mesh-arrays.mjs';
+import { DEFAULT_MUZZLE_FORWARD, DEFAULT_MUZZLE_HEIGHT } from './drive.mjs';
 import { xrState } from './webxr.js';
 import { markFramePhase, noteProgramCount } from './perf.js';
 import {
@@ -87,7 +88,6 @@ import {
 } from './texture.js';
 
 const BZFLAG_TANK_LENGTH = 6.0;
-const DEFAULT_MUZZLE_FORWARD = 3.0;
 // BZDB_MUZZLEFRONT (global.cxx: "_tankRadius + 0.1") is upstream's own
 // invariant: the muzzle never sits more than 0.1 past the tank's closest
 // possible approach to a wall, whatever the model looks like, so a shot can
@@ -101,9 +101,6 @@ const DEFAULT_MUZZLE_FORWARD = 3.0;
 // a value past *this* tank's own closest approach -- letting the shot spawn
 // inside or past a thin wall (issue #83). Clamp to bzo's own invariant.
 const MAX_MUZZLE_FORWARD = (BZFLAG_TANK_LENGTH / 2) + 0.1;
-// BZDB_MUZZLEHEIGHT. Also the floor the roaming camera rests on, so an observer
-// sits at the eye height of a tank on the ground.
-export const DEFAULT_MUZZLE_HEIGHT = 1.57;
 const MUZZLE_TIP_EPSILON = 0.03;
 const BZFlag_DEFAULT_HORIZONTAL_FOV = 60;
 

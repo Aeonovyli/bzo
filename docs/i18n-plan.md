@@ -404,7 +404,7 @@ standalone headset have no `dom-overlay` to fall back on.
 
 ### Controls Are Data, Not Prose
 
-The cheat sheet, the README table and the help panel's controls list are three
+The cheat sheet, `docs/controls.md` and the help panel's controls list are three
 copies of one table, and `scripts/check-controls-docs.mjs` exists only because
 they drift. Translating them would make it three copies per locale.
 

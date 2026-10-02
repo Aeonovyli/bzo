@@ -13,15 +13,17 @@
 // treat it as any other player. What lives here is only what a browser does
 // for itself: drive the tank and say so.
 
-const { resolveTankMotion } = require('./motion.cjs');
 const {
-  findTankObstacle,
-  getTankHitNormal,
-  isPyramidFlatTop,
-  TANK_HALF_WIDTH,
-  TANK_HALF_LENGTH,
-} = require('./collision.cjs');
-const { getAccelerationLimits, applyAccelerationLimit } = require('./flags.cjs');
+  createDriveState,
+  DEFAULT_MUZZLE_FORWARD,
+  DEFAULT_MUZZLE_HEIGHT,
+  movePacketFields,
+  packetVelocity,
+  readDriveInput,
+  shotFromTank,
+  stepDrive,
+} = require('./drive.cjs');
+const { getFiredShotFlag, getShotEffects } = require('./flags.cjs');
 
 // The fill rule: bots make up the playing roster to `fill`, and there are none
 // once the people do. Returns how many to add (positive) or take away
@@ -42,11 +44,6 @@ function pickBotToRemove(bots, teamSizes) {
   return best ? best.bot : null;
 }
 
-// The client's own numbers, from public/client.js: the occupant height its
-// collision test uses, and the muzzle a tank model reports.
-const TANK_COLLISION_HEIGHT = 2;
-const MUZZLE_FORWARD = 3.0;
-const MUZZLE_HEIGHT = 1.57;
 // How often a bot reports a move with nothing new in it, as a client's own
 // heartbeat does.
 const HEARTBEAT_SECONDS = 1;
@@ -56,14 +53,20 @@ const VELOCITY_THRESHOLD = 0.01;
 
 const round = (value, places) => Number(value.toFixed(places));
 
-// One bot's tank. `env` is the server it lives in:
+// One bot's tank. It drives by the shared `drive` step (public/drive.mjs), the
+// one a browser's tank drives by, so a bot carrying Burrow goes underground and
+// one carrying Agility gets the burst exactly as a person's tank does; what is
+// here is only what a client does around that step -- ask its pilot, say where
+// it went, fire. `env` is the server it lives in:
 //   config()        GAME_CONFIG
 //   colliders()     every solid a tank meets, world walls included
 //   topOf(obs)      an obstacle's top
 //   state()         { alive, x, y, z, rotation } off the server's player
+//   flag()          { type, zoned } of the flag the bot holds, or null
 //   view(self)      the pilot's view, given the bot's own idea of itself
 //   send(message)   a message as though the bot's client had sent it
 //   act(self)       the per-frame checks a client makes: grab, capture
+//   teleport?(from, to, state) a teleporter crossed on the way, as `drive` asks
 class BotDriver {
   constructor({ pilot, env }) {
     this.pilot = pilot;
@@ -72,42 +75,63 @@ class BotDriver {
     this.clock = 0;
     this.lastSentAt = -Infinity;
     this.lastSent = null;
-    this.stuckFrameCount = 0;
     this.lastDropAt = -Infinity;
+    this.drive = createDriveState();
   }
+
+  // The tank's state, read as the old driver's fields were.
+  get x() { return this.drive.x; }
+  get y() { return this.drive.y; }
+  get z() { return this.drive.z; }
+  get r() { return this.drive.rotation; }
+  get vy() { return this.drive.verticalVelocity; }
+  get angVel() { return this.drive.lastAngVel; }
+  get speed() { return this.drive.lastSpeed; }
+  get jumpDirection() { return this.drive.jumpDirection; }
 
   // Where the server put the tank, which is where every life starts.
   respawn(state) {
-    this.x = state.x;
-    this.y = state.y;
-    this.z = state.z;
-    this.r = state.rotation;
-    this.vy = 0;
-    this.angVel = 0;
-    this.speed = 0;
-    this.jumpDirection = null;
-    this.airVX = 0;
-    this.airVZ = 0;
-    this.onGround = this.y <= 0;
-    this.onObstacle = !this.onGround;
-    this.stuckFrameCount = 0;
+    this.drive = createDriveState({ x: state.x, y: state.y, z: state.z, rotation: state.rotation });
     this.lastSent = null;
   }
 
+  tankFor() {
+    const flag = this.env.flag ? this.env.flag() : null;
+    return { flag: flag?.type ?? null, motionFlag: flag?.type ?? null, zoned: flag?.zoned === true };
+  }
+
+  worldFor(config) {
+    return { config, colliders: this.env.colliders(), topOf: this.env.topOf, teleport: this.env.teleport };
+  }
+
   self() {
+    const config = this.env.config();
+    const d = this.drive;
+    const inAir = d.jumpDirection !== null;
     return {
-      x: this.x,
-      y: this.y,
-      z: this.z,
-      rotation: this.r,
-      inAir: this.jumpDirection !== null,
-      muzzleForward: MUZZLE_FORWARD,
-      muzzleHeight: MUZZLE_HEIGHT,
+      x: d.x,
+      y: d.y,
+      z: d.z,
+      rotation: d.rotation,
+      inAir,
+      muzzleForward: DEFAULT_MUZZLE_FORWARD,
+      muzzleHeight: DEFAULT_MUZZLE_HEIGHT,
+      // How the tank is moving, which a shot inherits -- as the client's view
+      // says it.
+      velocity: inAir
+        ? { x: d.airVelocityX, y: d.verticalVelocity, z: d.airVelocityZ }
+        : { x: -Math.sin(d.rotation) * d.lastSpeed, y: 0, z: -Math.cos(d.rotation) * d.lastSpeed },
+      speed: d.lastSpeed,
+      topSpeed: d.topSpeed || config.TANK_SPEED,
+      accel: d.linearLimit,
+      angVel: d.lastAngVel,
+      angAccel: d.angularLimit,
+      turnRate: d.turnRate || config.TANK_ROTATION_SPEED,
     };
   }
 
-  // One frame. Mirrors `handleInputEvents` and `handleMotion` in client.js for
-  // a tank carrying nothing that changes how it drives.
+  // One frame, as a browser's: the pilot decides, the shared step drives, and
+  // the move goes out before anything that rides on it.
   tick(dt) {
     this.clock += dt;
     const state = this.env.state();
@@ -128,144 +152,44 @@ class BotDriver {
       this.env.send({ type: 'dropFlag' });
     }
 
-    const forward = Math.max(-0.5, Math.min(1, out.speed || 0));
-    const turn = Math.max(-1, Math.min(1, out.rotation || 0));
-    const speed = config.TANK_SPEED;
-    const angSpeed = config.TANK_ROTATION_SPEED;
-    const airborne = this.jumpDirection !== null;
-    let force = false;
-
-    let vx;
-    let vz;
-    if (airborne) {
-      // "can't control motion in air" (LocalPlayer.cxx:341): the velocity and
-      // the turn rate are the ones it left with, so a tank that jumps turning
-      // lands facing somewhere else.
-      vx = this.airVX;
-      vz = this.airVZ;
-    } else {
-      // doMomentum, the same model the client drives by: no limit at all by
-      // default, a world's `-a` or `M` Momentum otherwise.
-      const limits = getAccelerationLimits(null, config.LINEAR_ACCELERATION, config.ANGULAR_ACCELERATION);
-      this.speed = applyAccelerationLimit(this.speed, forward * speed, limits.linear, dt);
-      this.angVel = applyAccelerationLimit(this.angVel, turn * angSpeed, limits.angular, dt);
-      vx = -Math.sin(this.r) * this.speed;
-      vz = -Math.cos(this.r) * this.speed;
+    const tank = this.tankFor();
+    const world = this.worldFor(config);
+    const clock = { now: this.clock, random: Math.random };
+    const intended = readDriveInput(this.drive, {
+      forward: out.speed || 0, turn: out.rotation || 0, up: Boolean(out.jump),
+    }, tank, world, clock);
+    const events = stepDrive(this.drive, intended, tank, world, clock, dt);
+    if (events.teleport) {
+      const tp = events.teleport;
+      this.env.send({
+        type: 'tp',
+        fromFaceId: tp.fromFaceId,
+        toFaceId: tp.toFaceId,
+        x: round(tp.source.x, 2),
+        y: round(tp.source.y, 2),
+        z: round(tp.source.z, 2),
+        r: round(tp.sourceRotation, 2),
+        vv: round(tp.verticalVelocity, 2),
+        vx: round(tp.airVelocityX, 2),
+        vz: round(tp.airVelocityZ, 2),
+        jd: tp.jumpDirection === null ? null : round(tp.jumpDirection, 2),
+      });
     }
-
-    if (!airborne && this.onGround) {
-      this.vy = 0;
-      this.y = 0;
-    }
-    if (airborne || this.onObstacle) this.vy -= config.GRAVITY * dt;
-    if (out.jump && !airborne && config.ALLOW_JUMPING) {
-      this.vy = config.JUMP_VELOCITY;
-      this.jumpDirection = this.r;
-      this.airVX = vx;
-      this.airVZ = vz;
-      force = true;
-    }
-
-    const step = this.resolve(vx, this.vy, vz, this.angVel, dt, config);
-    const oldX = this.x;
-    const oldZ = this.z;
-    const oldR = this.r;
-    this.stuckFrameCount = step.stuckFrameCount;
-    this.x = step.x;
-    this.y = step.y;
-    this.z = step.z;
-    this.r = step.azimuth;
-    this.vy = step.velocityY;
-
-    this.onObstacle = step.onBuilding;
-    this.onGround = !this.onObstacle && this.y <= 0;
-    const inAir = !this.onObstacle && !this.onGround;
-    if (this.jumpDirection !== null && !inAir) {
-      this.jumpDirection = null;
-      this.airVX = 0;
-      this.airVZ = 0;
-      this.vy = 0;
-      force = true;
-    } else if (this.jumpDirection === null && inAir) {
-      // Drove off an edge: the fall keeps the speed the tank left with.
-      this.jumpDirection = this.r;
-      this.airVX = vx;
-      this.airVZ = vz;
-      force = true;
-    }
-
-    // `fs` and `rs` are what the tank did, not what it was asked: client.js
-    // measures them off the resolved step.
-    let fs;
-    // In the air the turn carries on, so it is the turn rate the tank left
-    // with, as the client reports it.
-    const rs = dt > 0 ? (this.r - oldR) / dt / angSpeed : 0;
-    if (this.jumpDirection === null) {
-      const dx = this.x - oldX;
-      const dz = this.z - oldZ;
-      const along = (dx * -Math.sin(this.r)) + (dz * -Math.cos(this.r));
-      fs = dt > 0 ? along / dt / speed : 0;
-    } else {
-      fs = Math.hypot(this.airVX, this.airVZ) / speed;
-    }
-    this.report(fs, rs, dt, force || out.fire);
+    this.report(dt, events.forceSend || out.fire, Boolean(events.jumpStarted));
 
     this.env.act(this.self());
     if (out.fire) this.fire();
   }
 
-  resolve(velocityX, velocityY, velocityZ, angularVelocity, dt, config) {
-    return resolveTankMotion({
-      x: this.x,
-      y: this.y,
-      z: this.z,
-      azimuth: this.r,
-      velocityX,
-      velocityY,
-      velocityZ,
-      angularVelocity,
-      timeStep: dt,
-      groundLimit: 0,
-      onGround: this.onGround || this.onObstacle,
-      hitTest: (fromX, fromY, fromZ, fromAz, toX, toY, toZ, toAz) => findTankObstacle(
-        this.env.colliders(), toX, toY, toZ, {
-          rotation: toAz, fromY, fromX, fromZ, radius: TANK_COLLISION_HEIGHT,
-        }),
-      getNormal: (obs, px, py, pz, paz, hitX, hitY, hitZ, hitAz, fromX, fromZ, fromAz, toX, toZ, toAz) => (
-        getTankHitNormal(obs, px, py, pz, paz, hitY, TANK_COLLISION_HEIGHT, {
-          fromX, fromZ, fromAz, toX, toZ, toAz, hitX, hitZ,
-          halfWidth: TANK_HALF_WIDTH,
-          halfLength: TANK_HALF_LENGTH,
-        })),
-      isFlatTop: (obs) => {
-        if (!obs || obs.collisionKind === 'boundary') return false;
-        if (obs.type === 'pyramid') return isPyramidFlatTop(obs);
-        return true;
-      },
-      getObstacleTop: (obs) => this.env.topOf(obs),
-      maxBumpHeight: config.MAX_BUMP_HEIGHT,
-      stuckFrameCount: this.stuckFrameCount,
-    });
-  }
-
   // A move packet, sent as a client sends one: when a speed changed, on a jump
   // or a landing, before a shot, and otherwise as a heartbeat.
-  report(fs, rs, dt, force) {
+  report(dt, force, jumpStarted = false) {
     const packet = {
       type: 'm',
-      x: round(this.x, 2),
-      y: round(this.y, 2),
-      z: round(this.z, 2),
-      r: round(this.r, 2),
-      fs: round(fs, 3),
-      rs: round(rs, 3),
-      vv: round(this.jumpDirection === null ? 0 : this.vy, 2),
-      vx: round(this.jumpDirection === null ? 0 : this.airVX, 2),
-      vz: round(this.jumpDirection === null ? 0 : this.airVZ, 2),
+      ...movePacketFields(this.drive, { jumpStarted }),
       dt: round(dt, 3),
       sdt: round(Math.min(this.clock - this.lastSentAt, 60), 3),
       ct: round(this.clock, 3),
-      air: this.jumpDirection === null ? 0 : 1,
     };
     const last = this.lastSent;
     const changed = !last
@@ -280,22 +204,28 @@ class BotDriver {
   // A stop, for a bot about to be left idle: whatever the server last heard is
   // what it keeps extrapolating, so the last thing it hears is standing still.
   halt() {
-    if (!this.alive || this.jumpDirection !== null) return;
-    this.report(0, 0, 0, true);
+    if (!this.alive || this.drive.jumpDirection !== null) return;
+    this.drive.forwardSpeed = 0;
+    this.drive.rotationSpeed = 0;
+    this.report(0, true);
   }
 
+  // The shot every tank fires (`shotFromTank`), carrying the velocity the
+  // server holds for the tank off the move `tick` has just sent.
   fire() {
-    const dirX = -Math.sin(this.r);
-    const dirZ = -Math.cos(this.r);
-    this.env.send({
-      type: 'shoot',
-      x: this.x + (dirX * MUZZLE_FORWARD),
-      y: this.y + MUZZLE_HEIGHT,
-      z: this.z + (dirZ * MUZZLE_FORWARD),
-      dirX,
-      dirY: 0,
-      dirZ,
-    });
+    const config = this.env.config();
+    const tank = this.tankFor();
+    const fired = getFiredShotFlag(tank.flag, tank.zoned);
+    const fields = this.lastSent || movePacketFields(this.drive);
+    this.env.send(shotFromTank({
+      x: this.drive.x,
+      y: this.drive.y,
+      z: this.drive.z,
+      rotation: this.drive.rotation,
+      tankVelocity: packetVelocity(fields, config),
+      config,
+      shockwave: getShotEffects(fired).shockwave,
+    }));
   }
 }
 

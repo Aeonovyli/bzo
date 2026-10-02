@@ -569,6 +569,19 @@ the server and a browser Worker both run.
 describes, so the client's autopilot and the server's own bots
 (`server/bots.cjs`) drive the same decisions -- keep it that way.
 
+**One tank, one motion.** What a tank's controls do -- the flags' clamps and
+factors, Agility, Burrow, Wings, Bouncy, momentum, coasting, jumping, the
+collision pass, landing and falling, the measured speeds a move reports -- is
+the `drive` pair (`public/drive.mjs`, mirrored to `server/drive.cjs`), and
+every tank drives by it: the browser's (`handleInputEvents`/`handleMotion` in
+`client.js`), a server bot's (`BotDriver`), and a practice Worker's. So are the
+move packet's motion fields (`movePacketFields`), the velocity a shot inherits
+from them (`packetVelocity`, which the server's shot check reads too) and the
+shot itself (`shotFromTank`). The step returns what happened -- landed, jumped,
+fell, teleported, zoned, burrowed -- and a host decides what to play, draw or
+send; nothing in it touches the page. A rule about how a tank moves goes there,
+never into one host.
+
 ### Layout
 
 | Path | Role |
@@ -695,8 +708,11 @@ runs.
 
 Because the client is unbundled ESM and the server is CommonJS, logic needed on
 both sides is kept as a **hand-maintained pair**: `public/<name>.mjs` and
-`server/<name>.cjs`. Current pairs are `shots`, `teams`, `collision`,
-`motion`, `headset`, `flags` and `voice-channels`. `npm run check:shared-pairs` enforces them: the two mirrored
+`server/<name>.cjs`. Current pairs include `shots`, `teams`, `collision`,
+`motion`, `drive`, `teleport`, `trace`, `headset`, `flags` and
+`voice-channels`; `MIRRORED` in `scripts/check-shared-pairs.mjs` lists the ones
+kept byte for byte, and `node scripts/mirror-pair.mjs <name>` writes such a
+pair's `.cjs` from its `.mjs`. `npm run check:shared-pairs` enforces them: the two mirrored
 pairs must match line for line, and any name a hand-written pair exports on
 both sides must agree in type and arity. A pair that drifts does not throw --
 the client and server just quietly disagree about geometry, which surfaces as
@@ -846,17 +862,22 @@ The consequences, each of which was once a bug:
   `--window 320,240` on the headless probe before concluding anything about
   motion: at its default size it runs at ~8fps and steps over the whole band.
 
-### Known duplication (do not add more)
+### Known duplication (none; do not add any)
 
-`server.js` and `public/client.js` still each carry their own copy of:
-`getCollisionColliders`, `getWorldBorderColliders`, `normalizeAngle`,
-`rotateXZ`, `getSegmentBoxEntryTime`, `getShotTeleporterCrossing`,
-`transformShotThroughTeleporter`, `traceShotThroughTeleporters`. Several have
-already drifted. When touching any of them, change both sides in the same edit;
-the fix is to move each into the `collision` pair, matching upstream
-BZFlag, with fuzz coverage -- as the pyramid path already has.
+`server.js` and `public/client.js` carry no copy of each other's world logic. A
+helper both ends need goes into a shared pair, and what is left on each side is
+only which world to look at, and the host's own logging, caching and
+tolerances: `getCollisionColliders` is `buildCollisionColliders` in the
+`collision` pair over this host's obstacles, map size and walls, and
+`normalizeAngle` is the `motion` pair's.
 
-**`checkCollision` came off that list, and it is the pattern to follow.**
+Teleporter geometry and shot flight live in the `teleport` and
+`trace` pairs: a shell's step through teleporters and a beam's whole path are
+one trace, which the server flies every shot by and a client predicts its own
+shells and draws an unhanded beam by. The server's part is only the tank test
+(`findHit`) and the `[SHOT_TP]` log (`onTeleport`).
+
+**`checkCollision` is the pattern to follow.**
 `findTankObstacle` in the `collision` pair is `World::hitBuilding`, and both ends
 call it: what is left on each side is only which world to look at, what the
 occupant is, and -- on the server -- the logging and the tolerances. The two
@@ -1861,8 +1882,16 @@ The findings are: linear drift, angular drift, collision, moving while paused, a
 speed that changed faster than the configured acceleration, a rejected shot, a
 rejected jump, and the flag grab, shake and capture checks.
 
+A shot's speed is one of the shot checks. As upstream's, a shot leaves with
+its tank's velocity plus the shot speed along the barrel, kept level unless
+`SHOTS_KEEP_VERTICAL_VELOCITY` (`getMuzzleVelocity` in the shots pair). bzfs
+only caps it at shot speed plus top tank speed, since it cannot know how fast
+the tank was going. bzo knows that from the move a client sends just before
+each shot, so it subtracts the tank's velocity and wants exactly the shot
+speed back (`getShotVelocityRejection`).
+
 **A malformed packet is not an anti-cheat finding.** A non-finite coordinate or
-velocity, a zero-length shot direction, or a shot from an observer cannot be
+velocity, a shot velocity with no direction, or a shot from an observer cannot be
 turned into game state in any mode, so those are refused in every mode and
 logged as `[ANTICHEAT] Player "<name>" MALFORMED ...` without counting as a
 warning. The distinction is whether the server is exercising judgement: a
@@ -3745,7 +3774,7 @@ That runs, in order:
 |---|---|
 | `npm run check:server` | `node --check server.js` |
 | `npm run lint` | ESLint across server, `public/`, and `scripts/` |
-| `npm run check:controls-docs` | README controls section matches the in-game help panel |
+| `npm run check:controls-docs` | `docs/controls.md` matches the in-game help panel |
 | `npm run check:shared-pairs` | Each `public/<name>.mjs` and `server/<name>.cjs` still agree |
 | `npm run test:volume` | Audio level clamping, curve, formatting, and persistence |
 | `npm run test:voice-volume` | Remote playback gain and the microphone gain stage |
@@ -4219,10 +4248,12 @@ reached only through `-set` and bzo does not read `-set`: `wingsJumpCount` and
 
 - When adding network messages, document them in both the server switch
   statements and the client handlers, and update debug HUD counters if needed.
-- The controls list currently exists in several places: the README "Controls"
-  section, the help `<ul>` in `public/index.html`, `XR_HELP_ITEMS` in
+- The controls list currently exists in several places: `docs/controls.md`,
+  the help `<ul>` in `public/index.html`, `XR_HELP_ITEMS` in
   `public/client.js`, and the regex pairs in `scripts/check-controls-docs.mjs`.
   Only the first two are cross-checked. When changing a control, update all four.
+  The doc and the in-game help stay two copies until a help system (#64) makes
+  one of them data the other is built from.
 
 ## Persistent Project Decisions
 
@@ -4404,17 +4435,9 @@ Integration points:
 
 ## Controller mapping
 
-| Input | Effect |
-|---|---|
-| Either thumbstick up/down | Forward/backward movement (right stick preferred) |
-| Either thumbstick left/right | Tank rotation (right stick preferred) |
-| Either trigger | Fire, or activate a menu row |
-| Either primary face button (A/X) | Drop the carried flag, or activate a menu row |
-| Either grip or secondary face button | Jump / menu back |
-| Press either thumbstick | Open or close XR Settings |
-
-Tank rotation is independent of head direction. Three.js positions the camera for
-stereo rendering and head tracking automatically.
+`docs/controls.md` is the one description of the XR controllers' mapping, as of
+every other input. Tank rotation is independent of head direction; Three.js
+positions the camera for stereo rendering and head tracking automatically.
 
 ## Future work
 

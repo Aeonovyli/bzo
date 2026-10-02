@@ -25,6 +25,8 @@ const {
   findPublicServer,
   fetchServerList,
   fetchWorldFromServer,
+  probeGuestAccess,
+  guestReply,
   queryServerStatus,
   AUTOMATIC_TEAM,
   TANK_PLAYER,
@@ -51,6 +53,7 @@ const {
   WORLD_WEAPON_PLAYER_ID,
   WORLD_WEAPON_TEAM,
   getWorldWeaponDirection,
+  getShotFlight,
   WORLD_WEAPON_DEFAULT_DELAY,
   normalizeWorldWeaponDelays,
   getWorldReloadSeconds,
@@ -136,7 +139,6 @@ const {
 const {
   SHOT_COLLISION_RADIUS,
   SHOT_BOUNCE_CLEARANCE,
-  findShotEmbeddedObstacle,
   findShotSegmentImpact,
   getBaseTeamAtPoint,
   getBaseTopY,
@@ -155,10 +157,21 @@ const {
   TANK_HIT_HEIGHT,
   TANK_HIT_RADIUS,
   traceShotStep,
-  WORLD_WALL_HEIGHT,
   TANK_HEIGHT,
+  buildCollisionColliders,
 } = require('./server/collision.cjs');
-const { MAX_BUMP_HEIGHT: DEFAULT_MAX_BUMP_HEIGHT } = require('./server/motion.cjs');
+const {
+  buildTeleporterIndex,
+  getTeleportDestinationFace,
+  rotateXZ,
+  transformShotThroughTeleporter,
+} = require('./server/teleport.cjs');
+const {
+  findMapEdgeImpactPoint,
+  traceBeam,
+  traceShotThroughTeleporters,
+} = require('./server/trace.cjs');
+const { MAX_BUMP_HEIGHT: DEFAULT_MAX_BUMP_HEIGHT, normalizeAngle } = require('./server/motion.cjs');
 const {
   normalizePlayerTeamSelection,
   clampPlayingLimits,
@@ -1248,8 +1261,24 @@ function publishWorldFacts(host, port) {
     json: measured.json || record?.json || 0,
     brotli: measured.brotli || record?.brotli || 0,
     variables: record?.variables?.length ? record.variables : undefined,
+    // What an unregistered player may do there, where a visit has found out
+    // (`server/bzfs-worlds.cjs`). Absent until it has.
+    guestChat: guestAnswer(record?.guest?.chat),
+    guestSpawn: guestAnswer(record?.guest?.spawn),
   };
   return Object.values(facts).some((value) => value) ? facts : null;
+}
+
+// Whether a bzfs row's server lets an unregistered player spawn, as far as
+// this instance knows.
+function entryGuestSpawn(server) {
+  return guestAnswer((server.world || publishWorldFacts(server.host, server.port) || {}).guestSpawn);
+}
+
+// A guest fact as a row may show it: an answer bzfs gave, or nothing. Applied
+// to facts read off another instance's list too, which arrive unchecked.
+function guestAnswer(value) {
+  return value === 'yes' || value === 'no' ? value : undefined;
 }
 
 // What this server can measure of one imported world right now. Blank for any
@@ -1636,6 +1665,16 @@ function renderListReadout(entry, hidden) {
   if (has(GAME_OPTION_BITS.ricochet)) words.push('Ricochet');
   if (has(GAME_OPTION_BITS.handicap)) words.push('Handicap');
   if (has(GAME_OPTION_BITS.inertia)) words.push('Inertia');
+  // Upstream's one switch for both (`-disableBots`: "disallow clients from
+  // using autopilot or robots"), so one word for both.
+  if (entry.disableBots) words.push('No Bots');
+  // Whether a player without a bzflag.org login may play and talk there, which
+  // no bzfs publishes and bzo learns by asking (`enterAndProbe`). Nothing at
+  // all where it has not found out.
+  if (entry.guestSpawn === 'yes') words.push('Guests Play');
+  if (entry.guestSpawn === 'no') words.push('Registered Only');
+  if (entry.guestChat === 'yes') words.push('Guests Chat');
+  if (entry.guestChat === 'no') words.push('Guests Muted');
 
   const limits = [
     ['Time limit', formatMatchDuration(entry.maxTime)],
@@ -2172,6 +2211,11 @@ function renderListPage({
       owner: s.owner || '',
       ip: s.ip || '',
       variables: world.variables,
+      // `_disableBots` read as BZDB.isTrue does, `atoi(value) != 0`.
+      disableBots: Array.isArray(world.variables)
+        && world.variables.some(([name, value]) => name === '_disableBots' && (parseInt(value, 10) || 0) !== 0),
+      guestChat: guestAnswer(world.guestChat),
+      guestSpawn: guestAnswer(world.guestSpawn),
       desc: s.title,
       // Always the row's own link, imported or not -- `?viewmap=` already
       // imports on demand (`importMapForView`) the moment nothing this fresh
@@ -2229,6 +2273,10 @@ function renderListPage({
       actions: `<a class="action" href="${escapeHtml(`bzflag://${s.host}:${s.port}`)}">Launch</a>`
         + (canWatch
           ? `<a class="action" href="/?watch=${encodeURIComponent(`${s.host}_${s.port}`)}">Watch</a>`
+            // Playing there as `bzo-<callsign>`, unregistered, which a server
+            // that keeps guests out refuses (`guestSpawn`).
+            + (entryGuestSpawn(s) === 'no' ? ''
+              : `<a class="action" href="/?watch=${encodeURIComponent(`${s.host}_${s.port}`)}&amp;team=automatic">Play</a>`)
           : '')
         + `<form method="post" action="/list/import" class="inlineForm">`
         + `<input type="hidden" name="host" value="${escapeHtml(s.host)}">`
@@ -2275,6 +2323,7 @@ function renderListPage({
       gameOptionsBits: game.gameOptionsBits,
       players: game.players,
       bots: game.bots,
+      disableBots: game.disableBots === true,
       maxPlayers: game.maxPlayers,
       observers: Array.isArray(game.teamCounts) ? game.teamCounts[5] : undefined,
       observerMax: maxima[5],
@@ -2580,6 +2629,14 @@ ${renderMapList('mapList', 'mapFilter', localMaps)}
 <script src="/list-page.js"></script>
 
 ${renderListServerKeyAdminSection({ session, admin })}
+
+<footer class="muted">
+<p>bzo ${escapeHtml(SERVER_VERSION)} (build ${escapeHtml(CLIENT_BUILD)}): BZFlag in the browser, on desktop,
+phone and headset, and this list of the servers to play it on.</p>
+<p>Copyright (C) 2025-2026 Tim Riker. Free software under the
+<a href="https://www.gnu.org/licenses/agpl-3.0.html">GNU AGPL v3</a>;
+source at <a href="https://github.com/timriker/bzo">github.com/timriker/bzo</a>.</p>
+</footer>
 </body>
 </html>`;
 }
@@ -2592,6 +2649,7 @@ app.get('/list', async (req, res) => {
       .sort((a, b) => (b.info?.players ?? -1) - (a.info?.players ?? -1));
     const bzoServers = [...lists.bzo].sort((a, b) => (b.players ?? -1) - (a.players ?? -1));
     const session = sessionFromRequest(req);
+    const admin = isLocalAdminHttp(req) || (session ? isAdminSession(session, ADMIN_GROUPS) : false);
     res.type('html').send(renderListPage({
       servers,
       bzoServers,
@@ -2599,12 +2657,11 @@ app.get('/list', async (req, res) => {
       imported: typeof req.query.imported === 'string' ? req.query.imported : null,
       importError: typeof req.query.error === 'string' ? req.query.error : null,
       session,
-      admin: isLocalAdminHttp(req) || (session ? isAdminSession(session, ADMIN_GROUPS) : false),
-      // Not the `admin` above: `authoriseProxyRequest` wants a *signed-in*
-      // admin, because bzo will not send a remote server a name it has not
-      // verified. The address whitelist is a login stand-in for housekeeping
-      // on this instance, and there is nothing for it to stand in for here.
-      canWatch: Boolean(session) && isAdminSession(session, ADMIN_GROUPS),
+      admin,
+      // The same admins `authoriseProxyRequest` lets through. One with no
+      // login claims no name on the remote: it watches as `bzo-local` and
+      // plays as `bzo-<callsign>`, neither of which says it is anybody.
+      canWatch: admin,
     }));
   } catch (error) {
     logError('/list failed to reach the list server:', error);
@@ -2855,8 +2912,10 @@ let remoteServerListCache = { at: 0, servers: [] };
 const bzfsWorlds = createBzfsWorldTracker({
   statePath: path.join(CACHE_DIR, 'bzfs-worlds.json'),
   queryServerStatus: (host, port) => queryServerStatus(host, port),
-  importWorld: (host, port) =>
-    performRemoteMapImport(host, port, IMPORT_WORLD_BACKGROUND_TIMEOUT_MS),
+  importWorld: (host, port, guest) =>
+    performRemoteMapImport(host, port, IMPORT_WORLD_BACKGROUND_TIMEOUT_MS, guest),
+  probeGuestAccess: (host, port, { spawn }) =>
+    probeGuestAccess(host, port, { spawn, motto: serverCheckMotto() }),
   // A world with a BZFlag hash has a picture once one is saved under that
   // hash, whether or not the import it was drawn from is still here. One with
   // none has nothing to key a picture by, so only a live import counts.
@@ -3201,7 +3260,13 @@ async function importProxyWorld(target) {
 const IMPORT_WORLD_TIMEOUT_MS = 3 * 60 * 1000;
 const IMPORT_WORLD_BACKGROUND_TIMEOUT_MS = 10 * 60 * 1000;
 
-async function performRemoteMapImport(host, port, timeout) {
+// What the import's visitor says it is: this server's own /list page, where
+// what it learned about the target is shown.
+function serverCheckMotto() {
+  return PUBLIC_URL ? `bzo server check -- ${PUBLIC_URL.replace(/\/+$/, '')}/list` : undefined;
+}
+
+async function performRemoteMapImport(host, port, timeout, guest = null) {
   let publicServers;
   try {
     publicServers = await getRemoteServerList();
@@ -3219,7 +3284,7 @@ async function performRemoteMapImport(host, port, timeout) {
   const safeMapName = remoteMapFileName(listedServer.host, listedServer.port);
   const existing = inFlightRemoteImports.get(safeMapName);
   if (existing) return existing;
-  const promise = performRemoteMapImportNow(listedServer, safeMapName, timeout)
+  const promise = performRemoteMapImportNow(listedServer, safeMapName, timeout, guest)
     .finally(() => inFlightRemoteImports.delete(safeMapName));
   inFlightRemoteImports.set(safeMapName, promise);
   return promise;
@@ -3230,10 +3295,11 @@ async function performRemoteMapImport(host, port, timeout) {
 // header records. They are the same address for an import off the public list,
 // and different for a proxied target, where the name a player sees is public
 // and the address bzo reaches it on is private (`docs/proxy.md`).
-async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
+async function performRemoteMapImportNow(listedServer, safeMapName, timeout, guestQuestions = null) {
   const { host, port, dialHost = host, dialPort = port } = listedServer;
-  const { worldDatabase, gameSettings, queryGame, variables, worldHash } =
-    await fetchWorldFromServer(dialHost, dialPort, timeout || IMPORT_WORLD_TIMEOUT_MS);
+  const { worldDatabase, gameSettings, queryGame, variables, worldHash, guest } =
+    await fetchWorldFromServer(dialHost, dialPort, timeout || IMPORT_WORLD_TIMEOUT_MS,
+      { guest: guestQuestions, motto: serverCheckMotto() });
   const tree = parseWorldDatabase(worldDatabase);
   // Whatever caused this import -- the tracker's own schedule, an operator, or
   // somebody following a `?viewmap=` link -- the world tracker learns the hash
@@ -3244,7 +3310,7 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout) {
     byteLength: worldDatabase.length,
     compressedSize: tree.compressedSize,
     uncompressedSize: tree.uncompressedSize,
-  }, variables ? collectNonDefaultVariables(variables) : null);
+  }, variables ? collectNonDefaultVariables(variables) : null, guest);
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
   // or timed out (see `fetchWorldFromServer`); the map imports either way.
@@ -3901,6 +3967,7 @@ function sanitizeReportedWorld(world) {
 function sanitizeListServerReadout(source) {
   return {
     bots: boundedReportCount(source?.bots, 255),
+    disableBots: source?.disableBots === true,
     teamCounts: boundedTeamArray(source?.teamCounts),
     teamMaximums: boundedTeamArray(source?.teamMaximums),
     shakeTimeout: boundedReportCount(source?.shakeTimeout, 65535),
@@ -5985,6 +6052,7 @@ const MAP_PHYSICS_VARS = new Map([
   ['_shotSpeed', { key: 'SHOT_SPEED' }],
   ['_shotRange', { key: 'SHOT_RANGE' }],
   ['_shotRadius', { key: 'SHOT_RADIUS' }],
+  ['_shotsKeepVerticalVelocity', { key: 'SHOTS_KEEP_VERTICAL_VELOCITY', transform: (n) => n !== 0 }],
   // Seconds upstream, milliseconds here. Upstream defaults it to
   // `_explodeTime` and bzo keeps the one number for both, so only the
   // rejoin spelling is read -- `_explodeTime` on its own is how long the
@@ -6270,7 +6338,8 @@ function parseBZWServerOptions(lines) {
         const num = Number(setValue);
         if (Number.isFinite(num)) {
           const applied = transform ? transform(num) : num;
-          if (applied > 0) options.gameplay[key] = applied;
+          // A switch is stated either way; a quantity only when positive.
+          if (typeof applied === 'boolean' || applied > 0) options.gameplay[key] = applied;
         }
       } else {
         options.unreadBZDBVars.push(value);
@@ -11079,29 +11148,13 @@ log(`${MAP_SOURCE}: obstacles/meshes/links/zones/weapons  `
 
 let TELEPORTER_OBSTACLES_BY_INDEX = new Map();
 let TELEPORTER_LINKS_BY_SOURCE_FACE = new Map();
+// Both, as the shared `teleport` pair reads them.
+let TELEPORTER_INDEX = { teleporters: TELEPORTER_OBSTACLES_BY_INDEX, links: TELEPORTER_LINKS_BY_SOURCE_FACE };
 
 function rebuildTeleporterRuntimeState() {
-  TELEPORTER_OBSTACLES_BY_INDEX = new Map();
-  TELEPORTER_LINKS_BY_SOURCE_FACE = new Map();
-
-  for (const obs of OBSTACLES) {
-    if (obs?.kind !== 'teleporter') continue;
-    if (!Number.isInteger(obs.teleporterIndex)) continue;
-    TELEPORTER_OBSTACLES_BY_INDEX.set(obs.teleporterIndex, obs);
-  }
-
-  for (const link of TELEPORTER_GRAPH.links || []) {
-    if (!Number.isInteger(link?.sourceFaceId) || !Number.isInteger(link?.destFaceId)) continue;
-    if (!TELEPORTER_LINKS_BY_SOURCE_FACE.has(link.sourceFaceId)) {
-      TELEPORTER_LINKS_BY_SOURCE_FACE.set(link.sourceFaceId, []);
-    }
-    TELEPORTER_LINKS_BY_SOURCE_FACE.get(link.sourceFaceId).push(link.destFaceId);
-  }
-
-  for (const [sourceFaceId, destinations] of TELEPORTER_LINKS_BY_SOURCE_FACE.entries()) {
-    destinations.sort((a, b) => a - b);
-    TELEPORTER_LINKS_BY_SOURCE_FACE.set(sourceFaceId, Array.from(new Set(destinations)));
-  }
+  TELEPORTER_INDEX = buildTeleporterIndex(OBSTACLES, TELEPORTER_GRAPH.links);
+  TELEPORTER_OBSTACLES_BY_INDEX = TELEPORTER_INDEX.teleporters;
+  TELEPORTER_LINKS_BY_SOURCE_FACE = TELEPORTER_INDEX.links;
 }
 
 rebuildTeleporterRuntimeState();
@@ -11748,7 +11801,7 @@ class Player {
 
 // Projectile class
 class Projectile {
-  constructor(id, playerId, shotSlot, x, y, z, dirX, dirZ, dirY = 0, flag = null, now = Date.now()) {
+  constructor(id, playerId, shotSlot, x, y, z, dirX, dirZ, dirY = 0, flag = null, now = Date.now(), speed = null) {
     this.id = id;
     this.playerId = playerId;
     this.shotSlot = shotSlot;
@@ -11760,7 +11813,10 @@ class Projectile {
     this.flag = flag;
     const effects = getShotEffects(flag);
     this.ricochet = shotRicochets(flag, GAME_CONFIG.ALL_SHOTS_RICOCHET);
-    this.speed = GAME_CONFIG.SHOT_SPEED * effects.velocityFactor;
+    // A tank's shot carries its own speed, which its tank's velocity is part
+    // of (`getShotFlight`); a world weapon has no tank, and fires at the
+    // world's.
+    this.speed = Number.isFinite(speed) ? speed : GAME_CONFIG.SHOT_SPEED * effects.velocityFactor;
     this.throughBuildings = effects.throughBuildings;
     // A beam does not fly: `traceShotBeam` walks its whole path when it is
     // fired and leaves it here, and the projectile is a clock from then on.
@@ -13363,11 +13419,6 @@ function distance(x1, z1, x2, z2) {
   return Math.sqrt((x2 - x1) ** 2 + (z2 - z1) ** 2);
 }
 
-function normalizeAngle(angle) {
-  while (angle > Math.PI) angle -= Math.PI * 2;
-  while (angle < -Math.PI) angle += Math.PI * 2;
-  return angle;
-}
 
 function getBoxCollisionDistanceSquared(localX, localZ, halfW, halfD) {
   const closestX = Math.max(-halfW, Math.min(localX, halfW));
@@ -13377,81 +13428,9 @@ function getBoxCollisionDistanceSquared(localX, localZ, halfW, halfD) {
   return distX * distX + distZ * distZ;
 }
 
-// Upstream's border is one WallObstacle a side doing two jobs at once.
-// WallObstacle::inCylinder and inBox ignore height entirely, so it is an
-// infinite half-space that stops a tank at any altitude; makeSegments then
-// ignores a bouncing shot's hit on it above getHeight() (`ignoreHit`) and lets
-// the shot fly over rather than back into the arena. So the wall you can see
-// bounces shots and the invisible barrier above it does not.
-//
-// bzo says that with two colliders a side rather than a special case in the shot
-// path, each doing one of the two jobs and standing aside from the other with one
-// of upstream's own per-obstacle flags:
-//
-//   - the barrier, a thousand units high -- taller than any map bzo has to hold
-//     -- is the tank collider, and is `shootThrough`. It is upstream's wall as
-//     tanks meet it: a height-ignoring half-space with no roof.
-//   - the visible wall, `_wallHeight` tall, is the shot collider, and is
-//     `driveThrough`. It exists to give a shot a height to stop bouncing at.
-//
-// The flag on the visible wall is what makes the split correct rather than what
-// papers over it. Tanks are held by the barrier at the same inner edge, so they
-// never reach the wall, and the wall's roof -- which upstream's WallObstacle does
-// not have at all, `getHitNormal` only ever answering with the plane -- is not a
-// surface any collision code has to reason about.
-//
-// Both flags are the ones a map's `shootthrough` and `drivethrough` keywords
-// set, which is what makes this the compatible way to say it.
-function getWorldBorderColliders() {
-  if (mapNoWalls) return [];
-  const halfMap = GAME_CONFIG.MAP_SIZE / 2;
-  const thickness = 4;
-  const barrierHeight = 1000;
-  const span = GAME_CONFIG.MAP_SIZE + thickness * 2;
-  const sides = [
-    { name: 'north', x: 0, z: -halfMap - thickness / 2, w: span, d: thickness },
-    { name: 'south', x: 0, z: halfMap + thickness / 2, w: span, d: thickness },
-    { name: 'east', x: halfMap + thickness / 2, z: 0, w: thickness, d: span },
-    { name: 'west', x: -halfMap - thickness / 2, z: 0, w: thickness, d: span },
-  ];
-  const colliders = [];
-  for (const side of sides) {
-    // The barrier that stops a tank at any altitude a map can reach, and lets
-    // every shot through.
-    colliders.push({
-      type: 'box',
-      name: `boundary_${side.name}`,
-      collisionKind: 'boundary',
-      shootThrough: true,
-      x: side.x,
-      z: side.z,
-      w: side.w,
-      d: side.d,
-      h: barrierHeight,
-      baseY: 0,
-      rotation: 0,
-    });
-    // And the wall a player can see, which is what a shot bounces off below
-    // `_wallHeight` and nothing at all above it. Tanks are the barrier's job.
-    colliders.push({
-      type: 'box',
-      name: `boundary_${side.name}_wall`,
-      collisionKind: 'boundary',
-      driveThrough: true,
-      x: side.x,
-      z: side.z,
-      w: side.w,
-      d: side.d,
-      h: WORLD_WALL_HEIGHT,
-      baseY: 0,
-      rotation: 0,
-    });
-  }
-  return colliders;
-}
 
 function getCollisionColliders() {
-  return [...OBSTACLES, ...getWorldBorderColliders()];
+  return buildCollisionColliders(OBSTACLES, GAME_CONFIG.MAP_SIZE, mapNoWalls);
 }
 
 // `options.rotation` selects BZFlag's two occupant shapes: a heading makes the
@@ -13534,36 +13513,6 @@ function getSupportPhysicsDriver(x, y, z) {
   return obs ? resolvePhysicsDriverAt(obs, x, y, z) : null;
 }
 
-function findMapEdgeImpactPoint(prevX, prevY, prevZ, nextX, nextY, nextZ, halfMap) {
-  const prevInside = Math.abs(prevX) <= halfMap && Math.abs(prevZ) <= halfMap;
-  const nextInside = Math.abs(nextX) <= halfMap && Math.abs(nextZ) <= halfMap;
-
-  // Expected case: inside -> outside. Fall back to current position otherwise.
-  if (!prevInside || nextInside) {
-    return { x: nextX, y: nextY, z: nextZ };
-  }
-
-  let lo = 0;
-  let hi = 1;
-  for (let i = 0; i < 8; i++) {
-    const mid = (lo + hi) * 0.5;
-    const mx = prevX + (nextX - prevX) * mid;
-    const mz = prevZ + (nextZ - prevZ) * mid;
-    const inside = Math.abs(mx) <= halfMap && Math.abs(mz) <= halfMap;
-    if (inside) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-
-  const t = lo;
-  return {
-    x: prevX + (nextX - prevX) * t,
-    y: prevY + (nextY - prevY) * t,
-    z: prevZ + (nextZ - prevZ) * t,
-  };
-}
 
 // RandomSpawnPolicy::getPosition. A player waiting to restart at base spawns on
 // a random point of one of their own team's bases, which is every spawn in CTF
@@ -14166,10 +14115,45 @@ function getShotRejection(player, shotX, shotY, shotZ, now = Date.now()) {
 // not. That is the same class of client/server disagreement the drift checks
 // report, so it is counted and reported the same way. Returns true when the shot
 // must not be fired: always for a fatal reason, otherwise only in strict mode.
+// bzfs's own check on a shot's speed (shotFired, bzfs.cxx:4191) is an upper
+// bound -- no faster than the shot speed plus the fastest a tank can go --
+// because bzfs has no idea how fast this tank was going. bzo has: a client
+// sends a move with every shot (LocalPlayer.cxx:1268), so the server holds the
+// tank's velocity at the trigger. Take it away, and what is left must be the
+// world's shot speed, neither faster nor slower -- and level, unless the world
+// keeps vertical velocity. Not fatal: an honest client measures its own
+// velocity off the same move, so a disagreement is one for warning mode to
+// show.
+const SHOT_VELOCITY_TOLERANCE = 0.5;
+// How recent the move a shot is checked against has to be: a client sends one
+// with every shot, so anything older is a client that did not.
+const SHOT_MOVE_FRESH_MS = 1000;
+function getShotVelocityRejection(player, velocity, now) {
+  const keepVertical = GAME_CONFIG.SHOTS_KEEP_VERTICAL_VELOCITY === true;
+  if (!keepVertical && Math.abs(velocity.y) > SHOT_VELOCITY_TOLERANCE) {
+    return `shot climbs at ${velocity.y.toFixed(2)} in a world that keeps shots level`;
+  }
+  const fields = player.lastMoveFields;
+  const stated = fields && now - fields.at < SHOT_MOVE_FRESH_MS ? packetVelocity(fields, GAME_CONFIG) : null;
+  const tank = stated
+    ? { vx: stated.x, vy: stated.y, vz: stated.z }
+    : getPlayerMotion(player, getPlayerFlag(player.id)?.type ?? null, now);
+  const muzzleSpeed = Math.hypot(
+    velocity.x - tank.vx,
+    keepVertical ? velocity.y - tank.vy : 0,
+    velocity.z - tank.vz,
+  );
+  if (Math.abs(muzzleSpeed - GAME_CONFIG.SHOT_SPEED) > SHOT_VELOCITY_TOLERANCE) {
+    return `shot leaves the tank at ${muzzleSpeed.toFixed(2)}, not the world's ${GAME_CONFIG.SHOT_SPEED}`
+      + ` (tank moving at (${tank.vx.toFixed(2)},${tank.vy.toFixed(2)},${tank.vz.toFixed(2)}))`;
+  }
+  return null;
+}
+
 function reportShotRejection(player, reason, message, fatal) {
   const detail = `player=${player.id} at=${formatShotPoint(player.x, player.y, player.z)}`
     + ` sent=${formatShotPoint(Number(message.x), Number(message.y), Number(message.z))}`
-    + ` dir=(${Number(message.dirX)},${Number(message.dirY)},${Number(message.dirZ)})`;
+    + ` vel=(${Number(message.vx)},${Number(message.vy)},${Number(message.vz)})`;
 
   if (fatal) {
     logMalformed(player, 'SHOT', `${reason} | ${detail}`);
@@ -14748,6 +14732,9 @@ function computeListServerStatus() {
     maxPlayers: MAX_REAL_PLAYERS,
     version: SERVER_VERSION,
     gameOptionsBits: computeLocalGameOptionsBits(),
+    // Whether bots are refused, autopilot included (`-disableBots`), which a
+    // player choosing a server for its bots, or to fly one, wants to know first.
+    disableBots: DISABLE_BOTS,
     // The two fields the bzfs table on this same page already shows
     // (Shots, Style) that a bzo row was missing -- GAME_TYPE is already the
     // same vocabulary GAME_STYLES uses to decode a remote server's style.
@@ -16157,197 +16144,13 @@ function forwardVoiceSignal(player, message) {
 // opening inside it -- upstream's scene generator does the same subtraction,
 // `getBreadth() - border` and `getHeight() - border`.
 
-const BZFLAG_TELEPORT_TOLERANCE = 1e-6;
 
-function getSegmentBoxEntryTime(localStart, localEnd, bounds) {
-  const delta = {
-    x: localEnd.x - localStart.x,
-    y: localEnd.y - localStart.y,
-    z: localEnd.z - localStart.z,
-  };
 
-  let tMin = 0;
-  let tMax = 1;
-  const axes = ['x', 'y', 'z'];
 
-  for (const axis of axes) {
-    const start = localStart[axis];
-    const d = delta[axis];
-    const min = bounds.min[axis];
-    const max = bounds.max[axis];
 
-    if (Math.abs(d) < 1e-9) {
-      if (start < min || start > max) return null;
-      continue;
-    }
 
-    let t1 = (min - start) / d;
-    let t2 = (max - start) / d;
-    if (t1 > t2) {
-      const tmp = t1;
-      t1 = t2;
-      t2 = tmp;
-    }
 
-    if (t1 > tMin) tMin = t1;
-    if (t2 < tMax) tMax = t2;
-    if (tMin > tMax) return null;
-  }
 
-  if (tMax < 0 || tMin > 1) return null;
-  return Math.max(0, tMin);
-}
-
-function getShotTeleporterCrossing(start, end, obs) {
-  const dims = getShotTeleporterDims(obs);
-  const startLocalXZ = getColliderLocalPoint(start.x, start.z, obs);
-  const endLocalXZ = getColliderLocalPoint(end.x, end.z, obs);
-
-  const localStart = {
-    x: startLocalXZ.x,
-    y: start.y - (obs.baseY || 0),
-    z: startLocalXZ.z,
-  };
-  const localEnd = {
-    x: endLocalXZ.x,
-    y: end.y - (obs.baseY || 0),
-    z: endLocalXZ.z,
-  };
-
-  const outerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.halfD },
-    max: { x: dims.halfW, y: dims.h, z: dims.halfD },
-  };
-  const innerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.activeHalfD },
-    max: { x: dims.halfW, y: dims.activeH, z: dims.activeHalfD },
-  };
-
-  const tOuter = getSegmentBoxEntryTime(localStart, localEnd, outerBounds);
-  const tInner = getSegmentBoxEntryTime(localStart, localEnd, innerBounds);
-  if (tInner === null || tInner < 0 || tInner > 1) return null;
-
-  // Match BZFlag Teleporter::isTeleported behavior: if the outer frame
-  // is hit before the inner active slab, this is a frame hit (no teleport).
-  if (tOuter !== null && (tInner - tOuter) > BZFLAG_TELEPORT_TOLERANCE) return null;
-
-  const hitLocalX = localStart.x + (localEnd.x - localStart.x) * tInner;
-  const face = hitLocalX > 0 ? 0 : 1;
-  const sourceFaceId = obs.teleporterIndex * 2 + face;
-
-  return {
-    t: tInner,
-    face,
-    sourceFaceId,
-    tOuter,
-    point: {
-      x: start.x + (end.x - start.x) * tInner,
-      y: start.y + (end.y - start.y) * tInner,
-      z: start.z + (end.z - start.z) * tInner,
-    },
-  };
-}
-
-function getShotTeleporterFrameHit(start, end, obs) {
-  const dims = getShotTeleporterDims(obs);
-  const startLocalXZ = getColliderLocalPoint(start.x, start.z, obs);
-  const endLocalXZ = getColliderLocalPoint(end.x, end.z, obs);
-
-  const localStart = {
-    x: startLocalXZ.x,
-    y: start.y - (obs.baseY || 0),
-    z: startLocalXZ.z,
-  };
-  const localEnd = {
-    x: endLocalXZ.x,
-    y: end.y - (obs.baseY || 0),
-    z: endLocalXZ.z,
-  };
-
-  const outerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.halfD },
-    max: { x: dims.halfW, y: dims.h, z: dims.halfD },
-  };
-  const innerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.activeHalfD },
-    max: { x: dims.halfW, y: dims.activeH, z: dims.activeHalfD },
-  };
-
-  const tOuter = getSegmentBoxEntryTime(localStart, localEnd, outerBounds);
-  if (tOuter === null || tOuter < 0 || tOuter > 1) return null;
-
-  const tInner = getSegmentBoxEntryTime(localStart, localEnd, innerBounds);
-  if (tInner !== null && tInner >= 0 && tInner <= 1 && (tInner - tOuter) <= BZFLAG_TELEPORT_TOLERANCE) {
-    return null;
-  }
-
-  return {
-    t: tOuter,
-    point: {
-      x: start.x + (end.x - start.x) * tOuter,
-      y: start.y + (end.y - start.y) * tOuter,
-      z: start.z + (end.z - start.z) * tOuter,
-    },
-  };
-}
-
-function rotateXZ(x, z, angle) {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  return {
-    x: cos * x - sin * z,
-    z: sin * x + cos * z,
-  };
-}
-
-function transformShotThroughTeleporter(pointIn, dirIn, sourceObs, sourceFace, destObs, destFace) {
-  const srcDims = getShotTeleporterDims(sourceObs);
-  const dstDims = getShotTeleporterDims(destObs);
-
-  const radians1 = sourceObs.rotation + (sourceFace === 0 ? 0 : Math.PI);
-  const radians2 = destObs.rotation + (destFace === 1 ? 0 : Math.PI);
-
-  const relativeX = pointIn.x - sourceObs.x;
-  const relativeZ = pointIn.z - sourceObs.z;
-  const relativeY = pointIn.y - (sourceObs.baseY || 0);
-  const local = rotateXZ(relativeX, relativeZ, -radians1);
-
-  const breadthScale = srcDims.activeHalfD > 1e-6 ? (dstDims.activeHalfD / srcDims.activeHalfD) : 1;
-  const heightScale = srcDims.activeH > 1e-6 ? (dstDims.activeH / srcDims.activeH) : 1;
-
-  const localOut = {
-    x: -dstDims.halfW,
-    z: local.z * breadthScale,
-    y: relativeY * heightScale,
-  };
-
-  const rotatedOut = rotateXZ(localOut.x, localOut.z, radians2);
-  const pointOut = {
-    x: destObs.x + rotatedOut.x,
-    y: (destObs.baseY || 0) + localOut.y,
-    z: destObs.z + rotatedOut.z,
-  };
-
-  const rotateDelta = radians2 - radians1;
-  const dirRotated = rotateXZ(dirIn.x, dirIn.z, rotateDelta);
-  const dirOut = {
-    x: dirRotated.x,
-    y: dirIn.y,
-    z: dirRotated.z,
-  };
-
-  return { pointOut, dirOut };
-}
-
-function getShotTeleportDestinationFace(sourceFaceId) {
-  const destinations = TELEPORTER_LINKS_BY_SOURCE_FACE.get(sourceFaceId);
-  if (destinations && destinations.length > 0) return destinations[0];
-  const teleIndex = Math.floor(sourceFaceId / 2);
-  const oppositeFace = (teleIndex * 2) + (1 - (sourceFaceId % 2));
-  return oppositeFace;
-}
-
-const SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE = 0.5;
 const PLAYER_TELEPORT_REENTRY_BLOCK_DISTANCE = 5.0;
 const PLAYER_TELEPORT_REENTRY_BLOCK_MIN_MS = 250;
 const PLAYER_TELEPORT_EXIT_EPSILON = 0.08;
@@ -16430,7 +16233,7 @@ function applyPlayerTeleportMessage(player, sourceState, fromFaceId, toFaceId, n
     return { ok: false, reason: 'cooldown' };
   }
 
-  const expectedToFaceId = getShotTeleportDestinationFace(fromFaceId);
+  const expectedToFaceId = getTeleportDestinationFace(TELEPORTER_LINKS_BY_SOURCE_FACE, fromFaceId);
   if (toFaceId !== expectedToFaceId) {
     return { ok: false, reason: 'invalid_link' };
   }
@@ -16539,110 +16342,6 @@ function applyPlayerTeleportMessage(player, sourceState, fromFaceId, toFaceId, n
   };
 }
 
-function traceShotThroughTeleporters(start, dir, travelDistance, projectileId, reentryBlockTeleporterIndex = null, reentryBlockDistance = 0) {
-  let point = { ...start };
-  let direction = { ...dir };
-  let remaining = travelDistance;
-  let teleports = 0;
-  let blockedTeleporterIndex = Number.isInteger(reentryBlockTeleporterIndex) ? reentryBlockTeleporterIndex : null;
-  let blockedDistance = Math.max(0, Number(reentryBlockDistance) || 0);
-  const maxTeleportsPerTick = 8;
-
-  while (remaining > 1e-6 && teleports < maxTeleportsPerTick) {
-    const end = {
-      x: point.x + direction.x * remaining,
-      y: point.y + direction.y * remaining,
-      z: point.z + direction.z * remaining,
-    };
-
-    let earliest = null;
-    for (const obs of TELEPORTER_OBSTACLES_BY_INDEX.values()) {
-      const crossing = getShotTeleporterCrossing(point, end, obs);
-      if (crossing) {
-        if (blockedTeleporterIndex !== null && blockedDistance > 1e-6 && obs.teleporterIndex === blockedTeleporterIndex) {
-          // Ignore immediate re-entry to the just-exited teleporter.
-        } else if (!earliest || crossing.t < earliest.event.t) {
-          earliest = { obs, type: 'teleport', event: crossing };
-        }
-      }
-
-      const frameHit = getShotTeleporterFrameHit(point, end, obs);
-      if (frameHit && (!earliest || frameHit.t < earliest.event.t)) {
-        earliest = { obs, type: 'frameHit', event: frameHit };
-      }
-    }
-
-    if (!earliest) {
-      blockedDistance = Math.max(0, blockedDistance - remaining);
-      if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
-      point = end;
-      break;
-    }
-
-    if (earliest.type === 'frameHit') {
-      return {
-        point: earliest.event.point,
-        direction,
-        teleports,
-        reentryBlockTeleporterIndex: blockedTeleporterIndex,
-        reentryBlockDistance: Math.max(0, blockedDistance - (remaining * earliest.event.t)),
-        frameHit: true,
-        frameHitObstacle: earliest.obs,
-        frameHitRemaining: remaining * (1 - earliest.event.t),
-      };
-    }
-
-    const sourceObs = earliest.obs;
-    const sourceFaceId = earliest.event.sourceFaceId;
-    const destFaceId = getShotTeleportDestinationFace(sourceFaceId);
-    const destTeleporterIndex = Math.floor(destFaceId / 2);
-    const destFace = destFaceId % 2;
-    const sourceFace = sourceFaceId % 2;
-    const destObs = TELEPORTER_OBSTACLES_BY_INDEX.get(destTeleporterIndex);
-
-    if (!destObs) {
-      break;
-    }
-
-    const transformed = transformShotThroughTeleporter(
-      earliest.event.point,
-      direction,
-      sourceObs,
-      sourceFace,
-      destObs,
-      destFace,
-    );
-
-    const consumedDistance = remaining * earliest.event.t;
-    blockedDistance = Math.max(0, blockedDistance - consumedDistance);
-    if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
-    remaining = Math.max(0, remaining - consumedDistance);
-    point = {
-      x: transformed.pointOut.x + transformed.dirOut.x * 0.02,
-      y: transformed.pointOut.y + transformed.dirOut.y * 0.02,
-      z: transformed.pointOut.z + transformed.dirOut.z * 0.02,
-    };
-    direction = transformed.dirOut;
-    blockedTeleporterIndex = destTeleporterIndex;
-    blockedDistance = Math.max(
-      SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE,
-      (getShotTeleporterDims(destObs).activeHalfD * 2) + 0.05,
-    );
-    teleports++;
-
-    log(`[SHOT_TP] id=${projectileId} srcFace=${sourceFaceId} dstFace=${destFaceId} src=${sourceObs.linkName || sourceObs.name} dst=${destObs.linkName || destObs.name}`);
-  }
-
-  return {
-    point,
-    direction,
-    teleports,
-    reentryBlockTeleporterIndex: blockedTeleporterIndex,
-    reentryBlockDistance: blockedDistance,
-    frameHit: false,
-    frameHitObstacle: null,
-  };
-}
 
 // WorldWeapons::add (WorldWeapons.cxx:192). A weapon's first shot is
 // `initdelay` after the world was built -- upstream's `sync`, taken once so
@@ -16714,6 +16413,7 @@ function fireWorldWeaponShot(weapon, now) {
     dirX: proj.dirX,
     dirY: proj.dirY,
     dirZ: proj.dirZ,
+    speed: proj.speed,
     flag: proj.flag,
     ricochet: proj.ricochet,
     segments: proj.segments,
@@ -17309,213 +17009,31 @@ function applyShockWaveHits(proj, id, radius, now) {
   });
 }
 
-// The first teleporter event on one segment: the portal a shot enters, or the
-// frame it hits. traceShotThroughTeleporters asks the same two questions over a
-// whole simulation step; a beam has to ask them a segment at a time, because
-// over a laser's range a wall stands between the muzzle and a portal far more
-// often than not.
-function findSegmentTeleporterEvent(from, to, blockedTeleporterIndex, blockedDistance, ignoreFrames) {
-  let earliest = null;
-  for (const obs of TELEPORTER_OBSTACLES_BY_INDEX.values()) {
-    const crossing = getShotTeleporterCrossing(from, to, obs);
-    if (crossing) {
-      const blocked = blockedTeleporterIndex !== null
-        && blockedDistance > 1e-6
-        && obs.teleporterIndex === blockedTeleporterIndex;
-      if (!blocked && (!earliest || crossing.t < earliest.event.t)) {
-        earliest = { obs, type: 'teleport', event: crossing };
-      }
-    }
-    // A frame is a building, and a shot that goes through buildings goes through
-    // this one too.
-    if (ignoreFrames) continue;
-    const frameHit = getShotTeleporterFrameHit(from, to, obs);
-    if (frameHit && (!earliest || frameHit.t < earliest.event.t)) {
-      earliest = { obs, type: 'frameHit', event: frameHit };
-    }
-  }
-  return earliest;
-}
 
-// A beam's whole path, walked when the trigger is pulled. `_laserAdVel` 1000
-// puts the shell 1666 units downrange inside one simulation step -- further than
-// any bzo world is wide -- so there is nothing left to interpolate, and upstream
-// says the same thing by building its laser's entire segment list in
-// LaserStrategy's constructor and drawing along it.
-//
-// Takes whichever of a building, the ground, a teleporter, the world edge and a
-// tank the beam reaches first, as makeSegments does, and leaves the segments on
-// the projectile for the client to draw. Returns the tank it reached, if any,
-// for the caller to resolve once `shotBegin` has gone out: the client has to
-// have the shot before it is told the shot killed somebody.
-// makeSegments' own maxSegment. A straight beam is one segment; a ricocheting
-// one is as many as it can fit into its range, which on an enclosed map is what
-// ends it rather than the range doing so.
-const MAX_BEAM_SEGMENTS = 100;
-// How far off a surface the next segment is traced from, along that surface's
-// normal -- `traceShotStep`'s own `SHOT_BOUNCE_CLEARANCE` (collision.cjs),
-// shared so a beam's bounce and an ordinary shot's agree. It has to clear
-// SHOT_COLLISION_RADIUS: within that distance the shot still counts as inside
-// the obstacle, and a segment that starts inside something is carried
-// straight through it -- so a smaller clearance sent the beam through the
-// first wall it bounced off and out of the world. The drawn segment still
-// starts at the impact point, so there is no gap to see.
-const BEAM_SURFACE_CLEARANCE = SHOT_BOUNCE_CLEARANCE;
-
+// A beam's whole path, walked when the trigger is pulled (`traceBeam` in the
+// shared `trace` pair, which a browser draws an unhanded beam by too), with the
+// tanks it can reach as this server decides them. The segments go onto the
+// projectile for the client to draw; the tank it reached comes back for the
+// caller to resolve once `shotBegin` has gone out -- the client has to have the
+// shot before it is told the shot killed somebody.
 function traceShotBeam(proj, now) {
-  const obstacles = proj.throughBuildings ? [] : getCollisionColliders();
-  const halfMap = GAME_CONFIG.MAP_SIZE / 2;
-  let point = { x: proj.x, y: proj.y, z: proj.z };
-  // Where the segment is drawn from, which is the surface it bounced off rather
-  // than the clearance point the next segment is traced from.
-  let drawFrom = { ...point };
-  let direction = { x: proj.dirX, y: proj.dirY || 0, z: proj.dirZ };
-  let remaining = proj.speed * proj.lifetimeSeconds;
-  let blockedTeleporterIndex = null;
-  let blockedDistance = 0;
-  // Scopes the "already inside, carry it through" read below to an actual
-  // teleport exit, the same way traceShotStep's own `justTeleported` does
-  // (issue #83): true only for the segment starting right after a teleport
-  // transform, never for the muzzle's own starting point or after an
-  // ordinary bounce.
-  let justTeleported = false;
-  proj.segments = [];
-
-  for (let segment = 0; segment < MAX_BEAM_SEGMENTS && remaining > 1e-6; segment++) {
-    const far = {
-      x: point.x + (direction.x * remaining),
-      y: point.y + (direction.y * remaining),
-      z: point.z + (direction.z * remaining),
-    };
-
-    // makeSegments narrows one `t` across the ground, the first building and the
-    // first teleporter, so whichever is nearest is what the segment ended on.
-    // This is that in bzo's terms: the ground and the buildings are asked over
-    // the whole reach, the nearer of the two truncates the segment, and the
-    // teleporters are asked over what is left -- a portal behind a wall is not
-    // one the beam ever reaches.
-    const groundFraction = (direction.y < 0 && far.y < 0)
-      ? (0 - point.y) / (direction.y * remaining)
-      : Infinity;
-    // traceShotStep's rule for a shot that begins inside something because it
-    // just exited a teleporter: carry it through, because there is no surface
-    // between where it is and where it came from to stop it. Anything else
-    // that started embedded -- the muzzle's own spawn point overlapping a
-    // thin wall (issue #83) -- is an immediate hit right there instead.
-    const embeddedObstacle = findShotEmbeddedObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS);
-    const impact = embeddedObstacle
-      ? (justTeleported ? null : { fraction: 0, obstacle: embeddedObstacle, face: null })
-      : findShotSegmentImpact(obstacles, point, far, SHOT_COLLISION_RADIUS);
-    const obstacleFraction = impact ? impact.fraction : Infinity;
-    justTeleported = false;
-
-    let reason = 'range';
-    let obstacle = null;
-    let obstacleFace = -1;
-    let fraction = 1;
-    if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
-      reason = 'obstacle';
-      obstacle = impact.obstacle;
-      obstacleFace = Number.isInteger(impact.face) ? impact.face : -1;
-      fraction = obstacleFraction;
-    } else if (groundFraction < 1) {
-      reason = 'ground';
-      fraction = groundFraction;
-    }
-    let end = {
-      x: point.x + ((far.x - point.x) * fraction),
-      y: reason === 'ground' ? 0 : point.y + ((far.y - point.y) * fraction),
-      z: point.z + ((far.z - point.z) * fraction),
-    };
-
-    const teleporterEvent = findSegmentTeleporterEvent(
-      point, end, blockedTeleporterIndex, blockedDistance, proj.throughBuildings
-    );
-    if (teleporterEvent) {
-      end = { ...teleporterEvent.event.point };
-      reason = teleporterEvent.type === 'frameHit' ? 'frame_hit' : 'teleport';
-      obstacle = teleporterEvent.type === 'frameHit' ? teleporterEvent.obs : null;
-      obstacleFace = -1;
-    }
-
-    if (Math.abs(end.x) > halfMap || Math.abs(end.z) > halfMap) {
-      end = findMapEdgeImpactPoint(point.x, point.y, point.z, end.x, end.y, end.z, halfMap);
-      reason = 'out_of_bounds';
-      obstacle = null;
-      obstacleFace = -1;
-    }
-
-    const tankHit = findShotPlayerHit(proj, point, end, now);
-    if (tankHit) {
-      proj.segments.push({ from: { ...drawFrom }, to: { ...tankHit.point }, end: 'player_hit' });
-      proj.endReason = 'player_hit';
-      return tankHit;
-    }
-
-    // Each segment carries what ended it, which is what tells the client to
-    // play a ricochet where the next one starts.
-    proj.segments.push({ from: { ...drawFrom }, to: { ...end }, end: reason });
-    const travelled = Math.hypot(end.x - point.x, end.y - point.y, end.z - point.z);
-    remaining = Math.max(0, remaining - travelled);
-    blockedDistance = Math.max(0, blockedDistance - travelled);
-    if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
-    proj.endReason = reason;
-
-    if (reason === 'teleport') {
-      const sourceFaceId = teleporterEvent.event.sourceFaceId;
-      const destFaceId = getShotTeleportDestinationFace(sourceFaceId);
-      const destTeleporterIndex = Math.floor(destFaceId / 2);
-      const destObs = TELEPORTER_OBSTACLES_BY_INDEX.get(destTeleporterIndex);
-      if (!destObs) break;
-      const transformed = transformShotThroughTeleporter(
-        end, direction, teleporterEvent.obs, sourceFaceId % 2, destObs, destFaceId % 2
-      );
-      point = {
-        x: transformed.pointOut.x + (transformed.dirOut.x * BEAM_SURFACE_CLEARANCE),
-        y: transformed.pointOut.y + (transformed.dirOut.y * BEAM_SURFACE_CLEARANCE),
-        z: transformed.pointOut.z + (transformed.dirOut.z * BEAM_SURFACE_CLEARANCE),
-      };
-      direction = transformed.dirOut;
-      drawFrom = { ...point };
-      justTeleported = true;
-      blockedTeleporterIndex = destTeleporterIndex;
-      blockedDistance = Math.max(
-        SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE,
-        (getShotTeleporterDims(destObs).activeHalfD * 2) + 0.05,
-      );
-      log(`[SHOT_TP] id=${proj.id} beam srcFace=${sourceFaceId} dstFace=${destFaceId}`);
-      continue;
-    }
-
-    // makeSegments promotes Stop to Reflect on a world where every shot bounces,
-    // so a laser fired there is a beam that bends. All three surfaces bounce
-    // it: a building about its own normal, the ground about straight up, and
-    // a teleporter frame about its nearest border column's normal (issue #110
-    // -- upstream's ShotStrategy::getFirstBuilding treats a frame hit as an
-    // ordinary building hit, same as a flying shot).
-    if (proj.ricochet && (reason === 'obstacle' || reason === 'ground' || reason === 'frame_hit')) {
-      const normal = reason === 'ground'
-        ? { x: 0, y: 1, z: 0 }
-        : getShotObstacleNormal(obstacle, end.x, end.y, end.z, SHOT_COLLISION_RADIUS, obstacleFace);
-      direction = reflectShotDirection(direction.x, direction.y, direction.z, normal);
-      // The next segment is traced from clear of the surface, along its normal
-      // rather than along the new direction: a grazing bounce leaves almost no
-      // perpendicular gap, and it is the perpendicular gap that decides whether
-      // the shot still reads as inside. The beam is still drawn from the impact.
-      drawFrom = { ...end };
-      point = {
-        x: end.x + (normal.x * BEAM_SURFACE_CLEARANCE),
-        y: end.y + (normal.y * BEAM_SURFACE_CLEARANCE),
-        z: end.z + (normal.z * BEAM_SURFACE_CLEARANCE),
-      };
-      proj.bounces++;
-      continue;
-    }
-
-    break;
-  }
-
-  return null;
+  const traced = traceBeam(
+    { colliders: getCollisionColliders(), teleports: TELEPORTER_INDEX, mapSize: GAME_CONFIG.MAP_SIZE },
+    { x: proj.x, y: proj.y, z: proj.z },
+    { x: proj.dirX, y: proj.dirY || 0, z: proj.dirZ },
+    proj.speed * proj.lifetimeSeconds,
+    {
+      ricochet: proj.ricochet,
+      throughBuildings: proj.throughBuildings,
+      findHit: (from, to) => findShotPlayerHit(proj, from, to, now),
+      onTeleport: ({ sourceFaceId, destFaceId }) => log(
+        `[SHOT_TP] id=${proj.id} beam srcFace=${sourceFaceId} dstFace=${destFaceId}`),
+    },
+  );
+  proj.segments = traced.segments;
+  proj.endReason = traced.endReason;
+  proj.bounces += traced.bounces;
+  return traced.hit;
 }
 
 function simulateProjectilesStep(stepSeconds, now) {
@@ -17584,12 +17102,14 @@ function simulateProjectilesStep(stepSeconds, now) {
     const prevY = proj.y;
     const prevZ = proj.z;
     const traced = traceShotThroughTeleporters(
+      TELEPORTER_INDEX,
       { x: prevX, y: prevY, z: prevZ },
       { x: proj.dirX, y: proj.dirY || 0, z: proj.dirZ },
       stepDistance,
-      id,
       proj.teleportReentryBlockTeleporterIndex,
       proj.teleportReentryBlockDistance,
+      ({ sourceFaceId, destFaceId, source, dest }) => log(`[SHOT_TP] id=${id} srcFace=${sourceFaceId}`
+        + ` dstFace=${destFaceId} src=${source.linkName || source.name} dst=${dest.linkName || dest.name}`),
     );
     proj.dirX = traced.direction.x;
     proj.dirY = traced.direction.y;
@@ -18177,13 +17697,16 @@ function resolveProxyRequest(url) {
   if (watchSpec) {
     const parsed = parseHostPort(watchSpec.replace(/_(\d+)$/, ':$1'));
     const key = parsed ? `${parsed.host}:${parsed.port}` : watchSpec;
+    const asked = params.get('team');
     return {
       kind: 'watch',
       key,
-      // A watcher carries no token, so bzfs would refuse a spawn anyway
-      // (`isAllowedToEnter`, Permissions.cxx:129). Entering on a playing team
-      // would only buy a kick to explain.
-      team: PLAYER_TEAM.OBSERVER,
+      // An observer, unless a team is asked for: then an admin plays, under a
+      // name nobody has registered (`guestCallsign`), since the forum callsign
+      // would need a token bzfs cannot check from here.
+      team: (asked === PLAYER_TEAM.AUTOMATIC || PLAYER_TEAMS.includes(asked))
+        ? asked
+        : PLAYER_TEAM.OBSERVER,
       target: parsed ? Object.freeze({
         key,
         urlKey: proxyUrlKey(key),
@@ -18244,8 +17767,15 @@ async function authoriseProxyRequest(req, request) {
   const cookies = parseCookies(req.headers.cookie);
   const session = sessions.get(cookies[SESSION_COOKIE_NAME]);
   const callsign = session && typeof session.callsign === 'string' ? session.callsign : '';
-  if (!callsign) return { allowed: false, error: 'Watching needs a global login.' };
-  if (!isAdminSession(session, ADMIN_GROUPS)) {
+  // This server's own operator, on this machine, is an admin here without a
+  // login, as everywhere else (`localAdmin`).
+  const localAdmin = isLocalAdminRequest(req.socket.remoteAddress, req.headers, {
+    enabled: LOCAL_ADMIN,
+    whitelist: ADMIN_WHITELIST,
+    forwardedForPolicy,
+  });
+  if (!callsign && !localAdmin) return { allowed: false, error: 'Watching needs a global login.' };
+  if (!localAdmin && !isAdminSession(session, ADMIN_GROUPS)) {
     return { allowed: false, error: "Watching is limited to this server's admins." };
   }
   if (!request.target) return { allowed: false, error: 'Expected watch=<host>_<port>' };
@@ -18262,10 +17792,25 @@ async function authoriseProxyRequest(req, request) {
   if (!listed) {
     return { allowed: false, error: `${request.key} is not in the public BZFlag server list` };
   }
-  // The forum name bzo verified, sent as itself. The remote cannot check the
-  // claim and marks the player unverified regardless, so the motto naming this
-  // instance is what an operator actually has to act on.
-  return { allowed: true, callsign };
+  // Watching: the forum name bzo verified, sent as itself. The remote cannot
+  // check the claim and marks the player unverified regardless, so the motto
+  // naming this instance is what an operator actually has to act on.
+  // Playing: an unregistered name, which is the only kind that spawns without
+  // a token, and that still says whose it is.
+  if (request.team !== PLAYER_TEAM.OBSERVER) {
+    return { allowed: true, callsign: guestCallsign(callsign), guest: true };
+  }
+  return { allowed: true, callsign: callsign || 'bzo-local' };
+}
+
+// `bzo-<callsign>`, for an admin playing on a server outside this one's
+// network. A forum callsign is registered, and bzfs removes a registered name
+// that has not identified the moment it tries to spawn (`playerAlive`,
+// bzfs.cxx:3199); a token cannot be forwarded to it from here, because
+// my.bzflag.org compares it with the browser's address (docs/proxy.md). One
+// byte short of `CallSignLen`, which bzfs needs for the NUL.
+function guestCallsign(callsign) {
+  return `bzo-${callsign || 'local'}`.slice(0, 31);
 }
 
 function proxyPlayerRecord(player, motion = null) {
@@ -18412,9 +17957,28 @@ function proxyOutboundMotion(message, physics, status) {
   const y = Number(message.y) || 0;
   const z = Number(message.z) || 0;
   const r = Number(message.r) || 0;
-  const speed = (Number(message.fs) || 0) * physics.tankSpeed;
-  const vx = -Math.sin(r) * speed;
-  const vz = -Math.cos(r) * speed;
+  // The velocity the browser is actually moving at, read the way this
+  // server's own `getPlayerMotion` reads it: in the air the air velocity the
+  // packet carries, which keeps the speed and direction the tank left the
+  // ground with whatever it has turned to since; on the ground `fs` -- the
+  // speed it achieved, not the one asked for -- along the slide direction
+  // where it is sliding, and its heading otherwise. A native client dead
+  // reckons from exactly this between updates, so a velocity along the wrong
+  // line puts the tank somewhere else on their screen until the next one.
+  const airVX = Number(message.vx);
+  const airVZ = Number(message.vz);
+  let vx;
+  let vz;
+  if (message.air && Number.isFinite(airVX) && Number.isFinite(airVZ)) {
+    vx = airVX;
+    vz = airVZ;
+  } else {
+    const slide = Number(message.d);
+    const direction = Number.isFinite(slide) ? slide : r;
+    const speed = (Number(message.fs) || 0) * physics.tankSpeed;
+    vx = -Math.sin(direction) * speed;
+    vz = -Math.cos(direction) * speed;
+  }
   return {
     // bzo is Y-up, bzfs is Z-up (`proxyPosition`).
     pos: [x, -z, y],
@@ -18491,16 +18055,25 @@ const TEAM_FLAG_ABBREVIATIONS = new Set(['R*', 'G*', 'B*', 'P*']);
 // the two halves are spelled out. The slot itself still travels as
 // `shotSlot`, which is the same idea under bzo's own name.
 //
-// The direction: bzfs sends a velocity and bzo a unit direction, because the
-// speed is the world's rather than the shot's.
+// The velocity: bzfs sends the one the shooter fired with and leaves each
+// screen to make of it what the flag says, where bzo sends the result, a
+// heading and a speed (`getShotFlight`). A missile's speed is the world's, so it
+// is left to the client, which knows the target's.
 //
 // And when: `dt` is how long ago it was fired, so a shot that reached this
 // proxy late is drawn from where it started rather than from now.
+// The pilot each bzo browser on a target flies, by target and player id.
+// MsgAutoPilot carries only on or off, so a native client says "Roger" for
+// every autopilot; a browser that came through this server told it which
+// pilot, and every session on that target can name it.
+const proxyPilotNames = new Map();
+
 function proxyShot(shot, ricochetAll) {
   const velocity = { x: shot.velocity[0], y: shot.velocity[2], z: -shot.velocity[1] };
-  const speed = Math.hypot(velocity.x, velocity.y, velocity.z) || 1;
   const position = proxyPosition(shot.pos);
   const flag = shot.flag || null;
+  const effects = getShotEffects(flag);
+  const flight = getShotFlight(velocity, effects, null) || { x: 0, y: 0, z: 0, speed: 0 };
   return {
     type: 'shotBegin',
     id: `${shot.player}-${shot.id}`,
@@ -18509,9 +18082,10 @@ function proxyShot(shot, ricochetAll) {
     y: round2(position.y),
     z: round2(position.z),
     shotSlot: shot.slot,
-    dirX: round3(velocity.x / speed),
-    dirY: round3(velocity.y / speed),
-    dirZ: round3(velocity.z / speed),
+    dirX: round3(flight.x),
+    dirY: round3(flight.y),
+    dirZ: round3(flight.z),
+    ...(effects.guided ? {} : { speed: round2(flight.speed) }),
     flag,
     ricochet: shotRicochets(flag, ricochetAll),
     // A beam's path is walked by whoever owns the simulation, and that is the
@@ -18781,7 +18355,7 @@ async function handleProxyConnection(ws, req, request) {
     return;
   }
   if (ws.readyState !== ws.OPEN) return;
-  const options = { watch: kind === 'watch', callsign: allowed.callsign };
+  const options = { watch: kind === 'watch', callsign: allowed.callsign, guest: allowed.guest === true };
   const cookies = parseCookies(req.headers.cookie);
   // A login held for this target, if the browser has just been through one.
   // Taken rather than read: the token is answered once whatever happens next.
@@ -18802,10 +18376,18 @@ async function handleProxyConnection(ws, req, request) {
       || (pendingLogin
         ? pendingLogin.callsign
         : (loginSession ? loginSession.callsign : `bzo-view-${nextProxyViewerNumber++}`)),
-    globalCallsign: pendingLogin
+    // A guest is unregistered by construction, whatever the browser signed
+    // in as here.
+    globalCallsign: options.guest ? null : (pendingLogin
       ? pendingLogin.callsign
-      : (loginSession ? loginSession.callsign : null),
-    token: pendingLogin ? pendingLogin.token : '',
+      : (loginSession ? loginSession.callsign : null)),
+    token: options.guest || !pendingLogin ? '' : pendingLogin.token,
+  };
+  // What this connection learns about the target's guests, where it is one:
+  // a spawn or a refusal is as good an answer as a probe's (`noteGuest`).
+  const unregistered = !viewer.token && viewer.globalCallsign === null;
+  const noteGuest = (fact) => {
+    if (unregistered && target) bzfsWorlds.noteGuest(target.displayHost, target.displayPort, fact);
   };
   log(`[PROXY] ${key}: viewer "${viewer.callsign}" connecting`
     + ` to ${target.host}:${target.port} as ${team}${bot ? ' [BOT]' : ''}`
@@ -19016,7 +18598,10 @@ async function handleProxyConnection(ws, req, request) {
       const player = session.state.players.get(spawn.id);
       if (!player) return;
       announcedAlive.set(spawn.id, true);
-      if (spawn.id === session.playerId) selfAlive = true;
+      if (spawn.id === session.playerId) {
+        selfAlive = true;
+        noteGuest({ spawn: 'yes', spawnDetail: '' });
+      }
       send({
         type: 'alive',
         player: proxyPlayerRecord(player, session.state.motion.get(spawn.id)),
@@ -19076,7 +18661,7 @@ async function handleProxyConnection(ws, req, request) {
     session.on('autopilot', ({ id, on }) => {
       const callsign = session.state.players.get(id)?.callsign ?? id;
       log(`[PROXY] ${key}: "${callsign}" autopilot ${on ? 'on' : 'off'}`);
-      send({ type: 'autopilot', playerId: String(id), on });
+      send({ type: 'autopilot', playerId: String(id), on, pilot: proxyPilotNames.get(`${key}#${id}`) });
     });
 
     session.on('pause', ({ id, paused }) => {
@@ -19299,6 +18884,7 @@ async function handleProxyConnection(ws, req, request) {
     });
 
     ws.on('close', () => {
+      proxyPilotNames.delete(`${key}#${session.playerId}`);
       for (const shot of shotsInFlight.values()) clearTimeout(shot.expiry);
       shotsInFlight.clear();
     });
@@ -19345,12 +18931,19 @@ async function handleProxyConnection(ws, req, request) {
 
     session.on('playerLeft', (player) => {
       announcedAlive.delete(player.id);
+      proxyPilotNames.delete(`${key}#${player.id}`);
       send({ type: 'playerLeft', id: String(player.id) });
     });
     session.on('teams', (teams) => {
       send({ type: 'teamUpdate', teams: proxyTeamScores(teams) });
     });
     session.on('message', (message) => {
+      if (message.from === session.playerId) noteGuest({ chat: 'yes', chatDetail: '' });
+      else if (message.from === SERVER_PLAYER) {
+        const reply = guestReply(message.text);
+        if (reply?.spawn === 'no') noteGuest({ spawn: 'no', spawnDetail: reply.detail });
+        if (reply?.chat) noteGuest({ chat: reply.chat, chatDetail: reply.detail });
+      }
       send({
         type: 'message',
         src: proxyChatSource(message.from),
@@ -19527,9 +19120,9 @@ async function handleProxyConnection(ws, req, request) {
       const x = Number(message.x) || 0;
       const y = Number(message.y) || 0;
       const z = Number(message.z) || 0;
-      // A direction converts the way a position does, being a difference of
-      // two of them (`proxyOutboundMotion`).
-      const dir = [Number(message.dirX) || 0, -(Number(message.dirZ) || 0), Number(message.dirY) || 0];
+      // A velocity converts the way a position does, being a difference of
+      // two of them over time (`proxyOutboundMotion`).
+      const velocity = [Number(message.vx) || 0, -(Number(message.vz) || 0), Number(message.vy) || 0];
       const slot = nextShotSlot;
       nextShotSlot = (nextShotSlot + 1) % maxShots;
       const firingFlag = proxyCarriedFlagType(session) || '';
@@ -19545,14 +19138,10 @@ async function handleProxyConnection(ws, req, request) {
       session.sendShot({
         slot,
         pos: origin,
-        // Upstream adds the tank's own velocity here (LocalPlayer.cxx:1250)
-        // and bzo does not, so a proxied player's shells are a little slow on
-        // a native screen while the shooter is moving. Left alone rather than
-        // copied: upstream then zeroes the vertical component again unless
-        // `_shotsKeepVerticalV`, and getting half of that pair right is worse
-        // than neither. The target's speed check is an upper bound, so the
-        // slower shot passes it.
-        velocity: wave ? [0, 0, 0] : dir.map((component) => component * shotSpeed),
+        // The browser's own, which is upstream's: the tank's velocity plus
+        // the target's `_shotSpeed` along the barrel, level unless the target
+        // keeps vertical velocity (`getMuzzleVelocity`).
+        velocity: wave ? [0, 0, 0] : velocity,
         // The flag the *target* has on record for us, not the one the browser
         // thinks it is holding and not nothing.
         //
@@ -19671,6 +19260,10 @@ async function handleProxyConnection(ws, req, request) {
     // records and relays that it is (`bzfs.cxx:2820`).
     if (message.type === 'autopilot') {
       if (!playingTeam) return;
+      // Kept through the release too, which names the pilot letting go.
+      if (message.on === true && typeof message.pilot === 'string' && message.pilot) {
+        proxyPilotNames.set(`${key}#${session.playerId}`, sanitizeMotto(message.pilot));
+      }
       session.sendAutoPilot(message.on === true);
       return;
     }
@@ -20418,6 +20011,12 @@ function acceptConnection(ws, req) {
             player.rotationSpeed = rs;
             player.verticalVelocity = vv;
             player.slideDirection = d; // Store slide direction (undefined if not sliding)
+            // The accepted move as the shot check reads it: a shot the client
+            // fires next inherits the velocity these numbers state
+            // (`packetVelocity`), whatever the server's own reading of the jump.
+            player.lastMoveFields = {
+              r, fs, d, vv, vx, vz, air: Number(message.air) === 1 ? 1 : 0, at: now,
+            };
             if (hasAirVelocity) {
               player.airVelocityX = vx;
               player.airVelocityZ = vz;
@@ -20485,33 +20084,34 @@ function acceptConnection(ws, req) {
         }
 
         case 'shoot': {
-          // message: { type: 'shot', x, y, z, dirX, dirZ }
+          // message: { type: 'shoot', x, y, z, vx, vy, vz }
           const now = Date.now();
           const shotRejection = getShotRejection(player, message.x, message.y, message.z, now);
           if (shotRejection
             && reportShotRejection(player, shotRejection.reason, message, shotRejection.fatal)) {
             break;
           }
-          const rawDirX = Number(message.dirX);
-          const rawDirZ = Number(message.dirZ);
-          const rawDirY = Number(message.dirY);
-          if (!Number.isFinite(rawDirX) || !Number.isFinite(rawDirZ)) {
-            reportShotRejection(player, 'shot direction is not a finite number', message, true);
+          const velocity = { x: Number(message.vx), y: Number(message.vy), z: Number(message.vz) };
+          if (!Number.isFinite(velocity.x) || !Number.isFinite(velocity.y) || !Number.isFinite(velocity.z)) {
+            reportShotRejection(player, 'shot velocity is not a finite number', message, true);
             break;
           }
-          const planarLength = Math.hypot(rawDirX, rawDirZ);
-          if (planarLength < 1e-6) {
-            reportShotRejection(player, `shot direction has no horizontal component (${planarLength})`, message, true);
+          const shotFlag = getShotFlagFor(player);
+          const shotEffects = getShotEffects(shotFlag);
+          // LocalPlayer::fireShot makes a shock wave stationary whatever the
+          // tank was doing, and so does the flight below; there is no speed of
+          // its own to check.
+          const velocityRejection = shotEffects.shockwave ? null : getShotVelocityRejection(player, velocity, now);
+          if (velocityRejection && reportShotRejection(player, velocityRejection, message, false)) break;
+          const flight = getShotFlight(velocity, shotEffects, GAME_CONFIG.SHOT_SPEED);
+          if (!flight) {
+            reportShotRejection(player, 'shot velocity has no direction', message, true);
             break;
           }
-          const shotDirX = rawDirX / planarLength;
-          const shotDirZ = rawDirZ / planarLength;
-          const shotDirY = Number.isFinite(rawDirY) ? rawDirY : 0;
           // A shot allowed past the slot check in warning mode has no slot left
           // to take. It flies with slot -1: the reload bar ignores it, and the
           // log above already says the client thought it had one.
           const shotSlot = getAvailableShotSlot(player, now);
-          const shotFlag = getShotFlagFor(player);
           occupyShotSlot(player, shotSlot, shotFlag, now);
           const id = (++projectileIdCounter).toString();
           const proj = new Projectile(
@@ -20521,14 +20121,15 @@ function acceptConnection(ws, req) {
             message.x,
             message.y,
             message.z,
-            shotDirX,
-            shotDirZ,
-            shotDirY,
+            flight.x,
+            flight.z,
+            flight.y,
             // ShotPath::FiringInfo (ShotPath.cxx:46): an unzoned Phantom Zone
             // tank fires ordinary shells, so the flag a shot is fired under is
             // not always the flag its shooter is holding.
             shotFlag,
-            now
+            now,
+            flight.speed
           );
           projectiles.set(id, proj);
           // A beam is already everywhere it is going to be, so its path is walked
@@ -20540,6 +20141,7 @@ function acceptConnection(ws, req) {
             `[shotBegin] id=${proj.id} player=${proj.playerId} slot=${proj.shotSlot}` +
             ` pos=${formatShotPoint(proj.x, proj.y, proj.z)}` +
             ` dir=(${proj.dirX.toFixed(4)},${proj.dirY.toFixed(4)},${proj.dirZ.toFixed(4)})` +
+            ` speed=${proj.speed.toFixed(2)}` +
             ` flag=${proj.flag || 'none'}${proj.ricochet ? ' ricochet' : ''}` +
             (proj.beam ? ` beam=${proj.segments.length}seg end=${proj.endReason}` : '') +
             (proj.shockwave ? ` shockwave life=${proj.lifetimeSeconds.toFixed(3)}s` : '')
@@ -20555,6 +20157,7 @@ function acceptConnection(ws, req) {
             dirX: proj.dirX,
             dirY: proj.dirY,
             dirZ: proj.dirZ,
+            speed: proj.speed,
             flag: proj.flag,
             ricochet: proj.ricochet,
             segments: proj.segments,
@@ -21267,6 +20870,7 @@ function acceptConnection(ws, req) {
 // for -- until somebody arrives.
 const { EventEmitter } = require('node:events');
 const { planBotFill, pickBotToRemove, BotDriver } = require('./server/bots.cjs');
+const { packetVelocity } = require('./server/drive.cjs');
 
 const BOT_TICK_SECONDS = 0.05;
 const BOT_FAKE_REQUEST = Object.freeze({
@@ -21278,7 +20882,8 @@ const BOT_FAKE_REQUEST = Object.freeze({
 let AUTOPILOT_MODULE = null;
 const bots = new Map();
 let botFill = Math.max(0, Math.floor(Number(serverConfig.bots?.fill) || 0));
-let botFillPilot = typeof serverConfig.bots?.pilot === 'string' ? serverConfig.bots.pilot : 'ace';
+// `bots.pilot`, or the pilots' own default once they load.
+let botFillPilot = typeof serverConfig.bots?.pilot === 'string' ? serverConfig.bots.pilot : null;
 let botsIdle = false;
 let nextBotNumber = 1;
 
@@ -21311,8 +20916,9 @@ function isRealPlayer(player) {
   return !bots.has(player.id) && !player.bot;
 }
 
-// A remote tank's motion now, by the same model the client draws it with.
-function getBotViewMotion(player, flagType, now) {
+// A tank's motion now, from its last accepted move, by the same model the
+// client draws it with.
+function getPlayerMotion(player, flagType, now) {
   const airborne = player.jumpDirection !== null && player.jumpDirection !== undefined;
   const gravity = hasAirControl(flagType) ? GAME_CONFIG.WINGS_GRAVITY : GAME_CONFIG.GRAVITY;
   if (airborne) {
@@ -21380,7 +20986,7 @@ function buildBotView(bot, self) {
       x: position.x,
       y: position.y,
       z: position.z,
-      ...getBotViewMotion(other, flag?.type ?? null, now),
+      ...getPlayerMotion(other, flag?.type ?? null, now),
       team: other.team,
       alive: other.alive,
       paused: other.paused,
@@ -21531,6 +21137,12 @@ function addBot(pilotId = botFillPilot, team = PLAYER_TEAM.AUTOMATIC, { auto = f
       state: () => ({
         alive: player.alive && player.joined, x: player.x, y: player.y, z: player.z, rotation: player.rotation,
       }),
+      // The flag it drives by, as a client's tank does: Burrow takes it under,
+      // Agility gives it the burst, Wings flies it.
+      flag: () => {
+        const flag = getPlayerFlag(player.id);
+        return flag ? { type: flag.type ?? null, zoned: flag.zoned === true } : null;
+      },
       view: (self) => buildBotView(bot, self),
       send: (message) => socket.say(message),
       act: (self) => botCheckEnvironment(bot, self),
@@ -21642,6 +21254,7 @@ setInterval(() => {
 
 import('./public/autopilot.mjs').then((module) => {
   AUTOPILOT_MODULE = module;
+  botFillPilot = botFillPilot ?? module.DEFAULT_PILOT;
   if (botFill > 0) log(`[BOT] fill ${botFill} with ${botFillPilot}`);
   scheduleBotReconcile();
 }).catch((err) => logError(`[BOT] pilots did not load: ${err.message}`));

@@ -959,7 +959,8 @@ nor bzo's, and is read and dropped like any other unhandled token.)
 ## Map physics
 
 `_tankSpeed`, `_tankAngVel`, `_gravity`, `_jumpVelocity`, `_shotSpeed`,
-`_shotRange`, `_shotRadius`, `_reloadTime` and `_rejoinTime` are
+`_shotRange`, `_shotRadius`, `_shotsKeepVerticalVelocity`, `_reloadTime` and
+`_rejoinTime` are
 `StateDatabase::Locked`
 upstream (`globalDBItems`, `src/common/global.cxx`), which means the server
 owns the value and every client is told it. That is already how bzo works, so

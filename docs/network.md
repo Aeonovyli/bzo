@@ -95,7 +95,7 @@ omitted rather than sent null.
 | `m` | `x`,`y`,`z`,`r`,`fs`,`rs`,`vv`,`vx`,`vz`,`dt`,`sdt`,`ct`,`d?` | motion. See below |
 | `tp` | `fromFaceId`,`toFaceId`,`x`,`y`,`z`,`r`,`vv`,`vx`,`vz`,`jd` | the client believes it crossed a teleporter face |
 | `zone` | `fromFaceId`,`x`,`y`,`z`,`r` | a Phantom Zone tank crossed a portal and flipped instead of moving |
-| `shoot` | `x`,`y`,`z`,`dirX`,`dirY`,`dirZ` | fire. The server allots the slot and owns the flight |
+| `shoot` | `x`,`y`,`z`,`vx`,`vy`,`vz` | fire, with upstream's velocity: the tank's plus the shot speed along the barrel, level unless `SHOTS_KEEP_VERTICAL_VELOCITY`, before any flag scales it. The server checks it against the tank's velocity from the move before it, allots the slot and owns the flight |
 | `grabFlag` | `index` | ask for the flag at that roster index |
 | `dropFlag` | -- | drop what is carried |
 | `captureFlag` | `team` | the base team whose base the carrier is standing on |
@@ -135,7 +135,7 @@ omitted rather than sent null.
 | `playerJoined` / `playerLeft` / `playerUpdated` / `playerList` | player records | roster. A record carries `bzid` only to an admin -- `broadcastPlayerRecord` sends two payloads, and `getState` omits the field entirely for everyone else |
 | `alive` | player record | spawn |
 | `killed` | `victimId`, `shooterId`, `projectileId`, plus the hit's own fields | somebody died, and why |
-| `shotBegin` | `id`, `playerId`, `x`,`y`,`z`, `shotSlot`, `dirX`,`dirY`,`dirZ`, `flag`, `ricochet`, `segments`, `target`, `createdAt` | a shot exists |
+| `shotBegin` | `id`, `playerId`, `x`,`y`,`z`, `shotSlot`, `dirX`,`dirY`,`dirZ`, `speed`, `flag`, `ricochet`, `segments`, `target`, `createdAt` | a shot exists; `dir` is a unit heading and `speed` what the flag made of the fired velocity (absent on a proxied Guided Missile, which flies at the world's) |
 | `shotEnd` | `id`, `reason`, `x`,`y`,`z` | it stopped, and where |
 | `reload` | -- | reload the page: the server is restarting, usually for a map change |
 | `flagUpdate` | `flags` | the whole flag array |
@@ -332,7 +332,8 @@ costs a seat. A bzfs sends its BZDB only from `addPlayer`, after a player has
 actually been accepted (`bzfs.cxx:2361-2365`), so `_tankSpeed`, `_gravity`
 and every other world variable can only be read by briefly being on the
 server: one observer slot named `bzo-import`, one join and one part in
-everybody's chat, then `MsgExit`. What comes back is written into the
+everybody's chat, then `MsgExit`. The same visit asks what a guest may do
+there (docs/proxy.md, "Guest access"). What comes back is written into the
 exported map as `-set` lines -- only the values that differ from upstream's
 own defaults (`server/bzdb-defaults.cjs`, generated from `globalDBItems` by
 `scripts/gen-bzdb-defaults.mjs`), and including names bzo does not read

@@ -38,12 +38,13 @@ const CONFIG = {
   MAX_BUMP_HEIGHT: 0.33,
 };
 
-function makeDriver(think) {
+function makeDriver(think, flag = null) {
   const sent = [];
   const driver = new BotDriver({
     pilot: { think },
     env: {
       config: () => CONFIG,
+      flag: () => flag,
       colliders: () => [],
       topOf: () => 0,
       state: () => ({ alive: true, x: 0, y: 0, z: 0, rotation: 0 }),
@@ -95,6 +96,31 @@ function makeDriver(think) {
   const shoot = sent.findIndex((message) => message.type === 'shoot');
   assert.ok(shoot > 0 && sent[shoot - 1].type === 'm', 'a move rides ahead of the shot');
   assert.ok(Math.abs(sent[shoot].z + 3) < 1e-9 && Math.abs(sent[shoot].y - 1.57) < 1e-9);
+  assert.deepEqual([sent[shoot].vx, sent[shoot].vy, sent[shoot].vz].map((v) => Math.round(v * 1e6) / 1e6),
+    [-0, 0, -100], 'a standing tank fires at the shot speed');
+}
+
+// A moving tank's shot carries its velocity on top of the shot speed, as the
+// move riding ahead of it reports it.
+{
+  const { driver, sent } = makeDriver(() => ({ speed: 1, rotation: 0, fire: false }));
+  for (let i = 0; i < 40; i++) driver.tick(0.05);
+  driver.fire();
+  const shot = sent.at(-1);
+  const move = sent.findLast((message) => message.type === 'm');
+  assert.equal(shot.type, 'shoot');
+  assert.ok(Math.abs(shot.vz - (-100 - (move.fs * CONFIG.TANK_SPEED))) < 1e-9, `shot vz ${shot.vz}`);
+  assert.equal(shot.vy, 0, 'level unless the world keeps vertical velocity');
+}
+
+// A bot drives by the same step as a browser's tank, flag and all: holding
+// Burrow it sinks into the ground, and turns slower once it is there.
+{
+  const { driver } = makeDriver(() => ({ speed: 0, rotation: 1 }), { type: 'BU', zoned: false });
+  for (let i = 0; i < 20; i++) driver.tick(0.05);
+  assert.ok(driver.y < -1, `burrowed to ${driver.y.toFixed(2)}`);
+  const turnRate = driver.self().turnRate;
+  assert.ok(turnRate < CONFIG.TANK_ROTATION_SPEED * 0.6, `turns at ${turnRate.toFixed(2)} underground`);
 }
 
 console.log('bot tests passed');

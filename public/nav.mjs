@@ -42,6 +42,20 @@ const BUCKET = 32;
 // A tank standing still, turned any way: a circle a little under its half
 // length, which is what a corridor has to fit for a tank to turn in it.
 const STAND_RADIUS = 1.6;
+// A tank driving, rather than standing, sweeps out to its half length as it
+// turns. A node with something solid inside that is tight -- passable, as a
+// standing tank fits, but a corner a tank turning round it catches and
+// wedges on, as on the ribs of hix's support trusses -- and a route pays to
+// pass through one, so it goes round with room where it has the choice.
+const TIGHT_RADIUS = 3;
+const TIGHT_COST = 0.25;
+// Straightening a route: how far ahead it looks, and how often a line is
+// sampled.
+const SMOOTH_LOOKAHEAD = 40;
+const STRAIGHT_SAMPLE = 1;
+// The room a straightened leg keeps from anything solid either side of it:
+// the tight radius, so it is no closer than the grid route allows itself.
+const STRAIGHT_CLEARANCE = TIGHT_RADIUS;
 const STEP_UP = 0.33;
 // Flights: the forward speeds tried, the step an arc is flown in, how far
 // one can reach and how long it can last, the tank's height against what it
@@ -51,6 +65,9 @@ const STEP_UP = 0.33;
 const FLIGHT_SPEEDS = [1, 0.6, 0.3];
 const FLIGHT_STRIDE = 2;
 const FLIGHT_STEP = NAV_CELL / 2;
+const FLIGHT_MAX_STEP_SECONDS = 0.1;
+// How far above an edge a jumping tank's nose has to be as it gets there.
+const JUMP_NOSE_CLEARANCE = 1;
 const FLIGHT_REACH = 120;
 const FLIGHT_MAX_SECONDS = 6;
 const TANK_TALL = 2;
@@ -221,6 +238,17 @@ export function buildNavGraph(world) {
   // time a search reaches it and kept: the jump scan is the expensive part of
   // a search, and the world does not change under it.
   const moveCache = new Map();
+  // Whether a node is tight, asked the first time a move onto it is costed.
+  const tightCache = new Map();
+  const tight = (id) => {
+    let known = tightCache.get(id);
+    if (known === undefined) {
+      const n = nodes[id];
+      known = Boolean(findTankObstacle(near(n.x, n.z), n.x, n.y + 0.01, n.z, { radius: TIGHT_RADIUS }));
+      tightCache.set(id, known);
+    }
+    return known;
+  };
   const moves = (node) => {
     let cached = moveCache.get(node.id);
     if (!cached) {
@@ -242,7 +270,7 @@ export function buildNavGraph(world) {
           if (rise > STEP_UP || rise < -STEP_UP) continue;
           if (diagonal && !(levelNear(column(node.cx + dx, node.cz), node.y)
             && levelNear(column(node.cx, node.cz + dz), node.y))) continue;
-          out.push({ to: id, cost: step / tankSpeed, jump: false });
+          out.push({ to: id, cost: (step / tankSpeed) + (tight(id) ? TIGHT_COST : 0), jump: false });
         }
       }
       // Across a gap: a tank is held up while any of its box is over a
@@ -308,7 +336,10 @@ export function buildNavGraph(world) {
         // from where it stands.
         const launch = jumping ? 0 : edge - (NAV_CELL / 2) + JUMP_FRONT;
         const vy = jumping ? jump.velocity : 0;
-        const dt = FLIGHT_STEP / u;
+        // A step across, or a tenth of a second where that is shorter: a
+        // slow jump climbs a couple of metres in one step across, which is
+        // clean over a floor slab hanging above the takeoff.
+        const dt = Math.min(FLIGHT_STEP / u, FLIGHT_MAX_STEP_SECONDS);
         let previous = node.y;
         let landed = null;
         let time = 0;
@@ -326,7 +357,14 @@ export function buildNavGraph(world) {
             time = t;
             break;
           }
-          if (y < -1 || isBlocked(at.solid, y)) break;
+          // The tank's front too, half a tank ahead of where its centre is,
+          // and with room to spare: a jump onto a box whose centre clears
+          // the edge can still meet the box's face with its nose, and one
+          // that clears it by a hair from the planned spot does not from a
+          // pace further on, which is as close as a pilot takes off.
+          const nose = columnAt(launch + (u * t) + JUMP_FRONT);
+          if (y < -1 || isBlocked(at.solid, y)
+            || (vy - (gravity * t) > 0 && isBlocked(nose.solid, y - JUMP_NOSE_CLEARANCE))) break;
           previous = y;
         }
         if (landed === null || landed === node.id) continue;
@@ -448,6 +486,7 @@ export function buildNavGraph(world) {
       if (!best || !Number.isFinite(best.total)) return null;
       id = best.move.to;
       route.push({
+        id,
         x: nodes[id].x,
         y: nodes[id].y,
         z: nodes[id].z,
@@ -459,7 +498,67 @@ export function buildNavGraph(world) {
     return route;
   };
 
-  return { nodes, nodeAt, findRoute, moves };
+  // Whether a tank drives straight from `a` to `b` on one level: every point
+  // along the line is over a column with a node on that level -- floor, room
+  // to stand -- and none of them is tight. The line itself is enough: a tank
+  // leans out over an edge and stays up. A line through open floor, then,
+  // which is what a grid route across a base or a field zigzags over.
+  const straightWalk = (a, b) => {
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const steps = Math.ceil(Math.hypot(dx, dz) / STRAIGHT_SAMPLE);
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const x = a.x + (dx * t);
+      const z = a.z + (dz * t);
+      const ids = column(Math.round((x - origin) / NAV_CELL), Math.round((z - origin) / NAV_CELL));
+      if (!ids) return false;
+      const level = ids.find((id) => Math.abs(nodes[id].y - a.y) <= STEP_UP);
+      if (level === undefined) return false;
+      // Clear where the line actually runs, not at the column's centre, which
+      // can be two units off it -- enough to shave a rib a column test passes.
+      if (findTankObstacle(near(x, z), x, a.y + 0.01, z, { radius: STRAIGHT_CLEARANCE })) return false;
+    }
+    return true;
+  };
+
+  // A route with the zigzag taken out: from each point kept, on to the
+  // furthest of the next few that a straight drive reaches. A jump, a drive-off
+  // or a gap is kept as planned, and so is the node it leaves from.
+  const smoothRoute = (route, from) => {
+    if (!route || route.length < 2) return route;
+    const startId = nodeAt(from.x, from.y, from.z);
+    let anchor = startId === null ? from : nodes[startId];
+    const out = [];
+    let i = 0;
+    while (i < route.length) {
+      const node = route[i];
+      if (node.jump || node.bridge || node.flight) {
+        out.push(node);
+        anchor = node;
+        i++;
+        continue;
+      }
+      let j = i;
+      for (let k = i + 1; k < Math.min(route.length, i + SMOOTH_LOOKAHEAD); k++) {
+        const next = route[k];
+        if (next.jump || next.bridge || next.flight) break;
+        // Where the grid route went close by something it is kept: its many
+        // short legs are a curve round it, and a straight leg there is a
+        // sharp corner a tank at speed swings wide of, into what it was
+        // going round.
+        if (tight(route[k - 1].id) || tight(next.id)) break;
+        if (Math.abs(next.y - anchor.y) > STEP_UP || !straightWalk(anchor, next)) break;
+        j = k;
+      }
+      out.push(route[j]);
+      anchor = route[j];
+      i = j + 1;
+    }
+    return out;
+  };
+
+  return { nodes, nodeAt, findRoute, smoothRoute, moves };
 }
 
 class MinHeap {

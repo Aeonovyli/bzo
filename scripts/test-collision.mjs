@@ -1085,4 +1085,29 @@ assert.ok(Math.abs(trapped.x) < 1, 'and leaves the shot inside the corridor');
   assert.ok(Math.abs(ricochet.y) > 0.99, 'reflecting off the floor uses the floor\'s own normal');
 }
 
+// A bare point -- a radius of 0 -- inside a rectangle is inside it
+// (Intersect.cxx:125), so a pilot's sight line meets a pyramid rather than
+// passing straight through it.
+for (const side of [client, server]) {
+  assert.equal(side.testOrigRectCircle(1, 1, 0.2, -0.3, 0), true);
+  assert.equal(side.testOrigRectCircle(1, 1, 1.5, 0, 0), false);
+}
+{
+  const pyramid = { type: 'pyramid', name: 'p', x: 0, z: 0, w: 4, d: 4, h: 18, baseY: 0, rotation: 0 };
+  assert.ok(client.findShotSegmentImpact([pyramid], { x: 0, y: 1, z: 10 }, { x: 0, y: 1, z: -10 }, 0),
+    'a radius-0 ray through a pyramid hits it');
+}
+
+// The world's border: a shoot-through barrier and a drive-through wall a side,
+// none on a map with no walls, after the map's own obstacles.
+{
+  const border = client.buildWorldBorderColliders(400);
+  assert.equal(border.length, 8);
+  assert.equal(border.filter((c) => c.shootThrough && c.h === 1000).length, 4, 'four tank barriers');
+  assert.equal(border.filter((c) => c.driveThrough && c.h === client.WORLD_WALL_HEIGHT).length, 4, 'four shot walls');
+  assert.ok(border.every((c) => Math.max(Math.abs(c.x), Math.abs(c.z)) === 202), 'just outside the map');
+  assert.deepEqual(client.buildWorldBorderColliders(400, true), []);
+  const box = { type: 'box', x: 0, z: 0, w: 1, d: 1, h: 1 };
+  assert.equal(client.buildCollisionColliders([box], 400)[0], box);
+}
 console.log(`collision geometry tests passed (${checked} fuzz samples, ${solidSamples} solid, seed ${SEED})`);

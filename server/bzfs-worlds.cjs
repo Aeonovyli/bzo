@@ -51,6 +51,48 @@ function recheckMs(worldHash) {
   return /^t/i.test(worldHash || '') ? TEMP_RECHECK_MS : RECHECK_MS;
 }
 
+// What an unregistered player may do there -- chat, spawn -- is asked during
+// the one join a server costs (`enterAndProbe` in remote-world-import.cjs) and
+// trusted for a month: an operator changes a groups file rarely, and a changed
+// list entry asks again sooner. An answer that did not come is tried again
+// after a week rather than every day, since the usual reason is a server that
+// never had nobody on it.
+const GUEST_RECHECK_MS = 30 * 24 * 60 * 60 * 1000;
+const GUEST_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+// A visit made only for these questions is a join nobody needed for a world,
+// so they are spread thin: one every ten minutes, which takes a list of a few
+// hundred servers a couple of days to go round. A server whose turn comes too
+// soon is simply asked on a later day's check.
+const GUEST_VISIT_GAP_MS = 10 * 60 * 1000;
+
+function isGuestAnswer(value) {
+  return value === 'yes' || value === 'no';
+}
+
+// Whether a guest fact is worth asking about again: never asked, a known
+// answer gone stale, or an unanswered one due another try.
+function guestFactDue(guest, field, now, listChanged) {
+  const at = guest?.[`${field}At`];
+  if (!at) return true;
+  if (listChanged) return true;
+  return now - at > (isGuestAnswer(guest[field]) ? GUEST_RECHECK_MS : GUEST_RETRY_MS);
+}
+
+// A new answer over an old one. A silence does not overwrite something a
+// server actually said, but it is dated, so the retry waits its week.
+function mergeGuest(previous, fresh, now) {
+  const next = { ...(previous || {}) };
+  for (const field of ['chat', 'spawn']) {
+    if (fresh?.[field] === undefined) continue;
+    if (isGuestAnswer(fresh[field]) || !isGuestAnswer(next[field])) {
+      next[field] = fresh[field];
+      next[`${field}Detail`] = fresh[`${field}Detail`] || '';
+    }
+    next[`${field}At`] = now;
+  }
+  return next;
+}
+
 // A server that refused, timed out or sent something unusable is not asked
 // again straight away. Shorter than `RECHECK_MS` because being unreachable is
 // usually the temporary one of the two -- but doubling per consecutive
@@ -104,12 +146,14 @@ function serverKey(host, port) {
 }
 
 // `deps`: `queryServerStatus(host, port, timeout)` for the hash dial,
-// `importWorld(host, port)` for the download-and-register, `hasPicture(host,
+// `importWorld(host, port, guest)` for the download-and-register, with the
+// guest questions to ask while joined; `probeGuestAccess(host, port, { spawn })`
+// for those questions alone, when the world needs no download; `hasPicture(host,
 // port, worldHash)` for whether a picture of that world is held -- the import
 // itself is swept after two hours, the picture is not -- and `log`/`logError`.
 function createBzfsWorldTracker(deps) {
   const {
-    statePath, queryServerStatus, importWorld, hasPicture, onPassComplete, log, logError,
+    statePath, queryServerStatus, importWorld, probeGuestAccess, hasPicture, onPassComplete, log, logError,
   } = deps;
   // `host:port` -> { worldHash, fingerprint, checkedAt, error, errorAt }
   const records = new Map();
@@ -119,6 +163,7 @@ function createBzfsWorldTracker(deps) {
   let listed = new Map();
   let loaded = false;
   let lastImportAt = 0;
+  let lastGuestVisitAt = 0;
   let lastPassCompleteAt = 0;
   let timer = null;
   let writeTimer = null;
@@ -244,6 +289,16 @@ function createBzfsWorldTracker(deps) {
       return;
     }
 
+    // The guest questions this visit should ask, if it makes one. Spawning is
+    // only ever tried on a server with nobody on it -- player or observer --
+    // so no one sees a tank come and go; a busy server waits for an empty
+    // moment, or for an admin's real visit to answer it (`noteGuest`).
+    const listChanged = Boolean(record.fingerprint) && record.fingerprint !== fingerprint;
+    const empty = status.players === 0 && status.observers === 0 && !status.full;
+    const wantChat = guestFactDue(record.guest, 'chat', now, listChanged);
+    const wantSpawn = empty && guestFactDue(record.guest, 'spawn', now, listChanged);
+    const guestQuestions = wantChat || wantSpawn ? { chat: true, spawn: wantSpawn } : null;
+
     // The whole point of the dial: a world that has not changed needs no
     // download, however long ago the picture was drawn.
     // A record from before variables were kept has none to show, which only
@@ -252,8 +307,31 @@ function createBzfsWorldTracker(deps) {
     if (status.worldHash && status.worldHash === record.worldHash
       && hasPicture(server.host, server.port, record.worldHash)
       && Array.isArray(record.variables)) {
+      let guest = record.guest;
+      if (guestQuestions && probeGuestAccess && now - lastGuestVisitAt >= GUEST_VISIT_GAP_MS) {
+        // A join is a join, so it is spaced like an import is too.
+        if (now - lastImportAt < IMPORT_GAP_MS) {
+          records.set(key, { ...record, dueNow: true });
+          return;
+        }
+        lastImportAt = now;
+        lastGuestVisitAt = now;
+        try {
+          guest = mergeGuest(guest, await probeGuestAccess(server.host, server.port, guestQuestions), now);
+        } catch (error) {
+          // Dated all the same, so a server that will not take the join is
+          // asked again in a week rather than on every check.
+          guest = mergeGuest(guest, {
+            chat: 'unknown',
+            chatDetail: error.message,
+            ...(guestQuestions.spawn ? { spawn: 'unknown', spawnDetail: error.message } : {}),
+          }, now);
+        }
+        log(`[WORLDS] ${key} guests: chat ${guest.chat || '?'}`
+          + `${guestQuestions.spawn ? `, spawn ${guest.spawn || '?'}` : ''}`);
+      }
       records.set(key, {
-        ...record, fingerprint, checkedAt: now, error: null, errorAt: null, dueNow: false,
+        ...record, guest, fingerprint, checkedAt: now, error: null, errorAt: null, dueNow: false,
       });
       save();
       return;
@@ -270,7 +348,7 @@ function createBzfsWorldTracker(deps) {
     try {
       const {
         safeMapName, byteLength, compressedSize, uncompressedSize,
-      } = await importWorld(server.host, server.port);
+      } = await importWorld(server.host, server.port, guestQuestions);
       // Downloaded but not registered is a failure however well the transfer
       // went -- a world bzo cannot parse has no picture, and treating it as
       // done would leave it permanently due and re-fetched every tick.
@@ -290,6 +368,7 @@ function createBzfsWorldTracker(deps) {
         worldUncompressed: Number.isFinite(uncompressedSize) ? uncompressedSize : 0,
         // Recorded by `noteImport` during the import just made.
         variables: records.get(key)?.variables || record.variables || [],
+        guest: records.get(key)?.guest || record.guest,
         fingerprint,
         checkedAt: now,
         error: null,
@@ -297,7 +376,10 @@ function createBzfsWorldTracker(deps) {
         failCount: 0,
         dueNow: false,
       });
-      log(`[WORLDS] ${key} world ${status.worldHash || '(unhashed)'} imported as ${safeMapName}`);
+      const guest = records.get(key)?.guest;
+      log(`[WORLDS] ${key} world ${status.worldHash || '(unhashed)'} imported as ${safeMapName}`
+        + (guestQuestions ? `; guests: chat ${guest?.chat || '?'}`
+          + `${guestQuestions.spawn ? `, spawn ${guest?.spawn || '?'}` : ''}` : ''));
     } catch (error) {
       records.set(key, {
         ...record,
@@ -344,7 +426,7 @@ function createBzfsWorldTracker(deps) {
     // `variables` are the world variables that server set away from upstream's
     // defaults, as `[name, value]` pairs; null when the join that carries them
     // was refused, which keeps what an earlier import learned.
-    noteImport(host, port, worldHash, sizes = null, variables = null) {
+    noteImport(host, port, worldHash, sizes = null, variables = null, guest = null) {
       if (!host || !port) return;
       load();
       const key = serverKey(host, port);
@@ -361,11 +443,23 @@ function createBzfsWorldTracker(deps) {
         worldCompressed: sizes?.compressedSize || record.worldCompressed || 0,
         worldUncompressed: sizes?.uncompressedSize || record.worldUncompressed || 0,
         variables: Array.isArray(variables) ? variables : (record.variables || []),
+        guest: guest ? mergeGuest(record.guest, guest, Date.now()) : record.guest,
         checkedAt: Date.now(),
         error: null,
         errorAt: null,
         dueNow: false,
       });
+      save();
+    },
+    // What a real visit learned: a proxied admin who spawned, or was refused.
+    // As good an answer as a probe's, and it cost nobody anything extra.
+    noteGuest(host, port, guest) {
+      if (!host || !port || !guest) return;
+      load();
+      const key = serverKey(host, port);
+      const record = records.get(key);
+      if (!record) return;
+      record.guest = mergeGuest(record.guest, guest, Date.now());
       save();
     },
     start() {
@@ -378,6 +472,8 @@ function createBzfsWorldTracker(deps) {
       if (timer) clearInterval(timer);
       timer = null;
     },
+    // One step of the schedule, as the timer takes it: for a test.
+    tick,
     // Sizes measured off files this server holds -- the reconstructed `.bzw`,
     // the parsed world, its brotli sidecar. Remembered because the files do
     // not last: an import is swept two hours after it was fetched
@@ -423,4 +519,7 @@ module.exports = {
   RECHECK_MS,
   TEMP_RECHECK_MS,
   FAILURE_COOLDOWN_MS,
+  GUEST_RECHECK_MS,
+  GUEST_RETRY_MS,
+  GUEST_VISIT_GAP_MS,
 };

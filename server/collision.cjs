@@ -71,7 +71,10 @@ function origRectPointDistanceSquared(halfW, halfD, localX, localZ) {
 // True when an axis-aligned rectangle centered at the origin intersects a
 // circle of radius r centered at the local point.
 function testOrigRectCircle(halfW, halfD, localX, localZ, radius) {
-  return origRectPointDistanceSquared(halfW, halfD, localX, localZ) < radius * radius;
+  // "circle origin in rect" is a hit whatever the radius (Intersect.cxx:125),
+  // which is what makes a bare point -- a radius of 0 -- inside at all.
+  const distanceSquared = origRectPointDistanceSquared(halfW, halfD, localX, localZ);
+  return distanceSquared === 0 || distanceSquared < radius * radius;
 }
 
 // Tank collision box, matching BZFlag's _tankWidth (2.8) and _tankLength (6.0).
@@ -2578,12 +2581,64 @@ function getSegmentTankHitFraction(from, to, tank, shape = {}) {
   if (near < 0) return ((-b + root) / a) < 0 ? null : 0;
   return near;
 }
+
+// Upstream's border is one WallObstacle a side doing two jobs at once.
+// WallObstacle::inCylinder and inBox ignore height entirely, so it is an
+// infinite half-space that stops a tank at any altitude; makeSegments then
+// ignores a bouncing shot's hit on it above getHeight() (`ignoreHit`) and lets
+// the shot fly over rather than back into the arena. So the wall you can see
+// bounces shots and the invisible barrier above it does not.
+//
+// bzo says that with two colliders a side rather than a special case in the shot
+// path, each doing one of the two jobs and standing aside from the other with one
+// of upstream's own per-obstacle flags:
+//
+//   - the barrier, a thousand units high -- taller than any map bzo has to hold
+//     -- is the tank collider, and is `shootThrough`. It is upstream's wall as
+//     tanks meet it: a height-ignoring half-space with no roof.
+//   - the visible wall, `_wallHeight` tall, is the shot collider, and is
+//     `driveThrough`. It exists to give a shot a height to stop bouncing at.
+//
+// The flag on the visible wall is what makes the split correct rather than what
+// papers over it. Tanks are held by the barrier at the same inner edge, so they
+// never reach the wall, and the wall's roof -- which upstream's WallObstacle does
+// not have at all, `getHitNormal` only ever answering with the plane -- is not a
+// surface any collision code has to reason about.
+//
+// Both flags are the ones a map's `shootthrough` and `drivethrough` keywords
+// set, which is what makes this the compatible way to say it.
+function buildWorldBorderColliders(mapSize, noWalls = false) {
+  if (noWalls) return [];
+  const halfMap = mapSize / 2;
+  const thickness = 4;
+  const barrierHeight = 1000;
+  const span = mapSize + (thickness * 2);
+  const sides = [
+    { name: 'north', x: 0, z: -halfMap - (thickness / 2), w: span, d: thickness },
+    { name: 'south', x: 0, z: halfMap + (thickness / 2), w: span, d: thickness },
+    { name: 'east', x: halfMap + (thickness / 2), z: 0, w: thickness, d: span },
+    { name: 'west', x: -halfMap - (thickness / 2), z: 0, w: thickness, d: span },
+  ];
+  const colliders = [];
+  for (const side of sides) {
+    const box = { type: 'box', collisionKind: 'boundary', x: side.x, z: side.z, w: side.w, d: side.d, baseY: 0, rotation: 0 };
+    // The barrier that stops a tank at any altitude a map can reach, and lets
+    // every shot through.
+    colliders.push({ ...box, name: `boundary_${side.name}`, shootThrough: true, h: barrierHeight });
+    // And the wall a player can see, which is what a shot bounces off below
+    // `_wallHeight` and nothing at all above it. Tanks are the barrier's job.
+    colliders.push({ ...box, name: `boundary_${side.name}_wall`, driveThrough: true, h: WORLD_WALL_HEIGHT });
+  }
+  return colliders;
+}
+
+// Everything a tank or a shot can meet: the map's obstacles and its border.
+function buildCollisionColliders(obstacles, mapSize, noWalls = false) {
+  return [...(obstacles || []), ...buildWorldBorderColliders(mapSize, noWalls)];
+}
+
 module.exports = {
   ZERO_TOLERANCE,
-  collectMeshHitFacesTank,
-  collectMeshHitFacesCylinder,
-  pickPriorityMeshFace,
-  pickPriorityMeshCandidate,
   getColliderLocalPoint,
   testOrigRectCircle,
   TANK_HALF_LENGTH,
@@ -2607,17 +2662,18 @@ module.exports = {
   projectAxisBox,
   projectPolygon,
   testPolygonInAxisBox,
-  meshIntersectsCylinder,
+  meshFaceBlocksDirection,
   findMeshHitFace,
   findMeshFaceAt,
   resolvePhysicsDriverAt,
+  meshIntersectsCylinder,
   findMeshHitFaceOriented,
   meshIntersectsTank,
-  meshFaceBlocksDirection,
+  collectMeshHitFacesTank,
+  collectMeshHitFacesCylinder,
+  pickPriorityMeshCandidate,
+  pickPriorityMeshFace,
   getMeshHitNormal,
-  pointInMeshFacePolygon,
-  findMeshFaceCrossing,
-  findMeshRayImpact,
   getShotTeleporterDims,
   findTankObstacle,
   findPhysicsSurfaceObstacle,
@@ -2625,8 +2681,8 @@ module.exports = {
   BASE_TOP_TOLERANCE,
   isOnBaseTop,
   getBaseTeamAtPoint,
-  isOverFlatTop,
   meshFlatTopYsAt,
+  isOverFlatTop,
   movingTankOverlapsHeight,
   crossedFlatTop,
   phasedObstacleExpels,
@@ -2640,14 +2696,19 @@ module.exports = {
   findShotObstacle,
   findShotEmbeddedObstacle,
   findShotImpact,
-  getSegmentTankHitFraction,
-  TANK_HIT_RADIUS,
-  TANK_HIT_HEIGHT,
+  pointInMeshFacePolygon,
+  findMeshFaceCrossing,
+  findMeshRayImpact,
   getShotObstacleInterval,
   findShotSegmentImpact,
   getShotObstacleNormal,
+  timeAndSideRayHitsRect,
   getTankHitNormal,
   reflectShotDirection,
   traceShotStep,
-  timeAndSideRayHitsRect,
+  TANK_HIT_RADIUS,
+  TANK_HIT_HEIGHT,
+  getSegmentTankHitFraction,
+  buildWorldBorderColliders,
+  buildCollisionColliders,
 };

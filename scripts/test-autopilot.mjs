@@ -179,6 +179,26 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.ok(Math.abs(grounded.rotation) > 1, 'and dodged sideways where it is not');
 }
 
+// Burrowed, a tank on the ground's shell flies over him, so Ace neither jumps
+// nor dodges it -- that would lift him out of the one place it cannot reach.
+// A tank about to drive over him is the threat, and he drives out of its way.
+{
+  const shell = { ownerId: 'foe', ownerZoned: false, flag: null, x: 0, y: 1.57, z: -10, vx: 0, vy: 0, vz: 100 };
+  const under = new Ace().think(makeView({ self: { flag: 'BU', y: -1.32 }, shots: [shell] }));
+  assert.equal(under.jump, false, 'no jump out of the ground');
+  assert.notEqual(under.intent.mode, 'dodge', 'and nothing to dodge');
+  const above = new Ace().think(makeView({ shots: [shell] }));
+  assert.equal(above.intent.mode, 'dodge', 'unburrowed, the same shell is dodged');
+  // Crossing in front of him, he backs or drives out of its line.
+  const crossing = enemy(-20, -6, { vx: 20 });
+  const aside = new Ace().think(makeView({ self: { flag: 'BU', y: -1.32 }, players: [crossing] }));
+  assert.equal(aside.intent.mode, 'dodge', 'a tank about to drive over him is got out of the way of');
+  assert.equal(aside.jump, false, 'by driving, where driving does it');
+  // Head on there is no driving clear, and a jump beats being flattened.
+  const headOn = new Ace().think(makeView({ self: { flag: 'BU', y: -1.32 }, players: [enemy(0, -20, { vz: 20 })] }));
+  assert.equal(headOn.jump, true, 'head on, he jumps');
+}
+
 // Water below the edge of a roof stops Ace. Roger's look-ahead has nothing to
 // say when it meets nothing.
 {
@@ -197,11 +217,31 @@ for (const flag of ['US', 'MG', 'ID']) {
   });
   assert.equal(new Roger().think(view).dropFlag, true, 'west of its base is home to Roger');
   assert.equal(new Ace().think(view).dropFlag, false, 'Ace drives home first');
-  const onBase = makeView({
-    self: { x: 95, flag: 'G*', flagIndex: 1, flagTeam: 2, teamColor: 2 },
+  // On the base he drops it -- but on the move, never standing: a flag let go
+  // under a standing tank is picked straight back up.
+  const onBase = (now, speed) => makeView({
+    now,
+    self: { x: 95, flag: 'G*', flagIndex: 1, flagTeam: 2, teamColor: 2, speed },
     myBase: () => base,
   });
-  assert.equal(new Ace().think(onBase).dropFlag, true);
+  const ace = new Ace();
+  const standing = ace.think(onBase(100, 0));
+  assert.equal(standing.dropFlag, false, 'not from a standstill');
+  assert.equal(standing.speed, 1, 'he gets moving first');
+  // Roger's wander holds its last move for a second before it asks again.
+  const moving = ace.think(onBase(101.1, 25));
+  assert.equal(moving.dropFlag, true, 'then lets go');
+  // Turning no more than a little as he lets go.
+  const turning = {
+    view: makeView({ now: 200 }),
+    me: { flag: 'G*', speed: 25, inAir: false },
+    out: { speed: 0, rotation: 1, dropFlag: true },
+  };
+  new Ace().dropOnTheMove(turning);
+  assert.equal(turning.out.dropFlag, true);
+  assert.ok(Math.abs(turning.out.rotation) <= 0.3 && turning.out.speed === 1);
+  const after = ace.think(onBase(101.6, 25));
+  assert.equal(after.speed, 1, 'and keeps going, leaving it behind');
 }
 
 // Carrying a team flag, Ace heads home rather than after a foe -- but still
@@ -221,16 +261,18 @@ for (const flag of ['US', 'MG', 'ID']) {
 }
 
 // A jumper, frame by frame: Ace fires once, at the moment that puts the shot on
-// the spot as the tank comes down through the muzzle's height. Roger, whose
+// the spot as the tank comes down through the muzzle's height. His own speed is
+// part of the shot's, so he backs off to fire a near one sooner, while it is
+// still high, and drives at a far one to reach it before touchdown. Roger, whose
 // trigger skips a tank out of his height band, waits until it is nearly down.
 {
   const g = 9.8;
   const jumpVelocity = 19;
   const muzzleHeight = 1.57;
   const shotSpeed = 100;
-  const targetZ = -120;
+  const tankSpeed = 25;
   const frame = 1 / 30;
-  const run = (pilot) => {
+  const run = (pilot, targetZ) => {
     const fires = [];
     // Up to just past the landing: a shot that hit would have ended it there.
     for (let t = 0; t < 4.3; t += frame) {
@@ -244,19 +286,45 @@ for (const flag of ['US', 'MG', 'ID']) {
           y, airborne, gravity: g, vy: airborne ? jumpVelocity - (g * t) : 0,
         })],
       });
-      if (pilot.think(view).fire) fires.push(t);
+      const out = pilot.think(view);
+      if (out.fire) fires.push({ t, speed: out.speed * tankSpeed });
     }
     return fires;
   };
-  const fires = run(new Ace());
-  assert.equal(fires.length, 1, `one shot for one jump, got ${fires.length}`);
   const landsAt = (2 * jumpVelocity) / g;
   const enterAt = (jumpVelocity + Math.sqrt((jumpVelocity ** 2) - (2 * g * muzzleHeight))) / g;
-  const arrival = fires[0] + ((Math.abs(targetZ) - 3 - 2) / shotSpeed);
-  assert.ok(arrival >= enterAt - frame && arrival <= landsAt + 0.05,
-    `shot arrives at ${arrival.toFixed(3)}s, tank is in its path from ${enterAt.toFixed(3)} to ${landsAt.toFixed(3)}`);
-  const roger = run(new Roger());
-  assert.ok(roger.length === 0 || roger[0] > fires[0], 'Roger fires later, if at all');
+  const check = (targetZ, label) => {
+    const fires = run(new Ace(), targetZ);
+    assert.equal(fires.length, 1, `${label}: one shot for one jump, got ${fires.length}`);
+    const [{ t, speed }] = fires;
+    const arrival = t + ((Math.abs(targetZ) - 3 - 2) / (shotSpeed + speed));
+    assert.ok(arrival >= enterAt - frame && arrival <= landsAt + 0.05,
+      `${label}: shot arrives at ${arrival.toFixed(3)}s, tank is in its path from ${enterAt.toFixed(3)} to ${landsAt.toFixed(3)}`);
+    return fires[0];
+  };
+  const near = check(-120, 'near');
+  assert.ok(near.speed < 0, `backs off to fire a near jumper sooner (speed ${near.speed})`);
+  const standing = landsAt - ((120 - 3 - 2) / shotSpeed);
+  assert.ok(near.t < standing - 0.1, `fires at ${near.t.toFixed(2)}s, not ${standing.toFixed(2)}s`);
+  const far = check(-430, 'far');
+  assert.ok(far.speed > 0, `drives at a far jumper to reach it in time (speed ${far.speed})`);
+  const roger = run(new Roger(), -120);
+  assert.ok(roger.length === 0 || roger[0].t > near.t, 'Roger fires later, if at all');
+}
+
+// In the air his velocity is the one he left with: the shot bends off the
+// barrel by however much of it is across the line, and he turns into it.
+{
+  const ace = new Ace();
+  const ctx = {
+    view: makeView({ self: { shotSpeed: 100 } }),
+    me: { x: 0, y: 0, z: 5, inAir: true, vx: 0, vy: 20, flag: null, shotSpeed: 100 },
+  };
+  const shot = ace.shotToward(ctx, { x: 100, y: 0 }, 0);
+  const vx = Math.cos(shot.azimuth) * 100;
+  const vy = 20 + (Math.sin(shot.azimuth) * 100);
+  assert.ok(Math.abs(vy) < 1e-9 && vx > 0, 'the shot itself flies straight at the point');
+  assert.ok(Math.abs(shot.speed - vx) < 1e-9);
 }
 
 // A ricochet that comes straight back: a wall square across Ace's sights, the
@@ -282,13 +350,114 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.equal(new Roger().think(view(true)).fire, true, 'Roger fires anyway');
 }
 
+// A foe near a capture is fought where it stands, from 50 until it is past 75
+// -- the gap keeps Ace from flipping between the two -- and only one he could
+// shoot: a foe behind a wall is no reason to stop.
+{
+  const redFlag = { index: 0, type: 'R*', team: 1, onGround: true, x: 300, y: 0, z: 0 };
+  const view = (z, extra = {}) => makeView({
+    self: { teamColor: 2 },
+    players: [enemy(0, z)],
+    flags: [redFlag],
+    world: { teamFlags: true },
+    myBase: () => ({ x: -300, y: 0, z: 0, radius: 15 }),
+    ...extra,
+  });
+  const ace = new Ace();
+  assert.equal(ace.think(view(-40)).intent.mode, 'fight');
+  assert.equal(ace.think(view(-60)).intent.mode, 'fight', 'kept until it is past 75');
+  assert.equal(ace.think(view(-80)).intent.mode, 'capture');
+  assert.equal(ace.think(view(-60)).intent.mode, 'capture', 'and not taken up again short of 50');
+  assert.equal(new Ace().think(view(-40, { isObscured: () => true })).intent.mode, 'capture');
+}
+
+// Grinding: asked for full speed, covering a unit and a half a second -- a
+// tank against a wall it meets at a slant. Ace measures that as stuck and
+// backs off, then drives on at a new heading; nothing near him is a wall to
+// his look-ahead, so only the measurement can tell.
+{
+  const ace = new Ace();
+  const modes = [];
+  for (let i = 0; i < 40; i++) {
+    const out = ace.think(makeView({ now: 100 + (i / 30), self: { x: i * 0.05 } }));
+    modes.push(out.intent.mode);
+    if (out.intent.mode === 'unstick') assert.ok(out.speed < 0 || out.speed === 1);
+  }
+  assert.ok(modes.includes('unstick'), `grinding is caught: ${[...new Set(modes)]}`);
+  assert.equal(ace.stats.unsticks, 1);
+  // Driving freely is not.
+  const free = new Ace();
+  for (let i = 0; i < 40; i++) {
+    free.think(makeView({ now: 100 + (i / 30), self: { x: i * (25 / 30) } }));
+  }
+  assert.equal(free.stats.unsticks, 0);
+}
+
+// Holding Oscillation Overthruster, a jump onto a building goes into it
+// rather than onto it, so Ace jumps and lets the flag go once he is off the
+// ground -- it falls back where he left, a level below where he lands.
+{
+  const ace = new Ace();
+  const ctx = {
+    view: makeView({}),
+    me: { flag: 'OO', x: 0, y: 0, z: 0, inAir: false },
+    out: { speed: 0, rotation: 0, jump: false, dropFlag: false },
+  };
+  ace.takeJump(ctx, 8, 14);
+  assert.equal(ctx.out.jump, true, 'the jump is taken with the flag');
+  assert.equal(ctx.out.dropFlag, false, 'and the flag kept on the ground');
+  const air = { ...ctx, me: { ...ctx.me, inAir: true }, out: { dropFlag: false } };
+  ace.dropHardFlags(air);
+  assert.equal(air.out.dropFlag, true, 'then dropped in the air');
+  const landed = { ...ctx, me: { ...ctx.me, inAir: false }, out: { dropFlag: false } };
+  ace.dropHardFlags(landed);
+  assert.equal(landed.out.dropFlag, false);
+  assert.equal(ace.shedOnTakeoff, false, 'and forgotten on landing');
+}
+
+// Holding Agility, a jump of more than its threshold in asked-for speed sets
+// off a burst the jump would leave with, so Ace steps his speed up instead and
+// holds the jump until he is there.
+{
+  const ace = new Ace();
+  const out = { speed: 1, rotation: 0, jump: true, intent: { mode: 'capture' } };
+  ace.paceAgility(makeView({ now: 100, self: { flag: 'A' } }), out);
+  assert.ok(out.speed > 0 && out.speed < 0.3, `a step, not a leap (${out.speed})`);
+  assert.equal(out.jump, false, 'and no jump yet');
+  const plain = { speed: 1, rotation: 0, jump: true, intent: { mode: 'capture' } };
+  new Ace().paceAgility(makeView({ now: 100, self: { flag: null } }), plain);
+  assert.equal(plain.speed, 1);
+  assert.equal(plain.jump, true, 'without it nothing changes');
+}
+
+// A foe jumping up past a platform Ace stands on is caught on the way up: he
+// fires so the level shot meets it as its body rises through his muzzle's
+// height, before its apex, rather than waiting for it to land.
+{
+  const ace = new Ace();
+  ace.checkProgress = () => {};
+  const apex = 19 / 9.8;
+  let firedAt = null;
+  for (let t = 0; t < 3 && firedAt === null; t += 1 / 20) {
+    const h = (19 * t) - (4.9 * t * t);
+    const out = ace.think(makeView({
+      now: 100 + t,
+      self: { y: 30, rotation: Math.PI, muzzleHeight: 1.57, muzzleForward: 3, shotSpeed: 100, speed: 0, topSpeed: 25 },
+      world: { maxShots: 5, tankAngVel: Math.PI / 4 },
+      players: [enemy(0, 67, { y: 15 + h, airborne: true, gravity: 9.8, vy: 19 - (9.8 * t) })],
+    }));
+    if (out.fire) firedAt = t;
+  }
+  assert.ok(firedAt !== null && firedAt < apex, `fires on the way up (${firedAt?.toFixed(2)}s, apex ${apex.toFixed(2)}s)`);
+}
+
 // Capture the flag: holding a good superflag, with a foe 100 away and the red
 // flag far off to the east, Ace goes for the flag and Roger for the foe. In
 // reach of it, Ace lets go of the superflag to make room.
 {
   const redFlag = { index: 0, type: 'R*', team: 1, onGround: true, x: 300, y: 0, z: 0 };
-  const view = (x) => makeView({
-    self: { x, flag: 'V', flagIndex: 9, teamColor: 2 },
+  const view = (x, speed = 0) => makeView({
+    self: { x, flag: 'V', flagIndex: 9, teamColor: 2, speed },
     players: [enemy(x, -100)],
     flags: [redFlag],
     world: { teamFlags: true },
@@ -298,7 +467,7 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.equal(ace.targetId, null, 'Ace leaves the foe');
   assert.ok(ace.rotation < -1, 'and turns east for the flag');
   assert.equal(new Roger().think(view(0)).targetId, 'foe', 'Roger chases');
-  assert.equal(new Ace().think(view(295)).dropFlag, true, 'drops V to take the flag');
+  assert.equal(new Ace().think(view(295, 25)).dropFlag, true, 'drops V to take the flag, on the move');
 }
 
 // A raised flag: one a jump reaches is jumped for when the edge is in the

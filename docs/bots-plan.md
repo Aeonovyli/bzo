@@ -42,10 +42,15 @@ through `gatherDriveInput` and the fire and drop paths, exactly where a stick
 would go, so the server's movement checks see an ordinary tank.
 
 **Choosing one**: Settings -> Autopilot is a `pick` row like Hunt. Left and
-right step through `None`, `Roger` and `Ace`. Select flies the pilot shown,
-and on `None` or the one already flying it lands. `9` toggles the pilot the
-row is on. `/autopilot [roger|ace]` picks one by name. The row covers touch
-and XR, where there is no `9`.
+right step through `None`, `Roger` and `Ace`. Select turns the pilot shown
+on, and on `None` or the one already driving turns the autopilot off. `9`
+toggles the pilot the row is on, or Ace (`DEFAULT_PILOT`) with the row on
+`None`. `/autopilot [roger|ace]` picks one by name. The row covers touch and
+XR, where there is no `9`. The row also decides what a menu does (#162):
+with a pilot chosen, opening one puts the pilot on rather than pausing, and
+closing it takes the pilot off; with `None`, the default, a menu pauses. The
+player's own keys and stick override a driving pilot an axis at a time
+(`docs/controls.md`, "Combining inputs").
 
 **The view is the contract a server bot fills in:**
 
@@ -59,7 +64,7 @@ and XR, where there is no `9`.
   `firstHit` and `firstBuilding`. The client answers them with
   `findShotSegmentImpact` from the `collision` pair plus the world's walls.
 
-**It works through a proxy too.** The browser flies the tank either way; the
+**It works through a proxy too.** The browser drives the tank either way; the
 proxy forwards MsgAutoPilot both ways and reads `_disableBots` off the target.
 
 **A shot always rides with a move.** Upstream sends a player update before

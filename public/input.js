@@ -168,6 +168,12 @@ export function isMenuContextActive() {
   return context === INPUT_CONTEXT.DIALOG || context === INPUT_CONTEXT.ENTRY;
 }
 
+// A dialog over a game in progress, as against the entry dialog: the one a
+// pilot can fly through.
+export function isDialogContextActive() {
+  return inputContextManager.getContext() === INPUT_CONTEXT.DIALOG;
+}
+
 export function setInputContext(context) {
   const changed = inputContextManager.setContext(context);
   if (changed) {

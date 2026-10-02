@@ -72,6 +72,43 @@ function getWorldWeaponDirection(rotation, tilt) {
   };
 }
 
+// FiringInfo (ShotPath.cxx:29) and LocalPlayer::fireShot (LocalPlayer.cxx:1250):
+// a shot leaves with its tank's own velocity plus the world's shot speed along
+// the barrel, and keeps a vertical part only on a server that sets
+// `_shotsKeepVerticalVelocity` -- the tank's climb or fall otherwise stays with
+// the tank. This is the velocity `shoot` carries, before any flag has scaled
+// it, as upstream's MsgShotBegin carries it.
+function getMuzzleVelocity(direction, tankVelocity, shotSpeed, keepVertical) {
+  return {
+    x: tankVelocity.x + (shotSpeed * direction.x),
+    y: keepVertical ? tankVelocity.y + (shotSpeed * direction.y) : 0,
+    z: tankVelocity.z + (shotSpeed * direction.z),
+  };
+}
+
+// What a shot's strategy makes of that velocity, which every screen flying the
+// shot decides for itself upstream as well. The segmented shots -- an ordinary
+// shell, Rapid Fire, Machine Gun, Laser, Thief -- scale the whole of it by the
+// flag's factor (SegmentedShotStrategy.cxx:641), so a moving tank's shell is
+// faster forward and slower backward; a Guided Missile takes only its heading
+// and flies at the world's shot speed (GuidedMissleStrategy.cxx:75); a shock
+// wave does not move. `null` for a velocity with no heading to take.
+function getShotFlight(velocity, effects, shotSpeed) {
+  const length = Math.hypot(velocity.x, velocity.y, velocity.z);
+  if (effects.shockwave) {
+    return length > 1e-6
+      ? { x: velocity.x / length, y: velocity.y / length, z: velocity.z / length, speed: 0 }
+      : { x: 0, y: 0, z: 0, speed: 0 };
+  }
+  if (!(length > 1e-6)) return null;
+  return {
+    x: velocity.x / length,
+    y: velocity.y / length,
+    z: velocity.z / length,
+    speed: effects.guided ? shotSpeed : length * effects.velocityFactor,
+  };
+}
+
 // CustomWeapon's defaults (CustomWeapon.cxx:32) and its floor on a delay: a
 // weapon with no `initdelay` waits ten seconds for its first shot and one with
 // no `delay` fires every ten after that. `minWeaponDelay` is upstream's own
@@ -288,6 +325,8 @@ module.exports = {
   WORLD_WEAPON_NAME,
   WORLD_WEAPON_TEAM,
   getWorldWeaponDirection,
+  getMuzzleVelocity,
+  getShotFlight,
   WORLD_WEAPON_DEFAULT_DELAY,
   WORLD_WEAPON_MIN_DELAY,
   normalizeWorldWeaponDelays,

@@ -91,6 +91,7 @@ import {
   getGamepadInfo,
   isGameplayInputActive,
   isMenuContextActive,
+  isDialogContextActive,
   adjustSettingsMenuRow,
   activateXRSettingsMenuItem,
   closeSettingsDialog,
@@ -162,7 +163,7 @@ import {
   returnScoreboard
 } from './hud.js';
 import {
-  renderManager, DEFAULT_MUZZLE_HEIGHT, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
+  renderManager, GHOST_ALPHA_SCALE, GHOST_SCALE, meshSpinRadians,
   reportAlphaWithoutThreshold, TANK_NAV_LIGHTS_NAME,
 } from './render.js';
 import { CAMO_SOURCE_TEXTURE } from './camo.mjs';
@@ -255,36 +256,23 @@ import {
   FLAG_TYPES,
   SUPER_FLAG_COLOR,
   isBadFlag,
-  canJump,
   getFlagEndurance,
   getFlagFlightState,
   getFlagTeamIndex,
   getFlagType,
   getShotEffects,
   getThiefDropReloadSeconds,
-  applyAccelerationLimit,
-  applyMotionInput,
   firesContinuously,
-  getAccelerationLimits,
-  getMotionEffects,
-  getBounceState,
-  getBouncyJumpVelocity,
-  getMaxAngVelFactor,
-  getMaxSpeedFactor,
-  getSpeedFactor,
   getShockWaveAlpha,
   getShockWaveRadius,
   blanksTheView,
   cloaksTheTank,
   drivesThroughBuildings,
   fakesTeamColor,
-  BURROW_GRAVITY_FACTOR,
   BURROW_RADAR_FACTOR,
-  getBurrowFactors,
   getGroundLimit,
   getFiredShotFlag,
   isZoned,
-  togglesZoneOnTeleport,
   getNextRadarJamDecay,
   getTankAlphaTarget,
   getTankDimensionScale,
@@ -293,8 +281,6 @@ import {
   hidesTeamColors,
   jamsTheRadar,
   seesThroughDisguises,
-  getWingsJumpVelocity,
-  getWingsSlideVelocity,
   hasAirControl,
   isTeamFlag,
   normalizeShakeTimeout,
@@ -325,6 +311,7 @@ import {
   findFreeShotSlot,
   getShotTankHit,
   shockWaveHitsTank,
+  getShotFlight,
 } from './shots.mjs';
 import { CLIENT_VERSION } from './version.mjs';
 import {
@@ -364,12 +351,10 @@ import {
   getObstacleHeight,
   getOrigRectNormal,
   getShotObstacleNormal,
-  getTankLocalAngle,
   getBoxCrossingPlane,
   getMeshCrossingPlane,
   getTankHitNormal,
   getShotTeleporterDims,
-  findTankObstacle,
   findMeshHitFace,
   findMeshHitFaceOriented,
   resolvePhysicsDriverAt,
@@ -377,22 +362,41 @@ import {
   isOverFlatTop,
   getPyramidHeight,
   isPyramidFlatTop,
-  movingTankOverlapsHeight,
-  pyramidIntersectsTank,
   reflectShotDirection,
-  findShotEmbeddedObstacle,
   findShotSegmentImpact,
   testOrigRectCircle,
-  testOrigRectTank,
   TANK_HALF_LENGTH,
   TANK_HALF_WIDTH,
   TANK_HEIGHT,
   traceShotStep,
-  WORLD_WALL_HEIGHT,
+  buildCollisionColliders,
 } from './collision.mjs';
 import { meshArrays, FACE_NO_RADAR } from './mesh-arrays.mjs';
-import { resolveTankMotion } from './motion.mjs';
-import { AUTOPILOTS, createRouter, createWorldProbes } from './autopilot.mjs';
+import {
+  AIR_VELOCITY_THRESHOLD,
+  DEFAULT_MUZZLE_FORWARD,
+  DEFAULT_MUZZLE_HEIGHT,
+  TANK_COLLISION_HEIGHT,
+  createDriveState,
+  findInsideBuildings,
+  isDrivenUpward,
+  movePacketFields,
+  packetVelocity,
+  readDriveInput,
+  shotFromTank,
+  stepDrive,
+} from './drive.mjs';
+import { normalizeAngle } from './motion.mjs';
+import {
+  buildTeleporterIndex,
+  getShotTeleporterCrossing,
+  getTeleportDestinationFace,
+  transformShotThroughTeleporter,
+} from './teleport.mjs';
+import { traceBeam, traceShotThroughTeleporters } from './trace.mjs';
+import {
+  AUTOPILOTS, DEFAULT_PILOT, createRouter, createWorldProbes,
+} from './autopilot.mjs';
 import {
   TRACK_SURFACE_TOLERANCE,
   TRACK_UPDATE_TIME,
@@ -771,6 +775,8 @@ let shotJamUntil = 0;
 let nextTapShotAt = 0;
 let nextHeldShotAt = 0;
 let fireWasHeld = false;
+// The tank's velocity as of the last move, which a shot inherits.
+let shotTankVelocity = { x: 0, y: 0, z: 0 };
 let playerTeam = PLAYER_TEAM.ROGUE;
 // `rabbitIndex` on the client side (playing.cxx keeps it in the players' teams
 // alone; bzo keeps the id as well, because the radar and the scoreboard both
@@ -1233,6 +1239,9 @@ function getDestinationTeams(destination) {
 function destinationNeedsLogin(destination, team) {
   if (destination === DESTINATION_LOCAL) return false;
   if (team === PLAYER_TEAM.OBSERVER) return false;
+  // A watched server is played as an unregistered guest (`guestCallsign` in
+  // server.js), which no login could help with.
+  if (destination.startsWith('watch:')) return false;
   return !(destination === currentDestination() && team === proxyEnteredTeam);
 }
 
@@ -1630,9 +1639,8 @@ function callVoiceManager(method, ...args) {
 // How far through the interval since the last shot the reload is, 0 to 1. bzo's
 // reload is one interval shared by every slot, so this is a floor under all of
 // the shot bars rather than one bar's own progress.
-// The world's `_shotSpeed` as the firing flag leaves it. The server resolves the
-// same product onto the projectile when it is fired, so both sides advance a
-// shot by the same amount in the same step.
+// The world's `_shotSpeed` as the firing flag leaves it: a shot's speed from a
+// standing tank. A moving one adds its own velocity (`getShotFlight`).
 function getShotSpeed(flag) {
   const base = Number.isFinite(gameConfig?.SHOT_SPEED) ? gameConfig.SHOT_SPEED : 100;
   return base * getShotEffects(flag).velocityFactor;
@@ -2427,7 +2435,7 @@ let proxyEnteredTeam = null;
 function proxyTeamChangeNavigated(team) {
   if (proxyEnteredTeam === null || team === proxyEnteredTeam) return false;
   const params = new URLSearchParams(window.location.search);
-  if (!params.get('proxy')) return false;
+  if (!params.get('proxy') && !params.get('watch')) return false;
   params.set('team', team);
   window.location.search = params.toString();
   return true;
@@ -2556,7 +2564,6 @@ function applyWorldData(world) {
   } else {
     OBSTACLES = [];
   }
-  refreshCollisionColliders();
   // `OBSTACLES` includes `type === 'mesh'` entries now (the collision pair
   // itself skips them explicitly -- see collision.mjs), but `setObstacles`'s
   // own box/pyramid/teleporter/base dispatch has no case for one and would
@@ -2599,6 +2606,7 @@ function applyWorldData(world) {
   // fallback only ever applies to a world that failed to fetch.
   currentWorldMapSize = Number.isFinite(world?.mapSize) ? world.mapSize : DEFAULT_MAP_SIZE;
   currentWorldNoWalls = !!world?.noWalls;
+  refreshCollisionColliders();
   // Kept because a proxied connection has to decide its own water death, and
   // upstream reads exactly this one number for it (`World::getWaterLevel`,
   // tested against the tank's own z at `playing.cxx:4196`). Absent or zero is
@@ -3211,6 +3219,7 @@ defineLocalCommand('/autopilot', (args) => {
     return;
   }
   autopilotRowId = entry.id;
+  storeAutopilotRow(entry.id);
   engageAutopilot(entry.id);
 });
 
@@ -4151,6 +4160,7 @@ let OBSTACLES = [];
 let TELEPORTER_GRAPH = { teleporters: [], links: [] };
 let TELEPORTER_OBSTACLES_BY_INDEX = new Map();
 let TELEPORTER_LINKS_BY_SOURCE_FACE = new Map();
+let TELEPORTER_INDEX = { teleporters: TELEPORTER_OBSTACLES_BY_INDEX, links: TELEPORTER_LINKS_BY_SOURCE_FACE };
 
 // Map Viewer (issue #68). `availableViewMaps` is `init.viewableMaps` verbatim
 // -- every map hashed so far, `{ file, hash, url }`. `selectedViewMapFile` is
@@ -4263,7 +4273,33 @@ function isMyTankAlive() {
 // as long as the session runs, so treating it as a pause here would pause on
 // entry and never find its way back to unpaused.
 function shouldAutoPause() {
-  return isMenuContextActive() || (document.hidden && !isXREnabled());
+  if (document.hidden && !isXREnabled()) return true;
+  // A menu over a tank a pilot is flying, or one a pilot is chosen for, is
+  // not a pause: the pilot goes on driving while the menu has the keys
+  // (issue #162). A hidden window still pauses -- the browser stops drawing
+  // it, and with the frames goes the pilot.
+  if (!isMenuContextActive()) return false;
+  return !(isDialogContextActive() && autopilotFliesThroughMenus());
+}
+
+function autopilotFliesThroughMenus() {
+  return canUseAutopilot() && (autopilotOn || autopilotRowId !== null);
+}
+
+// A menu opening with a pilot chosen but not flying puts the pilot on, and
+// closing it takes that pilot off again; one already flying is left alone.
+function syncAutopilotWithMenu() {
+  const covered = isDialogContextActive();
+  if (covered === autopilotMenuCovered) return;
+  autopilotMenuCovered = covered;
+  if (covered) {
+    if (!autopilotOn && autopilotRowId !== null && canUseAutopilot() && isMyTankAlive()) {
+      setAutopilot(autopilotRowId, { remember: false });
+      autopilotMenuEngaged = true;
+    }
+  } else if (autopilotMenuEngaged) {
+    setAutopilot(null, { remember: false });
+  }
 }
 
 // The Unmap/Map pair (playing.cxx:1211, :1246). Every menu and the window's own
@@ -4273,6 +4309,7 @@ function shouldAutoPause() {
 // the countdown, so both directions are the same toggle the P key sends: it
 // cancels a countdown that has not finished and unpauses one that has.
 function syncAutoPause() {
+  syncAutopilotWithMenu();
   const send = pauseState.syncMenu({
     covered: shouldAutoPause(),
     alive: isMyTankAlive(),
@@ -5032,13 +5069,11 @@ let lastSentAirVelocityZ = 0;
 let lastSentTime = 0;
 let worldTime = 0;
 let chatWindowDirty = true;
-let cachedWorldBorderColliders = [];
-let cachedCollisionColliders = [];
+let cachedCollisionColliders = null;
 // Velocity-based thresholds: only send when velocity changes significantly
 // Thresholds must be large enough to avoid noise from frame-to-frame velocity calculation variations
 const VELOCITY_THRESHOLD = 0.15; // Send if forward/rotation speed changes by 15%
 const VERTICAL_VELOCITY_THRESHOLD = 1.0; // Send if vertical velocity changes significantly
-const AIR_VELOCITY_THRESHOLD = 0.35; // Send if airborne horizontal velocity changes significantly
 // How long this client will go without reporting, whatever the tank is doing.
 // The server's, because it is the server that decides what silence means: bzo
 // extrapolates between packets and keeps the socket alive with WebSocket
@@ -5057,7 +5092,6 @@ const MAX_REMOTE_EXTRAPOLATION_STOP_SECONDS = 0.3; // Short horizon only when re
 // The occupant height every tank collision test measures with. Upstream passes
 // `getDimensions()[2]`, which is _tankHeight; bzo's collision tests have always
 // used a flat 2 for it, so it is named here rather than repeated.
-const TANK_COLLISION_HEIGHT = 2;
 const JUMP_PATH_MAX_TIME = 4.0;
 const JUMP_PATH_STEP_TIME = 0.12;
 
@@ -6906,8 +6940,10 @@ function connectToServer() {
   // A player's own motto is not sent to a target. The motto is one of the few
   // ways a proxied connection announces itself at all, so it says only that --
   // see `proxyMotto`.
+  // A team on a watch link is an admin playing there rather than watching.
+  const watchTeam = watchTarget ? params.get('team') : null;
   const query = watchTarget
-    ? `/?watch=${encodeURIComponent(watchTarget)}`
+    ? `/?watch=${encodeURIComponent(watchTarget)}${watchTeam ? `&team=${encodeURIComponent(watchTeam)}` : ''}`
     : (proxyTarget
       ? `/?proxy=${encodeURIComponent(proxyTarget)}${proxyTeam ? `&team=${encodeURIComponent(proxyTeam)}` : ''}`
         + (IS_BOT_CLIENT ? '&bot' : '')
@@ -7392,6 +7428,11 @@ function handleServerMessage(message) {
           roamTargetId = null;
           roamTargetFlagIndex = null;
         }
+        // No link asked for a view: the default, which follows the game.
+        roamViewDefaulted = isObserverTeam(playerTeam)
+          && autoFollowTarget !== AUTO_FOLLOW_LEADER && autoRoamView === null
+          && !autoViewCamTarget && !autoViewMapTarget;
+        if (roamViewDefaulted) applyDefaultRoamView();
         amAdmin = message.player.admin === true;
         amVerified = message.player.verified === true;
         myGlobalCallsign = amVerified ? message.player.name : null;
@@ -7518,6 +7559,8 @@ function handleServerMessage(message) {
         refreshScoreboards();
         noticeAbout(null, [describePlayer(message.player.id), ' joined'], 0, false);
       }
+      // Someone arriving is a game to follow, for an observer still on the default.
+      refreshDefaultRoamView();
       break;
 
     case 'teamUpdate':
@@ -7543,6 +7586,8 @@ function handleServerMessage(message) {
       // and the team are read from.
       noticeAbout(null, [describePlayer(message.id), ' left'], 0, false);
       removePlayer(message.id);
+      // The last player gone leaves nothing to follow but the map.
+      refreshDefaultRoamView();
       break;
     }
 
@@ -8139,12 +8184,16 @@ function createProjectile(data) {
     const beamColor = effects.beamColor === null
       ? getPlayerShotColor(data.playerId)
       : new THREE.Color(effects.beamColor);
-    const segments = Array.isArray(data.segments) ? data.segments : traceBeamSegments(
+    // A proxied target leaves the path to each of its clients, so a beam that
+    // arrives without one is traced here, minus the tank hits that stay the
+    // shooting server's to decide.
+    const segments = Array.isArray(data.segments) ? data.segments : traceBeam(
+      { colliders: getCollisionColliders(), teleports: TELEPORTER_INDEX, mapSize: currentWorldMapSize ?? DEFAULT_MAP_SIZE },
       { x: data.x, y: data.y, z: data.z },
       { x: data.dirX, y: Number.isFinite(data.dirY) ? data.dirY : 0, z: data.dirZ },
-      getShotSpeed(data.flag ?? null) * getShotLifetimeSeconds(data.flag ?? null),
-      data.ricochet === true,
-    );
+      getAnnouncedShotSpeed(data) * getShotLifetimeSeconds(data.flag ?? null),
+      { ricochet: data.ricochet === true, throughBuildings: effects.throughBuildings === true },
+    ).segments;
     const beam = renderManager.createShotBeam({
       ...data,
       segments,
@@ -8185,7 +8234,7 @@ function createProjectile(data) {
       localProjectile.userData.pendingServerAck = false;
       localProjectile.userData.flag = data.flag ?? null;
       localProjectile.userData.ricochet = data.ricochet === true;
-      localProjectile.userData.speed = getShotSpeed(data.flag ?? null);
+      localProjectile.userData.speed = getAnnouncedShotSpeed(data);
       localProjectile.userData.lifeFactor = effects.lifeFactor;
       localProjectile.userData.hiddenOnRadar = effects.hiddenOnRadar;
       localProjectile.userData.guided = effects.guided;
@@ -8229,7 +8278,7 @@ function createProjectile(data) {
   projectile.userData.ricochet = data.ricochet === true;
   // How fast it flies, how long its slot is held, and whether anybody else's
   // radar shows it -- all three come off the firing flag.
-  projectile.userData.speed = getShotSpeed(data.flag ?? null);
+  projectile.userData.speed = getAnnouncedShotSpeed(data);
   projectile.userData.lifeFactor = effects.lifeFactor;
   projectile.userData.hiddenOnRadar = effects.hiddenOnRadar;
   // A missile's heading is not fixed at the muzzle: `updateProjectiles` turns it
@@ -8241,7 +8290,14 @@ function createProjectile(data) {
   projectiles.set(data.id, projectile);
 }
 
-function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0 }) {
+// A shot's speed is its own -- its tank's velocity is part of it -- and
+// `shotBegin` says what it is. A proxied Guided Missile's is left out, being the
+// world's.
+function getAnnouncedShotSpeed(data) {
+  return Number.isFinite(data.speed) ? data.speed : getShotSpeed(data.flag ?? null);
+}
+
+function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0, speed }) {
   if (myPlayerId === null || myPlayerId === undefined) return;
 
   const shotColor = getPlayerShotColor(myPlayerId);
@@ -8288,7 +8344,7 @@ function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0 }) {
   projectile.userData.ricochet = isPhantomDriving()
     ? true
     : shotRicochets(myFlag, gameConfig?.ALL_SHOTS_RICOCHET);
-  projectile.userData.speed = getShotSpeed(myFlag);
+  projectile.userData.speed = speed;
   projectile.userData.lifeFactor = localEffects.lifeFactor;
   projectile.userData.hiddenOnRadar = localEffects.hiddenOnRadar;
   projectile.userData.guided = localEffects.guided;
@@ -9303,7 +9359,7 @@ function getOperatorServerState() {
     maxTeamScore: Number(gameConfig?.MAX_TEAM_SCORE) || 0,
     mapFile: currentMapFile || serverOperatorConfig.mapFile || '',
     botFill: Number(serverOperatorConfig.botFill) || 0,
-    botPilot: serverOperatorConfig.botPilot || AUTOPILOTS.at(-1).id,
+    botPilot: serverOperatorConfig.botPilot || DEFAULT_PILOT,
   };
 }
 
@@ -9735,67 +9791,15 @@ function showMessage(text) {
   routeLocalHudMessage(text);
 }
 
-function getWorldBorderColliders() {
-  if (currentWorldNoWalls) return [];
-  if (cachedWorldBorderColliders.length > 0) return cachedWorldBorderColliders;
-  const mapSize = currentWorldMapSize ?? DEFAULT_MAP_SIZE;
-  const halfMap = mapSize / 2;
-  const thickness = 4;
-  const barrierHeight = 1000;
-  const span = mapSize + thickness * 2;
-  const sides = [
-    { name: 'north', x: 0, z: -halfMap - thickness / 2, w: span, d: thickness },
-    { name: 'south', x: 0, z: halfMap + thickness / 2, w: span, d: thickness },
-    { name: 'east', x: halfMap + thickness / 2, z: 0, w: thickness, d: span },
-    { name: 'west', x: -halfMap - thickness / 2, z: 0, w: thickness, d: span },
-  ];
-  cachedWorldBorderColliders = [];
-  for (const side of sides) {
-    // The barrier that stops a tank at any altitude a map can reach, and lets
-    // every shot through.
-    cachedWorldBorderColliders.push({
-      type: 'box',
-      name: `boundary_${side.name}`,
-      collisionKind: 'boundary',
-      shootThrough: true,
-      x: side.x,
-      z: side.z,
-      w: side.w,
-      d: side.d,
-      h: barrierHeight,
-      baseY: 0,
-      rotation: 0,
-    });
-    // And the wall a player can see, which is what a shot bounces off below
-    // `_wallHeight` and nothing at all above it. Tanks are the barrier's job.
-    cachedWorldBorderColliders.push({
-      type: 'box',
-      name: `boundary_${side.name}_wall`,
-      collisionKind: 'boundary',
-      driveThrough: true,
-      x: side.x,
-      z: side.z,
-      w: side.w,
-      d: side.d,
-      h: WORLD_WALL_HEIGHT,
-      baseY: 0,
-      rotation: 0,
-    });
-  }
-  return cachedWorldBorderColliders;
-}
-
-
 function getCollisionColliders() {
-  if (cachedCollisionColliders.length === 0) {
-    cachedCollisionColliders = [...OBSTACLES, ...getWorldBorderColliders()];
+  if (cachedCollisionColliders === null) {
+    cachedCollisionColliders = buildCollisionColliders(OBSTACLES, currentWorldMapSize ?? DEFAULT_MAP_SIZE, currentWorldNoWalls);
   }
   return cachedCollisionColliders;
 }
 
 function refreshCollisionColliders() {
-  cachedWorldBorderColliders = [];
-  cachedCollisionColliders = [];
+  cachedCollisionColliders = null;
   // The buildings a tank was inside belonged to the world that is going away,
   // and the renderer disposes their eighth-dimension nodes with it.
   insideBuildings = [];
@@ -9803,29 +9807,9 @@ function refreshCollisionColliders() {
 }
 
 function rebuildTeleporterRuntimeState() {
-  TELEPORTER_OBSTACLES_BY_INDEX = new Map();
-  TELEPORTER_LINKS_BY_SOURCE_FACE = new Map();
-
-  for (const obs of OBSTACLES) {
-    if (obs?.kind !== 'teleporter') continue;
-    if (!Number.isInteger(obs.teleporterIndex)) continue;
-    TELEPORTER_OBSTACLES_BY_INDEX.set(obs.teleporterIndex, obs);
-  }
-
-  const links = Array.isArray(TELEPORTER_GRAPH?.links) ? TELEPORTER_GRAPH.links : [];
-  for (const link of links) {
-    if (!Number.isInteger(link?.sourceFaceId) || !Number.isInteger(link?.destFaceId)) continue;
-    if (!TELEPORTER_LINKS_BY_SOURCE_FACE.has(link.sourceFaceId)) {
-      TELEPORTER_LINKS_BY_SOURCE_FACE.set(link.sourceFaceId, []);
-    }
-    TELEPORTER_LINKS_BY_SOURCE_FACE.get(link.sourceFaceId).push(link.destFaceId);
-  }
-
-  for (const [sourceFaceId, destinations] of TELEPORTER_LINKS_BY_SOURCE_FACE.entries()) {
-    const unique = Array.from(new Set(destinations));
-    unique.sort((a, b) => a - b);
-    TELEPORTER_LINKS_BY_SOURCE_FACE.set(sourceFaceId, unique);
-  }
+  TELEPORTER_INDEX = buildTeleporterIndex(OBSTACLES, TELEPORTER_GRAPH?.links);
+  TELEPORTER_OBSTACLES_BY_INDEX = TELEPORTER_INDEX.teleporters;
+  TELEPORTER_LINKS_BY_SOURCE_FACE = TELEPORTER_INDEX.links;
 }
 
 // Every obstacle's top, teleporters included: the importer resolves a
@@ -9881,13 +9865,6 @@ function amZoned() {
   return isZoned(flag?.type ?? null, flag?.zoned === true);
 }
 
-// LocalPlayer::doUpdateMotion's `groundLimit` for the local tank: how far below
-// zero this frame may put it. Every clamp that holds the tank down asks this
-// rather than assuming zero, so Burrow is the one flag that makes the ground
-// negotiable and nothing else notices.
-function myGroundLimit() {
-  return getGroundLimit(getMyFlag()?.type ?? null);
-}
 
 function amInsideBuilding() {
   return insideBuildings.length > 0;
@@ -9911,149 +9888,8 @@ function getFiringStatusText() {
   return '';
 }
 
-// The solid the local tank's box is inside of, or null. One line of its own,
-// because the loop is `findTankObstacle` in the shared `collision` pair and the
-// server calls the same one: this only says which world to look at and what the
-// local tank is. Every call is for the local player, so the heading defaults to
-// theirs -- a call site that silently fell back to a circle would disagree with
-// the server about the shape being tested.
-function checkCollision(x, y, z, rotation = playerRotation, fromY = y, fromX, fromZ) {
-  const phased = amPhased();
-  return findTankObstacle(getCollisionColliders(), x, y, z, {
-    rotation,
-    fromY,
-    fromX,
-    fromZ,
-    radius: TANK_COLLISION_HEIGHT,
-    tankScale: getMyTankScale(),
-    phased,
-    reversingOnGround: phased && phasedReverse && y <= 0,
-  });
-}
 
-// The whole of a tank's step, in one pass, which is what doUpdateMotion is
-// (LocalPlayer.cxx:498): the caller builds a velocity and a turn rate, and a
-// single search resolves position, height and heading together. `resolveTankMotion`
-// in the shared `motion` pair is that loop; this is only the world it looks at.
-//
-// A single pass is required rather than a horizontal one (`velocityY: 0`) plus
-// a separate vertical one against its own support-surface tolerances: two
-// independent passes can disagree with each other -- a slope that holds a tank
-// up under one pass's threshold and drops it under the other's, a landing one
-// declares and the other undoes on the same frame -- where one pass canonically
-// cannot disagree with itself.
-//
-// `isFlatTop` is upstream's own (`BoxBuilding::isFlatTop` is true,
-// `PyramidBuilding::isFlatTop` is its ZFlip, `WallObstacle`'s is false), and it
-// is what decides whether a tank may be bumped up a low ledge.
-function resolveTankStep(velocityX, velocityY, velocityZ, angularVelocity, deltaTime) {
-  const groundLimit = myGroundLimit();
-  const onSupport = onGround || onObstacle;
-  // A physics driver's push, read off whatever `lastMotionObstacle` says the
-  // tank landed on last frame -- upstream's own timing too
-  // (`LocalPlayer.cxx:397-429` reads a driver id assigned on the *previous*
-  // frame's support check). The vertical component always applies; the
-  // horizontal only while actually resting on the driving surface, the same
-  // split upstream makes between its `slide` branch (not implemented here --
-  // no real map sampled uses it, see `docs/bzw-plan.md`) and the plain push.
-  const driver = resolvePhysicsDriverAt(lastMotionObstacle, playerX, playerY, playerZ);
-  if (driver && driver.linear) {
-    velocityY += driver.linear[1];
-    if (onSupport) {
-      velocityX += driver.linear[0];
-      velocityZ += driver.linear[2];
-    }
-  }
-  return resolveTankMotion({
-    x: playerX,
-    y: playerY,
-    z: playerZ,
-    azimuth: playerRotation,
-    velocityX,
-    velocityY,
-    velocityZ,
-    angularVelocity,
-    timeStep: deltaTime,
-    groundLimit,
-    // Resting on a building is resting, for the purpose of climbing the next
-    // low ledge -- `playerY <= groundLimit` alone is only ever true on the
-    // world floor itself, so a tank already standing on one step could never
-    // bump up onto the next. `onGround`/`onObstacle` are last frame's
-    // classification (set below from `nextOnGround`/`nextOnObstacle`), which
-    // is what upstream's own `OnGround`/`OnBuilding` distinction answers too.
-    onGround: onSupport,
-    // World::hitBuilding, which is the solid the tank is expelled from and
-    // nothing else. The step's own start height goes in as `fromY`, so the
-    // occupant's vertical extent covers the span it crossed -- upstream's
-    // inMovingBox, and what stops a fast fall passing through a roof.
-    hitTest: (fromX, fromY, fromZ, fromAz, toX, toY, toZ, toAz) => (
-      checkCollision(toX, toY, toZ, toAz, fromY, fromX, fromZ)
-    ),
-    getNormal: (obs, px, py, pz, paz, hitX, hitY, hitZ, hitAz, fromX, fromZ, fromAz, toX, toZ, toAz) => {
-      const tankScale = getMyTankScale();
-      const sweep = {
-        fromX, fromZ, fromAz, toX, toZ, toAz, hitX, hitZ,
-        halfWidth: TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
-        halfLength: TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1),
-      };
-      const n = getTankHitNormal(obs, px, py, pz, paz, hitY, TANK_COLLISION_HEIGHT, sweep);
-      // Debug tap for the xwall/oct stuck investigation -- uncomment to
-      // capture which face/normal each hit resolved to, alongside the
-      // BZO-STUCK-DUMP block in handleMotion below (both toggle together).
-      // window.__bzoDebugLastNormal = { obs: obs ? (obs.name || obs.type) : null, n, sweep: { fromX, fromZ, toX, toZ, hitX, hitZ } };
-      return n;
-    },
-    isFlatTop: (obs) => {
-      if (!obs) return false;
-      if (obs.collisionKind === 'boundary') return false;
-      if (obs.type === 'pyramid') return isPyramidFlatTop(obs);
-      return true;
-    },
-    getObstacleTop: (obs) => getColliderTopY(obs),
-    // `_maxBumpHeight`, a server or a map may change (see server.js).
-    maxBumpHeight: gameConfig.MAX_BUMP_HEIGHT,
-    // Carried on the tank itself across frames -- `resolveTankMotion` only
-    // counts consecutive stuck frames within a single call, so persistence
-    // between calls is this caller's job, same as `verticalVelocity`.
-    stuckFrameCount: myTank.userData.stuckFrameCount || 0,
-  });
-}
 
-// LocalPlayer::collectInsideBuildings (LocalPlayer.cxx:966): every obstacle the
-// tank box overlaps where the frame left it. Upstream asks each one `inBox`,
-// which is the same solid `checkCollision` tests, and takes all of them rather
-// than the first -- a tank crossing a corner is inside two buildings, and the
-// eighth dimension belongs in both.
-//
-// The world border is not a building and neither is a teleporter: both expel a
-// phased tank, so it can never be in one, and upstream leaves its walls out of
-// the collision manager this list comes from.
-function findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale = getMyTankScale()) {
-  const found = [];
-  for (const obs of getCollisionColliders()) {
-    if (obs.driveThrough) continue;
-    if (obs.collisionKind === 'boundary' || obs.kind === 'teleporter') continue;
-    const obstacleBase = obs.baseY || 0;
-    const obstacleTop = getColliderTopY(obs);
-    if (!movingTankOverlapsHeight(obstacleBase, obstacleTop, worldY, worldY, 2, 0.15)) continue;
-    if (obs.type === 'pyramid') {
-      if (!pyramidIntersectsTank(obs, worldX, worldY, worldZ, rotation, 2, 0, tankScale)) continue;
-    } else if (obs.type === 'mesh') {
-      // `< 0` and not a truth test: face zero is a real face (issue #153).
-      if (findMeshHitFaceOriented(obs, worldX, worldY, worldZ, rotation,
-        TANK_HALF_WIDTH * (tankScale ? tankScale.width : 1),
-        TANK_HALF_LENGTH * (tankScale ? tankScale.length : 1), 2) < 0) continue;
-    } else {
-      const { x: localX, z: localZ } = getColliderLocalPoint(worldX, worldZ, obs);
-      if (!testOrigRectTank(
-        obs.w / 2, obs.d / 2, localX, localZ,
-        getTankLocalAngle(rotation, obs.rotation), 0, tankScale
-      )) continue;
-    }
-    found.push(obs);
-  }
-  return found;
-}
 
 // The wall a phasing tank is currently half inside, or null. Upstream works this
 // out on the tank's own client and ships a `CrossingWall` status bit for the
@@ -10067,7 +9903,7 @@ function findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale = getMy
 // obstacle and tests that; a tank in a corner is inside two, and either wall is
 // as good an answer as the guess `isCrossing` makes anyway.
 function findTankCrossingPlane(worldX, worldY, worldZ, rotation, tankScale) {
-  for (const obs of findInsideBuildings(worldX, worldY, worldZ, rotation, tankScale)) {
+  for (const obs of buildingsAt(worldX, worldY, worldZ, rotation, tankScale)) {
     const plane = obs.type === 'mesh'
       ? getMeshCrossingPlane(obs, worldX, worldY, worldZ, rotation, tankScale)
       : getBoxCrossingPlane(obs, worldX, worldY, worldZ, rotation, tankScale);
@@ -10080,6 +9916,11 @@ function findTankCrossingPlane(worldX, worldY, worldZ, rotation, tankScale) {
 // length reduces `findInsideBuildings`' rect test to a single point, which is
 // exactly "is the camera's own position inside this solid" and nothing more.
 const OBSERVER_POINT_SCALE = Object.freeze({ width: 0, length: 0 });
+
+// `drive`'s own test (collectInsideBuildings), against this client's world.
+function buildingsAt(x, y, z, rotation, tankScale = getMyTankScale()) {
+  return findInsideBuildings(getCollisionColliders(), getColliderTopY, x, y, z, rotation, tankScale);
+}
 
 // doUpdateMotion's last act (LocalPlayer.cxx:854), with the tank where the frame
 // leaves it. Only a phased tank can be inside a building, so every other real
@@ -10111,9 +9952,9 @@ function updateInsideBuildings() {
   const phased = amPhased();
   const observer = isObserver();
   const found = phased
-    ? findInsideBuildings(playerX, playerY, playerZ, playerRotation)
+    ? buildingsAt(playerX, playerY, playerZ, playerRotation)
     : observer
-      ? findInsideBuildings(playerX, playerY, playerZ, playerRotation, OBSERVER_POINT_SCALE)
+      ? buildingsAt(playerX, playerY, playerZ, playerRotation, OBSERVER_POINT_SCALE)
       : [];
   if (found.length !== insideBuildings.length
     || !found.every((obs, i) => obs === insideBuildings[i])) {
@@ -10122,7 +9963,7 @@ function updateInsideBuildings() {
   const cameraPosition = (phased || observer) ? renderManager.getCameraPosition() : null;
   const forRender = cameraPosition ? found.slice() : found;
   if (cameraPosition) {
-    for (const obs of findInsideBuildings(
+    for (const obs of buildingsAt(
       cameraPosition.x, cameraPosition.y, cameraPosition.z, 0, OBSERVER_POINT_SCALE,
     )) {
       if (!forRender.includes(obs)) forRender.push(obs);
@@ -10137,7 +9978,6 @@ function updateInsideBuildings() {
 // Intended input state
 let intendedForward = 0; // -1..1
 let intendedRotation = 0; // -1..1
-let intendedY = 0; // -1..1 (for jump/momentum)
 let jumpTriggered = false;
 let isInAir = false;
 let onGround = false;
@@ -10145,14 +9985,6 @@ let onObstacle = false;
 // `lastObstacle` (LocalPlayer.cxx:428): what the step last met, which is what
 // the debug overlay draws and what upstream's no-climb jump rule reads.
 let lastMotionObstacle = null;
-// `LocalPlayer::doUpdateMotion` (LocalPlayer.cxx:805-810): a face whose physics
-// driver pushes upward -- a jump pad -- sounds `SFX_BOUNCE`, and that branch
-// comes first in the chain, so the same frame never also rings the landing or
-// the burrow sound.
-function isDrivenUpward(obstacle, x, y, z) {
-  const driver = resolvePhysicsDriverAt(obstacle, x, y, z);
-  return !!(driver?.linear && driver.linear[1] > 0);
-}
 let jumpDirection = null; // Stores the direction at jump start
 // LocalPlayer::wingsFlapCount. Refilled to _wingsJumpCount on every tick the
 // tank spends on a surface and spent one per jump, take-off included. Only Wings
@@ -10163,15 +9995,18 @@ let wingsFlapsLeft = 0;
 // surface reports the jump control as a held button instead, and a wings tank
 // holding it would spend all _wingsJumpCount flaps in as many frames.
 let jumpWasHeld = false;
-// Whether the flag in hand steers in the air, resolved once per frame in
-// handleInputEvents and read by handleMotion, which runs straight after it.
-let airControl = false;
 // doUpdateMotion's `lastSpeed` and the tank's angular velocity, in real units --
 // units a second and radians a second, not stick fractions. They are what
 // `doMomentum` clamps against, so they have to be the actual velocities and not
 // what the stick was asking for.
 let lastSpeed = 0;
 let lastAngVel = 0;
+// This frame's top speed and `doMomentum` limit, for the autopilot to know what
+// speed it can be going by the next frame.
+let lastTopSpeed = 0;
+let lastLinearLimit = 0;
+let lastAngularLimit = 0;
+let lastTurnRate = 0;
 let localTeleportReentryBlockTeleporterIndex = null;
 let localTeleportReentryBlockDistance = 0;
 let localTeleportReentryBlockUntil = 0;
@@ -10584,69 +10419,10 @@ function triggerSpawnEffectForTank(tank, colorOverride = null) {
 }
 
 
-function setAirVelocity(tank, vx, vz) {
-  if (!tank || !tank.userData) return;
-  tank.userData.airVelocityX = vx;
-  tank.userData.airVelocityZ = vz;
 
-  const horizontalSpeed = Math.hypot(vx, vz);
-  if (horizontalSpeed > 0.001 && gameConfig && gameConfig.TANK_SPEED) {
-    tank.userData.jumpForwardSpeed = horizontalSpeed / gameConfig.TANK_SPEED;
-    tank.userData.fallForwardSpeed = tank.userData.jumpForwardSpeed;
-    tank.userData.slideDirection = Math.atan2(-vx, -vz);
-  } else {
-    tank.userData.jumpForwardSpeed = 0;
-    tank.userData.fallForwardSpeed = 0;
-    tank.userData.slideDirection = undefined;
-  }
-}
 
-// LocalPlayer::doJump's vertical component, and the gravity the tank falls back
-// under. Wings has its own of each: _wingsJumpVelocity and _wingsGravity, both
-// of which are the world's own values until a server says otherwise.
-function getJumpVelocity(verticalVelocity) {
-  if (airControl) return getWingsJumpVelocity(gameConfig.WINGS_JUMP_VELOCITY, verticalVelocity);
-  // Bouncy's bounce is a random quarter-to-full of the world's jump velocity, so
-  // no two are the same height. That randomness is the flag: a fixed bounce
-  // would just be jumping you did not ask for.
-  if (getMotionEffects(getMyFlag()?.type ?? null).bouncy) {
-    return getBouncyJumpVelocity(gameConfig.JUMP_VELOCITY, Math.random());
-  }
-  return gameConfig.JUMP_VELOCITY;
-}
 
-function getLocalGravity() {
-  if (airControl) return gameConfig.WINGS_GRAVITY;
-  // doUpdateMotion (LocalPlayer.cxx:332): a burrowing tank below ground level is
-  // pulled down at four times gravity, so the descent into the hole takes a
-  // fraction of a second rather than being a long slow sink.
-  if (playerY < 0 && (getMyFlag()?.type ?? null) === 'BU') {
-    return gameConfig.GRAVITY * BURROW_GRAVITY_FACTOR;
-  }
-  return gameConfig.GRAVITY;
-}
 
-// A tank under the floor it is allowed to rest on. That happens exactly once:
-// when a burrowed tank loses the flag, the limit springs back to zero with the
-// tank still down at `_burrowDepth`. It keeps its steering there -- upstream's
-// `location` is still `OnGround` at a negative z, so the full-control branch
-// runs -- and it must not be snapped to the surface, because the creep below is
-// what lifts it out.
-const GROUND_LIMIT_TOLERANCE = 0.01;
-function isBelowGroundLimit(y, groundLimit) {
-  return y < groundLimit - GROUND_LIMIT_TOLERANCE;
-}
-
-// "below the ground: however I got there, creep up" (LocalPlayer.cxx:376). A
-// tank below its own ground limit is lifted out rather than left there, which is
-// what happens to a burrowed tank the moment it loses the flag: the limit
-// springs back to zero and this walks it up to the surface. Upstream's own
-// expression, and it is a floor on the velocity rather than a teleport, so the
-// tank rises visibly.
-function applyGroundLimitCreep(verticalVelocity, y, groundLimit) {
-  if (!(y < groundLimit)) return verticalVelocity;
-  return Math.max(verticalVelocity, (-y / 2) + 0.5);
-}
 
 // HUDRenderer's altitude tape, which updateFlag() (playing.cxx:1465) puts up
 // only where there is altitude to read: a world that allows jumping, or the
@@ -10661,20 +10437,7 @@ function updateAltitudeTape() {
   document.body.classList.toggle('no-jumping', !shown);
 }
 
-function deriveAirVelocityFromState(rotation, normalizedSpeed) {
-  const speed = gameConfig?.TANK_SPEED || 15;
-  return {
-    x: -Math.sin(rotation) * normalizedSpeed * speed,
-    z: -Math.cos(rotation) * normalizedSpeed * speed
-  };
-}
 
-function normalizeAngle(angle) {
-  let normalized = Number(angle) || 0;
-  while (normalized > Math.PI) normalized -= Math.PI * 2;
-  while (normalized < -Math.PI) normalized += Math.PI * 2;
-  return normalized;
-}
 
 // No impact threshold, because upstream has none: `addLandEffect` gates only on
 // `useFancyEffects` and the `landEffect` type, and the sound only on `entryDrop`
@@ -10767,10 +10530,7 @@ function predictLocalPlayerTeleport(startState, endState, nowMs) {
 
   const sourceFaceId = earliest.crossing.sourceFaceId;
   const sourceFace = sourceFaceId % 2;
-  const destinations = TELEPORTER_LINKS_BY_SOURCE_FACE.get(sourceFaceId) || [];
-  const destFaceId = destinations.length > 0
-    ? destinations[0]
-    : ((Math.floor(sourceFaceId / 2) * 2) + (1 - (sourceFaceId % 2)));
+  const destFaceId = getTeleportDestinationFace(TELEPORTER_LINKS_BY_SOURCE_FACE, sourceFaceId);
   const destTeleporterIndex = Math.floor(destFaceId / 2);
   const destFace = destFaceId % 2;
   const destObs = TELEPORTER_OBSTACLES_BY_INDEX.get(destTeleporterIndex);
@@ -10809,9 +10569,7 @@ function predictLocalPlayerTeleport(startState, endState, nowMs) {
     z: transformed.pointOut.z + transformed.dirOut.z * exitAdvance,
   };
 
-  const radians1 = earliest.obs.rotation + (sourceFace === 0 ? 0 : Math.PI);
-  const radians2 = destObs.rotation + (destFace === 1 ? 0 : Math.PI);
-  const rotateDelta = radians2 - radians1;
+  const { rotateDelta } = transformed;
 
   localTeleportReentryBlockTeleporterIndex = destTeleporterIndex;
   localTeleportReentryBlockDistance = Math.max(
@@ -10849,8 +10607,10 @@ function usesVirtualInput() {
 // shoots with it; an observer cycles the roaming view with it, which is the
 // whole reason it is shared rather than inlined.
 function isFireHeld() {
-  if (autopilotOn && !isObserver()) return autopilotOutput?.fire === true;
-  return keys[FIRE_KEY] || (usesVirtualInput() && virtualInput.fire);
+  const held = keys[FIRE_KEY] || (usesVirtualInput() && virtualInput.fire);
+  // A pilot's trigger adds to the player's, as every other source's does.
+  if (autopilotOn && !isObserver()) return held || autopilotOutput?.fire === true;
+  return held;
 }
 
 // Every tank that can be roamed to, which is exactly the set
@@ -10959,6 +10719,7 @@ function getRoamTargetFlag() {
 
 // Selecting a target by hand leaves the view alone unless it cannot show one.
 function adoptRoamTarget(id) {
+  roamViewDefaulted = false;
   roamTargetId = id;
   if (id !== null && !roamViewNeedsTarget(roamView)) roamView = ROAM_VIEW.TRACK;
   refreshScoreboards();
@@ -10970,12 +10731,30 @@ function selectRoamTarget(id) {
   adoptRoamTarget(id);
 }
 
+// An observer who has not chosen a view watches the game if there is one --
+// following the leader while anyone is playing -- and roams freely while
+// nobody is. It keeps up as players come and go, until the observer picks a
+// view or a player themself; then the choice is theirs.
+let roamViewDefaulted = false;
+
+function applyDefaultRoamView() {
+  roamView = getRoamCandidates().length > 0 ? ROAM_VIEW.FOLLOW : ROAM_VIEW.FREE;
+  roamTargetId = null;
+  roamTargetFlagIndex = null;
+}
+
+function refreshDefaultRoamView() {
+  if (!roamViewDefaulted || !isObserver() || isPreviewingAltWorld()) return;
+  applyDefaultRoamView();
+}
+
 // One sequence walks the whole space: the leader, then each player, then the next
 // view. Upstream splits this across F8 (view type) and F6/F7 (subject), but bzo
 // binds nothing to changing the subject on its own, so fire, `C`, and the
 // Settings Camera row all step through the same list rather than offering a view
 // cycle that skips past the players. See advanceRoamSelection in roam.mjs.
 function cycleRoamView(direction = 1) {
+  roamViewDefaulted = false;
   const flagIndexes = getRoamTrackableFlags().map((flag) => flag.index);
   // Map Viewer (issue #68) is Observer on the wire, so nothing about
   // `playerTeam` says so -- `isPreviewingAltWorld()` is what actually means
@@ -11768,8 +11547,31 @@ function storeAutopilot(id) {
   }
 }
 let autopilotRestoreId = readStoredAutopilot();
-// The pilot the Settings row is pointed at, and the one `9` turns on.
-let autopilotRowId = autopilotRestoreId ?? AUTOPILOTS[0].id;
+// The pilot the Settings row is pointed at: `9` turns it on, and a menu opened
+// while it is not flying engages it rather than pausing (issue #162). None, the
+// default, keeps a menu's pause. Remembered on its own, as the player's choice.
+const AUTOPILOT_ROW_STORAGE_KEY = 'autopilotRow';
+function readStoredAutopilotRow() {
+  try {
+    const id = localStorage.getItem(AUTOPILOT_ROW_STORAGE_KEY);
+    return AUTOPILOTS.some((entry) => entry.id === id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+function storeAutopilotRow(id) {
+  try {
+    if (id) localStorage.setItem(AUTOPILOT_ROW_STORAGE_KEY, id);
+    else localStorage.removeItem(AUTOPILOT_ROW_STORAGE_KEY);
+  } catch {
+    /* ignore storage errors */
+  }
+}
+let autopilotRowId = readStoredAutopilotRow() ?? autopilotRestoreId;
+// Whether the pilot flying was put on by a menu opening, and so comes off
+// when the menu closes.
+let autopilotMenuEngaged = false;
+let autopilotMenuCovered = false;
 let autopilotOn = false;
 let autopilotOutput = null;
 let autopilotEnabledAt = -Infinity;
@@ -11791,7 +11593,7 @@ function getAutopilotName(id) {
 }
 
 // cmdAutoPilot: off if on, otherwise on with the pilot `id` names.
-function toggleAutopilot(id = autopilotRowId) {
+function toggleAutopilot(id = autopilotRowId ?? DEFAULT_PILOT) {
   if (!gameplayJoinConfirmed || isObserver()) return;
   if (autopilotOn) {
     setAutopilot(null);
@@ -11812,6 +11614,8 @@ function engageAutopilot(id) {
   if (autopilotOn) {
     autopilotId = id;
     autopilotOutput = null;
+    // Chosen by the player, so it stays when a menu that put a pilot on closes.
+    autopilotMenuEngaged = false;
     storeAutopilot(id);
     sendToServer({ type: 'autopilot', on: true, pilot: getAutopilotName(id) });
     setHudAlert(0, `${getAutopilotName(id)} has the controls`, 1);
@@ -11827,12 +11631,14 @@ function engageAutopilot(id) {
   setHudAlert(0, 'autopilot enabled', 1);
 }
 
-function setAutopilot(id) {
+function setAutopilot(id, { remember = true } = {}) {
   autopilotId = id;
   autopilotOn = id !== null;
   if (!autopilotOn) clearAutopilotIntent();
   autopilotReportAt = 0;
-  storeAutopilot(id);
+  // A pilot a menu put on is not the player's choice to come back to.
+  if (remember) storeAutopilot(id);
+  autopilotMenuEngaged = false;
   autopilotOutput = null;
   sendToServer({ type: 'autopilot', on: autopilotOn, pilot: autopilotOn ? getAutopilotName(id) : null });
 }
@@ -11856,6 +11662,7 @@ function stepAutopilotRow(direction) {
   const at = choices.findIndex((choice) => choice.id === autopilotRowId);
   const next = (at + (direction < 0 ? -1 : 1) + choices.length) % choices.length;
   autopilotRowId = choices[next].id;
+  storeAutopilotRow(autopilotRowId);
   return true;
 }
 
@@ -11994,6 +11801,19 @@ function buildAutopilotView() {
       ricochet: shotRicochets(getMyShotFlag(), gameConfig?.ALL_SHOTS_RICOCHET),
       canFire: findFreeShotSlot(
         myShotSlotFreeAt, normalizeShotSlotCount(gameConfig.SHOT_MAX_ACTIVE), frameEpochMs) >= 0,
+      // How the tank is moving, which a shot inherits: its velocity as of the
+      // last move, its speed along the barrel, how fast it can go and how fast
+      // that speed may change (0, no limit).
+      velocity: { ...shotTankVelocity },
+      speed: lastSpeed,
+      topSpeed: lastTopSpeed || gameConfig.TANK_SPEED,
+      accel: lastLinearLimit,
+      // The turn rate it has, radians a second, and how fast that may change
+      // (0, no limit): what a jump leaves with is reached from here.
+      angVel: lastAngVel,
+      angAccel: lastAngularLimit,
+      // Full-stick turn rate as this tank's flag and place leave it.
+      turnRate: lastTurnRate || gameConfig.TANK_ROTATION_SPEED,
     },
     players,
     shots,
@@ -12095,7 +11915,7 @@ function drawAutopilotIntent(intent, nowMs) {
   if (intent?.shot) {
     const shot = intent.shot;
     const path = shot.segments || autopilotProbes.traceShot(
-      shot.from, shot.dir, getShotSpeed(getMyShotFlag()), getShotLifetimeSeconds(getMyShotFlag()),
+      shot.from, shot.dir, shot.speed ?? getShotSpeed(getMyShotFlag()), getShotLifetimeSeconds(getMyShotFlag()),
       shotRicochets(getMyShotFlag(), gameConfig?.ALL_SHOTS_RICOCHET));
     autopilotShotOverlay = { path, held: shot.held === true, at: nowMs };
   }
@@ -12124,6 +11944,51 @@ function reportAutopilot(nowMs) {
   });
   autopilotTally.kills = 0;
   autopilotTally.deaths = 0;
+}
+
+// One autopilot flight, takeoff to landing, against what the pilot planned
+// for it (`lastFlight`): the heading and turn rate it left with, and how far
+// off the way on it faced when it came down. Sent as a debug line, so the log
+// says what a flight on a real client did -- the bot benchmark flies the
+// server's physics, not this one.
+let autopilotFlight = null;
+function noteAutopilotFlight(wasInAir, nowInAir, rotationSpeed) {
+  if (!autopilotOn) {
+    autopilotFlight = null;
+    return;
+  }
+  const deg = (radians) => (radians * 180 / Math.PI).toFixed(0);
+  if (!wasInAir && nowInAir) {
+    const pilot = autopilots.get(autopilotId);
+    const plan = pilot?.lastFlight && (performance.now() / 1000) - pilot.lastFlight.at < 0.5 ? pilot.lastFlight : null;
+    autopilotFlight = {
+      at: performance.now(),
+      r: playerRotation,
+      rs: rotationSpeed,
+      x: playerX,
+      z: playerZ,
+      plan,
+      mode: autopilotOutput?.intent?.mode ?? '?',
+    };
+    return;
+  }
+  if (!(wasInAir && !nowInAir) || !autopilotFlight) return;
+  const flight = autopilotFlight;
+  autopilotFlight = null;
+  const plan = flight.plan;
+  const aim = plan?.aim;
+  const want = aim ? Math.atan2(-(aim.x - playerX), -(aim.z - playerZ)) : null;
+  const off = want === null ? null : Math.abs(normalizeAngle(playerRotation - want));
+  sendToServer({
+    type: 'debug',
+    message: `[autopilot] flight (${flight.mode}${plan ? (plan.jump ? ', jump' : ', drive-off') : ', unplanned'}):`
+      + ` from (${flight.x.toFixed(0)},${flight.z.toFixed(0)}) r ${flight.r.toFixed(2)} rs ${flight.rs.toFixed(2)}`
+      + ` to (${playerX.toFixed(0)},${myTank.position.y.toFixed(0)},${playerZ.toFixed(0)}) r ${playerRotation.toFixed(2)}`
+      + ` after ${((performance.now() - flight.at) / 1000).toFixed(2)}s`
+      + (plan ? `; planned air ${plan.air.toFixed(2)}s turn ${deg(plan.turn)} deg cmd ${plan.rotation.toFixed(2)},`
+        + ` landing (${plan.landing.x},${plan.landing.y},${plan.landing.z}) aim (${aim.x},${aim.z}),`
+        + ` facing ${deg(off)} deg off the aim` : ''),
+  });
 }
 
 function runAutopilot() {
@@ -12160,12 +12025,12 @@ function runAutopilot() {
 // limits: a tank caps reverse and treats `up` as a jump, while the roaming
 // camera spends `up` and `down` on altitude, which is the whole reason those two
 // come back raw.
-function gatherDriveInput() {
-  if (autopilotOn && autopilotOutput) {
+function gatherDriveInput({ player = true } = {}) {
+  if (!player) {
     return {
-      forward: autopilotOutput.speed,
-      turn: autopilotOutput.rotation,
-      up: autopilotOutput.jump,
+      forward: autopilotOutput?.speed ?? 0,
+      turn: autopilotOutput?.rotation ?? 0,
+      up: autopilotOutput?.jump === true,
       down: false,
     };
   }
@@ -12209,22 +12074,125 @@ function gatherDriveInput() {
   // what upstream's keyboardSpeed does with the same pair of keys.
   let forward = forwardKeyHeld ? keyForward : stickForward;
   let turn = turnKeyHeld ? keyTurn : stickTurn;
+
+  if (keys['Tab']) up = true;
+  if (keys['Space']) down = true;
+
+  // The autopilot takes the mouse box's place, last in line: a key or a stick
+  // still owns its axis while it is held, so a player can turn a pilot out of
+  // a corner while it keeps the speed, and lets go to hand it back. The mouse
+  // box is left out altogether -- it holds an offset wherever the cursor is
+  // parked, so it would never hand anything back.
+  if (autopilotOn && autopilotOutput) {
+    if (!forwardKeyHeld && stickForward === 0) forward = autopilotOutput.speed;
+    if (!turnKeyHeld && stickTurn === 0) turn = autopilotOutput.rotation;
+    return { forward, turn, up: up || autopilotOutput.jump, down };
+  }
+
   if (mouseSteeringActive()) {
     if (!forwardKeyHeld && stickForward === 0) forward = -mouseY;
     if (!turnKeyHeld && stickTurn === 0) turn = -mouseX;
   }
 
-  if (keys['Tab']) up = true;
-  if (keys['Space']) down = true;
-
   return { forward, turn, up, down };
+}
+
+// The local tank as the shared `drive` step sees it. The rest of client.js
+// reads and writes the tank through its own globals -- position, the air and
+// ground state, the momentum velocities -- so each step loads them in and
+// writes them back out, and the step itself never touches the page.
+const myDrive = createDriveState();
+function loadMyDrive() {
+  const data = myTank.userData;
+  Object.assign(myDrive, {
+    x: playerX,
+    y: playerY,
+    z: playerZ,
+    rotation: playerRotation,
+    verticalVelocity: data.verticalVelocity || 0,
+    airVelocityX: data.airVelocityX || 0,
+    airVelocityZ: data.airVelocityZ || 0,
+    jumpDirection: jumpDirection ?? null,
+    onGround,
+    onObstacle,
+    inAir: isInAir,
+    lastObstacle: lastMotionObstacle,
+    insideBuildings,
+    lastSpeed,
+    lastAngVel,
+    previousSpeedFraction: data.previousSpeedFraction || 0,
+    agilityStartedAt: data.agilityStartedAt ?? -Infinity,
+    jumpForwardSpeed: data.jumpForwardSpeed || 0,
+    fallForwardSpeed: data.fallForwardSpeed || 0,
+    slideDirection: data.slideDirection,
+    forwardSpeed: data.forwardSpeed || 0,
+    rotationSpeed: data.rotationSpeed || 0,
+    stuckFrameCount: data.stuckFrameCount || 0,
+    wingsFlapsLeft,
+    jumpWasHeld,
+    wasAirborne: data.wasAirborne === true,
+    bounceReadyAt: data.bounceReadyAt ?? 0,
+  });
+}
+function storeMyDrive() {
+  const data = myTank.userData;
+  playerX = myDrive.x;
+  playerY = myDrive.y;
+  playerZ = myDrive.z;
+  playerRotation = myDrive.rotation;
+  data.verticalVelocity = myDrive.verticalVelocity;
+  data.airVelocityX = myDrive.airVelocityX;
+  data.airVelocityZ = myDrive.airVelocityZ;
+  jumpDirection = myDrive.jumpDirection;
+  onGround = myDrive.onGround;
+  onObstacle = myDrive.onObstacle;
+  isInAir = myDrive.inAir;
+  lastMotionObstacle = myDrive.lastObstacle;
+  lastSpeed = myDrive.lastSpeed;
+  lastAngVel = myDrive.lastAngVel;
+  lastTopSpeed = myDrive.topSpeed;
+  lastTurnRate = myDrive.turnRate;
+  lastLinearLimit = myDrive.linearLimit;
+  lastAngularLimit = myDrive.angularLimit;
+  data.previousSpeedFraction = myDrive.previousSpeedFraction;
+  data.agilityStartedAt = myDrive.agilityStartedAt;
+  data.jumpForwardSpeed = myDrive.jumpForwardSpeed;
+  data.fallForwardSpeed = myDrive.fallForwardSpeed;
+  data.slideDirection = myDrive.slideDirection;
+  data.forwardSpeed = myDrive.forwardSpeed;
+  data.rotationSpeed = myDrive.rotationSpeed;
+  data.stuckFrameCount = myDrive.stuckFrameCount;
+  wingsFlapsLeft = myDrive.wingsFlapsLeft;
+  jumpWasHeld = myDrive.jumpWasHeld;
+  data.wasAirborne = myDrive.wasAirborne;
+  data.bounceReadyAt = myDrive.bounceReadyAt;
+}
+function myDriveTank() {
+  const flag = getMyFlag();
+  return {
+    flag: flag?.type ?? null,
+    motionFlag: effectiveMotionFlagType(),
+    zoned: flag?.zoned === true,
+    // Unlimited Wings while driving as an observer (issue #68).
+    unlimitedFlaps: isPhantomDriving(),
+  };
+}
+function myDriveWorld() {
+  return {
+    config: gameConfig,
+    colliders: getCollisionColliders(),
+    topOf: getColliderTopY,
+    teleport: (from, to) => predictLocalPlayerTeleport(from, to, frameEpochMs),
+  };
+}
+function myDriveClock() {
+  return { now: performance.now() / 1000, random: Math.random };
 }
 
 function handleInputEvents() {
   // Reset intended input each frame
   intendedForward = 0;
   intendedRotation = 0;
-  intendedY = 0;
   jumpTriggered = false;
 
   updateVirtualInputFromXR();
@@ -12248,78 +12216,22 @@ function handleInputEvents() {
 
   runAutopilot();
 
-  // Gather intended input from controls
-  const carriedFlagType = effectiveMotionFlagType();
-  airControl = hasAirControl(carriedFlagType);
-  if (isInAir && !airControl) {
-    // In air: use stored jump values to match what we send in packets
-    intendedForward = myTank.userData.jumpForwardSpeed || 0;
-    intendedRotation = myTank.userData.rotationSpeed || 0;
-    // A coasting tank does not read the sticks at all, so the jump control goes
-    // unsampled and has to be treated as released. Landing therefore re-arms it,
-    // which is what makes holding jump bounce a tank down a building.
-    jumpWasHeld = false;
-  } else if (isGameplayInputActive()) {
-    const drive = gatherDriveInput();
-    // The input clamps: reversed controls, and the four flags that take
-    // one direction away. They belong here, on the raw stick, because that is
-    // where upstream negates and clamps -- everything downstream, including the
-    // acceleration smoothing and Agility's window, should see what the tank was
-    // actually asked to do.
-    const clamped = applyMotionInput(
-      carriedFlagType, drive.forward, drive.turn, amInsideBuilding());
-    intendedForward = clamped.forward;
-    intendedRotation = clamped.turn;
-    if (drive.up && !jumpWasHeld
-      && canJump(carriedFlagType, gameConfig.ALLOW_JUMPING, jumpDirection !== null, wingsFlapsLeft,
-        amInsideBuilding())) {
-      intendedY = 1;
-      jumpTriggered = true;
-      // Every jump spends a flap. Only Wings ever holds more than the one a
-      // surface just put back.
-      wingsFlapsLeft--;
-    }
-    jumpWasHeld = drive.up;
-  } else {
-    // Chat (or a menu) owns the keyboard: nothing fresh to read, so the tank
-    // holds still on the ground rather than a stale key or mouse offset
-    // driving it -- but that is the only thing this player was doing, not the
-    // whole simulation. A dialog freezes the rest of it too, moments later,
-    // once the server confirms the auto-pause syncAutoPause asked for; chat
-    // never asks for one, so nothing below should wait on this player's
-    // keyboard either. Issues #95 and #99.
-    jumpWasHeld = false;
+  // What the controls ask for, after the flags have had their say: the shared
+  // `drive` step's own reading. With a menu or chat holding the keys a pilot
+  // still drives -- the player's own controls are simply not read -- and with
+  // neither, nothing is (issues #95 and #99).
+  let controls = null;
+  if (isGameplayInputActive() || (autopilotOn && autopilotOutput)) {
+    const drive = gatherDriveInput({ player: isGameplayInputActive() });
+    controls = { forward: drive.forward, turn: drive.turn, up: drive.up };
   }
-
-  // Bouncy takes the decision off the player entirely: a tank on a surface is
-  // thrown back up as soon as its landing delay expires, and `canJump` lets it
-  // through even on a world where nothing else may jump. Neither that nor a
-  // tank already coasting through the air above reads a key, so unlike the
-  // branch above, chat does not touch either one.
-  if (!jumpTriggered) {
-    const bounce = getBounceState(
-      carriedFlagType,
-      !isInAir,
-      myTank.userData.wasAirborne === true,
-      myTank.userData.bounceReadyAt ?? 0,
-      performance.now() / 1000,
-    );
-    myTank.userData.bounceReadyAt = bounce.bounceReadyAt;
-    if (bounce.jump && canJump(carriedFlagType, gameConfig.ALLOW_JUMPING, false, wingsFlapsLeft,
-      amInsideBuilding())) {
-      intendedY = 1;
-      jumpTriggered = true;
-      wingsFlapsLeft--;
-    }
-  }
-  myTank.userData.wasAirborne = isInAir;
-  const reverseSpeedRatio = Number.isFinite(gameConfig?.REVERSE_SPEED_RATIO)
-    ? gameConfig.REVERSE_SPEED_RATIO
-    : 0.5;
-  intendedForward = Math.max(-reverseSpeedRatio, Math.min(1, intendedForward));
-  intendedRotation = Math.max(-1, Math.min(1, intendedRotation));
-  intendedY = Math.max(-1, Math.min(1, intendedY));
-  phasedReverse = intendedForward < 0;
+  loadMyDrive();
+  const intended = readDriveInput(myDrive, controls, myDriveTank(), myDriveWorld(), myDriveClock());
+  storeMyDrive();
+  intendedForward = intended.forward;
+  intendedRotation = intended.rotation;
+  jumpTriggered = intended.jumpTriggered;
+  phasedReverse = intended.phasedReverse;
 }
 
 function handleMotion(deltaTime) {
@@ -12333,547 +12245,95 @@ function handleMotion(deltaTime) {
   if (isObserver() && !isPhantomDriving()) return;
   if (pauseState.isFrozen() || entryDialogFreeze) return;
 
-  let forceMoveSend = false;
+  // The motion is the shared `drive` step's (public/drive.mjs), the one every
+  // tank drives by -- this browser's, a server bot's, a practice Worker's. What
+  // stays here is what only a browser does with it: the sounds, the jets and
+  // rings, the packets, and the tank's mesh.
+  loadMyDrive();
+  const wasInAir = isInAir;
+  const events = stepDrive(myDrive, {
+    forward: intendedForward,
+    rotation: intendedRotation,
+    jumpTriggered,
+    phasedReverse,
+  }, myDriveTank(), myDriveWorld(), myDriveClock(), deltaTime);
+  storeMyDrive();
+  let forceMoveSend = events.forceSend;
+  const jumpStarted = Boolean(events.jumpStarted);
 
-  // Detect landing immediately based on ground state from handleInputEvents
-  // This must happen before any position/velocity modifications
-  // Only clear jumpDirection if we're actually ON something (ground or obstacle), not just isInAir=false
-  if (jumpDirection !== null && (onGround || onObstacle)) {
-    const landingImpactSpeed = Math.abs(myTank.userData.verticalVelocity || 0);
-    // We were in air, now we're on ground/obstacle - send landing packet
-    forceMoveSend = true;
-    jumpDirection = null;
-    myTank.userData.jumpForwardSpeed = 0;
-    myTank.userData.fallForwardSpeed = 0;
-    myTank.userData.slideDirection = undefined;
-    myTank.userData.verticalVelocity = 0;
-    setAirVelocity(myTank, 0, 0);
+  if (events.landed) {
     clearJumpPredictionDebug(myTank);
-    triggerLandingFeedback(myTank, landingImpactSpeed, {
+    triggerLandingFeedback(myTank, events.landed.impactSpeed, {
       local: true,
-      silent: isDrivenUpward(lastMotionObstacle, playerX, playerY, playerZ),
+      silent: isDrivenUpward(events.landed.obstacle, events.landed.x, events.landed.y, events.landed.z),
     });
   }
-
-  const oldX = playerX;
-  const oldY = playerY;
-  const oldZ = playerZ;
-  const oldRotation = playerRotation;
-
-
-  // Step 3: Convert intended speed/rotation to deltas.
-  //
-  // The three good movement flags land here and nowhere else, because
-  // `setDesiredSpeed` and `setDesiredAngVel` are the only places upstream
-  // applies them: they scale the world's own tank speed and turn rate rather
-  // than replacing them. Agility carries a clock, so `getSpeedFactor` is handed
-  // the window it last opened and gives back the window it wants next -- the
-  // rule stays in the shared pair and this only remembers the answer.
-  const motionFlag = effectiveMotionFlagType();
-  const agility = getSpeedFactor(
-    motionFlag,
-    myTank.userData.previousSpeedFraction || 0,
-    intendedForward,
-    myTank.userData.agilityStartedAt ?? -Infinity,
-    performance.now() / 1000,
-  );
-  myTank.userData.agilityStartedAt = agility.agilityStartedAt;
-  myTank.userData.previousSpeedFraction = intendedForward;
-  // Burrow's two handicaps, read off where the tank actually is rather than off
-  // the flag: holding the flag above ground costs nothing.
-  const burrow = getBurrowFactors(motionFlag, playerY);
-  const speedFactor = agility.factor * burrow.speed;
-  const angVelFactor = getMaxAngVelFactor(motionFlag) * burrow.angVel;
-  let moveRotation = playerRotation;
-  const priorAirVelocityX = myTank.userData.airVelocityX || 0;
-  const priorAirVelocityZ = myTank.userData.airVelocityZ || 0;
-
-  let movementForwardInput = intendedForward;
-  let movementRotationInput = intendedRotation;
-  // Wings drives in the air on the same terms as on the ground, so it takes the
-  // same acceleration limits with it. Upstream reaches the same place from the
-  // other side: its wings branch skips doMomentum but still runs getNewAngVel,
-  // and doMomentum does nothing without the Momentum flag anyway.
-  // doMomentum (LocalPlayer.cxx:1537). The world's acceleration limit -- `-a`,
-  // which upstream calls inertia -- composed with `M` if the tank is carrying
-  // it, applied to the velocity rather than to the stick. With `-a 0 0`, which
-  // is upstream's default and bzo's, there is no limit: `setDesiredSpeed` is
-  // instant and the tank reaches full speed in one frame, exactly as a BZFlag
-  // tank does.
-  //
-  // Smoothing the stick directly, with no upstream counterpart, would give
-  // every tank inertia BZFlag does not have and no way for a server or a map
-  // to say otherwise -- the opposite of the point: bzo should feel like
-  // BZFlag and offer the same knobs to change it.
-  const tankSpeedNow = gameConfig.TANK_SPEED * speedFactor;
-  const tankAngVelNow = gameConfig.TANK_ROTATION_SPEED * angVelFactor;
-  if (!isInAir || airControl) {
-    const limits = getAccelerationLimits(
-      motionFlag, gameConfig.LINEAR_ACCELERATION, gameConfig.ANGULAR_ACCELERATION);
-    lastSpeed = applyAccelerationLimit(
-      lastSpeed, intendedForward * tankSpeedNow, limits.linear, deltaTime);
-    lastAngVel = applyAccelerationLimit(
-      lastAngVel, intendedRotation * tankAngVelNow, limits.angular, deltaTime);
-    // Back to the fraction everything downstream is written in. The velocity is
-    // what carries the limit; the fraction is just how it is spelled from here
-    // on, and how it goes on the wire.
-    movementForwardInput = tankSpeedNow > 0 ? lastSpeed / tankSpeedNow : 0;
-    movementRotationInput = tankAngVelNow > 0 ? lastAngVel / tankAngVelNow : 0;
-  } else {
-    lastSpeed = intendedForward * tankSpeedNow;
-    lastAngVel = intendedRotation * tankAngVelNow;
-  }
-
-  // Upstream's velocity, in world units per second rather than as a step: the
-  // resolver integrates it over the timestep itself, because the timestep is
-  // what it searches.
-  let movementForwardSpeed = movementForwardInput;
-  const coasting = isInAir && jumpDirection !== null && !airControl;
-  const sliding = isInAir && airControl && gameConfig.WINGS_SLIDE_TIME > 0;
-  let velocityX;
-  let velocityZ;
-  if (coasting) {
-    // "can't control motion in air": upstream carries oldVelocity straight
-    // through (LocalPlayer.cxx:341), which is the velocity the step that left
-    // the surface gave the tank.
-    velocityX = priorAirVelocityX;
-    velocityZ = priorAirVelocityZ;
-  } else if (sliding) {
-    // _wingsSlideTime above zero: the stick adds to the velocity the tank
-    // already has rather than replacing it, so flight carries momentum.
-    const slid = getWingsSlideVelocity(
-      priorAirVelocityX,
-      priorAirVelocityZ,
-      moveRotation,
-      movementForwardSpeed * gameConfig.TANK_SPEED,
-      gameConfig.TANK_SPEED,
-      gameConfig.WINGS_SLIDE_TIME,
-      deltaTime,
-    );
-    velocityX = slid.x;
-    velocityZ = slid.z;
-  } else {
-    velocityX = -Math.sin(moveRotation) * movementForwardSpeed * tankSpeedNow;
-    velocityZ = -Math.cos(moveRotation) * movementForwardSpeed * tankSpeedNow;
-  }
-
-  const groundLimit = myGroundLimit();
-  const wasInAir = isInAir;
-  if (!jumpTriggered && myTank.position.y <= groundLimit
-    && !isBelowGroundLimit(myTank.position.y, groundLimit)) {
-    myTank.userData.verticalVelocity = 0;
-    myTank.position.y = groundLimit;
-    playerY = groundLimit;
-  }
-
-  // doUpdateMotion applies gravity in the full-control branch too, whenever the
-  // tank is above its own floor (LocalPlayer.cxx:334) -- which is what makes a
-  // Burrow tank sink into the ground it is standing on rather than needing to be
-  // airborne first. Only a tank resting on the *ground* can sink: one on a
-  // building is held up by the building, whatever floor its flag gives it.
-  const sinkingIntoGround = onGround && playerY > groundLimit;
-  if (isInAir || onObstacle || sinkingIntoGround) {
-    myTank.userData.verticalVelocity -= getLocalGravity() * deltaTime;
-  }
-  // The creep is a floor recomputed from where the tank is, not momentum it
-  // keeps. Upstream recomputes `newVelocity[2]` every frame and only raises it
-  // while the tank is under its limit, so the moment the tank is not under it
-  // there is nothing left lifting it.
-  if (playerY < groundLimit) {
-    myTank.userData.verticalVelocity = applyGroundLimitCreep(
-      myTank.userData.verticalVelocity, playerY, groundLimit);
-  } else if (onGround && !jumpTriggered && myTank.userData.verticalVelocity > 0) {
-    myTank.userData.verticalVelocity = 0;
-  }
-
-  let jumpStarted = false; // Track if jump was just triggered this frame
-
-  // handleInputEvents already asked canJump, which is what refuses a second jump
-  // in mid air -- and grants one to Wings, which is allowed to flap there.
-  if (jumpTriggered) {
-    myTank.userData.verticalVelocity = getJumpVelocity(myTank.userData.verticalVelocity || 0);
-    jumpStarted = true; // Mark that jump started this frame
-    myTank.userData.jumpForwardSpeed = movementForwardInput;
-    myTank.userData.fallForwardSpeed = movementForwardInput;
-    myTank.userData.slideDirection = undefined;
-    forceMoveSend = true; // Force send on jump
-    renderManager.playSound(airControl ? 'flap' : 'jump', myTank.position);
+  if (events.jumpStarted) {
+    renderManager.playSound(events.jumpStarted.flap ? 'flap' : 'jump', myTank.position);
     renderManager.fireTankJumpJets(myTank);
   }
-
-  // One pass. Position, height and heading come back resolved together, so
-  // there is no second opinion for them to disagree with.
-  const angularVelocity = movementRotationInput * tankAngVelNow;
-  const step = resolveTankStep(
-    velocityX,
-    myTank.userData.verticalVelocity || 0,
-    velocityZ,
-    angularVelocity,
-    deltaTime,
-  );
-  myTank.userData.stuckFrameCount = step.stuckFrameCount;
-  const intendedTravelX = velocityX * deltaTime;
-  const intendedTravelZ = velocityZ * deltaTime;
-  let result = {
-    x: step.x,
-    y: step.y,
-    z: step.z,
-    moved: true,
-    // Whatever the resolver had to take away from the step, which is what the
-    // slide reporting downstream keys off.
-    altered: Math.abs((step.x - playerX) - intendedTravelX) > 1e-6
-      || Math.abs((step.z - playerZ) - intendedTravelZ) > 1e-6,
-    trajectoryDeltaX: step.velocityX * deltaTime,
-    trajectoryDeltaZ: step.velocityZ * deltaTime,
-  };
-  myTank.userData.verticalVelocity = step.velocityY;
-
-  const localNowMs = frameEpochMs;
-  let teleportedThisFrame = false;
-  let predictedTeleportRotateDelta = 0;
-  let predictedTeleportPacket = null;
-  const sourceRotationBeforeTeleport = normalizeAngle(step.azimuth);
-  if (result.moved) {
-    const predictedTeleport = predictLocalPlayerTeleport(
-      { x: oldX, y: oldY, z: oldZ },
-      { x: result.x, y: result.y, z: result.z },
-      localNowMs,
-    );
-    // doUpdateMotion's teleporter branch (LocalPlayer.cxx:729): a Phantom Zone
-    // tank does not teleport. The crossing is detected exactly as it is for
-    // everybody else -- and takes the same cooldown, so driving through a portal
-    // toggles once rather than once a frame -- but the tank stays where it is
-    // and the zone flips instead.
-    if (predictedTeleport.applied && togglesZoneOnTeleport(getMyFlag()?.type ?? null)) {
-      const zoneFlag = getMyFlag();
-      const zoned = !(zoneFlag.zoned === true);
-      zoneFlag.zoned = zoned;
-      // The point the crossing happened at, not wherever the server has since
-      // extrapolated the tank to. Same reasoning as the `tp` packet's own source
-      // state: the server has to check the claim the client actually made, and a
-      // frame of travel is several units at tank speed.
-      sendToServer({
-        type: 'zone',
-        fromFaceId: predictedTeleport.fromFaceId,
-        x: Number(result.x.toFixed(2)),
-        y: Number(result.y.toFixed(2)),
-        z: Number(result.z.toFixed(2)),
-        r: Number(sourceRotationBeforeTeleport.toFixed(2)),
-      });
-      // SFX_PHANTOM, in place of SFX_TELEPORT. Upstream plays one or the other,
-      // never both.
-      renderManager.playSound('phantom', myTank.position);
-      showMessage(zoned ? 'Zoned' : 'Unzoned');
-    } else if (predictedTeleport.applied) {
-      const sourceState = {
-        x: result.x,
-        y: result.y,
-        z: result.z,
-      };
-      teleportedThisFrame = true;
-      predictedTeleportRotateDelta = predictedTeleport.rotateDelta;
-      result = {
-        ...result,
-        x: predictedTeleport.state.x,
-        y: predictedTeleport.state.y,
-        z: predictedTeleport.state.z,
-        moved: true,
-        altered: true,
-      };
-      predictedTeleportPacket = {
-        type: 'tp',
-        fromFaceId: predictedTeleport.fromFaceId,
-        toFaceId: predictedTeleport.toFaceId,
-        x: Number(sourceState.x.toFixed(2)),
-        y: Number(sourceState.y.toFixed(2)),
-        z: Number(sourceState.z.toFixed(2)),
-        r: Number(sourceRotationBeforeTeleport.toFixed(2)),
-        vv: Number((myTank.userData.verticalVelocity || 0).toFixed(2)),
-        vx: Number((myTank.userData.airVelocityX || 0).toFixed(2)),
-        vz: Number((myTank.userData.airVelocityZ || 0).toFixed(2)),
-        jd: jumpDirection !== null && jumpDirection !== undefined
-          ? Number(jumpDirection.toFixed(2))
-          : null,
-      };
-      forceMoveSend = true;
-    }
-  }
-
-  // "pick new location if we haven't already done so" (LocalPlayer.cxx:667).
-  // The resolver reports the one case it decided itself -- a surface met with an
-  // upward normal, upstream's OnBuilding -- and the rest is the height.
-  const nextOnObstacle = step.onBuilding;
-  const nextOnGround = !nextOnObstacle && step.y <= groundLimit;
-  const nextInAir = !nextOnObstacle && !nextOnGround;
-
-  // `justLanded` (LocalPlayer.cxx:794): the frame the tank stops being in the
-  // air. One transition, so one sound and one ring, however many frames of
-  // slope or ground it took to get here.
-  if (wasInAir && !nextInAir) {
-    forceMoveSend = true;
-    triggerLandingFeedback(myTank, Math.abs(step.velocityY || 0), {
-      local: true,
-      silent: isDrivenUpward(step.obstacle || null, step.x, step.y, step.z),
+  if (events.zoneToggle) {
+    const zoneFlag = getMyFlag();
+    const zoned = !(zoneFlag.zoned === true);
+    zoneFlag.zoned = zoned;
+    // The point the crossing happened at: the server has to check the claim
+    // the client actually made.
+    sendToServer({
+      type: 'zone',
+      fromFaceId: events.zoneToggle.fromFaceId,
+      x: Number(events.zoneToggle.x.toFixed(2)),
+      y: Number(events.zoneToggle.y.toFixed(2)),
+      z: Number(events.zoneToggle.z.toFixed(2)),
+      r: Number(events.zoneToggle.rotation.toFixed(2)),
     });
-    jumpDirection = null;
-    myTank.userData.jumpForwardSpeed = 0;
-    myTank.userData.fallForwardSpeed = 0;
-    myTank.userData.slideDirection = undefined;
-    myTank.userData.verticalVelocity = 0;
-    setAirVelocity(myTank, 0, 0);
-    clearJumpPredictionDebug(myTank);
+    // SFX_PHANTOM, in place of SFX_TELEPORT. Upstream plays one or the other.
+    renderManager.playSound('phantom', myTank.position);
+    showMessage(zoned ? 'Zoned' : 'Unzoned');
   }
 
-  // And the frame it starts. Upstream needs no announcement -- `location` is
-  // InAir and the velocity it already had carries it -- but bzo's air model is
-  // told a direction and a velocity, so they are taken from the step that left
-  // the surface rather than frozen off a stick fraction.
-  const fallStarted = nextInAir && !wasInAir && !jumpStarted;
-  if (fallStarted) {
-    forceMoveSend = true;
-    jumpDirection = playerRotation;
-    myTank.userData.slideDirection = undefined;
-    setAirVelocity(myTank, step.velocityX, step.velocityZ);
-    const carried = gameConfig.TANK_SPEED > 0
-      ? Math.hypot(step.velocityX, step.velocityZ) / gameConfig.TANK_SPEED
-      : 0;
-    myTank.userData.jumpForwardSpeed = carried;
-    myTank.userData.fallForwardSpeed = carried;
-  }
+  myTank.position.set(playerX, playerY, playerZ);
+  myTank.rotation.y = playerRotation;
 
-  onObstacle = nextOnObstacle;
-  onGround = nextOnGround;
-  isInAir = nextInAir;
-  lastMotionObstacle = step.obstacle || null;
-  // Debug instrumentation for the still-open xwall/oct stuck investigation
-  // (issue #84 -- not yet root-caused as of this commit).
-  // Uncomment to resume it: keeps a rolling ~1.5s buffer of every frame's
-  // position/velocity/obstacle/normal and dumps it over the existing
-  // debugLog channel (so it lands in server.log, not just the browser
-  // console) the moment forward progress stalls for a real player -- no
-  // manual console commands needed to catch a live repro.
-  // window.__bzoDebugBuf = window.__bzoDebugBuf || [];
-  // window.__bzoDebugStuckStreak = window.__bzoDebugStuckStreak || 0;
-  // window.__bzoDebugDumped = window.__bzoDebugDumped || false;
-  // {
-  //   const moveDist = Math.hypot(step.x - playerX, step.z - playerZ);
-  //   window.__bzoDebugBuf.push({
-  //     t: performance.now().toFixed(0),
-  //     x: step.x.toFixed(3), y: step.y.toFixed(3), z: step.z.toFixed(3),
-  //     az: step.azimuth.toFixed(3),
-  //     vx: step.velocityX.toFixed(2), vy: step.velocityY.toFixed(2), vz: step.velocityZ.toFixed(2),
-  //     moveDist: moveDist.toFixed(4),
-  //     obstacle: step.obstacle ? (step.obstacle.name || step.obstacle.type) : null,
-  //     onObstacle, onGround, isInAir,
-  //     stuckFrameCount: myTank.userData.stuckFrameCount || 0,
-  //     lastNormal: window.__bzoDebugLastNormal || null,
-  //   });
-  //   window.__bzoDebugLastNormal = null;
-  //   if (window.__bzoDebugBuf.length > 90) window.__bzoDebugBuf.shift();
-  //   const requestedSpeed = Math.hypot(velocityX, velocityZ);
-  //   if (moveDist < 0.05 && requestedSpeed > 0.5) {
-  //     window.__bzoDebugStuckStreak++;
-  //   } else {
-  //     window.__bzoDebugStuckStreak = 0;
-  //     window.__bzoDebugDumped = false;
-  //   }
-  //   if (window.__bzoDebugStuckStreak > 10 && !window.__bzoDebugDumped) {
-  //     window.__bzoDebugDumped = true;
-  //     debugLog(JSON.stringify(window.__bzoDebugBuf), 'BZO-STUCK-DUMP');
-  //   }
-  // }
-  // Unlimited Wings while driving (issue #68): grounded recharges to it same
-  // as everywhere else, so a phantom tank landing and taking off again never
-  // runs dry either.
-  if (!isInAir) wingsFlapsLeft = isPhantomDriving() ? Infinity : gameConfig.WINGS_JUMP_COUNT;
-
-  let forwardSpeed = 0;
-  let rotationSpeed = myTank.userData.rotationSpeed || 0;
-
-  if (result.moved) {
-    playerX = result.x;
-    playerY = result.y;
-    playerZ = result.z;
-    // The heading the one pass resolved, which is upstream's own: its search
-    // runs over the azimuth as well as the position and leaves `newAngVel = 0`
-    // where the step hit something, so a turn into a wall does not happen and
-    // nothing downstream has to undo one.
-    playerRotation = normalizeAngle(step.azimuth);
-    if (teleportedThisFrame) {
-      playerRotation = normalizeAngle(playerRotation + predictedTeleportRotateDelta);
-      if (jumpDirection !== null && jumpDirection !== undefined) {
-        jumpDirection = normalizeAngle(jumpDirection + predictedTeleportRotateDelta);
-      }
-
-      const rotatedAirVelocity = rotateXZ(
-        myTank.userData.airVelocityX || 0,
-        myTank.userData.airVelocityZ || 0,
-        predictedTeleportRotateDelta,
-      );
-      setAirVelocity(myTank, rotatedAirVelocity.x, rotatedAirVelocity.z);
-      myTank.userData.slideDirection = undefined;
+  if (events.teleport) {
+    renderManager.playSound('teleport', myTank.position);
+    suppressLocalTeleportFxUntil = performance.now() + 250;
+    // BZFlag's order: the teleport is reported before any move this frame
+    // makes. A driving observer (issue #68) crosses the portal but never
+    // reports it, which the server would refuse from Observer anyway.
+    const tp = events.teleport;
+    if (!isObserver() && ws && ws.readyState === WebSocket.OPEN) {
+      sendToServer({
+        type: 'tp',
+        fromFaceId: tp.fromFaceId,
+        toFaceId: tp.toFaceId,
+        x: Number(tp.source.x.toFixed(2)),
+        y: Number(tp.source.y.toFixed(2)),
+        z: Number(tp.source.z.toFixed(2)),
+        r: Number(tp.sourceRotation.toFixed(2)),
+        vv: Number(tp.verticalVelocity.toFixed(2)),
+        vx: Number(tp.airVelocityX.toFixed(2)),
+        vz: Number(tp.airVelocityZ.toFixed(2)),
+        jd: tp.jumpDirection !== null && tp.jumpDirection !== undefined ? Number(tp.jumpDirection.toFixed(2)) : null,
+      });
     }
-    myTank.position.set(playerX, playerY, playerZ);
-    myTank.rotation.y = playerRotation;
-
-    if (teleportedThisFrame) {
-      // As above: the teleport sound is the whole of it.
-      renderManager.playSound('teleport', myTank.position);
-      suppressLocalTeleportFxUntil = performance.now() + 250;
-
-      // Match BZFlag semantics: explicit teleport event is sent before
-      // any subsequent movement packet generated this frame. A driving
-      // observer (issue #68) still crosses the portal -- the prediction
-      // above already moved it -- it just never reports the crossing, which
-      // the server would refuse from Observer anyway (server.js's `'tp'`
-      // handler).
-      if (predictedTeleportPacket && !isObserver() && ws && ws.readyState === WebSocket.OPEN) {
-        sendToServer(predictedTeleportPacket);
-      }
-    }
-
-    // Store jumpDirection AFTER rotation update so it matches packet r value
-    if (jumpStarted) {
-      jumpDirection = playerRotation;
-      // The stick is a fraction of this tank's own maximum; the air velocity is
-      // a fraction of the world's, so the boost has to come with it or a High
-      // Speed tank would lose it the moment it left the ground.
-      const jumpVelocity = deriveAirVelocityFromState(
-        jumpDirection, movementForwardInput * speedFactor);
-      setAirVelocity(myTank, jumpVelocity.x, jumpVelocity.z);
-    }
+  } else {
+    decayLocalTeleportReentryBlock(events.moved, frameEpochMs);
   }
 
   updateInsideBuildings();
 
-  // doUpdateMotion (LocalPlayer.cxx:803-816), the whole else-chain in upstream's
-  // own order, read off the face this frame's step ended on -- upstream sets its
-  // physics driver from `lastObstacle` immediately before this. A driver pushing
-  // upward sounds first and every frame the tank is still on the pad, which is
-  // upstream's behaviour too and in practice one or two frames, since a pad that
-  // lifts a tank stops being under it. Otherwise the frame a tank crosses from
-  // ground level into the ground, which only Burrow ever does.
-  // Both in the ear rather than positional: upstream's chain is three
-  // `playLocalSound` calls, which it documents as distance 0 -- no attenuation.
-  // These are the player's own tank, under the camera, so a rolloff only ever
-  // makes them quieter than upstream's.
-  if (isDrivenUpward(lastMotionObstacle, playerX, playerY, playerZ)) {
+  // doUpdateMotion's sound chain (LocalPlayer.cxx:803-816), in upstream's order
+  // and in the ear rather than positional: a driver pushing upward, otherwise
+  // the frame a tank goes into the ground, which only Burrow ever does.
+  if (events.drivenUpward) {
     renderManager.playLocalSound('bounce');
-  } else if (oldY >= 0 && playerY < 0) {
+  } else if (events.burrowEntered) {
     renderManager.playLocalSound('burrow');
   }
 
-  const actualDeltaX = playerX - oldX;
-  const actualDeltaZ = playerZ - oldZ;
-  const trajectoryDeltaX = Number.isFinite(result.trajectoryDeltaX)
-    ? result.trajectoryDeltaX
-    : actualDeltaX;
-  const trajectoryDeltaZ = Number.isFinite(result.trajectoryDeltaZ)
-    ? result.trajectoryDeltaZ
-    : actualDeltaZ;
-
-  // Calculate actual movement direction for slide detection before using it
-  // in the forward speed calculation.
-  let slideDirection = null;
-  if (result.moved && result.altered) {
-    // Slide occurred - calculate actual movement direction
-    const actualDistance = Math.hypot(trajectoryDeltaX, trajectoryDeltaZ);
-
-    if (actualDistance > 0.001) {
-      // Calculate direction from movement vector
-      const actualDirection = Math.atan2(-trajectoryDeltaX, -trajectoryDeltaZ);
-
-      // Determine expected direction (r on ground, jumpDirection in air)
-      const expectedDirection = isInAir && jumpDirection !== null ? jumpDirection : playerRotation;
-
-      // Normalize angle difference to -PI to PI
-      const angleDiff = Math.abs(((actualDirection - expectedDirection + Math.PI) % (Math.PI * 2)) - Math.PI);
-
-      // If actual direction differs from expected by more than 0.01 radians, include it
-      if (!teleportedThisFrame && angleDiff > 0.01) {
-        slideDirection = actualDirection;
-      }
-    }
-  }
-
-  if (!teleportedThisFrame) {
-    decayLocalTeleportReentryBlock(Math.hypot(actualDeltaX, actualDeltaZ), localNowMs);
-  }
-
-  if ((isInAir || jumpStarted || fallStarted) && deltaTime > 0) {
-    if (teleportedThisFrame) {
-      // Preserve the rotated airborne velocity through teleports. The portal
-      // displacement is not physical travel and would wildly overstate speed.
-    } else if (airControl && !jumpStarted) {
-      // Wings changes its horizontal velocity every frame, so the figure the
-      // server and the other clients extrapolate from is this frame's actual
-      // travel rather than the one the tank took off with.
-      setAirVelocity(myTank, actualDeltaX / deltaTime, actualDeltaZ / deltaTime);
-    } else if (result.moved && result.altered) {
-      const newAirVelocityX = trajectoryDeltaX / deltaTime;
-      const newAirVelocityZ = trajectoryDeltaZ / deltaTime;
-      const airVelocityDelta = Math.hypot(newAirVelocityX - priorAirVelocityX, newAirVelocityZ - priorAirVelocityZ);
-      setAirVelocity(myTank, newAirVelocityX, newAirVelocityZ);
-      if (airVelocityDelta > AIR_VELOCITY_THRESHOLD) {
-        forceMoveSend = true;
-      }
-    } else if (jumpStarted && !result.altered) {
-      const jumpVelocity = deriveAirVelocityFromState(
-        jumpDirection, intendedForward * speedFactor);
-      setAirVelocity(myTank, jumpVelocity.x, jumpVelocity.z);
-    }
-  }
-
-  if (deltaTime > 0) {
-    // Only recalculate forwardSpeed when the sticks are connected to the tank:
-    // on the ground, or in the air with Wings. Coasting keeps the last value.
-    if (!isInAir || airControl) {
-      const actualDeltaX = playerX - oldX;
-      const actualDeltaZ = playerZ - oldZ;
-      const actualDistance = Math.sqrt(actualDeltaX * actualDeltaX + actualDeltaZ * actualDeltaZ);
-
-      if (actualDistance > 0.001) {
-        const actualSpeed = actualDistance / deltaTime;
-        const tankSpeed = gameConfig.TANK_SPEED;
-
-        // When sliding (slideDirection set), use actual speed in that direction
-        // Otherwise, use dot product with rotation direction
-        if (slideDirection !== null) {
-          // Sliding: use actual speed magnitude (already moving in slideDirection)
-          forwardSpeed = actualSpeed / tankSpeed;
-        } else {
-          // Normal: project onto rotation direction
-          const forwardX = -Math.sin(playerRotation);
-          const forwardZ = -Math.cos(playerRotation);
-          const dot = (actualDeltaX * forwardX + actualDeltaZ * forwardZ) / actualDistance;
-          forwardSpeed = (dot * actualSpeed) / tankSpeed;
-        }
-        // `fs` is a fraction of the world's base speed, not of whatever this
-        // tank's flag has raised it to, so a boosted tank reports more than 1
-        // and the server extrapolates it at face value. The bound widens with
-        // the flag rather than the reading being squashed back to 1, which
-        // would have the server place a High Speed tank two thirds of the way
-        // to where it actually is.
-        const maxFS = getMaxSpeedFactor(motionFlag);
-        forwardSpeed = Math.max(-maxFS, Math.min(maxFS, forwardSpeed));
-      }
-    } else {
-      const airSpeed = Math.hypot(myTank.userData.airVelocityX || 0, myTank.userData.airVelocityZ || 0);
-      forwardSpeed = gameConfig.TANK_SPEED > 0 ? airSpeed / gameConfig.TANK_SPEED : 0;
-    }
-    // Calculate rotation speed whenever the tank is steering: on the ground or
-    // on an obstacle, and in the air with Wings.
-    if (!isInAir || airControl) {
-      const actualDeltaRot = playerRotation - oldRotation;
-      const actualRotSpeed = actualDeltaRot / deltaTime;
-      const tankRotSpeed = gameConfig.TANK_ROTATION_SPEED;
-      rotationSpeed = actualRotSpeed / tankRotSpeed;
-      const maxRS = getMaxAngVelFactor(motionFlag);
-      rotationSpeed = Math.max(-maxRS, Math.min(maxRS, rotationSpeed));
-    }
-  }
-  myTank.userData.forwardSpeed = forwardSpeed;
-  myTank.userData.rotationSpeed = rotationSpeed;
+  const forwardSpeed = myDrive.forwardSpeed;
+  const rotationSpeed = myDrive.rotationSpeed;
+  noteAutopilotFlight(wasInAir, isInAir, rotationSpeed);
 
   const now = performance.now();
   const timeSinceLastSend = now - lastSentTime;
@@ -12983,29 +12443,23 @@ function handleMotion(deltaTime) {
   // reconnect still carries the last session's tank until the new `init`
   // clears it, and a move from it reports the old position to a server that
   // has none yet.
+  // The move's motion, from the shared step's state, rounded as it goes on the
+  // wire (`movePacketFields`); a jump sends the speed it left with and a dead
+  // stick its zero. The shot fired this frame inherits the velocity the server
+  // will read back off those same numbers.
+  const motionFields = movePacketFields(myDrive, { jumpStarted, stopped: deadStickStopUpdate });
+  const sentFS = motionFields.fs;
+  const sentRS = motionFields.rs;
+  const sentVV = motionFields.vv;
+  shotTankVelocity = packetVelocity(motionFields, gameConfig);
+
   if (shouldSendUpdate && !isObserver() && gameplayJoinConfirmed
     && ws && ws.readyState === WebSocket.OPEN) {
-
-    // Round velocities to the precision we send to match server expectations
-    // For jump packets, send the intendedForward value used for movement, not calculated forwardSpeed
-    const sentFS = deadStickStopUpdate
-      ? 0
-      : (jumpStarted ? Number((myTank.userData.jumpForwardSpeed || 0).toFixed(2)) : Number(forwardSpeed.toFixed(2)));
-    const sentRS = deadStickStopUpdate ? 0 : Number(rotationSpeed.toFixed(2));
-    const sentVV = Number(verticalVelocity.toFixed(2));
 
     const movePacket = {
       type: 'm',
       id: myPlayerId,
-      x: Number(playerX.toFixed(2)),
-      y: Number(playerY.toFixed(2)),
-      z: Number(playerZ.toFixed(2)),
-      r: Number(playerRotation.toFixed(2)),
-      fs: sentFS,
-      rs: sentRS,
-      vv: sentVV,
-      vx: Number(airVelocityX.toFixed(2)),
-      vz: Number(airVelocityZ.toFixed(2)),
+      ...motionFields,
       dt: Number(deltaTime.toFixed(3)),
       // How long the client took to get from the last packet's speeds to these
       // ones. `dt` above is one frame, which is the window `fs` and `rs` were
@@ -13021,24 +12475,7 @@ function handleMotion(deltaTime) {
       // time. See docs/lag-plan.md, "Extrapolate on the client's clock, not
       // ours".
       ct: Number(((frameEpochMs - clientClockOrigin) / 1000).toFixed(3)),
-      // Upstream's `PlayerState::Falling`, which is a tank whose location is
-      // `InAir` or `InBuilding` rather than resting on ground or a building
-      // (`LocalPlayer.cxx:819-823`). Only a proxied connection reads it: this
-      // server works out for itself whether a tank is airborne, because here
-      // the client is not the authority on where it is. A target bzfs is --
-      // it believes a client's own state outright -- and it needs this one
-      // because it skips the vertical part of its shot-origin check for a
-      // falling tank, so a shot fired mid-jump is dropped without it.
-      air: (onGround || onObstacle) ? 0 : 1,
     };
-
-    // Add optional direction field if sliding
-    const packetSlideDirection = airborneState
-      ? myTank.userData.slideDirection
-      : slideDirection;
-    if (packetSlideDirection !== null && packetSlideDirection !== undefined) {
-      movePacket.d = Number(packetSlideDirection.toFixed(2));
-    }
 
     if (myTank && myTank.userData.ghostMesh) {
       const ghostX = Number(playerX.toFixed(2));
@@ -13154,22 +12591,11 @@ function shoot() {
 
   const myShot = getShotEffects(getMyShotFlag());
 
-  // Calculate shot origin from model-derived muzzle offsets when available.
-  // LocalPlayer::fireShot (LocalPlayer.cxx:1230) is the exception: a shock wave
-  // has its origin "under tank", because the wave swells around the tank rather
-  // than leaving a barrel, and that point is what the server measures its radius
-  // from. The direction still travels, as upstream's FiringInfo carries the
-  // tank's angle whatever it does with the velocity.
-  const muzzleForward = Number.isFinite(myTank?.userData?.muzzleForward)
-    ? myTank.userData.muzzleForward
-    : 3.0;
-  const muzzleHeight = Number.isFinite(myTank?.userData?.muzzleHeight)
-    ? myTank.userData.muzzleHeight
-    : 1.57;
-  const shotX = myShot.shockwave ? playerX : playerX + dirX * muzzleForward;
-  const shotY = (myTank ? myTank.position.y : 0) + (myShot.shockwave ? 0 : muzzleHeight);
-  const shotZ = myShot.shockwave ? playerZ : playerZ + dirZ * muzzleForward;
-
+  // The shot every tank fires (`shotFromTank` in the shared drive pair): from
+  // the muzzle this tank's model reports -- under the tank for a shock wave,
+  // which swells around it rather than leaving a barrel -- with upstream's
+  // velocity, the tank's own plus the shot speed along the barrel.
+  //
   // A phantom tank's shot (issue #68) is cosmetic: nothing about it is sent,
   // so nobody else ever sees or hears it and the server never learns it
   // happened. The local prediction below runs exactly as it does for a real
@@ -13177,17 +12603,24 @@ function shoot() {
   // existing 2-second stale-prediction purge in `updateProjectiles` is what
   // ends it rather than the shot's own ~3.5s range/speed lifetime. Accepted
   // for now rather than teaching it a real expiry.
-  if (!isObserver()) {
-    sendToServer({
-      type: 'shoot',
-      x: shotX,
-      y: shotY,
-      z: shotZ,
-      dirX,
-      dirY: 0,
-      dirZ,
-    });
-  }
+  const shotMessage = shotFromTank({
+    x: playerX,
+    y: myTank ? myTank.position.y : 0,
+    z: playerZ,
+    rotation: playerRotation,
+    tankVelocity: shotTankVelocity,
+    config: gameConfig,
+    shockwave: myShot.shockwave,
+    muzzleForward: Number.isFinite(myTank?.userData?.muzzleForward) ? myTank.userData.muzzleForward : DEFAULT_MUZZLE_FORWARD,
+    muzzleHeight: Number.isFinite(myTank?.userData?.muzzleHeight) ? myTank.userData.muzzleHeight : DEFAULT_MUZZLE_HEIGHT,
+  });
+  const shotX = shotMessage.x;
+  const shotY = shotMessage.y;
+  const shotZ = shotMessage.z;
+  const velocity = { x: shotMessage.vx, y: shotMessage.vy, z: shotMessage.vz };
+  const flight = getShotFlight(velocity, myShot, getShotSpeed(null))
+    || { x: dirX, y: 0, z: dirZ, speed: getShotSpeed(getMyShotFlag()) };
+  if (!isObserver()) sendToServer(shotMessage);
   // A beam's path is the server's to trace -- it is a polyline through whatever
   // it met, not something the client can extrapolate from a direction -- so the
   // shooter gets the muzzle flash and the report at once and the beam itself
@@ -13201,150 +12634,10 @@ function shoot() {
     return true;
   }
 
-  createLocalProjectile({ x: shotX, y: shotY, z: shotZ, dirX, dirY: 0, dirZ });
+  createLocalProjectile({
+    x: shotX, y: shotY, z: shotZ, dirX: flight.x, dirY: flight.y, dirZ: flight.z, speed: flight.speed,
+  });
   return true;
-}
-
-// The teleporter's parts, read off the solid the server already resolved. The
-// world arrives collision-ready: `w`/`d`/`h` are the frame, as they are for
-// every other obstacle, so nothing here recomputes the border. The only thing
-// left to derive is the portal opening inside the frame, which is upstream's own
-// subtraction in the scene generator -- `getBreadth() - border` and
-// `getHeight() - border`.
-
-const BZFLAG_TELEPORT_TOLERANCE = 1e-6;
-
-function getSegmentBoxEntryTime(localStart, localEnd, bounds) {
-  const delta = {
-    x: localEnd.x - localStart.x,
-    y: localEnd.y - localStart.y,
-    z: localEnd.z - localStart.z,
-  };
-
-  let tMin = 0;
-  let tMax = 1;
-  const axes = ['x', 'y', 'z'];
-
-  for (const axis of axes) {
-    const start = localStart[axis];
-    const d = delta[axis];
-    const min = bounds.min[axis];
-    const max = bounds.max[axis];
-
-    if (Math.abs(d) < 1e-9) {
-      if (start < min || start > max) return null;
-      continue;
-    }
-
-    let t1 = (min - start) / d;
-    let t2 = (max - start) / d;
-    if (t1 > t2) {
-      const tmp = t1;
-      t1 = t2;
-      t2 = tmp;
-    }
-
-    if (t1 > tMin) tMin = t1;
-    if (t2 < tMax) tMax = t2;
-    if (tMin > tMax) return null;
-  }
-
-  if (tMax < 0 || tMin > 1) return null;
-  return Math.max(0, tMin);
-}
-
-function getShotTeleporterCrossing(start, end, obs) {
-  const dims = getShotTeleporterDims(obs);
-  const startLocalXZ = getColliderLocalPoint(start.x, start.z, obs);
-  const endLocalXZ = getColliderLocalPoint(end.x, end.z, obs);
-
-  const localStart = {
-    x: startLocalXZ.x,
-    y: start.y - (obs.baseY || 0),
-    z: startLocalXZ.z,
-  };
-  const localEnd = {
-    x: endLocalXZ.x,
-    y: end.y - (obs.baseY || 0),
-    z: endLocalXZ.z,
-  };
-
-  const outerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.halfD },
-    max: { x: dims.halfW, y: dims.h, z: dims.halfD },
-  };
-  const innerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.activeHalfD },
-    max: { x: dims.halfW, y: dims.activeH, z: dims.activeHalfD },
-  };
-
-  const tOuter = getSegmentBoxEntryTime(localStart, localEnd, outerBounds);
-  const tInner = getSegmentBoxEntryTime(localStart, localEnd, innerBounds);
-  if (tInner === null || tInner < 0 || tInner > 1) return null;
-  if (tOuter !== null && (tInner - tOuter) > BZFLAG_TELEPORT_TOLERANCE) return null;
-
-  const hitLocalX = localStart.x + (localEnd.x - localStart.x) * tInner;
-  const face = hitLocalX > 0 ? 0 : 1;
-  const sourceFaceId = obs.teleporterIndex * 2 + face;
-
-  return {
-    t: tInner,
-    sourceFaceId,
-    face,
-    point: {
-      x: start.x + (end.x - start.x) * tInner,
-      y: start.y + (end.y - start.y) * tInner,
-      z: start.z + (end.z - start.z) * tInner,
-    },
-  };
-}
-
-// Teleporter::isTeleported's other outcome: the outer, border-inclusive block
-// entered without a qualifying inner crossing -- the frame's own solid
-// material rather than its doorway. Mirrors server.js's function of the same
-// name; see its comment and issue #110 for why a shot bounces off this like
-// any other building instead of just ending here.
-function getShotTeleporterFrameHit(start, end, obs) {
-  const dims = getShotTeleporterDims(obs);
-  const startLocalXZ = getColliderLocalPoint(start.x, start.z, obs);
-  const endLocalXZ = getColliderLocalPoint(end.x, end.z, obs);
-
-  const localStart = {
-    x: startLocalXZ.x,
-    y: start.y - (obs.baseY || 0),
-    z: startLocalXZ.z,
-  };
-  const localEnd = {
-    x: endLocalXZ.x,
-    y: end.y - (obs.baseY || 0),
-    z: endLocalXZ.z,
-  };
-
-  const outerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.halfD },
-    max: { x: dims.halfW, y: dims.h, z: dims.halfD },
-  };
-  const innerBounds = {
-    min: { x: -dims.halfW, y: 0, z: -dims.activeHalfD },
-    max: { x: dims.halfW, y: dims.activeH, z: dims.activeHalfD },
-  };
-
-  const tOuter = getSegmentBoxEntryTime(localStart, localEnd, outerBounds);
-  if (tOuter === null || tOuter < 0 || tOuter > 1) return null;
-
-  const tInner = getSegmentBoxEntryTime(localStart, localEnd, innerBounds);
-  if (tInner !== null && tInner >= 0 && tInner <= 1 && (tInner - tOuter) <= BZFLAG_TELEPORT_TOLERANCE) {
-    return null;
-  }
-
-  return {
-    t: tOuter,
-    point: {
-      x: start.x + (end.x - start.x) * tOuter,
-      y: start.y + (end.y - start.y) * tOuter,
-      z: start.z + (end.z - start.z) * tOuter,
-    },
-  };
 }
 
 // _tankRadius (global.cxx:155): 0.72 * tankLength, the bounding-circle radius
@@ -13396,305 +12689,6 @@ function getWorldTeleporterProximity(x, y, z) {
     if (p > best) best = p;
   }
   return best;
-}
-
-function rotateXZ(x, z, angle) {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  return {
-    x: cos * x - sin * z,
-    z: sin * x + cos * z,
-  };
-}
-
-function transformShotThroughTeleporter(pointIn, dirIn, sourceObs, sourceFace, destObs, destFace) {
-  const srcDims = getShotTeleporterDims(sourceObs);
-  const dstDims = getShotTeleporterDims(destObs);
-
-  const radians1 = sourceObs.rotation + (sourceFace === 0 ? 0 : Math.PI);
-  const radians2 = destObs.rotation + (destFace === 1 ? 0 : Math.PI);
-
-  const relativeX = pointIn.x - sourceObs.x;
-  const relativeZ = pointIn.z - sourceObs.z;
-  const relativeY = pointIn.y - (sourceObs.baseY || 0);
-  const local = rotateXZ(relativeX, relativeZ, -radians1);
-
-  const breadthScale = srcDims.activeHalfD > 1e-6 ? (dstDims.activeHalfD / srcDims.activeHalfD) : 1;
-  const heightScale = srcDims.activeH > 1e-6 ? (dstDims.activeH / srcDims.activeH) : 1;
-
-  const localOut = {
-    x: -dstDims.halfW,
-    z: local.z * breadthScale,
-    y: relativeY * heightScale,
-  };
-
-  const rotatedOut = rotateXZ(localOut.x, localOut.z, radians2);
-  const pointOut = {
-    x: destObs.x + rotatedOut.x,
-    y: (destObs.baseY || 0) + localOut.y,
-    z: destObs.z + rotatedOut.z,
-  };
-
-  const rotateDelta = radians2 - radians1;
-  const dirRotated = rotateXZ(dirIn.x, dirIn.z, rotateDelta);
-  const dirOut = {
-    x: dirRotated.x,
-    y: dirIn.y,
-    z: dirRotated.z,
-  };
-
-  return { pointOut, dirOut };
-}
-
-const SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE = 0.5;
-
-function traceShotThroughTeleporters(start, dir, travelDistance, reentryBlockTeleporterIndex = null, reentryBlockDistance = 0) {
-  let point = { ...start };
-  let direction = { ...dir };
-  let remaining = travelDistance;
-  let teleports = 0;
-  let blockedTeleporterIndex = Number.isInteger(reentryBlockTeleporterIndex) ? reentryBlockTeleporterIndex : null;
-  let blockedDistance = Math.max(0, Number(reentryBlockDistance) || 0);
-  const maxTeleportsPerTick = 8;
-
-  while (remaining > 1e-6 && teleports < maxTeleportsPerTick) {
-    const end = {
-      x: point.x + direction.x * remaining,
-      y: point.y + direction.y * remaining,
-      z: point.z + direction.z * remaining,
-    };
-
-    let earliest = null;
-    let earliestFrameHit = null;
-    for (const obs of TELEPORTER_OBSTACLES_BY_INDEX.values()) {
-      const crossing = getShotTeleporterCrossing(point, end, obs);
-      if (crossing) {
-        if (blockedTeleporterIndex === null || blockedDistance <= 1e-6 || obs.teleporterIndex !== blockedTeleporterIndex) {
-          if (!earliest || crossing.t < earliest.crossing.t) {
-            earliest = { obs, crossing };
-          }
-        }
-      }
-
-      const frameHit = getShotTeleporterFrameHit(point, end, obs);
-      if (frameHit && (!earliestFrameHit || frameHit.t < earliestFrameHit.frameHit.t)) {
-        earliestFrameHit = { obs, frameHit };
-      }
-    }
-
-    // A frame hit that comes no later than the nearest teleport crossing wins:
-    // same tie-break server.js's own loop uses, since a crossing this same
-    // step already proved it is not the frame (getShotTeleporterCrossing and
-    // getShotTeleporterFrameHit on the same obstacle are mutually exclusive).
-    if (earliestFrameHit && (!earliest || earliestFrameHit.frameHit.t < earliest.crossing.t)) {
-      return {
-        point: earliestFrameHit.frameHit.point,
-        direction,
-        teleports,
-        reentryBlockTeleporterIndex: blockedTeleporterIndex,
-        reentryBlockDistance: Math.max(0, blockedDistance - (remaining * earliestFrameHit.frameHit.t)),
-        frameHit: true,
-        frameHitObstacle: earliestFrameHit.obs,
-        frameHitRemaining: remaining * (1 - earliestFrameHit.frameHit.t),
-      };
-    }
-
-    if (!earliest) {
-      blockedDistance = Math.max(0, blockedDistance - remaining);
-      if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
-      point = end;
-      break;
-    }
-
-    const sourceFaceId = earliest.crossing.sourceFaceId;
-    const sourceObs = earliest.obs;
-    const sourceFace = sourceFaceId % 2;
-    const destinations = TELEPORTER_LINKS_BY_SOURCE_FACE.get(sourceFaceId) || [];
-    const destFaceId = destinations.length > 0
-      ? destinations[0]
-      : ((Math.floor(sourceFaceId / 2) * 2) + (1 - (sourceFaceId % 2)));
-    const destTeleporterIndex = Math.floor(destFaceId / 2);
-    const destFace = destFaceId % 2;
-    const destObs = TELEPORTER_OBSTACLES_BY_INDEX.get(destTeleporterIndex);
-    if (!destObs) break;
-
-    const transformed = transformShotThroughTeleporter(
-      earliest.crossing.point,
-      direction,
-      sourceObs,
-      sourceFace,
-      destObs,
-      destFace,
-    );
-
-    const consumedDistance = remaining * earliest.crossing.t;
-    blockedDistance = Math.max(0, blockedDistance - consumedDistance);
-    if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
-    remaining = Math.max(0, remaining - consumedDistance);
-    point = {
-      x: transformed.pointOut.x + transformed.dirOut.x * 0.02,
-      y: transformed.pointOut.y + transformed.dirOut.y * 0.02,
-      z: transformed.pointOut.z + transformed.dirOut.z * 0.02,
-    };
-    direction = transformed.dirOut;
-    blockedTeleporterIndex = destTeleporterIndex;
-    blockedDistance = Math.max(
-      SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE,
-      (getShotTeleporterDims(destObs).activeHalfD * 2) + 0.05,
-    );
-    teleports++;
-  }
-
-  return {
-    point,
-    direction,
-    teleports,
-    reentryBlockTeleporterIndex: blockedTeleporterIndex,
-    reentryBlockDistance: blockedDistance,
-  };
-}
-
-// The first teleporter event on one segment: the portal a beam enters, or the
-// frame it hits. traceShotThroughTeleporters asks the same two questions over a
-// whole simulation step; a beam has to ask them a segment at a time, because
-// over a laser's range a wall stands between the muzzle and a portal far more
-// often than not.
-function findSegmentTeleporterEvent(from, to, blockedTeleporterIndex, blockedDistance) {
-  let earliest = null;
-  for (const obs of TELEPORTER_OBSTACLES_BY_INDEX.values()) {
-    const crossing = getShotTeleporterCrossing(from, to, obs);
-    if (crossing) {
-      const blocked = blockedTeleporterIndex !== null
-        && blockedDistance > 1e-6
-        && obs.teleporterIndex === blockedTeleporterIndex;
-      if (!blocked && (!earliest || crossing.t < earliest.event.t)) {
-        earliest = { obs, type: 'teleport', event: crossing };
-      }
-    }
-    const frameHit = getShotTeleporterFrameHit(from, to, obs);
-    if (frameHit && (!earliest || frameHit.t < earliest.event.t)) {
-      earliest = { obs, type: 'frameHit', event: frameHit };
-    }
-  }
-  return earliest;
-}
-
-// makeSegments' own maxSegment.
-const MAX_BEAM_SEGMENTS = 100;
-// traceShotStep's own clearance, so a beam's bounce and a shot's agree.
-const BEAM_SURFACE_CLEARANCE = SHOT_BOUNCE_CLEARANCE;
-
-// A beam's whole path, walked where nobody handed one over: a proxied target
-// traces the beam on each of its own clients and forwards no path, so this
-// walks it here instead. Same order as the server's traceShotBeam -- building,
-// ground, teleporter, bounce -- minus the tank hits, which stay the shooting
-// server's to decide.
-function traceBeamSegments(start, dir, range, ricochet) {
-  const obstacles = getCollisionColliders();
-  const segments = [];
-  let point = { ...start };
-  let drawFrom = { ...point };
-  let direction = { ...dir };
-  let remaining = range;
-  let blockedTeleporterIndex = null;
-  let blockedDistance = 0;
-  let justTeleported = false;
-
-  for (let segment = 0; segment < MAX_BEAM_SEGMENTS && remaining > 1e-6; segment++) {
-    const far = {
-      x: point.x + (direction.x * remaining),
-      y: point.y + (direction.y * remaining),
-      z: point.z + (direction.z * remaining),
-    };
-    const groundFraction = (direction.y < 0 && far.y < 0)
-      ? (0 - point.y) / (direction.y * remaining)
-      : Infinity;
-    const embedded = findShotEmbeddedObstacle(obstacles, point.x, point.y, point.z, SHOT_COLLISION_RADIUS);
-    const impact = embedded
-      ? (justTeleported ? null : { fraction: 0, obstacle: embedded, face: null })
-      : findShotSegmentImpact(obstacles, point, far, SHOT_COLLISION_RADIUS);
-    const obstacleFraction = impact ? impact.fraction : Infinity;
-    justTeleported = false;
-
-    let reason = 'range';
-    let obstacle = null;
-    let obstacleFace = -1;
-    let fraction = 1;
-    if (obstacleFraction <= groundFraction && obstacleFraction < 1) {
-      reason = 'obstacle';
-      obstacle = impact.obstacle;
-      obstacleFace = Number.isInteger(impact.face) ? impact.face : -1;
-      fraction = obstacleFraction;
-    } else if (groundFraction < 1) {
-      reason = 'ground';
-      fraction = groundFraction;
-    }
-    let end = {
-      x: point.x + ((far.x - point.x) * fraction),
-      y: reason === 'ground' ? 0 : point.y + ((far.y - point.y) * fraction),
-      z: point.z + ((far.z - point.z) * fraction),
-    };
-
-    const teleporterEvent = findSegmentTeleporterEvent(point, end, blockedTeleporterIndex, blockedDistance);
-    if (teleporterEvent) {
-      end = { ...teleporterEvent.event.point };
-      reason = teleporterEvent.type === 'frameHit' ? 'frame_hit' : 'teleport';
-      obstacle = teleporterEvent.type === 'frameHit' ? teleporterEvent.obs : null;
-      obstacleFace = -1;
-    }
-
-    segments.push({ from: { ...drawFrom }, to: { ...end }, end: reason });
-    const travelled = Math.hypot(end.x - point.x, end.y - point.y, end.z - point.z);
-    remaining = Math.max(0, remaining - travelled);
-    blockedDistance = Math.max(0, blockedDistance - travelled);
-    if (blockedDistance <= 1e-6) blockedTeleporterIndex = null;
-
-    if (reason === 'teleport') {
-      const sourceFaceId = teleporterEvent.event.sourceFaceId;
-      const destinations = TELEPORTER_LINKS_BY_SOURCE_FACE.get(sourceFaceId) || [];
-      const destFaceId = destinations.length > 0
-        ? destinations[0]
-        : ((Math.floor(sourceFaceId / 2) * 2) + (1 - (sourceFaceId % 2)));
-      const destTeleporterIndex = Math.floor(destFaceId / 2);
-      const destObs = TELEPORTER_OBSTACLES_BY_INDEX.get(destTeleporterIndex);
-      if (!destObs) break;
-      const transformed = transformShotThroughTeleporter(
-        end, direction, teleporterEvent.obs, sourceFaceId % 2, destObs, destFaceId % 2
-      );
-      point = {
-        x: transformed.pointOut.x + (transformed.dirOut.x * BEAM_SURFACE_CLEARANCE),
-        y: transformed.pointOut.y + (transformed.dirOut.y * BEAM_SURFACE_CLEARANCE),
-        z: transformed.pointOut.z + (transformed.dirOut.z * BEAM_SURFACE_CLEARANCE),
-      };
-      direction = transformed.dirOut;
-      drawFrom = { ...point };
-      justTeleported = true;
-      blockedTeleporterIndex = destTeleporterIndex;
-      blockedDistance = Math.max(
-        SHOT_TELEPORT_REENTRY_BLOCK_DISTANCE,
-        (getShotTeleporterDims(destObs).activeHalfD * 2) + 0.05,
-      );
-      continue;
-    }
-
-    if (ricochet && (reason === 'obstacle' || reason === 'ground' || reason === 'frame_hit')) {
-      const normal = reason === 'ground'
-        ? { x: 0, y: 1, z: 0 }
-        : getShotObstacleNormal(obstacle, end.x, end.y, end.z, SHOT_COLLISION_RADIUS, obstacleFace);
-      direction = reflectShotDirection(direction.x, direction.y, direction.z, normal);
-      drawFrom = { ...end };
-      point = {
-        x: end.x + (normal.x * BEAM_SURFACE_CLEARANCE),
-        y: end.y + (normal.y * BEAM_SURFACE_CLEARANCE),
-        z: end.z + (normal.z * BEAM_SURFACE_CLEARANCE),
-      };
-      continue;
-    }
-
-    break;
-  }
-
-  return segments;
 }
 
 function isShotTeleportDebugEnabled() {
@@ -15171,6 +14165,7 @@ function updateProjectiles(deltaTime) {
         renderManager.aimProjectile(projectile, steered);
       }
       const traced = traceShotThroughTeleporters(
+        TELEPORTER_INDEX,
         {
           x: projectile.position.x,
           y: projectile.position.y,
