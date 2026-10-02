@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.101] - 2026-10-02
+
 ### Added
 - A `group` spun off vertical or sheared tips the meshes it places, and a
   spinning mesh inside it spins about the tipped axis, as upstream does.
@@ -13,18 +15,20 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 - The guided missile is drawn as upstream's modelled missile, its nose and
   fins in the shooter's colour, sized by `_gmSize`, trailing upstream's
   densest smoke.
-- Meshes a map repeats at different places are drawn as one shared shape,
-  one draw call for all its copies; a player is told how many on entry.
+- Meshes a map repeats at other places and facings are drawn as one shared
+  shape, one draw call for all its copies; a player is told how many on
+  entry.
 - The radar draws the map's still obstacles from one cached image while the
-  player holds a height, and live while they climb or fall. Refs #133
+  player holds a height, and live while they climb or fall.
 - World variables `_lockOnAngle`, `_identifyRange`, `_rainPuddleColor` and
   `_disableBots` are read from a map.
 
 ### Fixed
 - A world weapon's guided missile flies until it hits something, as
   upstream's does, instead of stopping at an ordinary missile's range.
-- Shots are upstream's colours: a team's colour lifted only slightly toward
-  white, so a blue shot is deep blue rather than pale.
+- Shots are upstream's colours and size: a team's colour lifted only slightly
+  toward white, so a blue shot is deep blue rather than pale, on a bolt two
+  units across.
 - Watching or playing a BZFlag server without a login takes a random
   `bzo-view-` callsign, so two viewers no longer refuse each other.
 - A free camera opened from a link with `pos=` stays where the link put it,
