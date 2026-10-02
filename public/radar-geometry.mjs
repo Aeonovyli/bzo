@@ -116,17 +116,26 @@ export function getRadarObstacleCullRadius(obs) {
 // when it is too small on the panel for its own faces to be worth drawing.
 // Spin-aware for the same reason a face's is: a mesh turning about
 // `spinPivot` leaves every corner the same distance from it.
+// A mesh spinning about an axis a tipped group turned off vertical (#168)
+// swings its points through height as well, so its rejection circle has to
+// hold the full 3D distance from the pivot rather than the flat one.
+export function isTippedRadarSpin(obs) {
+  return Boolean(obs.angvel && obs.spinPivot && obs.spinAxis && Math.abs(obs.spinAxis.y) < 0.999999);
+}
+
 export function getRadarMeshObstacleCull(obs) {
-  const { minX, maxX, minZ, maxZ } = obs.bounds;
+  const { minX, maxX, minY, maxY, minZ, maxZ } = obs.bounds;
   const footprint = [minX, minZ, maxX, minZ, maxX, maxZ, minX, maxZ];
   const spins = Boolean(obs.angvel && obs.spinPivot);
+  const tipped = isTippedRadarSpin(obs);
   const cullX = spins ? obs.spinPivot.x : (minX + maxX) / 2;
   const cullZ = spins ? obs.spinPivot.z : (minZ + maxZ) / 2;
+  const dy = tipped ? Math.max(Math.abs(minY - obs.spinPivot.y), Math.abs(maxY - obs.spinPivot.y)) : 0;
   let cullRadius = 0;
   for (let i = 0; i < 4; i += 1) {
     cullRadius = Math.max(
       cullRadius,
-      Math.hypot(footprint[i * 2] - cullX, footprint[(i * 2) + 1] - cullZ),
+      Math.hypot(footprint[i * 2] - cullX, footprint[(i * 2) + 1] - cullZ, dy),
     );
   }
   return { cullX, cullZ, cullRadius, footprint };
@@ -139,6 +148,7 @@ export function getRadarMeshObstacleCull(obs) {
 // cached list keeps its meaning for as long as the map does.
 export function getRadarMeshFaceCull(obs, arrays, f) {
   const spins = Boolean(obs.angvel && obs.spinPivot);
+  const tipped = isTippedRadarSpin(obs);
   const start = arrays.faceStart[f];
   const end = arrays.faceStart[f + 1];
   let cullX = 0;
@@ -158,8 +168,9 @@ export function getRadarMeshFaceCull(obs, arrays, f) {
   let cullRadius = 0;
   for (let c = start; c < end; c += 1) {
     const v = arrays.corners[c] * 3;
+    const dy = tipped ? arrays.vertices[v + 1] - obs.spinPivot.y : 0;
     cullRadius = Math.max(
-      cullRadius, Math.hypot(arrays.vertices[v] - cullX, arrays.vertices[v + 2] - cullZ),
+      cullRadius, Math.hypot(arrays.vertices[v] - cullX, arrays.vertices[v + 2] - cullZ, dy),
     );
   }
   return { cullX, cullZ, cullRadius };

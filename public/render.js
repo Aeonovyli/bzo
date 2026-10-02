@@ -387,8 +387,13 @@ const BZFLAG_GM_FLARE_RANGE = 3;
 const BZFLAG_GM_FLARE_MAX = BZFLAG_GM_FLARE_MIN + BZFLAG_GM_FLARE_RANGE - 1;
 const BZFLAG_GM_FLARE_SIZE = 1.0;               // FlareSize
 const BZFLAG_GM_FLARE_SPREAD = 0.08;            // FlareSpread, radians
-// flareColor takes the bolt's rgb and its own alpha (BoltSceneNode.cxx:304).
+// flareColor takes the bolt's rgb and its own alpha (BoltSceneNode.cxx:304),
+// and a missile's bolt is `setColor(1.0, 0.2, 0.0)` whoever fired it
+// (GuidedMissleStrategy.cxx:47). Kept upstream's: a spike in a blue team's
+// colour is lost against the sky, and the model's nose and fins already say
+// whose missile it is.
 const BZFLAG_GM_FLARE_OPACITY = 0.667;
+const BZFLAG_GM_FLARE_COLOR = [1.0, 0.2, 0.0];
 // `shot_tail.png` is a four-by-four sheet of wisps, and a shot takes six
 // consecutive cells of it from a random start so that two shots in the air do
 // not wear the same tail.
@@ -400,7 +405,10 @@ const BZFLAG_SHOT_TAIL_SEGMENTS = 6;
 const BZFLAG_SHOT_TAIL_DISTANCES = [0.34, 0.62, 0.90, 1.18, 1.46, 1.74];
 const BZFLAG_SHOT_TAIL_SCALES = [0.78, 0.70, 0.62, 0.54, 0.46, 0.38];
 const BZFLAG_SHOT_TAIL_ALPHAS = [0.74, 0.64, 0.54, 0.44, 0.34, 0.24];
-const BZFLAG_SHOT_HEAD_SCALE = 1.35;
+// A bolt's billboard at upstream's own size: nothing calls `setSize` on a
+// shot's BoltSceneNode, so it keeps its default radius of 1 and its square is
+// two units across -- a missile's flares reaching to its edge.
+const BZFLAG_SHOT_HEAD_SCALE = 2;
 // Grown in powers of two from here, the way the flag batch grows.
 const BZFLAG_SHOT_BATCH_MIN_CAPACITY = 32;
 const BZFLAG_GM_PUFF_TEXTURE = '/textures/puffs.png';
@@ -413,6 +421,26 @@ const BZFLAG_GM_PUFF_SPIN = 180;                // draw(): glRotatef(age*180, 0,
 const BZFLAG_GM_PUFF_SIZE = 0.5;                // draw(): size = 0.5f + age * 1.25f
 const BZFLAG_GM_PUFF_GROWTH = 1.25;
 const BZFLAG_GM_PUFF_ALPHA = 0.5;               // draw(): alpha = 0.5f - age/lifetime
+// GuidedMissileStrategy's ctor at `useQuality() >= 3`: `rootPuff /= 10 + 5 *
+// bzfrand()`, so a missile at that quality leaves a puff every frame or so.
+const BZFLAG_GM_PUFF_QUALITY_DIVISOR = 10;
+const BZFLAG_GM_PUFF_QUALITY_DIVISOR_RANGE = 5;
+// Every puff in the world rides in one ring of instances, aged on the GPU from
+// its birth time, so a puff costs the CPU one write when it is born and nothing
+// after. Upstream's rate is one a frame a missile, for the 1.75 s a puff is
+// visible: enough for a dozen missiles at once at 144 fps before the oldest
+// puff is overwritten.
+const GM_PUFF_CAPACITY = 4096;
+// renderGeoGMBolt (BoltSceneNode.cxx:326), the modelled missile upstream draws
+// at `useQuality() >= 3`.
+const BZFLAG_GM_MODEL_PATH = '/obj/missile.obj';
+const BZFLAG_GM_MODEL_ROLL = 90;                // degrees a second, `rotSpeed`
+// coneColor and bodyColor; the nose is the shot's colour and the fins half it.
+const BZFLAG_GM_MODEL_CONE = 0.125;
+const BZFLAG_GM_MODEL_FIN_SCALE = 0.5;
+const GM_MODEL_AXIS = new THREE.Vector3(0, 0, 1);
+const GM_MODEL_FORWARD = new THREE.Vector3();
+const GM_MODEL_ROLL = new THREE.Quaternion();
 // Flags, mirroring FlagSceneNode (FlagSceneNode.cxx) at upstream's default
 // quality, where `geoPole` is on and `realFlag` is off: pole and cloth are one
 // billboarded pair facing the camera, and the cloth is a strip of eight quads
@@ -1523,6 +1551,125 @@ function buildShotBatchMesh(texture, capacity, { cells, additive }) {
   return mesh;
 }
 
+// SmokeGMPuffEffect::draw (EffectsRenderer.cxx), on the GPU: a puff's age is
+// the clock less its birth, and everything else -- its fade, its swell, its
+// drift upward and its spin -- is upstream's formula of that age. A puff whose
+// age is past its fade is moved off screen rather than drawn transparent.
+const GM_PUFF_VERTEX_SHADER = `
+attribute vec3 puffOrigin;
+attribute float puffBirth;
+attribute vec2 puffCell;
+uniform float time;
+varying vec2 vUv;
+varying float vAlpha;
+#include <fog_pars_vertex>
+void main() {
+  float age = time - puffBirth;
+  vAlpha = ${BZFLAG_GM_PUFF_ALPHA.toFixed(4)} - (age / ${BZFLAG_GM_PUFF_LIFETIME.toFixed(4)});
+  vUv = (uv * ${(1 / BZFLAG_GM_PUFF_CELLS).toFixed(4)}) + puffCell;
+  if (age < 0.0 || vAlpha <= 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  float size = (${BZFLAG_GM_PUFF_SIZE.toFixed(4)} + (age * ${BZFLAG_GM_PUFF_GROWTH.toFixed(4)})) * 2.0;
+  float spin = radians(age * ${BZFLAG_GM_PUFF_SPIN.toFixed(4)});
+  vec2 corner = vec2(
+    (position.x * cos(spin)) - (position.y * sin(spin)),
+    (position.x * sin(spin)) + (position.y * cos(spin))
+  );
+  vec4 mvPosition = modelViewMatrix
+    * vec4(puffOrigin + vec3(0.0, ${BZFLAG_GM_PUFF_DRIFT.toFixed(4)} * age, 0.0), 1.0);
+  mvPosition.xy += corner * size;
+  gl_Position = projectionMatrix * mvPosition;
+  #include <fog_vertex>
+}
+`;
+
+const GM_PUFF_FRAGMENT_SHADER = `
+uniform sampler2D map;
+varying vec2 vUv;
+varying float vAlpha;
+#include <fog_pars_fragment>
+void main() {
+  vec4 texel = texture2D(map, vUv);
+  gl_FragColor = vec4(texel.rgb, texel.a * vAlpha);
+  #include <colorspace_fragment>
+  #include <fog_fragment>
+}
+`;
+
+function buildGMPuffMesh(texture) {
+  const plane = new THREE.PlaneGeometry(1, 1);
+  const geometry = new THREE.InstancedBufferGeometry();
+  geometry.index = plane.index;
+  geometry.setAttribute('position', plane.getAttribute('position'));
+  geometry.setAttribute('uv', plane.getAttribute('uv'));
+  const attribute = (size, fill = 0) => {
+    const buffer = new THREE.InstancedBufferAttribute(new Float32Array(GM_PUFF_CAPACITY * size).fill(fill), size);
+    buffer.setUsage(THREE.DynamicDrawUsage);
+    return buffer;
+  };
+  geometry.setAttribute('puffOrigin', attribute(3));
+  // Born long ago, so a slot never written is already faded out.
+  geometry.setAttribute('puffBirth', attribute(1, -1e6));
+  geometry.setAttribute('puffCell', attribute(2));
+  geometry.instanceCount = 0;
+  const material = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([
+      THREE.UniformsLib.fog,
+      { map: { value: null }, time: { value: 0 } },
+    ]),
+    vertexShader: GM_PUFF_VERTEX_SHADER,
+    fragmentShader: GM_PUFF_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    fog: true,
+  });
+  // `merge` clones values, a texture included, so the sheet goes in after.
+  material.uniforms.map.value = texture;
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = SHOT_RENDER_ORDER;
+  return mesh;
+}
+
+// renderGeoGMBolt's missile (`public/obj/missile.obj`, written by
+// `scripts/gen-missile-obj.mjs`) for one shot colour: its four parts merged
+// into one geometry, each in the colour upstream paints it, so a missile is
+// one draw call. The nose is the shooter's colour flat and the fins half it:
+// upstream's team colour, which in a bzo world is the player's own.
+function halveDisplayColor(color, scale) {
+  const rgb = color.getRGB({ r: 0, g: 0, b: 0 }, THREE.SRGBColorSpace);
+  return new THREE.Color().setRGB(rgb.r * scale, rgb.g * scale, rgb.b * scale, THREE.SRGBColorSpace);
+}
+
+function buildGMModelGeometry(parts, shotColor) {
+  const nose = new THREE.Color(shotColor);
+  const partColors = {
+    nose,
+    // Half of what upstream displays, so halved as display values.
+    fin: halveDisplayColor(nose, BZFLAG_GM_MODEL_FIN_SCALE),
+    body: new THREE.Color(1, 1, 1),
+    cone: new THREE.Color().setRGB(
+      BZFLAG_GM_MODEL_CONE, BZFLAG_GM_MODEL_CONE, BZFLAG_GM_MODEL_CONE, THREE.SRGBColorSpace,
+    ),
+  };
+  const positions = [];
+  const colors = [];
+  for (const [name, geometry] of parts) {
+    const color = partColors[name] || partColors.body;
+    const position = geometry.getAttribute('position');
+    for (let i = 0; i < position.count; i += 1) {
+      positions.push(position.getX(i), position.getY(i), position.getZ(i));
+      colors.push(color.r, color.g, color.b);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  return geometry;
+}
+
 // One instanced draw call per mesh regardless of how many drops or puddles are
 // alive -- `glDepthMask(GL_FALSE)` and `GL_SRC_ALPHA`/`GL_ONE_MINUS_SRC_ALPHA`
 // upstream's own blend, `glDisable(GL_CULL_FACE)` its own `DoubleSide`. Alpha is
@@ -1973,6 +2120,7 @@ class RenderManager {
     this._preloadTankModel('/obj/modern.obj');
     this._preloadTankModel('/obj/simple.obj');
     this._preloadTankModel('/obj/wheeled6.obj');
+    this._preloadGMModel();
   }
 
   init({ container = document.body } = {}) {
@@ -3783,7 +3931,9 @@ class RenderManager {
   // spinning mesh at the same phase as one that has been watching it all along.
   _updateMeshSpins(timeSeconds = 0) {
     for (const spin of this._meshSpins) {
-      spin.group.rotation.y = meshSpinRadians(spin.angvel, timeSeconds);
+      const radians = meshSpinRadians(spin.angvel, timeSeconds);
+      if (spin.axis) spin.group.quaternion.setFromAxisAngle(spin.axis, radians);
+      else spin.group.rotation.y = radians;
     }
   }
 
@@ -4083,7 +4233,7 @@ class RenderManager {
     const spin = weather.spin ?? preset.spin;
     const { billboard } = preset;
     const [halfW, halfH] = preset.size;
-    const puddleColor = preset.puddleColor || [1, 1, 1];
+    const puddleColor = weather.puddleColor || preset.puddleColor || [1, 1, 1];
     const puddleSpeed = weather.puddleSpeed ?? preset.puddleSpeed ?? WEATHER_DEFAULT_PUDDLE_SPEED;
     const maxPuddleTime = weather.maxPuddleTime ?? WEATHER_DEFAULT_MAX_PUDDLE_TIME;
 
@@ -5014,7 +5164,7 @@ class RenderManager {
       // itself but never touches its geometry.
       this._addDebugLabel(meshMesh, 'mesh');
       const object3D = (meshObs.angvel && meshObs.spinPivot)
-        ? this._wrapMeshSpin(meshMesh, meshObs.spinPivot, meshObs.angvel)
+        ? this._wrapMeshSpin(meshMesh, meshObs.spinPivot, meshObs.angvel, meshObs.spinAxis)
         : meshMesh;
       this.worldGroup.add(this._tagDraws(object3D, 'mesh'));
       this.meshObjects.push(object3D);
@@ -5027,17 +5177,24 @@ class RenderManager {
   // #88 -- see `applyGroupInstanceTransformToMesh`/`finalizeMeshGeometry`,
   // server.js). The inner mesh is shifted back by that same pivot once, so
   // at rotation 0 it still sits exactly where its baked geometry already
-  // puts it; only the group's own `rotation.y`, driven every frame by
+  // puts it; only the group's own rotation, driven every frame by
   // `_updateMeshSpins`, turns it from there -- `MeshDrawMgr::executeSet`'s
-  // own `glRotatef` wrapped around an otherwise-unmoved draw.
-  _wrapMeshSpin(meshMesh, spinPivot, angvel) {
+  // own `glRotatef` wrapped around an otherwise-unmoved draw. The turn is
+  // about `spinAxis` when a tipped group placed the mesh (#168), about the
+  // vertical otherwise.
+  _wrapMeshSpin(meshMesh, spinPivot, angvel, spinAxis) {
     const group = new THREE.Group();
     group.name = meshMesh.name;
     group.position.set(spinPivot.x, spinPivot.y, spinPivot.z);
     meshMesh.position.set(-spinPivot.x, -spinPivot.y, -spinPivot.z);
     meshMesh.updateMatrix();
     group.add(meshMesh);
-    this._meshSpins.push({ group, angvel });
+    const axis = spinAxis && Math.abs(spinAxis.y) < 0.999999
+      ? new THREE.Vector3(spinAxis.x, spinAxis.y, spinAxis.z)
+      : null;
+    // An axis pointing down turns the other way, as upstream's would.
+    const signedAngvel = spinAxis && !axis && spinAxis.y < 0 ? -angvel : angvel;
+    this._meshSpins.push({ group, angvel: signedAngvel, axis });
     return group;
   }
 
@@ -7774,7 +7931,9 @@ class RenderManager {
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
-    const tint = new THREE.Color(baseColor);
+    // The canvas holds display bytes, so the tint goes in as display values,
+    // not the linear ones a `THREE.Color` keeps.
+    const tint = new THREE.Color(baseColor).getRGB({ r: 0, g: 0, b: 0 }, THREE.SRGBColorSpace);
     const tintR = tint.r * 255;
     const tintG = tint.g * 255;
     const tintB = tint.b * 255;
@@ -7830,7 +7989,7 @@ class RenderManager {
   // its widest and re-randomising it costs a handful of floats rather than a
   // buffer of a new size. `drawRange` covers the frames that picked fewer than
   // the maximum, which is what keeps the allocation a one-off.
-  _createGMFlares(baseColor) {
+  _createGMFlares() {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(
       new Float32Array(BZFLAG_GM_FLARE_MAX * 4 * 3), 3,
@@ -7844,10 +8003,10 @@ class RenderManager {
       indices.set([base, base + 1, base + 2, base + 1, base + 3, base + 2], i * 6);
     }
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-    // The bolt's own colour, and never lit: upstream draws the flares with
-    // lighting off and blends them over the world.
+    // Never lit: upstream draws the flares with lighting off and blends them
+    // over the world.
     const material = new THREE.MeshBasicMaterial({
-      color: baseColor,
+      color: new THREE.Color().setRGB(...BZFLAG_GM_FLARE_COLOR, THREE.SRGBColorSpace),
       transparent: true,
       opacity: BZFLAG_GM_FLARE_OPACITY,
       depthWrite: false,
@@ -7953,7 +8112,9 @@ class RenderManager {
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
-    const tint = new THREE.Color(baseColor);
+    // The canvas holds display bytes, so the tint goes in as display values,
+    // not the linear ones a `THREE.Color` keeps.
+    const tint = new THREE.Color(baseColor).getRGB({ r: 0, g: 0, b: 0 }, THREE.SRGBColorSpace);
     const tintR = tint.r * 255;
     const tintG = tint.g * 255;
     const tintB = tint.b * 255;
@@ -8006,6 +8167,37 @@ class RenderManager {
       this._shotColorCache.set(color, entry);
     }
     return entry;
+  }
+
+  _preloadGMModel() {
+    if (this._gmModelParts || this._gmModelLoading) return;
+    this._gmModelLoading = true;
+    new OBJLoader().load(BZFLAG_GM_MODEL_PATH, (obj) => {
+      const parts = [];
+      obj.traverse((child) => {
+        if (child.isMesh) parts.push([child.name, child.geometry]);
+      });
+      this._gmModelParts = parts;
+    }, undefined, () => {
+      this._gmModelLoading = false;
+    });
+  }
+
+  // Null until the model has loaded; a missile fired before then is drawn as
+  // the bolt alone.
+  _getGMModelGeometry(color) {
+    if (!this._gmModelParts) return null;
+    const entry = this._getShotColorCache(color);
+    if (!entry.gmModel) entry.gmModel = buildGMModelGeometry(this._gmModelParts, color);
+    return entry.gmModel;
+  }
+
+  // Unlit, as upstream draws it, and two-sided: its fins are single quads.
+  _getGMModelMaterial() {
+    if (!this._gmModelMaterial) {
+      this._gmModelMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    }
+    return this._gmModelMaterial;
   }
 
   _getShotBoltTexture(color) {
@@ -8100,6 +8292,17 @@ class RenderManager {
         head.setMatrixAt(head.count, dummy.matrix);
         head.geometry.attributes.instanceAlpha.setX(head.count, 1);
         head.count += 1;
+      }
+
+      // renderGeoGMBolt's frame: nose along the flight, rolling about it.
+      if (state.guidedModel) {
+        const model = state.guidedModel;
+        GM_MODEL_FORWARD.set(state.tailDirX, state.tailDirY, state.tailDirZ);
+        model.quaternion.setFromUnitVectors(GM_MODEL_AXIS, GM_MODEL_FORWARD);
+        GM_MODEL_ROLL.setFromAxisAngle(
+          GM_MODEL_AXIS, THREE.MathUtils.degToRad(((performance.now() / 1000) * BZFLAG_GM_MODEL_ROLL) % 360),
+        );
+        model.quaternion.multiply(GM_MODEL_ROLL);
       }
 
       const tail = batch.tailMesh;
@@ -8587,94 +8790,76 @@ class RenderManager {
   // the missile's own, so a slow frame leaves the same trail as a fast one.
   trailGMPuffs(projectile, deltaTime) {
     if (!projectile || !(deltaTime > 0)) return;
-    const due = (projectile.userData.puffTimer ?? 0) + deltaTime;
-    if (due < BZFLAG_GM_PUFF_INTERVAL) {
-      projectile.userData.puffTimer = due;
-      return;
+    const state = projectile.userData;
+    // GuidedMissileStrategy::update: a puff once the missile has flown its
+    // current wait, then a fresh random wait up to `rootPuff` -- so never more
+    // than one a frame, and at quality 3's `rootPuff` very nearly one every
+    // frame.
+    if (!(state.puffRoot > 0)) {
+      state.puffRoot = BZFLAG_GM_PUFF_INTERVAL
+        / (BZFLAG_GM_PUFF_QUALITY_DIVISOR + (Math.random() * BZFLAG_GM_PUFF_QUALITY_DIVISOR_RANGE));
+      state.puffWait = Math.random() * state.puffRoot;
+      state.puffTimer = 0;
     }
-    // A missile that has been off screen or stalled does not owe a burst of
-    // puffs all at one point, so the backlog is dropped rather than drawn.
-    projectile.userData.puffTimer = due % BZFLAG_GM_PUFF_INTERVAL;
+    state.puffTimer += deltaTime;
+    if (state.puffTimer <= state.puffWait) return;
+    state.puffTimer = 0;
+    state.puffWait = Math.random() * state.puffRoot;
     this.createGMPuff(projectile.position);
   }
 
+  _getGMPuffMesh() {
+    if (this._gmPuffMesh) return this._gmPuffMesh;
+    const texture = this._createTintedTexture(
+      BZFLAG_GM_PUFF_TEXTURE, 256, 256, this._paintGMPuffSheet, null);
+    this._gmPuffMesh = buildGMPuffMesh(texture);
+    this._gmPuffNext = 0;
+    this._gmPuffClock = this._gmPuffClock || 0;
+    this.worldGroup.add(this._tagDraws(this._gmPuffMesh, 'effect'));
+    return this._gmPuffMesh;
+  }
+
+  // One puff into the ring: where, when, and which quadrant of the sheet
+  // upstream picked for it. The oldest slot is the one reused.
   createGMPuff(position) {
-    if (!this.scene || !position) return;
-    // Upstream picks a quadrant of the sheet at random per puff. The four are
-    // cut once and shared: a puff is a short-lived thing and there may be
-    // dozens of them, so none of them may cost a texture.
-    const textures = this._getGMPuffTextures();
-    const texture = textures[Math.floor(Math.random() * textures.length)];
+    if (!this.scene || !this.worldGroup || !position) return;
+    const mesh = this._getGMPuffMesh();
+    const { geometry } = mesh;
+    const slot = this._gmPuffNext;
+    this._gmPuffNext = (slot + 1) % GM_PUFF_CAPACITY;
+    geometry.instanceCount = Math.max(geometry.instanceCount, slot + 1);
 
-    const material = new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false,
-      opacity: BZFLAG_GM_PUFF_ALPHA,
-    });
-    const sprite = new THREE.Sprite(material);
     const jitter = () => (Math.random() * BZFLAG_GM_PUFF_JITTER * 2) - BZFLAG_GM_PUFF_JITTER;
-    sprite.position.set(
-      position.x + jitter(),
-      position.y + jitter(),
-      position.z + jitter(),
-    );
-    sprite.scale.set(BZFLAG_GM_PUFF_SIZE * 2, BZFLAG_GM_PUFF_SIZE * 2, 1);
-    sprite.renderOrder = SHOT_RENDER_ORDER;
-    this.worldGroup.add(this._tagDraws(sprite, 'effect'));
-
-    if (!this.gmPuffs) this.gmPuffs = [];
-    this.gmPuffs.push({ sprite, material, age: 0, baseY: sprite.position.y });
+    const origin = geometry.getAttribute('puffOrigin');
+    origin.setXYZ(slot, position.x + jitter(), position.y + jitter(), position.z + jitter());
+    const birth = geometry.getAttribute('puffBirth');
+    birth.setX(slot, this._gmPuffClock);
+    // The sheet is drawn the right way up, so its top row is the top of `v`.
+    const quadrant = Math.floor(Math.random() * BZFLAG_GM_PUFF_CELLS * BZFLAG_GM_PUFF_CELLS);
+    const cell = 1 / BZFLAG_GM_PUFF_CELLS;
+    const column = quadrant % BZFLAG_GM_PUFF_CELLS;
+    const row = Math.floor(quadrant / BZFLAG_GM_PUFF_CELLS);
+    const uv = geometry.getAttribute('puffCell');
+    uv.setXY(slot, column * cell, (BZFLAG_GM_PUFF_CELLS - 1 - row) * cell);
+    for (const [attribute, size] of [[origin, 3], [birth, 1], [uv, 2]]) {
+      attribute.addUpdateRange(slot * size, size);
+      attribute.needsUpdate = true;
+    }
   }
 
+  // Only the clock moves: every puff's fade, swell, drift and spin follow from
+  // it in the shader.
   updateGMPuffs(deltaTime) {
-    if (!this.gmPuffs?.length || deltaTime <= 0) return;
-    for (let i = this.gmPuffs.length - 1; i >= 0; i -= 1) {
-      const puff = this.gmPuffs[i];
-      puff.age += deltaTime;
-      const alpha = BZFLAG_GM_PUFF_ALPHA - (puff.age / BZFLAG_GM_PUFF_LIFETIME);
-      if (alpha <= 0.001) {
-        this.worldGroup.remove(puff.sprite);
-        puff.material.dispose();
-        this.gmPuffs.splice(i, 1);
-        continue;
-      }
-      puff.material.opacity = alpha;
-      // Upstream's `vertDrift`, on bzo's up axis.
-      puff.sprite.position.y = puff.baseY + (BZFLAG_GM_PUFF_DRIFT * puff.age);
-      const size = (BZFLAG_GM_PUFF_SIZE + (puff.age * BZFLAG_GM_PUFF_GROWTH)) * 2;
-      puff.sprite.scale.set(size, size, 1);
-      // A sprite has no roll of its own, so the spin is the texture's.
-      puff.material.rotation = THREE.MathUtils.degToRad(puff.age * BZFLAG_GM_PUFF_SPIN);
-    }
+    if (!(deltaTime > 0)) return;
+    this._gmPuffClock = (this._gmPuffClock || 0) + deltaTime;
+    if (this._gmPuffMesh) this._gmPuffMesh.material.uniforms.time.value = this._gmPuffClock;
   }
 
-  _getGMPuffTextures() {
-    if (this._gmPuffTextures) return this._gmPuffTextures;
-    const cells = BZFLAG_GM_PUFF_CELLS * BZFLAG_GM_PUFF_CELLS;
-    this._gmPuffTextures = [];
-    for (let quadrant = 0; quadrant < cells; quadrant += 1) {
-      this._gmPuffTextures.push(this._createTintedTexture(
-        BZFLAG_GM_PUFF_TEXTURE, 256, 256, this._paintGMPuffQuadrant, quadrant));
-    }
-    return this._gmPuffTextures;
-  }
-
-  // One quadrant of the puff sheet, drawn to fill its own texture. Cutting it
-  // here rather than with `offset`/`repeat` means a puff needs no texture of its
-  // own, and it goes through the same canvas-backed path everything else does,
-  // which is what redraws it if the image has not arrived yet.
-  _paintGMPuffQuadrant(ctx, canvas, image, quadrant) {
+  // The whole puff sheet; a puff picks its quadrant by UV.
+  _paintGMPuffSheet(ctx, canvas, image) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!image) return;
-    const cells = BZFLAG_GM_PUFF_CELLS;
-    const width = image.width / cells;
-    const height = image.height / cells;
-    ctx.drawImage(
-      image,
-      (quadrant % cells) * width, Math.floor(quadrant / cells) * height, width, height,
-      0, 0, canvas.width, canvas.height,
-    );
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
   }
 
   removePausedSphere(sphere) {
@@ -8857,9 +9042,20 @@ class RenderManager {
       // Under the head rather than over it, as upstream draws the flares before
       // the billboard square: the sprite covers the inner ends of the spikes,
       // so they read as coming out of the bolt and not as crossing it.
-      const flares = this._createGMFlares(projectileColor);
+      const flares = this._createGMFlares();
       projectile.add(flares);
       projectile.userData.guidedFlares = flares;
+      // And the missile itself, over the bolt as upstream draws it at quality
+      // 3 -- turned along the flight and rolled by `updateShotVisuals`.
+      // The model wears the shooter's own colour flat, not the bolt's lifted one.
+      const modelColor = typeof data.modelColor === 'number' ? data.modelColor : projectileColor;
+      const modelGeometry = this._getGMModelGeometry(modelColor);
+      if (modelGeometry) {
+        const model = new THREE.Mesh(modelGeometry, this._getGMModelMaterial());
+        model.scale.setScalar(getFlagTuning().gmSize);
+        projectile.add(model);
+        projectile.userData.guidedModel = model;
+      }
       projectile.userData.projectileTexture = missileTexture;
       // Only a missile's sheet is stepped; every other shot is one still image.
       projectile.userData.missileTexture = missileTexture;

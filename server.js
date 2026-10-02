@@ -50,6 +50,7 @@ const {
 const {
   normalizeShotSlotCount,
   WORLD_WEAPON_PLAYER_ID,
+  getWorldMissileLifetimeSeconds,
   WORLD_WEAPON_TEAM,
   getWorldWeaponDirection,
   getShotFlight,
@@ -74,10 +75,8 @@ const {
   FLAG_RADIUS,
   FLAG_STATUS,
   FLAG_TYPES,
-  IDENTIFY_RANGE,
   findNearestGroundFlag,
   GM_TURN_ANGLE,
-  LOCK_ON_ANGLE,
   TARGETING_ANGLE,
   pickTargetInSights,
   steerGuidedShot,
@@ -1122,13 +1121,15 @@ function tankModelIsBuildable(filePath) {
   return buildable;
 }
 
-// Every OBJ in public/obj is a tank the player may choose, except the ones that
-// cannot be drawn. A model missing its parts is left out rather than listed:
-// the client builds tanks from the file alone, so offering one it cannot build
-// would put a player in a tank nobody can see.
+// Every OBJ in public/obj is a tank the player may choose, except two that are
+// not -- `tank.obj`, upstream's own mesh that `split-bzflag-tank` reads, and
+// `missile.obj`, the guided missile -- and the ones that cannot be drawn. A
+// model missing its parts is left out rather than listed: the client builds
+// tanks from the file alone, so offering one it cannot build would put a
+// player in a tank nobody can see.
 function getAvailableTankModels() {
   const objDir = path.join(__dirname, 'public', 'obj');
-  const hiddenModelFiles = new Set(['tank.obj']);
+  const hiddenModelFiles = new Set(['tank.obj', 'missile.obj']);
   try {
     return fs.readdirSync(objDir)
       .filter((fileName) => fileName.toLowerCase().endsWith('.obj'))
@@ -2715,8 +2716,8 @@ app.get('/list', async (req, res) => {
       session,
       admin,
       // The same admins `authoriseProxyRequest` lets through. One with no
-      // login claims no name on the remote: it watches as `bzo-local` and
-      // plays as `bzo-<callsign>`, neither of which says it is anybody.
+      // login claims no name on the remote: it watches and plays as a
+      // `bzo-view-<tag>`, which says it is nobody in particular.
       canWatch: admin,
     }));
   } catch (error) {
@@ -5169,9 +5170,9 @@ function readMeshTransformToken(target, token, words) {
 // point crosses over, moves, and crosses back rather than the matrix being
 // rewritten into bzo's axes: one conversion either side, stated once, instead
 // of a similarity transform nobody can check against the map text.
-function applyMeshTransform(mesh) {
-  const tool = buildMeshTransformTool(mesh.transformOps);
-  if (!tool) return mesh;
+function meshTransformMovers(ops) {
+  const tool = buildMeshTransformTool(ops);
+  if (!tool) return null;
   const vm = tool.vertexMatrix;
   const nm = tool.normalMatrix;
 
@@ -5203,6 +5204,24 @@ function applyMeshTransform(mesh) {
     return { x: tx, y: tz, z: -ty };
   };
 
+  // A direction carried by the matrix itself rather than as a surface normal
+  // -- a spinning mesh's axis, which upstream turns with the mesh
+  // (`MeshSceneNode`'s transform wrapped around `MeshDrawMgr`'s `glRotatef`).
+  const moveVector = (v) => {
+    const x = v.x; const y = -v.z; const z = v.y;
+    const tx = (x * vm[0][0]) + (y * vm[0][1]) + (z * vm[0][2]);
+    const ty = (x * vm[1][0]) + (y * vm[1][1]) + (z * vm[1][2]);
+    const tz = (x * vm[2][0]) + (y * vm[2][1]) + (z * vm[2][2]);
+    return { x: tx, y: tz, z: -ty };
+  };
+
+  return { movePoint, moveNormal, moveVector };
+}
+
+function applyMeshTransform(mesh) {
+  const movers = meshTransformMovers(mesh.transformOps);
+  if (!movers) return mesh;
+  const { movePoint, moveNormal } = movers;
   mesh.vertices = mesh.vertices.map(movePoint);
   mesh.normals = mesh.normals.map(moveNormal);
   mesh.checkPoints = mesh.checkPoints.map((p) => ({ ...movePoint(p), inside: p.inside }));
@@ -6358,6 +6377,14 @@ function parseBZWServerOptions(lines) {
         const truthy = Number.isFinite(parsed) && parsed !== 0;
         const field = value === '_useRainPuddles' ? 'puddles' : 'spin';
         options.weather = { ...(options.weather || {}), [field]: truthy };
+      } else if (value === '_rainPuddleColor') {
+        // `WeatherRenderer::set` (WeatherRenderer.cxx:322): the puddle tint,
+        // over the preset's own. A colour that will not parse leaves it.
+        const color = parseColorString(setValue || '');
+        if (color) options.weather = { ...(options.weather || {}), puddleColor: color.slice(0, 3) };
+      } else if (value === '_disableBots') {
+        // What `-disableBots` publishes, so a map stating it means the same.
+        if (bzdbIsTrue(setValue ?? '')) options.disableBots = true;
       } else if (value === '_rainTexture' || value === '_rainPuddleTexture') {
         const textureName = (setValue || '').trim().toLowerCase();
         if (BZW_STOCK_TEXTURES.has(textureName)) {
@@ -6631,6 +6658,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // re-wording the same fact a second time for a chat line.
   const warnedMessages = [];
   const warn = (message) => { warnedMessages.push(message); if (!quiet) log(message); };
+  // Facts about how bzo built the map, said to a player but not warnings --
+  // see where `messages` is built.
+  const notes = [];
   // `extraMessages` -- a fact only knowable outside this function's own text
   // parsing (a remote import's own wire-protocol decode -- `performRemote
   // MapImportNow`) fed through the exact same `warn`, so it is logged,
@@ -6733,6 +6763,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // rather than applied wrong. A spin about the vertical is read like
   // `rotation` (see the `spin` branch below); this is only the rest of it.
   let nonVerticalSpinCount = 0;
+  // Boxes, pyramids and teleporters placed by a group spun off vertical or
+  // sheared -- its meshes take the whole transform, these stay upright.
+  let tippedObstacleCount = 0;
   // Which zone keywords a map asked for that bzo does not act on, gathered so
   // the load can say so once rather than for every zone. `zone` blocks are
   // otherwise the one place a map states something invisible: a spawn zone that
@@ -8013,7 +8046,15 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       // placing a member is a position rotation, a different operator. See the
       // `rotation`/`rot` branch, where both get set from the same line.
       const [, groupDefName] = line.split(/\s+/);
-      current = { type: 'group', groupDefName: groupDefName || '', rotation: 0, spin: 0, scale: [1, 1, 1] };
+      //
+      // `transformOps` and `xformPos`/`xformSize`/`xformRotation` are the same
+      // block read the way upstream reads it (`WorldFileLocation::read`), kept
+      // beside the box-model fields above for the one case those cannot say:
+      // a group spun off vertical or sheared, which tips every mesh it places.
+      current = {
+        type: 'group', groupDefName: groupDefName || '', rotation: 0, spin: 0, scale: [1, 1, 1],
+        transformOps: [], xformPos: null, xformSize: null, xformRotation: 0, tipped: false,
+      };
     } else if (token === 'tetra') {
       // CustomTetra's own defaults (CustomTetra.cxx:27-38): `drivethrough`/
       // `shootthrough`/`ricochet` are WorldFileObstacle's usual false, and
@@ -8587,6 +8628,14 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         Number.isFinite(parsedY) ? parsedY : 1,
         Number.isFinite(parsedZ) ? parsedZ : 1,
       ];
+      if (token === 'scale') current.transformOps.push({ type: 'scale', data: [...current.scale, 0] });
+      else current.xformSize = current.scale;
+    } else if (current && current.type === 'group' && token === 'shear') {
+      // No box-model equivalent at all, so only the meshes a sheared group
+      // places can show it -- see `tipped` at the group's `end`.
+      const [a, b, c] = line.split(/\s+/).slice(1).map(Number);
+      current.transformOps.push({ type: 'shear', data: [a || 0, b || 0, c || 0, 0] });
+      if (a || b || c) current.tipped = true;
     } else if (current && BZW_PASSABILITY_KEYWORDS.has(token)) {
       Object.assign(current, BZW_PASSABILITY_KEYWORDS.get(token));
     } else if (current && token === 'name') {
@@ -8606,6 +8655,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       current.x = parseFloat(x);
       current.z = -parseFloat(y); // BZFlag +Y (north) -> our -Z (north)
       current.baseY = parseFloat(z) || 0;
+      if (current.type === 'group') {
+        const pos = [parseFloat(x) || 0, parseFloat(y) || 0, parseFloat(z) || 0];
+        if (token === 'shift') current.transformOps.push({ type: 'shift', data: [...pos, 0] });
+        else current.xformPos = pos;
+      }
     } else if (current && token === 'size') {
       // size w d h (BZFlag x/y are center-to-edge half extents, z is full height)
       const [, w, d, h] = line.split(/\s+/);
@@ -8629,6 +8683,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       current.rotation = (parseFloat(deg) || 0) * Math.PI / 180 + Math.PI;
       if (current.type === 'group') {
         current.spin = (parseFloat(deg) || 0) * Math.PI / 180;
+        current.xformRotation = current.spin;
       }
     } else if (current && token === 'spin') {
       // spin <deg> <ax> <ay> <az> (WorldFileLocation::read) -- the more
@@ -8640,12 +8695,22 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       const [, rawAngle, rawAx, rawAy, rawAz] = line.split(/\s+/).map(Number);
       const isVertical = Math.abs(rawAx || 0) < 1e-6 && Math.abs(rawAy || 0) < 1e-6
         && Math.abs(rawAz || 0) > 1e-6;
+      if (current.type === 'group') {
+        current.transformOps.push({
+          type: 'spin', data: [rawAx || 0, rawAy || 0, rawAz || 0, (rawAngle || 0) * Math.PI / 180],
+        });
+      }
       if (isVertical) {
         const signedDeg = (rawAngle || 0) * Math.sign(rawAz);
         current.rotation = (signedDeg * Math.PI / 180) + Math.PI;
         if (current.type === 'group') {
           current.spin = signedDeg * Math.PI / 180;
         }
+      } else if (current.type === 'group') {
+        // A mesh can tip, so the group's meshes take the whole transform;
+        // only its boxes and pyramids are left upright, and counted where
+        // the group is placed.
+        if (rawAngle) current.tipped = true;
       } else {
         nonVerticalSpinCount++;
       }
@@ -8832,6 +8897,15 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
           phydrv: current.phydrv || null,
           materialOverride: current.materialOverride || null,
           tint: current.tint || null,
+          // Upstream's whole transform (`CustomGroup.cxx:129-139`: `size`,
+          // `rotation`, `position`, then the ordered list), carried only
+          // when the box-model fields above cannot say it.
+          transformOps: current.tipped ? [
+            ...(current.xformSize ? [{ type: 'scale', data: [...current.xformSize, 0] }] : []),
+            ...(current.xformRotation ? [{ type: 'spin', data: [0, 0, 1, current.xformRotation] }] : []),
+            ...(current.xformPos ? [{ type: 'shift', data: [...current.xformPos, 0] }] : []),
+            ...current.transformOps,
+          ] : null,
         };
         if (currentDefine) {
           currentDefine.groupInstances.push(instanceRequest);
@@ -9173,6 +9247,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   }
 
   function applyGroupInstanceTransform(members, request, instanceLabel) {
+    if (request.transformOps) tippedObstacleCount += members.length;
     const [scaleX, scaleY, scaleZ] = request.scale;
     const cos = Math.cos(request.spin);
     const sin = Math.sin(request.spin);
@@ -9250,15 +9325,33 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     const [scaleX, scaleY, scaleZ] = request.scale;
     const cos = Math.cos(request.spin);
     const sin = Math.sin(request.spin);
-    const placePoint = (point) => {
+    let placePoint = (point) => {
       const local = transformGroupPoint(point, scaleX, scaleY, scaleZ, cos, sin);
       return { x: request.x + local.x, y: request.baseY + local.y, z: request.z + local.z };
     };
+    let placeNormal = (n) => transformGroupPoint(n, 1, 1, 1, cos, sin);
+    let placeVector = (v) => transformGroupPoint(v, scaleX, scaleY, scaleZ, cos, sin);
+    // A group spun off vertical or sheared: upstream's own matrix, which the
+    // scale/spin/shift above cannot express (#168).
+    const movers = request.transformOps && meshTransformMovers(request.transformOps);
+    if (movers) {
+      placePoint = movers.movePoint;
+      placeNormal = movers.moveNormal;
+      placeVector = movers.moveVector;
+    }
+    // The axis a spinning mesh turns about: its own local up, carried
+    // through every enclosing group so a tipped group tips the spin too.
+    let spinAxis = mesh.spinAxis;
+    if (mesh.angvel) {
+      const axis = placeVector(mesh.spinAxis || { x: 0, y: 1, z: 0 });
+      const len = Math.hypot(axis.x, axis.y, axis.z);
+      spinAxis = len > 0 ? { x: axis.x / len, y: axis.y / len, z: axis.z / len } : mesh.spinAxis;
+    }
     const placedMesh = {
       ...mesh,
       name: `${instanceLabel}:${mesh.name || 'Mesh'}`,
       vertices: mesh.vertices.map(placePoint),
-      normals: mesh.normals.map((n) => transformGroupPoint(n, 1, 1, 1, cos, sin)),
+      normals: mesh.normals.map(placeNormal),
       checkPoints: mesh.checkPoints.map((p) => ({ ...placePoint(p), inside: p.inside })),
       // Fresh face objects, never the template's own -- the same definition
       // may be placed more than once, each with its own transform, and
@@ -9268,9 +9361,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       faces: mesh.faces.map((face) => ({ ...face })),
       drawFaces: mesh.drawFaces ? mesh.drawFaces.map((face) => ({ ...face })) : null,
       drawVertices: mesh.drawVertices ? mesh.drawVertices.map(placePoint) : null,
-      drawNormals: mesh.drawNormals
-        ? mesh.drawNormals.map((n) => transformGroupPoint(n, 1, 1, 1, cos, sin))
-        : null,
+      drawNormals: mesh.drawNormals ? mesh.drawNormals.map(placeNormal) : null,
       // The point a spinning mesh (`angvel`, #88) rotates about -- upstream
       // has no per-mesh pivot of its own (a hand-authored `drawInfo` spins
       // about world origin), so this is just the mesh's own local (0,0,0)
@@ -9279,6 +9370,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       // point rather than always restarting from world origin here is what
       // makes an arbitrarily deep nesting land in the right place.
       spinPivot: mesh.angvel ? placePoint(mesh.spinPivot || { x: 0, y: 0, z: 0 }) : mesh.spinPivot,
+      spinAxis,
     };
     // The instance's own `phydrv`/`matref` override, same rule and same
     // helper `applyGroupInstanceTransform` uses for a nested plain-obstacle
@@ -9523,6 +9615,148 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // branch, rather than finalized as-is -- so nothing downstream of this
   // function ever sees a concave face at all, the same guarantee upstream
   // gives every one of its own collision/rendering paths.
+  // Meshes that differ only by where they stand and which way they face: a
+  // compiled world writes each placement of a `define` out in full, so
+  // `bmbz.ducatileague.org:5172` is 693 meshes and far fewer shapes. Each is
+  // matched vertex for vertex against a reference turned about the vertical,
+  // and verified before it is shared, so the match is exact -- a
+  // planar-projected face's UVs run from its own first corner and turn with
+  // it, and a face's normal turns with the instance's matrix.
+  //
+  // A mirrored copy is a turn of the reference's mirror image, never of the
+  // reference, so it lands in a group of its own with a template of its own.
+  // That costs a draw per handedness and keeps every instance a proper
+  // rotation: an instanced batch has one winding, and a negative scale on
+  // one copy would cull the wrong side of it.
+  //
+  // Left out: a spinning mesh, which turns about a pivot of its own; one a
+  // batch already draws; and one with a see-through material, because a
+  // batch is sorted as one object and its copies would draw in the wrong
+  // order through each other.
+  const REPEAT_TOLERANCE = 0.005;
+  function instanceRepeatedMeshes(candidates) {
+    const groups = new Map();
+    for (const mesh of candidates) {
+      if (mesh.drawnByInstance || mesh.angvel) continue;
+      const arrays = meshDrawArrays(mesh);
+      if (!arrays || arrays.vertices.length < 3 || arrays.faceCount === 0) continue;
+      if (arrays.materials.some((m) => m.dynamicColor || (Array.isArray(m.color) && (m.color[3] ?? 1) < 1))) continue;
+      const v = arrays.vertices;
+      const count = v.length / 3;
+      const centre = { x: 0, y: 0, z: 0 };
+      for (let i = 0; i < v.length; i += 3) {
+        centre.x += v[i] / count;
+        centre.y += v[i + 1] / count;
+        centre.z += v[i + 2] / count;
+      }
+      // What a turn about the vertical leaves alone, vertex by vertex: each
+      // one's distance from the vertical through the centre, and its height.
+      // Coarse on purpose -- the exact test is the verification below.
+      const round = (n) => Math.round(n * 100);
+      const invariant = [];
+      for (let i = 0; i < v.length; i += 3) {
+        invariant.push(round(Math.hypot(v[i] - centre.x, v[i + 2] - centre.z)), round(v[i + 1] - centre.y));
+      }
+      const hash = crypto.createHash('sha1');
+      hash.update(invariant.join(','));
+      for (const field of ['faceStart', 'corners', 'cornerNormal', 'cornerTexcoord', 'faceMaterial']) {
+        hash.update(`|${field}:${Array.from(arrays[field]).join(',')}`);
+      }
+      hash.update(`|t:${Array.from(arrays.texcoords, (n) => Math.round(n * 1000)).join(',')}`);
+      hash.update(`|m:${JSON.stringify(arrays.materials)}`);
+      const key = hash.digest('hex');
+      const list = groups.get(key) || [];
+      list.push({ mesh, arrays, centre });
+      groups.set(key, list);
+    }
+
+    // The turn about the vertical that carries the reference onto `entry`,
+    // in radians as the client's `rotation.y` reads it, or null where no turn
+    // does: every vertex and every normal has to land within tolerance.
+    const solveTurn = (reference, entry) => {
+      const rv = reference.arrays.vertices;
+      const ev = entry.arrays.vertices;
+      let pivot = -1;
+      let best = 0;
+      for (let i = 0; i < rv.length; i += 3) {
+        const r = Math.hypot(rv[i] - reference.centre.x, rv[i + 2] - reference.centre.z);
+        if (r > best) { best = r; pivot = i; }
+      }
+      let angle = 0;
+      if (pivot >= 0 && best > REPEAT_TOLERANCE) {
+        const x = rv[pivot] - reference.centre.x;
+        const z = rv[pivot + 2] - reference.centre.z;
+        const tx = ev[pivot] - entry.centre.x;
+        const tz = ev[pivot + 2] - entry.centre.z;
+        angle = Math.atan2((z * tx) - (x * tz), (x * tx) + (z * tz));
+      }
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const turned = (x, z) => [(x * cos) + (z * sin), (-x * sin) + (z * cos)];
+      for (let i = 0; i < rv.length; i += 3) {
+        const [x, z] = turned(rv[i] - reference.centre.x, rv[i + 2] - reference.centre.z);
+        if (Math.abs(x - (ev[i] - entry.centre.x)) > REPEAT_TOLERANCE
+          || Math.abs(z - (ev[i + 2] - entry.centre.z)) > REPEAT_TOLERANCE
+          || Math.abs((rv[i + 1] - reference.centre.y) - (ev[i + 1] - entry.centre.y)) > REPEAT_TOLERANCE) {
+          return null;
+        }
+      }
+      const rn = reference.arrays.normals;
+      const en = entry.arrays.normals;
+      for (let i = 0; i < rn.length; i += 3) {
+        const [x, z] = turned(rn[i], rn[i + 2]);
+        if (Math.abs(x - en[i]) > REPEAT_TOLERANCE || Math.abs(z - en[i + 2]) > REPEAT_TOLERANCE
+          || Math.abs(rn[i + 1] - en[i + 1]) > REPEAT_TOLERANCE) {
+          return null;
+        }
+      }
+      return angle;
+    };
+
+    let meshCount = 0;
+    let shapeCount = 0;
+    for (const candidatesForKey of groups.values()) {
+      // Each member joins the first set whose reference it is a turn of, or
+      // starts one: its mirror image, or a near miss the coarse key let in.
+      const sets = [];
+      for (const entry of candidatesForKey) {
+        let placed = false;
+        for (const set of sets) {
+          const angle = solveTurn(set.reference, entry);
+          if (angle === null) continue;
+          set.members.push({ entry, angle });
+          placed = true;
+          break;
+        }
+        if (!placed) sets.push({ reference: entry, members: [{ entry, angle: 0 }] });
+      }
+      for (const { reference, members } of sets) {
+        if (members.length < 2) continue;
+        const { mesh: first, centre } = reference;
+        const toLocal = (p) => ({ ...p, x: p.x - centre.x, y: p.y - centre.y, z: p.z - centre.z });
+        const template = finalizeMeshGeometry({
+          ...first,
+          vertices: first.vertices.map(toLocal),
+          checkPoints: (first.checkPoints || []).map(toLocal),
+          drawVertices: first.drawVertices ? first.drawVertices.map(toLocal) : first.drawVertices,
+          faces: first.faces.map((face) => ({ ...face })),
+          drawFaces: first.drawFaces ? first.drawFaces.map((face) => ({ ...face })) : first.drawFaces,
+        });
+        const name = `repeat#${shapeCount}:${first.name || 'mesh'}`;
+        meshTemplates.set(name, [template]);
+        for (const { entry, angle } of members) {
+          meshInstances.push({
+            define: name, x: entry.centre.x, y: entry.centre.y, z: entry.centre.z, spin: angle, scale: [1, 1, 1],
+          });
+          entry.mesh.drawnByInstance = true;
+        }
+        meshCount += members.length;
+        shapeCount += 1;
+      }
+    }
+    return { meshes: meshCount, shapes: shapeCount };
+  }
+
   function finalizeMeshGeometry(mesh) {
     mesh.bounds = computeMeshBounds(mesh.vertices);
     mesh.baseY = mesh.bounds ? mesh.bounds.minY : 0;
@@ -9730,7 +9964,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     // A definition holding a spinning mesh turns about a pivot placed per
     // instance, which one local template cannot carry -- and there are seven
     // such instances across every map bzo has seen, so they stay expanded.
-    const spins = definedMeshesSpin(request.groupDefName);
+    // A tipped instance (#168) is placed by a matrix the template's
+    // scale/spin/shift cannot carry either.
+    const spins = definedMeshesSpin(request.groupDefName) || !!request.transformOps;
     const passable = isPassableDefine(request.groupDefName);
     if (!spins) {
       const templateKey = `${request.groupDefName}\u0000${overrideKey}`;
@@ -9827,7 +10063,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   }
   // How many group instances are drawn from a shared template rather than a
   // copy apiece (#153).
-  if (passableInstances > 0) {
+  // Logged once the repeated meshes below have joined them.
+  const logInstancing = (repeats) => {
+    if (passableInstances === 0 && repeats.meshes === 0) return;
     const templateFaces = [...meshTemplates.values()]
       .reduce((sum, list) => sum + list.reduce((n, m) => n + meshArrays(m).faceCount, 0), 0);
     instancing = {
@@ -9835,9 +10073,12 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       groups: groupInstanceRequests.length,
       templates: meshTemplates.size,
       faces: templateFaces,
+      repeats: repeats.meshes,
+      repeatShapes: repeats.shapes,
     };
     if (!quiet) log(`${mapLabel}: ${formatInstancing(instancing)}`);
-  }
+    notes.push(`${mapLabel}: ${formatInstancing(instancing)}`);
+  };
   if (unknownGroupDefs.size > 0) {
     warn(
       `Ignoring "group" instances naming a "define" not in ${mapLabel}:`
@@ -9856,6 +10097,12 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
     warn(
       `Ignoring ${nonVerticalSpinCount} "spin" line(s) about an axis other than `
       + `vertical in ${mapLabel} -- bzo's box/pyramid model can't tip that way`
+    );
+  }
+  if (tippedObstacleCount > 0) {
+    warn(
+      `Not tipping ${tippedObstacleCount} obstacle(s) placed by a group spun off `
+      + `vertical or sheared in ${mapLabel} -- bzo's box/pyramid model can't tip that way`
     );
   }
   if (unreadZoneKeywords.size > 0) {
@@ -9925,6 +10172,12 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
       .join(', ');
     warn(`${mapLabel} textures: ${summary}`);
   }
+
+  // The same mesh written out at many places and facings -- a compiled world
+  // arrives with its groups flattened -- drawn as one template and a
+  // placement apiece, through the same path a passable `group` takes (#153). Every copy stays in `meshes`
+  // for collision and the radar, marked as drawn by the batch.
+  logInstancing(instanceRepeatedMeshes(meshes));
 
   // Joined into `obstacles` before the tally below, so "included" counts a
   // mesh along with everything else that actually collides, renders, and
@@ -10112,7 +10365,11 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // client reads this from the map's own registry entry and says it locally
   // the moment a player actually starts viewing that map, never during the
   // entry dialog's preview-while-choosing.
-  const messages = Array.from(new Set([...serverOptions.serverMessages, ...warnedMessages]));
+  //
+  // `notes` follow them: what bzo did with the map rather than what it could
+  // not do, so they are said to a player but never baked into an import's
+  // `-srvmsg` lines, where they would go stale the moment bzo changed.
+  const messages = Array.from(new Set([...serverOptions.serverMessages, ...warnedMessages, ...notes]));
 
   // Ground texture (issue #81) -- the one surface that is never an
   // obstacle, so it gets no `matref`d registry entry of its own the way
@@ -10171,8 +10428,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
 
 // `instanced 18/22 groups, 15 templates, 52 faces` -- group instances drawn
 // from a shared template rather than a copy apiece (#153).
-function formatInstancing({ instanced, groups, templates, faces }) {
-  return `instanced ${instanced}/${groups} groups, ${templates} templates, ${faces} faces`;
+function formatInstancing({ instanced, groups, templates, faces, repeats = 0, repeatShapes = 0 }) {
+  return `instanced ${instanced}/${groups} groups, ${templates} templates, ${faces} faces`
+    + (repeats > 0 ? `, ${repeats} repeated meshes as ${repeatShapes}` : '');
 }
 
 // Generate random obstacles on server start
@@ -10718,7 +10976,7 @@ function hashRemainingMapsInBackground() {
     .filter((fileName) => fileName !== 'random' && !MAP_REGISTRY.has(fileName));
   const total = pending.length;
   let converted = 0;
-  const instancing = { instanced: 0, groups: 0, templates: 0, faces: 0 };
+  const instancing = { instanced: 0, groups: 0, templates: 0, faces: 0, repeats: 0, repeatShapes: 0 };
   const step = () => {
     const fileName = pending.shift();
     if (!fileName) {
@@ -10762,7 +11020,7 @@ function hashRemainingMapsInBackground() {
         )) {
           converted += 1;
           if (mapData.instancing) {
-            for (const key of Object.keys(instancing)) instancing[key] += mapData.instancing[key];
+            for (const key of Object.keys(instancing)) instancing[key] += mapData.instancing[key] || 0;
           }
         }
       }
@@ -15656,7 +15914,7 @@ function searchFlag(player) {
   if (getPlayerFlag(player.id)?.type !== 'ID') return;
   if (!player.alive || player.paused) return;
 
-  const closest = findNearestGroundFlag(flags, player.x, player.y, player.z, IDENTIFY_RANGE);
+  const closest = findNearestGroundFlag(flags, player.x, player.y, player.z, getFlagTuning().identifyRange);
   if (!closest) return;
 
   sendToPlayer(player, {
@@ -16679,6 +16937,9 @@ function fireWorldWeaponShot(weapon, now) {
   // The shot's team, since there is no player to read one off: the map's own
   // `color`, or rogue.
   proj.team = weapon.team || WORLD_WEAPON_TEAM;
+  proj.lifetimeSeconds = getWorldMissileLifetimeSeconds(
+    proj.playerId, proj.guided, GAME_CONFIG.MAP_SIZE, proj.speed,
+  ) ?? proj.lifetimeSeconds;
   projectiles.set(id, proj);
   // A beam's whole path is walked when it is fired, as it is for a tank's, and a
   // world weapon can be a `L` Laser -- `fountains.bzw` mounts two.
@@ -16918,7 +17179,7 @@ function setPlayerTarget(player) {
   });
 
   const locked = canLockOn(player)
-    ? pickTargetInSights(eye, forward, lockable, LOCK_ON_ANGLE)
+    ? pickTargetInSights(eye, forward, lockable, getFlagTuning().lockOnAngle)
     : null;
   setLockTarget(player, locked);
   const targetId = locked ?? pickTargetInSights(eye, forward, visible, TARGETING_ANGLE);
@@ -17942,9 +18203,13 @@ function bzfsChatDestination(target, team) {
 
 // A callsign for a viewer who has not signed in. The name a target sees is
 // never the client's to choose (docs/proxy.md, "What a proxy connection
-// is"), so an anonymous browser is numbered rather than asked. Counted per process, because a target rejects a callsign already on
-// it and two viewers must not collide.
-let nextProxyViewerNumber = 1;
+// is"), so an anonymous browser is given one. A target refuses a callsign
+// already on it, so the name has to differ from every other viewer's -- this
+// server's, a restarted one's still timing out there, and every other bzo's
+// -- which a counter alone cannot promise and a random tag can.
+function proxyViewerCallsign() {
+  return `bzo-view-${crypto.randomBytes(3).toString('hex')}`;
+}
 
 // Which target a WebSocket is for, or null for an ordinary connection to this
 // server's own game. Read off the handshake's own query string, because `init`
@@ -18080,7 +18345,8 @@ async function authoriseProxyRequest(req, request) {
   if (request.team !== PLAYER_TEAM.OBSERVER) {
     return { allowed: true, callsign: guestCallsign(callsign), guest: true };
   }
-  return { allowed: true, callsign: callsign || 'bzo-local' };
+  // No login, no name: numbered like any anonymous viewer (`proxyViewerCallsign`).
+  return { allowed: true, callsign: callsign || null };
 }
 
 // `bzo-<callsign>`, for an admin playing on a server outside this one's
@@ -18090,7 +18356,7 @@ async function authoriseProxyRequest(req, request) {
 // my.bzflag.org compares it with the browser's address (docs/proxy.md). One
 // byte short of `CallSignLen`, which bzfs needs for the NUL.
 function guestCallsign(callsign) {
-  return `bzo-${callsign || 'local'}`.slice(0, 31);
+  return callsign ? `bzo-${callsign}`.slice(0, 31) : proxyViewerCallsign();
 }
 
 function proxyPlayerRecord(player, motion = null) {
@@ -18654,7 +18920,7 @@ async function handleProxyConnection(ws, req, request) {
     callsign: options.callsign
       || (pendingLogin
         ? pendingLogin.callsign
-        : (loginSession ? loginSession.callsign : `bzo-view-${nextProxyViewerNumber++}`)),
+        : (loginSession ? loginSession.callsign : proxyViewerCallsign())),
     // A guest is unregistered by construction, whatever the browser signed
     // in as here.
     globalCallsign: options.guest ? null : (pendingLogin
@@ -19655,7 +19921,9 @@ async function handleProxyConnection(ws, req, request) {
       return;
     }
     if (message.type === 'debug') {
-      log(`[PROXY] ${key}: "${viewer.callsign}" ${String(message.message).slice(0, 200)}`);
+      // Capped, since the browser chose it, but long enough for a whole
+      // `renderer.stats` line -- the reason a watcher sends one at all.
+      log(`[PROXY] ${key}: "${viewer.callsign}" ${String(message.message).slice(0, 4000)}`);
     }
     // Everything else a client can say is about playing, and playing is step
     // 5. Dropped rather than answered, so nothing here pretends to a target
@@ -21380,7 +21648,7 @@ function buildBotView(bot, self) {
       shakeTimeout: FLAG_SHAKE_TIMEOUT,
       jumpVelocity: GAME_CONFIG.JUMP_VELOCITY,
       gravity: GAME_CONFIG.GRAVITY,
-      lockOnAngle: LOCK_ON_ANGLE,
+      lockOnAngle: getFlagTuning().lockOnAngle,
       shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
     isFoe: (player) => areFoes(player.team, me.team, TEAMS_ALLOWED),

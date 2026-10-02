@@ -773,6 +773,9 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _shockAdLife <n>` | how long an `SW` Shock Wave lasts, as a share of an ordinary shot's life |
 | `-set _shockInRadius <n>`, `_shockOutRadius <n>` | the radius a shock wave starts at (may be `0`) and grows to |
 | `-set _gmAdLife <n>`, `_gmTurnAngle <radians>`, `_gmActivationTime <seconds>` | `GM` Guided Missile's life as a share of an ordinary shot's, how fast it turns toward its lock each second, and how long it flies before it may hit anything (may be `0`) |
+| `-set _lockOnAngle <radians>` | the cone a `GM` lock is picked from |
+| `-set _gmSize <n>` | how long the modelled `GM` missile is drawn |
+| `-set _identifyRange <n>` | how far `ID` Identify reaches for the nearest flag on the ground |
 | `-set _burrowSpeedAd <n>`, `_burrowAngularAd <n>` | how fast a `BU` Burrow tank drives and turns underground, as a share of an ordinary one's |
 | `-set _rFireAdVel <n>`, `_rFireAdRate <n>`, `_rFireAdLife <n>` | `F` Rapid Fire's speed, reload rate and life, each a multiple of an ordinary shot's; upstream's default life follows `_rFireAdRate` |
 | `-set _thiefAdShotVel <n>`, `_thiefAdRate <n>`, `_thiefAdLife <n>` | `TH` Thief's beam: speed, reload rate and life |
@@ -1184,6 +1187,7 @@ rendering path replaces upstream's three (see below):
 | `_rainTexture <name>`, `_rainPuddleTexture <name>` | either stock texture, overriding the preset's own |
 | `_useRainPuddles <0\|1>` | puddles on or off, overriding the preset's own |
 | `_rainMaxPuddleTime <n>`, `_rainPuddleSpeed <n>` | how long a puddle lasts, and how fast it grows |
+| `_rainPuddleColor <color>` | the puddles' tint, overriding the preset's own |
 | `_rainSpins <0\|1>` | whether a drop tumbles as it falls |
 | `_rainRoofs <0\|1\|2>` | `0` lets rain fall through a roof to the ground beneath; `1` (upstream's default) stops it at the first roof; `2` also puddles the roof itself |
 
@@ -1331,6 +1335,13 @@ is what bzo's `WORLD_WEAPON_PLAYER_ID` and `WORLD_WEAPON_TEAM` are, and it takes
 no shot slot and waits on no reload -- there is no tank to answer for it. Being
 rogue makes it everybody's enemy, which is what a world weapon should be.
 
+A world weapon's `GM` never runs out of life. Upstream times a missile out
+only on the client that fired it, which then ends it everywhere
+(`GuidedMissleStrategy.cxx:128`, `:464`). A world weapon has no such client,
+so its missile flies until it hits the ground, a building or the world's
+edge. bzo drops one that has flown long enough to cross the world twice,
+so a missile aimed at the sky still ends.
+
 A tank killed by one gets a death, nobody gets a kill, and the victim's team
 loses a point. The notice is upstream's own whole phrase rather than a name:
 `gotBlowedUp` throws the "Got shot by " prefix away when the killer has no roster
@@ -1370,12 +1381,15 @@ extent through `scale` instead to say what that should do.
 
 `spin <deg> <ax> <ay> <az>` is read as `rotation <deg>`'s equivalent, again on
 any obstacle, but only when its axis is the map's own vertical (`0 0 1` or
-`0 0 -1`, the latter negating the angle) -- a spin about any other axis tips
+`0 0 -1`, the latter negating the angle). A spin about any other axis tips
 the shape out of bzo's axis-aligned box/pyramid model, the same as `shear`
-always does, so it is counted for the load to name instead
-(`ahs3_INCOMING.bzw`'s "3way" groups spin 90° about `1 0 0`, and are named
-this way on that map's load -- moot in practice today, since "3way" is itself
-a `mesh` define with nothing to place yet).
+always does. On a plain box or pyramid it is counted for the load to name.
+On a `group` it is read in full, with the group's `shear` and the rest of
+its transform, as upstream's ordered `MeshTransform` (`CustomGroup.cxx:
+129-139`), and applied to every mesh the group places. The group's boxes,
+pyramids and teleporters stay upright, and the load names how many.
+`bmbz.ducatileague.org:5172`'s helicopter tail rotors are a `group` spun
+90° about `0 1 0` around a spinning `blades` mesh.
 
 **All of that is about a `box`, a `pyramid` or a `group` line.** On anything
 that builds a mesh, the same four keywords are read as upstream's own
@@ -1442,9 +1456,10 @@ this: `ahs3_Ironside_Battlefield.bzw`'s own links use patterns like `topf:*`.
 
 Not yet read:
 
-- `shear`, on a plain obstacle or inside a `group` block -- it has no
-  representation in bzo's axis-aligned box/pyramid model at all, unlike
-  `shift`/`scale`/`spin` above. On a mesh it is read; see **Mesh transforms**.
+- `shear` on a plain obstacle -- it has no representation in bzo's
+  axis-aligned box/pyramid model at all, unlike `shift`/`scale`/`spin`
+  above. On a mesh, or on a `group` placing one, it is read; see **Mesh
+  transforms** and **Groups**.
 - A named `transform` block (`xform <name>`, referencing one built from
   `shift`/`scale`/`shear`/`spin` lines) and the `xform <name>` line that
   references one, anywhere it appears.
@@ -1573,7 +1588,10 @@ would otherwise open a sphere obstacle in the middle of a mesh.
   `group`, in which case it turns about wherever that instance's own local
   origin landed), bzo pivots the same way: about the mesh's own local
   (0,0,0), placed by however many `group` instances (if any) it took to reach
-  the world. Purely visual -- a spinning mesh's faces collide and block shots
+  the world. The spin is about the mesh's own local up, carried through those
+  same groups, so a group spun off vertical tips the spin axis with it
+  (`MeshDrawMgr::executeSet`'s `glRotatef` about Z inside the transform).
+  Purely visual -- a spinning mesh's faces collide and block shots
   exactly as if they never moved.
 
 All six primitives that expand to a mesh upstream are read too:
@@ -1668,10 +1686,10 @@ The notable absences:
   `specular`/`shininess`/`emission`, and `noculling` on a `drawInfo` face;
   `ambient` and `groupAlpha` are read but never applied, each matching what
   upstream does with its own).
-- **`xform`, and -- on a `box`, `pyramid` or `group` only -- `shear` and a
-  `spin` about anything but the vertical axis.** `shift`, `scale` and a
-  vertical `spin` are read there now; on a mesh all four are read in full,
-  see **Mesh transforms** and **Groups** above.
+- **`xform`, and -- on a `box` or `pyramid` -- `shear` and a `spin` about
+  anything but the vertical axis.** `shift`, `scale` and a vertical `spin`
+  are read there now. On a mesh all four are read in full, and on a `group`
+  for the meshes it places; see **Mesh transforms** and **Groups** above.
 - **A `zone` block's `flag` keyword.** `zoneflag`, `team` and `safety` are all
   read -- see **Team zones** and **Flag safety zones** above. `flag` names a
   type any flag of which spawns in the zone; a map using it is named in the

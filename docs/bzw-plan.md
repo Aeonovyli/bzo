@@ -141,11 +141,14 @@ What is left:
 - [ ] A bare `transform` / `enddef` block's `shift`/`scale`/`shear`/`spin`
       lines composed into one named matrix, and `xform <name>` referencing it
       from inside a `group` block or a plain obstacle.
-- [ ] `shear`, on a plain obstacle or inside a `group` block -- no
-      representation in bzo's axis-aligned box/pyramid model at all.
+- [ ] `shear` on a plain obstacle, or on a box/pyramid a `group` places --
+      no representation in bzo's axis-aligned box/pyramid model at all. A
+      group's meshes already take it.
 - [ ] `scale` stated directly on a plain box or pyramid, no `group` involved.
-- [ ] A `spin` about anything but the vertical axis -- tips a shape out of
-      bzo's axis-aligned model the same way `shear` does. The most common
+- [ ] A `spin` about anything but the vertical axis on a box or pyramid,
+      directly or through a `group` (a group's meshes already take it) --
+      tips a shape out of bzo's axis-aligned model the same way `shear`
+      does. The most common
       thing bzo drops on a real map: 63 such lines across 7 of the 54 live
       servers `scripts/survey-live-maps.mjs` imported, one map alone
       accounting for 24. Needs a general oriented box/pyramid

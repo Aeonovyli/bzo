@@ -102,7 +102,8 @@ and watching is that same connection not hung up.
 or a local admin (`localAdmin`, this machine or the whitelist). Admin is the
 gate on connecting somewhere the instance's own operator never configured. A
 signed-in watcher is shown as the forum callsign bzo verified; a local admin
-with no login as `bzo-local`, which claims to be nobody. The
+with no login as a `bzo-view-<tag>` with a random tag, which claims to be
+nobody and cannot collide with another viewer's name. The
 session is checked before any network work, and a public list that could not
 be fetched refuses rather than allowing -- a check that did not happen is not
 a check that passed.

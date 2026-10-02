@@ -54,6 +54,19 @@ export function normalizeShotSlotCount(value) {
 // shooter up has to tolerate.
 export const WORLD_WEAPON_PLAYER_ID = 253;
 
+// GuidedMissileStrategy::update times out only the shooter's own missile
+// (`!isRemote`, GuidedMissleStrategy.cxx:128), and the shooter's `expire` is
+// what ends it everywhere else (`sendEndShot`, :464). A world weapon has no
+// shooter to do either, so its missile flies until it hits the ground, a
+// building or the world's edge. The cap is bzo's: long enough to cross the
+// world twice, so a missile aimed at the sky is still dropped. Null for any
+// other shot, which keeps its ordinary life.
+export function getWorldMissileLifetimeSeconds(playerId, guided, mapSize, speed) {
+  if (!guided || String(playerId) !== String(WORLD_WEAPON_PLAYER_ID)) return null;
+  if (!(mapSize > 0) || !(speed > 0)) return null;
+  return (2 * mapSize) / speed;
+}
+
 // bz_vectorFromRotations (bzfsAPI.cxx:1845), which is how a world weapon's aim
 // becomes a direction, converted to bzo's axes.
 //

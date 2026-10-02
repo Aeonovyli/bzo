@@ -129,6 +129,8 @@ export const GM_AD_LIFE = 0.95;
 export const GM_TURN_ANGLE = 0.628319;
 export const GM_ACTIVATION_TIME = 0.5;
 export const LOCK_ON_ANGLE = 0.15;
+// `_gmSize`, the length the modelled missile is drawn at (renderGeoGMBolt).
+export const GM_SIZE = 1.5;
 
 // Burrow's four numbers (global.cxx:28). `_burrowDepth` is negative because it
 // is a z and not a distance: it is how far below the ground a burrowed tank
@@ -1176,6 +1178,11 @@ function buildFlagTuning(config = {}) {
     // `_flagPoleSize`, how tall its pole is drawn.
     flagAltitude: positive(config.FLAG_ALTITUDE, FLAG_ALTITUDE),
     flagPoleSize: positive(config.FLAG_POLE_SIZE, FLAG_POLE_SIZE),
+    // `_lockOnAngle`, the cone a Guided Missile's lock is picked from, and
+    // `_identifyRange`, how far Identify reaches.
+    lockOnAngle: positive(config.LOCK_ON_ANGLE, LOCK_ON_ANGLE),
+    identifyRange: positive(config.IDENTIFY_RANGE, IDENTIFY_RANGE),
+    gmSize: positive(config.GM_SIZE, GM_SIZE),
   });
 }
 let flagTuning = buildFlagTuning();

@@ -215,6 +215,12 @@ export const BZDB_CONFIG_VARS = new Map([
   ['_gmTurnAngle', { key: 'GM_TURN_ANGLE' }],
   // A missile that may hit the moment it leaves the barrel.
   ['_gmActivationTime', { key: 'GM_ACTIVATION_TIME', allowZero: true }],
+  // How long the modelled missile is drawn.
+  ['_gmSize', { key: 'GM_SIZE' }],
+  // The cone a missile's lock is picked from, radians.
+  ['_lockOnAngle', { key: 'LOCK_ON_ANGLE' }],
+  // How far Identify reaches for the nearest flag on the ground.
+  ['_identifyRange', { key: 'IDENTIFY_RANGE' }],
   ['_burrowSpeedAd', { key: 'BURROW_SPEED_AD' }],
   ['_burrowAngularAd', { key: 'BURROW_ANGULAR_AD' }],
   ['_rFireAdVel', { key: 'RFIRE_AD_VEL' }],

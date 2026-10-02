@@ -394,9 +394,11 @@ These are deliberate. Do not "fix" them without being asked.
   between two looks -- a modelled guided missile behind `useQuality() >= 3`, a
   real flag cloth behind `realFlag`, `SHELL_INSIDE_NODES` for the eighth
   dimension -- bzo builds the one a player who turns everything up would see,
-  not the one upstream ships cold, and leaves the other out. These three were
-  picked under the older rule (upstream's *default*) and are worth
-  revisiting now that the rule has changed -- see "bzo does not mirror
+  not the one upstream ships cold, and leaves the other out. The guided
+  missile follows this: its model (`public/obj/missile.obj`) and its
+  quality-3 smoke. The flag cloth and the eighth dimension were picked under
+  the older rule (upstream's *default*) and are worth revisiting now that the
+  rule has changed -- see "bzo does not mirror
   BZFlag's client display options" above. A setting is only added where a
   measurement says the frame rate needs it, which is the same rule the render
   level follows, and the fallback then is what the render level chooses

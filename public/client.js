@@ -232,6 +232,7 @@ import {
   getRadarObstacleCullRadius,
   getRadarPolygonScratch,
   isOutsideRadarSquare as isOutsideRadarSquareOf,
+  isTippedRadarSpin,
 } from './radar-geometry.mjs';
 import { createVoiceManager } from './voice.js';
 import {
@@ -287,10 +288,8 @@ import {
   keepFlagIdentity,
   parseFlagInfo,
   findNearestGroundFlag,
-  IDENTIFY_RANGE,
   shotRicochets,
   TARGETING_ANGLE,
-  LOCK_ON_ANGLE,
   pickTargetInSights,
   steerGuidedShot,
   canRunOver,
@@ -301,6 +300,7 @@ import {
 import {
   normalizeShotSlotCount,
   WORLD_WEAPON_PLAYER_ID,
+  getWorldMissileLifetimeSeconds,
   WORLD_WEAPON_TEAM,
   SHOT_TAP_SPACING_MS,
   getWorldReloadSeconds,
@@ -390,7 +390,7 @@ import {
   getTeleportDestinationFace,
   transformShotThroughTeleporter,
 } from './teleport.mjs';
-import { traceBeam, traceShotThroughTeleporters } from './trace.mjs';
+import { findMapEdgeImpactPoint, traceBeam, traceShotThroughTeleporters } from './trace.mjs';
 import {
   AUTOPILOTS, DEFAULT_PILOT, createRouter, createWorldProbes,
 } from './autopilot.mjs';
@@ -1034,6 +1034,10 @@ function readViewPosTarget() {
   return { x, y, z, rotation: (deg * Math.PI) / 180 };
 }
 const autoViewPosTarget = readViewPosTarget();
+// Set once a link's `pos=` has placed the viewer. A free camera is free: the
+// spot a link names is where its sender stood, outside the walls or not, so
+// `confineViewerToWorld` leaves it alone in that view.
+let viewerPlacedByLink = false;
 
 // The current view, as a link -- what the "Share View Link" button hands
 // back. It names the map actually on screen: the staged or joined Map Viewer
@@ -2736,6 +2740,7 @@ const WORLD_REENTRY_MARGIN = 10;
 // join is always inside them -- the server's spawn is authoritative and is
 // chosen against this same world -- so this can never argue with it.
 function confineViewerToWorld() {
+  if (viewerPlacedByLink && roamView === ROAM_VIEW.FREE) return;
   const half = (Number.isFinite(currentWorldMapSize) ? currentWorldMapSize : DEFAULT_MAP_SIZE) / 2;
   const limit = Math.max(0, half - WORLD_REENTRY_MARGIN);
   const confine = (value) => Math.max(-limit, Math.min(limit, value));
@@ -4045,31 +4050,49 @@ function lightenHexColor(colorValue, mix = 0.45) {
   return color;
 }
 
-function getPlayerShotColor(playerId, team = null) {
+// Team::addBrightness (Team.cxx:192) at upstream's `shotBrightness` of 0.2: a
+// shot is its tank's colour lifted toward white by (1 - c)^4 a channel, so a
+// channel already bright stays put and a dark one gains a little. A blue team's
+// shot stays deep blue. Worked in the colour's own display values, which is
+// what upstream's floats are.
+const SHOT_BRIGHTNESS = 0.2;
+function shotColorFromTankColor(colorValue) {
+  const color = new THREE.Color(typeof colorValue === 'number' ? colorValue : (colorValue || 0x4caf50));
+  const rgb = color.getRGB({ r: 0, g: 0, b: 0 }, THREE.SRGBColorSpace);
+  const lift = (c) => Math.max(0, Math.min(1, c + (SHOT_BRIGHTNESS * ((1 - c) ** 4))));
+  return color.setRGB(lift(rgb.r), lift(rgb.g), lift(rgb.b), THREE.SRGBColorSpace);
+}
+
+// The colour a shot is made from: its shooter's tank colour. A guided
+// missile's model wears it flat, nose and fins; the bolt lifts it
+// (`getPlayerShotColor`).
+function getPlayerShotBaseColor(playerId, team = null) {
   // A world weapon's shot has no shooter to take a colour from. Upstream draws
   // one in its `shot.team`'s colour: the weapon's own `color`, or rogue, which
   // no player of a colour team wears and so reads as nobody's.
   if (String(playerId) === String(WORLD_WEAPON_PLAYER_ID)) {
-    return lightenHexColor(getPlayerTeamColor(team || WORLD_WEAPON_TEAM), 0.45);
+    return getPlayerTeamColor(team || WORLD_WEAPON_TEAM);
   }
   const tank = tanks.get(playerId);
   const playerColor = tank?.userData?.playerState?.color;
   // Player::addShots takes a `colorblind` flag for exactly this
   // (playing.cxx:6169): a shot has to lie about its owner's team too, or the
   // shots would give away what the tanks no longer do.
-  const color = getEffectiveTankColor(
+  return getEffectiveTankColor(
     playerId,
     typeof playerColor === 'number' ? playerColor : 0x4caf50
   );
-  return lightenHexColor(color, 0.45);
+}
+
+function getPlayerShotColor(playerId, team = null) {
+  return shotColorFromTankColor(getPlayerShotBaseColor(playerId, team));
 }
 
 // The colour the radar draws a shot in. Deliberately not `getPlayerShotColor`:
-// that lightens a player's colour by 45% so the bolt reads as hot against the
-// world, and a pale green is fine as a glowing ball in the sky but reads as
-// plain white once it is a two-pixel line on a dark panel. The radar wants the
-// colour its own blips use, so a shot and the tank that fired it are the same
-// colour on the same panel.
+// that lifts a player's colour toward white so the bolt reads as hot against
+// the world, which a two-pixel line on a dark panel does not need. The radar
+// wants the colour its own blips use, so a shot and the tank that fired it are
+// the same colour on the same panel.
 //
 // Upstream asks the same question and answers it the same way -- its shots take
 // `Team::getRadarColor` (RadarRenderer.cxx:671), the radar palette, not the
@@ -5847,6 +5870,12 @@ function logRenderStats(reason) {
   // `radar` phase. It moves with the wheel as well as with `?radarZoom=`, so it
   // belongs on every sample rather than on the init line.
   stats.radarZoom = Math.round(radarZoomLevel * 1000) / 1000;
+  // How the radar's obstacles were drawn since the last line: from the cached
+  // image, live, and how many times the image was rebaked (#133).
+  stats.radarCache = `${radarCacheFrames.cached}/${radarCacheFrames.live}/${radarCacheFrames.bakes}`;
+  radarCacheFrames.cached = 0;
+  radarCacheFrames.live = 0;
+  radarCacheFrames.bakes = 0;
   // bzo's own collections, which is where a leak would live if the scene graph
   // is clean: each of these is added to on an event and has to be removed from
   // on another, and a count that climbs while a client sits idle names which one
@@ -7559,6 +7588,7 @@ function handleServerMessage(message) {
             playerZ = autoViewPosTarget.z;
             playerRotation = autoViewPosTarget.rotation;
             roamCamera = null;
+            viewerPlacedByLink = true;
           }
           // Whatever this join settled on -- the server's spawn, chosen
           // against the live match's world, or a `pos=` copied off a link to
@@ -8369,6 +8399,7 @@ function createProjectile(data) {
       x: data.x,
       z: data.z,
       color: shotColor.getHex(),
+      modelColor: new THREE.Color(getPlayerShotBaseColor(data.playerId, data.team)).getHex(),
       fireSound: effects.fireSound,
       guided: effects.guided,
     });
@@ -8389,7 +8420,9 @@ function createProjectile(data) {
   // A missile's heading is not fixed at the muzzle: `updateProjectiles` turns it
   // every step at whichever tank its shooter has locked.
   projectile.userData.guided = effects.guided;
-  projectile.userData.lifetimeSeconds = getShotLifetimeSeconds(data.flag ?? null);
+  projectile.userData.lifetimeSeconds = getWorldMissileLifetimeSeconds(
+    data.playerId, effects.guided, currentWorldMapSize, projectile.userData.speed,
+  ) ?? getShotLifetimeSeconds(data.flag ?? null);
   projectile.userData.teleportReentryBlockTeleporterIndex = null;
   projectile.userData.teleportReentryBlockDistance = 0;
   projectiles.set(data.id, projectile);
@@ -8429,6 +8462,7 @@ function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0, speed }) {
       dirY,
       dirZ,
       color: shotColor.getHex(),
+      modelColor: new THREE.Color(getPlayerShotBaseColor(myPlayerId)).getHex(),
       fireSound: localEffects.fireSound,
       guided: localEffects.guided,
     });
@@ -11043,7 +11077,7 @@ function resolveOwnLockTarget() {
   // A lock is only worth taking while there is a missile for it to steer: `GM`
   // in the hand, or one still in the air after the flag was dropped.
   const canLock = getPlayerFlagType(myPlayerId) === 'GM' || hasGuidedShotInFlight(myPlayerId);
-  const locked = canLock ? pickTargetInSights(eye, forward, lockable, LOCK_ON_ANGLE) : null;
+  const locked = canLock ? pickTargetInSights(eye, forward, lockable, getFlagTuning().lockOnAngle) : null;
   return {
     targetId: locked ?? pickTargetInSights(eye, forward, visible, TARGETING_ANGLE),
     locked: locked !== null,
@@ -11951,7 +11985,7 @@ function buildAutopilotView() {
       shakeTimeout: normalizeShakeTimeout(gameConfig.FLAG_SHAKE_TIMEOUT),
       jumpVelocity: gameConfig.JUMP_VELOCITY,
       gravity: gameConfig.GRAVITY,
-      lockOnAngle: LOCK_ON_ANGLE,
+      lockOnAngle: getFlagTuning().lockOnAngle,
       shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
     isFoe: (player) => areFoes(player.team, playerTeam, teamsAllowed),
@@ -13580,7 +13614,7 @@ function checkNearFlag() {
     playerX,
     myTank.position.y,
     playerZ,
-    IDENTIFY_RANGE
+    getFlagTuning().identifyRange
   );
   if (!closest) {
     lastIdentifiedFlagIndex = null;
@@ -14419,6 +14453,19 @@ function updateProjectiles(deltaTime) {
       if (clientTracesShots && step.bounces === 0 && (step.obstacle || step.ground)) {
         removeProjectile(id, 0, step.x, step.y, step.z);
         return;
+      }
+      // The world's edge, above the wall too. Upstream's border is a plane with
+      // no top for every shot but a bouncing one (`ignoreHit` needs `Reflect`,
+      // SegmentedShotStrategy.cxx:469), so a shell or a missile flying higher
+      // than `_wallHeight` still stops and bursts there, as bzo's server ends
+      // its own shots at the edge.
+      if (clientTracesShots && !ownRicochet && !currentWorldNoWalls) {
+        const halfMap = (Number.isFinite(currentWorldMapSize) ? currentWorldMapSize : DEFAULT_MAP_SIZE) / 2;
+        if (Math.abs(step.x) > halfMap || Math.abs(step.z) > halfMap) {
+          const edge = findMapEdgeImpactPoint(startX, startY, startZ, step.x, step.y, step.z, halfMap);
+          removeProjectile(id, 0, edge.x, edge.y, edge.z);
+          return;
+        }
       }
       if (!ownRicochet && step.bounces === 0) return;
       projectile.position.x = step.x;
@@ -15409,6 +15456,81 @@ function getRadarMeshObstacles() {
   return radarMeshOrder.list;
 }
 
+// The obstacles that never move, painted once into a world-space image and
+// drawn each frame as that one image (#133). The only thing that changes the
+// picture is the player's height, through `getRadarOpacity`: so the image is
+// baked at one height and stays good while the player stays near it, and a
+// player going up or down draws live until they have held a height long
+// enough to bake again. A tank spends most of its life on the ground, so most
+// frames are one `drawImage` however much map there is.
+//
+// Resolution is the panel's own pixels per world unit at the current zoom,
+// oversampled because the image is turned with the heading every frame and
+// resampling a texel per pixel would blur. Zoomed far enough in that the
+// image would be too big, the live path draws instead -- and there it is
+// already cheap, because nearly everything is outside the panel.
+const RADAR_CACHE_OVERSAMPLE = 2;
+const RADAR_CACHE_MAX_PIXELS = 2048;
+// How long a height has to hold before it is worth baking at.
+const RADAR_CACHE_SETTLE_MS = 250;
+let radarObstacleCache = null;
+// Frames drawn each way since the last `renderer.stats` line.
+const radarCacheFrames = { cached: 0, live: 0, bakes: 0 };
+
+function getRadarObstacleCache({ mapSize, py, size, radarDistance, scale }) {
+  const resolution = scale * RADAR_CACHE_OVERSAMPLE;
+  const pixels = Math.ceil(mapSize * resolution);
+  if (!(pixels > 0) || pixels > RADAR_CACHE_MAX_PIXELS) {
+    radarCacheFrames.live += 1;
+    return { ready: false, bakeNow: false };
+  }
+  const now = performance.now();
+  let cache = radarObstacleCache;
+  if (!cache || cache.source !== OBSTACLES || cache.mapSize !== mapSize
+    || cache.size !== size || cache.radarDistance !== radarDistance) {
+    const canvas = cache?.canvas || document.createElement('canvas');
+    canvas.width = pixels;
+    canvas.height = pixels;
+    cache = {
+      source: OBSTACLES,
+      mapSize,
+      size,
+      radarDistance,
+      canvas,
+      ctx: canvas.getContext('2d'),
+      resolution,
+      bakedPy: NaN,
+      lastPy: py,
+      stillSince: now,
+    };
+    radarObstacleCache = cache;
+  }
+  if (Math.abs(py - cache.lastPy) > 1e-3) {
+    cache.lastPy = py;
+    cache.stillSince = now;
+  }
+  // Half an opacity step of `addRadarFill`'s rounding, in height: within it,
+  // a live paint would round to the same fill the image holds.
+  const heightTolerance = (RADAR_DEPTH_FACTOR / RADAR_FILL_ALPHA_STEPS) / 2;
+  if (Math.abs(py - cache.bakedPy) <= heightTolerance) {
+    radarCacheFrames.cached += 1;
+    return { ready: true, canvas: cache.canvas };
+  }
+  radarCacheFrames.live += 1;
+  const bakeNow = now - cache.stillSince >= RADAR_CACHE_SETTLE_MS;
+  return {
+    ready: false,
+    bakeNow,
+    canvas: cache.canvas,
+    ctx: cache.ctx,
+    resolution: cache.resolution,
+    markBaked: () => {
+      cache.bakedPy = py;
+      radarCacheFrames.bakes += 1;
+    },
+  };
+}
+
 // Team::getRadarColor is what upstream's radar draws a base in
 // (RadarRenderer.cxx:1186), and bzo has the same table. That colour and the one
 // a map paints an obstacle are both shaded towards the radar's neutral grey, so
@@ -15737,12 +15859,16 @@ function updateRadar() {
   let radarFillPath = null;
   let radarFillStyle = '';
   let radarFillAlpha = -1;
+  // Where fills land and how a radar-relative unit becomes a pixel there: the
+  // panel itself, or the world-space cache `paintRadarObstacleLayer` bakes.
+  let fillTarget = { ctx: radarCtx, offset: center, scale: radarWorldHalfExtent / radarDistance };
   const flushRadarFills = () => {
     if (!radarFillPath) return;
-    radarCtx.globalAlpha = radarFillAlpha;
-    radarCtx.fillStyle = radarFillStyle;
-    radarCtx.fill(radarFillPath);
-    radarCtx.globalAlpha = 1;
+    const { ctx } = fillTarget;
+    ctx.globalAlpha = radarFillAlpha;
+    ctx.fillStyle = radarFillStyle;
+    ctx.fill(radarFillPath);
+    ctx.globalAlpha = 1;
     radarFillPath = null;
   };
   // `polygon` is a flat `x, y` buffer in radar-relative units, as the clip
@@ -15760,9 +15886,10 @@ function updateRadar() {
       radarFillStyle = fillStyle;
       radarFillAlpha = alpha;
     }
+    const { offset, scale } = fillTarget;
     for (let i = 0; i < count; i += 1) {
-      const panelX = center + ((polygon[i * 2] / radarDistance) * radarWorldHalfExtent);
-      const panelY = center + ((polygon[(i * 2) + 1] / radarDistance) * radarWorldHalfExtent);
+      const panelX = offset + (polygon[i * 2] * scale);
+      const panelY = offset + (polygon[(i * 2) + 1] * scale);
       if (i === 0) radarFillPath.moveTo(panelX, panelY);
       else radarFillPath.lineTo(panelX, panelY);
     }
@@ -15893,85 +16020,115 @@ function updateRadar() {
     radarCtx.restore();
   });
 
-  // Draw obstacles within radar distance, rotated to match map orientation
-  if (typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES)) {
-    getRadarObstacles().forEach(({ obs, cullRadius }) => {
-      const centerRel = toRadarRelative(obs.x, obs.z);
-      // The whole footprint against the panel, so a long obstacle whose centre
-      // is off the panel still draws the span of it that is on -- see
-      // `getRadarObstacleCullRadius`. Ahead of the corner work rather than
-      // after it, which is the point: on a large map most of the list is out
-      // of range and costs one comparison rather than a clipped polygon.
-      if (isOutsideRadarSquare(centerRel.x, centerRel.y, cullRadius)) return;
+  // The obstacles, painted through one routine whatever they land on. `view`
+  // is the frame a world point is measured in -- the player's, turned to the
+  // heading, for the panel; the world's own for the cache -- and the square
+  // it is clipped and culled against. `spinning` says which meshes this pass
+  // owns: a spinning one turns every frame, so the cache leaves it out and the
+  // panel draws it live over the cached image.
+  const paintRadarObstacleLayer = (view, spinning) => {
+    const { ox, oz, cos: viewCos, sin: viewSin, heading, half } = view;
+    const relative = (worldX, worldZ) => {
+      const dx = worldX - ox;
+      const dz = worldZ - oz;
+      return { x: (dx * viewCos) - (dz * viewSin), y: (dx * viewSin) + (dz * viewCos) };
+    };
+    const outside = (x, y, margin) => isOutsideRadarSquareOf(x, y, half, margin);
 
-      const halfW = (obs.w || 8) / 2;
-      const halfD = (obs.d || 8) / 2;
-      const obstacleRadarRotation = getRadarObjectRotation(obs.rotation);
-      const cosR = Math.cos(obstacleRadarRotation);
-      const sinR = Math.sin(obstacleRadarRotation);
-      const scratch = radarPolygonScratch();
-      for (let i = 0; i < 4; i += 1) {
-        const cornerX = RADAR_BOX_CORNERS[i * 2] * halfW;
-        const cornerZ = RADAR_BOX_CORNERS[(i * 2) + 1] * halfD;
-        scratch[i * 2] = centerRel.x + ((cornerX * cosR) - (cornerZ * sinR));
-        scratch[(i * 2) + 1] = centerRel.y + ((cornerX * sinR) + (cornerZ * cosR));
-      }
+    if (spinning !== 'only') {
+      getRadarObstacles().forEach(({ obs, cullRadius }) => {
+        const centerRel = relative(obs.x, obs.z);
+        // The whole footprint against the square, so a long obstacle whose
+        // centre is off it still draws the span of it that is on -- see
+        // `getRadarObstacleCullRadius`. Ahead of the corner work rather than
+        // after it, which is the point: on a large map most of the list is out
+        // of range and costs one comparison rather than a clipped polygon.
+        if (outside(centerRel.x, centerRel.y, cullRadius)) return;
 
-      const clippedCount = clipPolygonToRadarSquare(scratch, 4, radarDistance);
-      if (clippedCount < 3) return;
+        const halfW = (obs.w || 8) / 2;
+        const halfD = (obs.d || 8) / 2;
+        const obstacleRadarRotation = (-obs.rotation) + heading;
+        const cosR = Math.cos(obstacleRadarRotation);
+        const sinR = Math.sin(obstacleRadarRotation);
+        const scratch = radarPolygonScratch();
+        for (let i = 0; i < 4; i += 1) {
+          const cornerX = RADAR_BOX_CORNERS[i * 2] * halfW;
+          const cornerZ = RADAR_BOX_CORNERS[(i * 2) + 1] * halfD;
+          scratch[i * 2] = centerRel.x + ((cornerX * cosR) - (cornerZ * sinR));
+          scratch[(i * 2) + 1] = centerRel.y + ((cornerX * sinR) + (cornerZ * cosR));
+        }
+        const clippedCount = clipPolygonToRadarSquare(scratch, 4, half);
+        if (clippedCount < 3) return;
 
-      // Calculate opacity based on player's vertical position relative to obstacle
-      const baseY = obs.baseY || 0;
-      const height = getObstacleHeight(obs);
-      addRadarFill(
-        getRadarClipBuffer(),
-        clippedCount,
-        getObstacleRadarFillStyle(obs),
-        getRadarOpacity(py, baseY, height),
-      );
-    });
-  }
+        // Opacity from the player's height against the obstacle's span.
+        const baseY = obs.baseY || 0;
+        const height = getObstacleHeight(obs);
+        addRadarFill(
+          getRadarClipBuffer(),
+          clippedCount,
+          getObstacleRadarFillStyle(obs),
+          getRadarOpacity(py, baseY, height),
+        );
+      });
+    }
 
-  // Draw a mesh's own upward-facing faces -- see `getRadarMeshObstacles`. Each
-  // face's own vertices are already in world space (no obstacle rotation to
-  // apply, unlike a box), so this projects them directly rather than
-  // rotating a local rectangle the way the obstacle loop above does -- unless
-  // the mesh itself has an `angvel` (#88), in which case its faces are
-  // rotated live about its own `spinPivot` first, the 2D (x/z) equivalent of
-  // `renderManager`'s own `rotation.y` on that mesh's 3D pivot group
-  // (`meshSpinRadians` is the one shared formula both read).
-  //
-  // A mesh too small on the panel for its faces to separate draws its
-  // footprint instead -- see `RADAR_MESH_FOOTPRINT_PIXELS`. The footprint is
-  // the same world-space box, so a spin turns it the same way a face turns.
-  if (typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES)) {
+    // A mesh's own upward-facing faces -- see `getRadarMeshObstacles`. Each
+    // face's own vertices are already in world space (no obstacle rotation to
+    // apply, unlike a box), so this projects them directly rather than
+    // rotating a local rectangle the way the obstacle loop above does -- unless
+    // the mesh itself has an `angvel` (#88), in which case its faces are
+    // rotated live about its own `spinPivot` first, the 2D (x/z) equivalent of
+    // `renderManager`'s own `rotation.y` on that mesh's 3D pivot group
+    // (`meshSpinRadians` is the one shared formula both read).
+    //
+    // A mesh too small on the panel for its faces to separate draws its
+    // footprint instead -- see `RADAR_MESH_FOOTPRINT_PIXELS`. The footprint is
+    // the same world-space box, so a spin turns it the same way a face turns.
+    // The test is in panel pixels at the current zoom whichever target this
+    // is, so the cache keeps exactly the detail the panel would draw.
     const worldToPanelPixels = radarWorldHalfExtent / radarDistance;
     getRadarMeshObstacles().forEach((entry) => {
       const { obs, arrays, faces, footprint, footprintTint, cullX, cullZ, cullRadius } = entry;
+      const spins = Boolean(obs.angvel && obs.spinPivot);
+      if ((spinning === 'skip' && spins) || (spinning === 'only' && !spins)) return;
       // Same rejection as the obstacle loop, on the circle the cached list
       // carries for this mesh -- a spinning one's is centred on the pivot, so
       // it holds whatever angle the mesh is at this frame.
-      const cullRel = toRadarRelative(cullX, cullZ);
-      if (isOutsideRadarSquare(cullRel.x, cullRel.y, cullRadius)) return;
+      const cullRel = relative(cullX, cullZ);
+      if (outside(cullRel.x, cullRel.y, cullRadius)) return;
 
-      const spinAngle = obs.angvel && obs.spinPivot ? meshSpinRadians(obs.angvel) : 0;
+      const spinAngle = spins ? meshSpinRadians(obs.angvel) : 0;
       const spinCos = Math.cos(spinAngle);
       const spinSin = Math.sin(spinAngle);
+      // A tipped spin (#168) turns about a tilted axis, so the point's height
+      // feeds its flat position: Rodrigues about `spinAxis`, then dropped to
+      // x/z like every other radar point. A down-pointing vertical axis is
+      // the same turn the other way.
+      const tippedAxis = spinAngle && isTippedRadarSpin(obs) ? obs.spinAxis : null;
+      const flatSin = obs.spinAxis && obs.spinAxis.y < 0 ? -spinSin : spinSin;
       // Projects one world (x, z) into the scratch buffer at `slot`, spinning
       // it about the mesh's pivot first where the mesh turns.
-      const project = (scratch, slot, worldX, worldZ) => {
+      const project = (scratch, slot, worldX, worldZ, worldY = obs.spinPivot ? obs.spinPivot.y : 0) => {
         let spunX = worldX;
         let spunZ = worldZ;
-        if (spinAngle) {
+        if (tippedAxis) {
+          const offX = worldX - obs.spinPivot.x;
+          const offY = worldY - obs.spinPivot.y;
+          const offZ = worldZ - obs.spinPivot.z;
+          const { x: ax, y: ay, z: az } = tippedAxis;
+          const dot = ((ax * offX) + (ay * offY) + (az * offZ)) * (1 - spinCos);
+          spunX = obs.spinPivot.x + (offX * spinCos) + (((ay * offZ) - (az * offY)) * spinSin) + (ax * dot);
+          spunZ = obs.spinPivot.z + (offZ * spinCos) + (((ax * offY) - (ay * offX)) * spinSin) + (az * dot);
+        } else if (spinAngle) {
           const offsetX = worldX - obs.spinPivot.x;
           const offsetZ = worldZ - obs.spinPivot.z;
-          spunX = obs.spinPivot.x + (offsetX * spinCos) + (offsetZ * spinSin);
-          spunZ = obs.spinPivot.z - (offsetX * spinSin) + (offsetZ * spinCos);
+          spunX = obs.spinPivot.x + (offsetX * spinCos) + (offsetZ * flatSin);
+          spunZ = obs.spinPivot.z - (offsetX * flatSin) + (offsetZ * spinCos);
         }
-        const dx = spunX - px;
-        const dz = spunZ - pz;
-        scratch[slot * 2] = (dx * headingCos) - (dz * headingSin);
-        scratch[(slot * 2) + 1] = (dx * headingSin) + (dz * headingCos);
+        const dx = spunX - ox;
+        const dz = spunZ - oz;
+        scratch[slot * 2] = (dx * viewCos) - (dz * viewSin);
+        scratch[(slot * 2) + 1] = (dx * viewSin) + (dz * viewCos);
       };
 
       // A single face has no height of its own to speak of -- upstream's own
@@ -15985,7 +16142,7 @@ function updateRadar() {
         for (let i = 0; i < 4; i += 1) {
           project(scratch, i, footprint[i * 2], footprint[(i * 2) + 1]);
         }
-        const clippedCount = clipPolygonToRadarSquare(scratch, 4, radarDistance);
+        const clippedCount = clipPolygonToRadarSquare(scratch, 4, half);
         if (clippedCount < 3) return;
         addRadarFill(
           getRadarClipBuffer(),
@@ -16003,10 +16160,10 @@ function updateRadar() {
         const scratch = radarPolygonScratch();
         for (let i = 0; i < vertexCount; i += 1) {
           const v = arrays.corners[start + i] * 3;
-          project(scratch, i, arrays.vertices[v], arrays.vertices[v + 2]);
+          project(scratch, i, arrays.vertices[v], arrays.vertices[v + 2], arrays.vertices[v + 1]);
         }
 
-        const clippedCount = clipPolygonToRadarSquare(scratch, vertexCount, radarDistance);
+        const clippedCount = clipPolygonToRadarSquare(scratch, vertexCount, half);
         if (clippedCount < 3) return;
 
         const { color } = arrays.materials[arrays.faceMaterial[f]];
@@ -16018,11 +16175,48 @@ function updateRadar() {
         );
       });
     });
-  }
+    flushRadarFills();
+  };
 
-  // Everything the two loops above accumulated, before the gameplay layers go
-  // down over it.
-  flushRadarFills();
+  const panelView = {
+    ox: px, oz: pz, cos: headingCos, sin: headingSin, heading: playerHeading, half: radarDistance,
+  };
+  if (typeof OBSTACLES !== 'undefined' && Array.isArray(OBSTACLES)) {
+    const cache = getRadarObstacleCache({
+      mapSize, py, size, radarDistance, scale: radarWorldHalfExtent / radarDistance,
+    });
+    if (cache.ready) {
+      // One image for every obstacle that does not move: the world-space bake
+      // turned and placed the way the panel's own projection would put each
+      // polygon, clipped to the square the live path clips to.
+      const k = radarWorldHalfExtent / radarDistance;
+      const halfMap = mapSize / 2;
+      radarCtx.save();
+      radarCtx.beginPath();
+      radarCtx.rect(center - radarWorldHalfExtent, center - radarWorldHalfExtent,
+        radarWorldHalfExtent * 2, radarWorldHalfExtent * 2);
+      radarCtx.clip();
+      radarCtx.translate(center, center);
+      radarCtx.scale(k, k);
+      radarCtx.rotate(playerHeading);
+      radarCtx.translate(-px, -pz);
+      radarCtx.drawImage(cache.canvas, -halfMap, -halfMap, mapSize, mapSize);
+      radarCtx.restore();
+      paintRadarObstacleLayer(panelView, 'only');
+    } else {
+      paintRadarObstacleLayer(panelView, 'all');
+      if (cache.bakeNow) {
+        // Painted in the world's own frame: no heading, no player offset, the
+        // map's whole square, a pixel per `cache.resolution` world units.
+        const target = fillTarget;
+        fillTarget = { ctx: cache.ctx, offset: (mapSize / 2) * cache.resolution, scale: cache.resolution };
+        cache.ctx.clearRect(0, 0, cache.canvas.width, cache.canvas.height);
+        paintRadarObstacleLayer({ ox: 0, oz: 0, cos: 1, sin: 0, heading: 0, half: mapSize / 2 }, 'skip');
+        fillTarget = target;
+        cache.markBaked();
+      }
+    }
+  }
 
   // The bases over the obstacles, as outlines -- see `getRadarBases`. Clipped
   // to the panel rather than polygon-clipped, so a base half off the edge does
