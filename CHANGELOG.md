@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-03
+
 ### Added
 - The BZFlag list shows which map bzo is running, after the title:
   `<title> - bzo` on bzo.bzw. #174
