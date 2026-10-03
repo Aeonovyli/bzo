@@ -176,15 +176,17 @@ function packReject(reason) {
 // payload)` seats a client that sent MsgEnter, and `link.onFrame` then takes
 // every frame it sends.
 function createBzflagServer({
-  getStatus, getPlayers, getTeams, getGameSettings, getWorld, onEnter, rejectReason, log = () => {},
+  getStatus, getPlayers, getTeams, getGameSettings, getWorld, onEnter, reserveId, releaseId,
+  rejectReason, log = () => {},
 }) {
   const startedAt = Date.now();
   const connections = new Set();
 
+  // A connection's id is the player id it will have if it joins
+  // (`reserveId`), handed back when it closes.
   function freeId() {
-    const used = new Set([...connections].map((connection) => connection.id));
-    for (let id = 0; id < MAX_CONNECTIONS; id += 1) if (!used.has(id)) return id;
-    return 0xff;
+    if (connections.size >= MAX_CONNECTIONS) return 0xff;
+    return reserveId();
   }
 
   function reject(connection, reason) {
@@ -265,6 +267,7 @@ function createBzflagServer({
     socket.on('error', () => {});
     socket.on('close', () => {
       connections.delete(connection);
+      if (connection.id !== 0xff) releaseId(connection.id);
       if (connection.link) {
         connection.link.closed = true;
         connection.link.onClose?.();

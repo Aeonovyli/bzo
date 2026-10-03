@@ -11766,9 +11766,13 @@ function currentWorldTime(now = Date.now()) {
 // the same numbers (`server/player-ids.cjs`), so the two agree about which
 // slot is which -- including through a proxy, where they are literally the
 // same slot.
+// Numbers held for a native BZFlag client between its handshake, which has to
+// name its id, and the player that MsgEnter creates with it.
+const reservedPlayerNumbers = new Set();
+
 function getNextPlayerNumber() {
   let num = 0;
-  const takenNumbers = new Set(Array.from(players.values()).map(p => p.playerNumber));
+  const takenNumbers = new Set([...Array.from(players.values()).map(p => p.playerNumber), ...reservedPlayerNumbers]);
   while (takenNumbers.has(num)) {
     num++;
   }
@@ -15537,7 +15541,21 @@ if (BZFLAG_CONFIG?.listen) {
       shakeWins: FLAG_SHAKE_WINS,
     }),
     getWorld: getBzflagWorld,
-    onEnter: seatNativeClient,
+    // The handshake's id is the player's bzo number, so every id a native
+    // client sees is the one bzo's own scoreboard shows.
+    reserveId: () => {
+      const number = getNextPlayerNumber();
+      if (number > 243) return 0xff;
+      reservedPlayerNumbers.add(number);
+      return number;
+    },
+    releaseId: (id) => reservedPlayerNumbers.delete(id),
+    onEnter: (link, payload) => {
+      seatNativeClient(link, payload).catch((error) => {
+        logError(`[BZFLAG] seating ${link.address} failed: ${error.message}`);
+        link.reject('server error');
+      });
+    },
     rejectReason: () => `This world can't be sent to BZFlag clients yet; play in a browser at ${PUBLIC_URL || 'this server\'s web page'}`,
     log,
   });
@@ -15583,15 +15601,32 @@ function getBzflagWorld() {
 // door a bot uses (`createBotSocket`): its socket's `send` is the
 // translator, and what it says arrives as a browser's message would. It
 // watches for now; playing is the next phase of #174.
-function seatNativeClient(link, payload) {
+async function seatNativeClient(link, payload) {
   const enter = decodeEnter(payload);
   if (!enter || !enter.callsign.trim()) {
     link.reject('bad MsgEnter');
     return;
   }
+  // bzfs asks the list server about every callsign, token or none
+  // (ListServerLink::addMe), and says what it heard (ListServerConnection.cxx:
+  // 272-293). The token is spent here and never logged.
+  let login = null;
+  try {
+    const { status, body } = await checkGlobalToken(enter.callsign, enter.token, ADMIN_GROUPS);
+    const parsed = parseGlobalTokenReply(body);
+    const bad = parsed.lines.some((line) => line.startsWith('TOKBAD: '));
+    login = { ...parsed, registered: parsed.good || bad };
+    log(`[BZFLAG] "${enter.callsign}" CHECKTOKENS ${status}: ${parsed.good ? `verified bzid=${parsed.bzid || 'none'}`
+      : (bad ? 'registered, bad token' : 'not registered')}`
+      + `${parsed.groups.length ? ` groups=${parsed.groups.join(',')}` : ''}`);
+  } catch (error) {
+    logError(`[BZFLAG] "${enter.callsign}" CHECKTOKENS failed: ${error.message}`);
+  }
+  if (link.closed) return;
   const socket = new EventEmitter();
   socket.OPEN = 1;
   socket.readyState = 1;
+  socket.reservedPlayerNumber = link.id;
   const translator = new NativeTranslator({
     selfSlot: link.id,
     send: (code, body) => link.send(code, body),
@@ -15606,11 +15641,14 @@ function seatNativeClient(link, payload) {
     }
   };
   socket.ping = () => setTimeout(() => socket.emit('pong'), 0);
+  let seated = null;
   const close = () => {
     if (socket.readyState !== 1) return;
     socket.readyState = 3;
     socket.emit('close');
     if (!link.closed) link.close();
+    // No cookie carries it, so nothing could come back to it.
+    if (seated?.sessionId) sessions.remove(seated.sessionId);
   };
   socket.close = close;
   socket.terminate = close;
@@ -15622,12 +15660,9 @@ function seatNativeClient(link, payload) {
     } else if (code === 'mg') {
       const chat = decodeClientMessage(body);
       if (!chat || !chat.text.trim()) return;
-      let dst = chat.to;
-      if (dst <= 243) {
-        const entry = [...translator.slots.entries()].find(([, slot]) => slot === dst);
-        dst = entry ? entry[0] : null;
-      }
-      if (dst === null) return;
+      // A player id is bzo's own; the destinations above them are upstream's
+      // numbers too (server/player-ids.cjs).
+      const dst = chat.to <= 243 ? String(chat.to) : chat.to;
       say({ type: 'message', dst, text: chat.text, msgType: 'chat' });
     }
   };
@@ -15636,16 +15671,38 @@ function seatNativeClient(link, payload) {
     headers: { 'user-agent': `BZFlag ${enter.version}` },
     socket: { remoteAddress: link.remoteAddress, remotePort: 0 },
   });
-  log(`[BZFLAG] "${enter.callsign}" entered from ${link.address} (${enter.version}); watching`);
+  const player = [...players.values()].find((candidate) => candidate.ws === socket);
+  if (!player) return;
+  seated = player;
+  // What a browser's session gives it at `acceptConnection`, from the token
+  // instead of a cookie. A session record, as `/login` makes, because
+  // `isAdmin` re-reads the session every time it is asked; nothing sends its
+  // id anywhere.
+  if (login?.good && login.bzid) {
+    const callsign = login.callsign || enter.callsign;
+    player.sessionId = sessions.create({ bzid: login.bzid, callsign, groups: login.groups });
+    player.verified = true;
+    player.bzid = login.bzid;
+    player.globalCallsign = callsign;
+    player.admin = isAdminSession(sessions.get(player.sessionId), ADMIN_GROUPS);
+  }
+  log(`[BZFLAG] "${enter.callsign}" entered from ${link.address} (${enter.version}); watching`
+    + `${player.verified ? `, bzid=${player.bzid} admin=${player.admin}` : ''}`);
   say({
     type: 'joinGame', name: enter.callsign, team: PLAYER_TEAM.OBSERVER, motto: enter.motto, tankModel: 'bzflag',
   });
+  if (!player.joined) return;
+  if (login?.good) {
+    replyToPlayer(player, 'Global login approved!');
+  } else if (login?.registered) {
+    replyToPlayer(player, 'Global login rejected, bad token.');
+  } else if (login) {
+    replyToPlayer(player, 'This callsign is not registered.');
+    replyToPlayer(player, 'You can register it at https://forums.bzflag.org/');
+  }
   // Said whatever team was asked for, since an observer who picked one
   // would otherwise not know why they got none.
-  const player = [...players.values()].find((candidate) => candidate.ws === socket);
-  if (player && player.joined) {
-    replyToPlayer(player, `BZFlag clients can watch bzo but not play yet. To play, use a browser: ${PUBLIC_URL || 'this server\'s web page'}`);
-  }
+  replyToPlayer(player, `BZFlag clients can watch bzo but not play yet. To play, use a browser: ${PUBLIC_URL || 'this server\'s web page'}`);
 }
 
 // bzfs re-adds on every join and part and every `ListServerReAddTime`; the
@@ -20321,7 +20378,8 @@ function acceptConnection(ws, req) {
   }
 
 
-  let player = new Player(ws);
+  let player = new Player(ws, null, ws.reservedPlayerNumber ?? null);
+  reservedPlayerNumbers.delete(ws.reservedPlayerNumber);
   players.set(player.id, player);
 
   // Set player as not yet joined (not alive)

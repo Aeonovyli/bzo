@@ -127,7 +127,6 @@ class NativeTranslator {
     this.teamIndex = teamIndex;
     this.config = config;
     this.selfBzoId = null;
-    this.slots = new Map();
     this.players = new Map();
     this.shots = new Map();
     this.shotCounter = 0;
@@ -137,24 +136,11 @@ class NativeTranslator {
     this.startedAt = Date.now();
   }
 
-  // A bzo player's id as a bzfs one, given out on first sight and kept for
-  // the connection's life.
+  // A bzo player's id as a bzfs one: the same number, since bzo numbers its
+  // players in upstream's PlayerId space (server/player-ids.cjs).
   slotFor(bzoId) {
-    if (bzoId === null || bzoId === undefined) return NO_PLAYER;
-    const key = String(bzoId);
-    if (this.selfBzoId !== null && key === this.selfBzoId) return this.selfSlot;
-    let slot = this.slots.get(key);
-    if (slot !== undefined) return slot;
-    const used = new Set(this.slots.values());
-    for (let id = 0; id <= LAST_REAL_PLAYER; id += 1) {
-      if (id !== this.selfSlot && !used.has(id)) {
-        slot = id;
-        break;
-      }
-    }
-    if (slot === undefined) return NO_PLAYER;
-    this.slots.set(key, slot);
-    return slot;
+    const id = Number(bzoId);
+    return Number.isInteger(id) && id >= 0 && id <= LAST_REAL_PLAYER ? id : NO_PLAYER;
   }
 
   // An id bzo sent that names no player: the server, or nobody.
@@ -181,14 +167,23 @@ class NativeTranslator {
       .fixed(record.motto, MOTTO_LEN);
     this.write('ap', w.done());
     this.players.set(String(record.id), record);
+    this.playerInfo(record);
+  }
+
+  // MsgPlayerInfo: what the scoreboard draws as `-`, `+` and `@`
+  // (`PlayerAttribute`, Protocol.h:53). bzo learns nothing about a callsign
+  // it did not verify, so verified means registered too.
+  playerInfo(record) {
+    const properties = (record.verified ? 1 | 2 : 0) | (record.admin ? 4 : 0);
+    this.write('pb', new Writer(3).u8(1).u8(this.slotFor(record.id)).u8(properties).done());
   }
 
   removePlayer(bzoId) {
     const key = String(bzoId);
-    if (!this.slots.has(key)) return;
-    this.write('rp', new Writer(1).u8(this.slots.get(key)).done());
-    this.slots.delete(key);
+    if (!this.players.has(key)) return;
+    this.write('rp', new Writer(1).u8(this.slotFor(key)).done());
     this.players.delete(key);
+    this.orders.delete(key);
   }
 
   // `PlayerState::pack`, the full form, from bzo's own move fields.
@@ -314,7 +309,10 @@ class NativeTranslator {
         if (this.accepted) this.removePlayer(message.id);
         break;
       case 'playerUpdated':
-        if (this.accepted && message.player) this.score(message.player);
+        if (this.accepted && message.player) {
+          this.score(message.player);
+          this.playerInfo(message.player);
+        }
         break;
       case 'alive':
         if (this.accepted && message.player) this.alive(message.player);

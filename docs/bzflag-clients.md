@@ -28,6 +28,15 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
   the binary a client downloads. So only a map with a `.bzw` file, and only
   where bzfs is installed; anywhere else a join is turned away with the link
   to play in a browser.
+- **Sign-in.** The token a client sends with `MsgEnter` is checked with
+  bzflag.org (`checkGlobalToken`) before it is seated, as bzfs checks every
+  callsign. A good one gives the player its BZID, global callsign and admin
+  groups, as a browser login does, and each answer is said in bzfs's words:
+  "Global login approved!", "Global login rejected, bad token.", or "This
+  callsign is not registered." Unlike bzfs, the check leaves out the
+  player's address, as the browser login does. The login is a session, as a
+  browser's is, removed when the client leaves; so the same account joining
+  from a browser too is a second device, and the newer one wins.
 
 ## What doesn't yet
 
@@ -35,7 +44,5 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
    decides hits, so a native player's reports have to be checked rather than
    trusted. A native client also doesn't reconnect by itself when the server
    restarts.
-2. **Sign-in.** A native client sends its token with `MsgEnter`;
-   `checkGlobalToken` will check it.
-3. **A world without bzfs.** Writing BZFlag's world format in JS, checked
+2. **A world without bzfs.** Writing BZFlag's world format in JS, checked
    against what `-cacheout` writes.

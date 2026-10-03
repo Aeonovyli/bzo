@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- A BZFlag client's global login is checked when it joins, so a registered
+  player gets their name, BZID and admin groups as a browser login does,
+  and the scoreboard's `+` and `@`. A BZFlag client sees every player under
+  the same number bzo's own scoreboard shows. #174
+
 ## [1.3.0] - 2026-10-03
 
 ### Added
