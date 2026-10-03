@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-10-03
+
 ### Fixed
 - A server that has just restarted no longer drops off `/list` for 15
   minutes. It waits until it can answer before announcing itself to either
