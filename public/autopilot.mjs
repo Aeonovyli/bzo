@@ -558,6 +558,18 @@ export class Roger {
   }
 }
 
+// A lunge (`startLunge`): Ace, holding still, drives forward for a moment so
+// that a shot carries the tank's speed to a foe a standing shot falls short of
+// -- base to base on HiX. The move the shot goes with states that speed, so it
+// is an honest shot, and he stops again once it is away. Only at a foe slower
+// than LUNGE_STILL_SPEED, since a shot at that range is three seconds in the
+// air; given up if no shot goes within LUNGE_SECONDS; not where the ground
+// ahead within LUNGE_CLEARANCE drops away or is blocked.
+const LUNGE_STILL_SPEED = 1;
+const LUNGE_HOLD_SPEED = 0.05;
+const LUNGE_SECONDS = 0.3;
+const LUNGE_CLEARANCE = 4;
+
 // How far from Ace a returning ricochet still counts as coming back to him --
 // he may have moved a little by then -- and how long a shot is clear of its
 // own muzzle.
@@ -713,6 +725,10 @@ export class Ace extends Roger {
     // its type hidden, so this is how a pilot that dropped a flag knows not to
     // drive straight back over it.
     this.knownFlagTypes = new Map();
+    // A lunge under way: who it is for and when it began; and whether to stop
+    // on the next frame, the shot having gone.
+    this.lunge = null;
+    this.lungeStop = false;
     // The route being followed, and the flags no route reached lately.
     this.route = null;
     this.unreachable = new Map();
@@ -844,7 +860,7 @@ export class Ace extends Roger {
     // gets that high is in the shot's path all along.
     const disc = (p.vz * p.vz) + (2 * g * (p.z - muzzleZ));
     const enter = disc < 0 ? 0 : Math.max(0, (p.vz + Math.sqrt(disc)) / g);
-    const reach = Math.max(0, distance2D(me, landing) - me.muzzleForward - TANK.hitRadius);
+    const reach = Math.max(0, distance2D(me, landing) - me.muzzleForward - TANK.radius);
     return { landing, reach, enter, distance: distance2D(me, landing) };
   }
 
@@ -877,7 +893,7 @@ export class Ace extends Roger {
         const distance = distance2D(me, point);
         plans.push({
           landing: point,
-          reach: Math.max(0, distance - me.muzzleForward - TANK.hitRadius),
+          reach: Math.max(0, distance - me.muzzleForward - TANK.radius),
           enter: a,
           distance,
           landsAt,
@@ -1232,10 +1248,29 @@ export class Ace extends Roger {
   fireAtTank(ctx) {
     const lastShot = this.lastShot;
     const landingShots = new Map(this.landingShots);
+    // The lunge's last frame: the shot went with the last one, so stand still.
+    if (this.lungeStop) {
+      this.lungeStop = false;
+      ctx.out.speed = 0;
+    }
+    const holding = Math.abs(ctx.out.speed) < LUNGE_HOLD_SPEED;
+    // Given up when it takes too long, or when anything else -- a dodge, a
+    // chase -- wants the tank to move.
+    if (this.lunge && (ctx.view.now - this.lunge.at > LUNGE_SECONDS || !holding)) this.lunge = null;
+    // Still lunging: keep the speed the shot is waiting on, so the move it goes
+    // with says the same.
+    if (this.lunge) ctx.out.speed = 1;
     const speed = ctx.out.speed;
     this.landingShotChosen = false;
     this.chooseShot(ctx);
-    if (!ctx.out.fire) return;
+    if (!ctx.out.fire) {
+      if (!this.lunge && holding) this.startLunge(ctx);
+      return;
+    }
+    if (this.lunge) {
+      this.lunge = null;
+      this.lungeStop = true;
+    }
     if (!this.mayUseShot(ctx)) {
       ctx.out.fire = false;
       ctx.out.shotTargetId = null;
@@ -1258,6 +1293,43 @@ export class Ace extends Roger {
       return;
     }
     ctx.out.intent.shot = { ...shot, segments: this.lastTrace };
+  }
+
+  // A foe lined up, standing still and in sight, whom a shot fired at full
+  // speed forward reaches and one fired now does not: drive forward, and the
+  // ordinary trigger fires once the speed is there (`fireAtGrounded`).
+  startLunge(ctx) {
+    const { view, me, out } = ctx;
+    if (me.inAir || !me.canFire || me.flag === 'SW' || me.flag === 'GM') return;
+    if (view.now - this.lastShot < 1 / view.world.maxShots) return;
+    const base = view.world.shotSpeed;
+    const top = me.topSpeed ?? view.world.tankSpeed;
+    const factor = (me.shotSpeed ?? base) / base;
+    const along = ((me.vx ?? 0) * Math.cos(me.azimuth)) + ((me.vy ?? 0) * Math.sin(me.azimuth));
+    const reachAt = (forward) => (me.muzzleForward ?? 0)
+      + ((base + forward) * factor * (me.shotLifetime ?? Infinity)) + TANK.radius;
+    const errorLimit = (view.world.maxShots * view.world.lockOnAngle) / 8;
+    const pos = { x: me.x, y: me.y, z: me.z };
+    const target = this.remotePlayers(view).find((p) => {
+      if (!view.isFoe(p) || !p.alive || p.paused || p.notResponding) return false;
+      if (p.zoned && !me.zoned && me.flag !== 'SB') return false;
+      if (Math.hypot(p.vx ?? 0, p.vy ?? 0) >= LUNGE_STILL_SPEED) return false;
+      if (Math.abs(me.z - p.z) >= 2 * view.world.tankHeight) return false;
+      const dist = distance2D(me, p);
+      if (dist <= reachAt(along) || dist > reachAt(top)) return false;
+      if (angleDifference(pos, me.azimuth, p) >= errorLimit) return false;
+      return me.flag === 'SB' || !this.isObscured(ctx, pos, p);
+    });
+    if (!target) return;
+    if (this.openDistance(ctx, pos, me.azimuth) < LUNGE_CLEARANCE) return;
+    const ahead = this.surfaceAt(view, me.x + (LUNGE_CLEARANCE * Math.cos(me.azimuth)),
+      -(me.y + (LUNGE_CLEARANCE * Math.sin(me.azimuth))), me.z + 1);
+    if (Math.abs(ahead - me.z) > 0.5) return;
+    this.lunge = { id: target.id, at: view.now };
+    out.speed = 1;
+    out.targetId = target.id;
+    out.intent.mode = 'lunge';
+    out.intent.target = { ...toBzo(target), id: target.id };
   }
 
   // Whether the shot chosen this frame may go: always while more slots are
@@ -1312,7 +1384,7 @@ export class Ace extends Roger {
       y: self.y + self.muzzleHeight,
       z: self.z + (dirZ * self.muzzleForward),
     };
-    const reach = TANK.hitRadius + SELF_HIT_MARGIN;
+    const reach = TANK.radius + SELF_HIT_MARGIN;
     const shot = this.shotVelocity(ctx);
     const segments = view.traceShot(muzzle, shot.dir, shot.speed, self.shotLifetime, true);
     this.lastTrace = segments;
@@ -1343,7 +1415,7 @@ export class Ace extends Roger {
           out.intent.mode === 'dodge' ? { ...range, low: preferred, high: preferred } : range);
         if (!Number.isFinite(shot.flight)) continue;
         const miss = plan.distance * Math.abs(Math.sin(normalizeAngle(shot.azimuth - me.azimuth)));
-        if (miss > TANK.hitRadius / 2) continue;
+        if (miss > TANK.radius / 2) continue;
         if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z }, plan.landing)) continue;
         out.fire = true;
         out.shotTargetId = p.id;
@@ -1383,12 +1455,25 @@ export class Ace extends Roger {
     const onLine = (p) => {
       const rx = p.x - me.x;
       const ry = -p.z - me.y;
-      return (rx * ux) + (ry * uy) > 0 && Math.abs((rx * uy) - (ry * ux)) < TANK.hitRadius * AIR_SHOT_SHARE;
+      return (rx * ux) + (ry * uy) > 0 && Math.abs((rx * uy) - (ry * ux)) < TANK.radius * AIR_SHOT_SHARE;
     };
+    // Roger fires at anything lined up, however far (AutoPilot.cxx:703). Ace
+    // fires only at a foe the shot can reach: from the muzzle, as far as it
+    // flies in its life -- its flag's speed along this line, a Guided
+    // Missile's the world's -- and into the hit sphere. Judged where Roger
+    // judges the aim, 0.3 seconds ahead.
+    const travel = me.flag === 'GM' ? base : length * ((me.shotSpeed ?? base) / base);
+    const reach = (me.muzzleForward ?? 0) + (travel * (me.shotLifetime ?? Infinity)) + TANK.radius;
+    // `view.players` is still in bzo's axes here, as `onLine` reads it.
+    const inRange = (p) => me.flag === 'SW' || distance2D(me, {
+      x: p.x + (0.3 * (p.vx ?? 0)),
+      y: -(p.z + (0.3 * (p.vz ?? 0))),
+    }) <= reach;
     const grounded = {
       ...view,
       players: view.players.filter((p) => !p.airborne
         && !(view.now <= (this.landingShots.get(p.id) ?? -Infinity) + 0.5)
+        && inRange(p)
         && (!me.inAir || (muzzle >= p.y && muzzle <= p.y + view.world.tankHeight && onLine(p)))),
     };
     super.fireAtTank({ ...ctx, view: grounded });
@@ -1457,7 +1542,7 @@ export class Ace extends Roger {
     for (const p of this.remotePlayers(view)) {
       if (!p.alive || p.paused) continue;
       if (!canRunOver(p.flag ?? null, 'BU', p.z, p.zoned === true)) continue;
-      const clearance = getRunOverRadius('BU', p.flag ?? null, TANK.hitRadius) + SQUASH_MARGIN;
+      const clearance = getRunOverRadius('BU', p.flag ?? null, TANK.radius) + SQUASH_MARGIN;
       const rx = me.x - p.x;
       const ry = me.y - p.y;
       const speed2 = (p.vx * p.vx) + (p.vy * p.vy);
@@ -1480,7 +1565,7 @@ export class Ace extends Roger {
   // put: when it passes closest, by how much, and which way is away from it.
   soonestHit(ctx) {
     const { view, me } = ctx;
-    const clearance = TANK.hitRadius + SHOT_COLLISION_RADIUS + DODGE_CLEARANCE;
+    const clearance = TANK.radius + SHOT_COLLISION_RADIUS + DODGE_CLEARANCE;
     let best = null;
     for (const shot of view.shots) {
       if (shot.ownerId === me.id) continue;

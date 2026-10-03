@@ -279,6 +279,31 @@ the fill with `/bot add [pilot] [team] [count]`, removes them with
 of it off, autopilot included. `AGENTS.md` (the `docs/bots-plan.md`
 paragraph) has how they work.
 
+## Kicks and bans
+
+An admin's `/kick <player> <reason>` removes a player, and
+`/idban <player|+bzid> <duration> <reason>` bans a signed-in player's
+bzflag.org account, as on a BZFlag server: `30m`, `1h`, `1w2d`, `forever`,
+or `short` for server.json's `banTime` (300 minutes by default).
+`/idbanlist` and `/idunban <bzid>` read and lift them. Bans are kept in
+`bans.json` beside `server.json`. A kicked or banned browser stays off
+until its player presses a key, taps or pulls a trigger, rather than
+rejoining by itself.
+
+## Polls
+
+Players vote as on a BZFlag server: `/poll kick <player>`, `/poll flagreset`,
+`/poll kill <player>` and `/poll set <variable> <value>`, then `/vote yes|no`,
+and an admin's `/veto`. Signed-in players may start kick and flag reset polls
+and vote; kill and set polls are an admin's, as in BZFlag's default groups,
+and only an admin may poll against an admin. A poll needs two votes
+besides its starter's and 50.1% in favour. server.json's `poll` block takes
+BZFlag's `-poll` settings, and `"voteTime": 0` turns polls off:
+
+```json
+"poll": { "voteTime": 60, "vetoTime": 2, "votesRequired": 2, "votePercentage": 50.1, "voteRepeatTime": 300 }
+```
+
 ## Updating
 
 ### Source installs

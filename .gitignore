@@ -6,6 +6,7 @@ node_modules/
 server.json
 sessions.json
 list-server-keys.json
+bans.json
 data/
 cache/
 

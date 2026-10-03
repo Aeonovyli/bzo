@@ -41,6 +41,19 @@ const JITTER_MAX_GAP_SECONDS = 7.5;
 // degrades is interesting within seconds.
 const PING_INTERVAL_MS = 10000;
 
+// bzo's own, for deciding whether moves need a lossy transport (WebRTC or
+// WebTransport; see docs/lag-plan.md): how often TCP's in-order delivery holds
+// a player's traffic up. A round trip is a spike at three times the player's
+// recent median and at least 100ms over it. A stall is the server waiting at
+// least 250ms longer for a move than the client took to send it -- the
+// head-of-line block a lost packet makes on TCP, seen on every move rather
+// than every ten-second ping.
+const RTT_SPIKE_WINDOW = 30;
+const RTT_SPIKE_MIN_SAMPLES = 5;
+const RTT_SPIKE_FACTOR = 3;
+const RTT_SPIKE_MIN_EXTRA_MS = 100;
+const STALL_MIN_SECONDS = 0.25;
+
 // `if (lostavg >= 0.01f)` (LagInfo.cxx:87). Below one percent the figure is
 // noise from the dynamic alpha rather than a connection worth mentioning.
 const LOSS_REPORT_FLOOR = 0.01;
@@ -96,6 +109,13 @@ function createLagTracker() {
   // than zero, because "no interval open" has to be distinguishable from a
   // timestamp and not merely unlikely to collide with one.
   let lastUpdateAt = null;
+  // The recent round trips a spike is judged against, and the tallies the
+  // leaving player's summary line reports.
+  const recentRtts = [];
+  let rttSpikes = 0;
+  let stalls = 0;
+  let updates = 0;
+  let worstStallMs = 0;
 
   return {
     // A ping going out while the last one is still unanswered is that one lost.
@@ -112,13 +132,27 @@ function createLagTracker() {
 
     // Ignored unless a ping is outstanding: a pong bzo did not ask for carries
     // no interval to measure.
+    // Returns the round trip and its median when it was a spike, else null.
     pongReceived(now) {
-      if (!pingPending) return;
+      if (!pingPending) return null;
       pingPending = false;
       const seconds = Math.max(0, (now - pingSentAt) / 1000);
       ({ average: lagAverage, alpha: lagAlpha } = blend(lagAverage, lagAlpha, seconds, LAG_DECAY));
       ({ average: lossAverage, alpha: lossAlpha } = decayTowardZero(lossAverage, lossAlpha, LOSS_DECAY));
       samples++;
+      const rttMs = Math.round(seconds * 1000);
+      let spike = null;
+      if (recentRtts.length >= RTT_SPIKE_MIN_SAMPLES) {
+        const sorted = [...recentRtts].sort((a, b) => a - b);
+        const medianMs = sorted[Math.floor(sorted.length / 2)];
+        if (rttMs >= medianMs * RTT_SPIKE_FACTOR && rttMs - medianMs >= RTT_SPIKE_MIN_EXTRA_MS) {
+          rttSpikes++;
+          spike = { rttMs, medianMs };
+        }
+      }
+      recentRtts.push(rttMs);
+      if (recentRtts.length > RTT_SPIKE_WINDOW) recentRtts.shift();
+      return spike;
     },
 
     // Upstream's jitter, from the two numbers bzo already has on every move: how
@@ -129,20 +163,32 @@ function createLagTracker() {
     // `nowMs` is the server clock; `clientGapSeconds` is the move's `sdt`. The
     // arrival gap is measured here rather than passed in, so there is one
     // definition of it and nothing else can reset it.
+    // Returns the wait and the client's send gap when it was a stall, else null.
     recordUpdate(nowMs, clientGapSeconds) {
-      if (!Number.isFinite(nowMs)) return;
+      if (!Number.isFinite(nowMs)) return null;
       const previous = lastUpdateAt;
       lastUpdateAt = nowMs;
       // The first update after a reset starts an interval rather than being one.
-      if (previous === null) return;
-      if (!Number.isFinite(clientGapSeconds) || !(clientGapSeconds > 0)) return;
+      if (previous === null) return null;
+      if (!Number.isFinite(clientGapSeconds) || !(clientGapSeconds > 0)) return null;
       const arrivalGapSeconds = (nowMs - previous) / 1000;
-      if (!(arrivalGapSeconds > 0)) return;
-      if (arrivalGapSeconds >= JITTER_MAX_GAP_SECONDS) return;
-      if (clientGapSeconds >= JITTER_MAX_GAP_SECONDS) return;
+      if (!(arrivalGapSeconds > 0)) return null;
+      if (arrivalGapSeconds >= JITTER_MAX_GAP_SECONDS) return null;
+      if (clientGapSeconds >= JITTER_MAX_GAP_SECONDS) return null;
       const jitter = Math.abs(arrivalGapSeconds - clientGapSeconds);
       ({ average: jitterAverage, alpha: jitterAlpha } = blend(jitterAverage, jitterAlpha, jitter, JITTER_DECAY));
       ({ average: lossAverage, alpha: lossAlpha } = decayTowardZero(lossAverage, lossAlpha, LOSS_DECAY));
+      updates++;
+      if (arrivalGapSeconds - clientGapSeconds < STALL_MIN_SECONDS) return null;
+      stalls++;
+      const waitedMs = Math.round(arrivalGapSeconds * 1000);
+      worstStallMs = Math.max(worstStallMs, waitedMs);
+      return { waitedMs, sentMs: Math.round(clientGapSeconds * 1000) };
+    },
+
+    // What the leaving player's summary line reports.
+    getStallSummary() {
+      return { rttSpikes, pings: samples, stalls, updates, worstStallMs };
     },
 
     // The update stream was deliberately broken, so the next packet begins a new

@@ -40,9 +40,9 @@ bzo reads.
 | `_flagEffectTime` | 0.64 | how long a tank takes to change size, grow in on spawning, or fade; may be 0 |
 | `_pauseDropTime` | 15 | how long a paused tank keeps its flag; may be 0 |
 
-bzo's own hit radius (2, against upstream's 4.32), its collision height and
-its default muzzle keep their ratio to upstream's figures when a world
-resizes the tank.
+A shot hits a tank within `0.99 * _tankRadius` of its middle, as upstream's
+does. bzo's own collision height and default muzzle keep their ratio to
+upstream's figures when a world resizes the tank.
 
 `_explodeTime` is bzfs's spawn delay for each victim (`bzfs.cxx:3371`).
 `_rejoinTime` is something else (`RejoinList.cxx:73`). Coming back through
@@ -112,7 +112,10 @@ flag scales both halves and not equally -- see AGENTS.md's **Shot timing**.
 | `_spawnSafeSRMod` | 3 | tank radii a spawn keeps from a Steamroller or Burrow tank |
 | `_spawnSafeSWMod` | 1.5 | the share of a Shock Wave's reach a spawn keeps from it |
 | `_spawnMaxCompTime` | 0.01 | how long the spawn search looks before taking the farthest-from-enemies spot found |
-| `_disableBots` | 0 | no robots or autopilot on this server, as `-disableBots` |
+| `_disableBots` | 0 | no robots or autopilot on this server, as `-disableBots`; `/set` changes it live |
+| `_disallowSelfCap` | 0 (bzo's) | no capturing your own team's flag. From allejo's [ctfOverseer](https://github.com/allejo/ctfOverseer) plugin, whose default is on |
+| `_delayTeamFlagGrab` | 0 (bzo's) | seconds after a capture that the team flag cannot be grabbed by an enemy; its own team still may. ctfOverseer's, default 20 there |
+| `noWalls`, `freeCtfSpawns` | 0 | the `world` block's two switches, which upstream keeps as BZDB: no border wall, and a CTF tank spawning anywhere rather than on its base |
 
 `_wallHeight` may be 0: the visible wall is gone, every shot leaves the world
 over it, and tanks are still held at the edge, as by upstream's
@@ -126,6 +129,7 @@ height-ignoring `WallObstacle`.
 | `_speedChecksLogOnly` | 0 | a speed finding is logged and not refused, whatever the anti-cheat mode |
 | `_updateThrottleRate` | 30 | the most position updates a client sends a second; 0 is no limit |
 | `_notRespondingTime` | 5 | how long a playing tank may go unheard before it is marked not responding: `[nr]` on the scoreboard, its flag dropped where it was last seen, a new rabbit if it was one, and no lock on it until its next move. Never less than two of bzo's idle heartbeats (`MAX_UPDATE_INTERVAL`) |
+| `_scoreSaveTime` | 120 (bzo's) | seconds a player's score is kept after they leave; back on rejoining with the same callsign from the same address. 0 keeps none. Not upstream's: it is allejo's [ScoreRestorer](https://github.com/allejo/ScoreRestorer) plugin, which many servers run |
 | `_angleTolerance` | 0.05 | how far a tank's heading may drift from what its last move predicts before its client sends another, radians |
 | `_endShotDetection` | 5 | read, no effect: bzfs kicks a client that reports more shot ends than this, and a bzo client reports none |
 | `_coldetDepth`, `_coldetElements`, `_cullDepth` | 6, 4, 6 | read, no effect: they tune upstream's collision and cull octrees, which bzo does not build |

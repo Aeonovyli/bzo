@@ -314,16 +314,17 @@ export function getShotTankHit(shot, from, to, tank, rules = {}) {
   // zoned tank's bullet, and a zoned bullet reaches nobody else.
   if (shotPassesThroughTank(shot.flag, tank.zoned)) return null;
 
+  const narrow = usesNarrowHitBox(tank.flagType ?? null);
   const fraction = getSegmentTankHitFraction(from, to, tank.position, {
-    narrow: usesNarrowHitBox(tank.flagType ?? null),
+    narrow,
     radiusScale: getTankHitRadiusScale(tank.flagType ?? null),
     shotRadius,
   });
   if (fraction === null) return null;
 
-  // The tank's height gate, asked where the shot entered its footprint.
+  // Narrow's box stands the tank's height; the sphere has its own.
   const y = from.y + ((to.y - from.y) * fraction);
-  if (y < tank.position.y || y > tank.position.y + TANK.hitHeight) return null;
+  if (narrow && (y < tank.position.y || y > tank.position.y + TANK.hitHeight)) return null;
 
   return {
     fraction,

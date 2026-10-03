@@ -28,12 +28,15 @@ const TANK_PLAYER = 0;
 const COMPUTER_PLAYER = 1;
 // `PlayerState` status bits (PlayerState.h:25).
 const STATUS_ALIVE = 1 << 0;
+const STATUS_FLAG_ACTIVE = 1 << 4;
 const STATUS_FALLING = 1 << 6;
 // `BlowedUpReason` (playing.h:128).
 const DEATH_REASONS = {
   // The match's end blowing every tank up is the server's word alone,
   // `GotKilledMsg`.
   gameOver: 0, shot: 1, runOver: 2, captured: 3, genocide: 4, selfDestruct: 5, water: 6,
+  // `DeathTouch = PhysicsDriverDeath`, 'pd', which carries the driver's index.
+  physicsDriver: 0x7064,
 };
 // `NoTeam` (global.h), as MsgScoreOver packs it for a player's win.
 const NO_TEAM = 0xffff;
@@ -185,11 +188,13 @@ function decodeClientMessage(payload) {
 // `options.teamIndex(team)` names a bzo team by upstream's number;
 // `options.send(code, payload)` writes a frame; `options.selfSlot` is the id
 // the handshake gave this connection; `options.config()` is the live game
-// config, for speeds.
+// config, for speeds. `options.scoreOf(id)` is a player's score as the
+// server tallies it, which bzo's own clients tally for themselves and a
+// BZFlag client is sent, as bzfs sends it.
 class NativeTranslator {
   constructor({
     selfSlot, send, teamIndex, config, flagName = () => '', guidedShots = () => [],
-    addressOf = () => null, selfIsAdmin = () => false,
+    addressOf = () => null, selfIsAdmin = () => false, scoreOf = () => null,
   }) {
     this.selfSlot = selfSlot;
     this.write = send;
@@ -201,6 +206,7 @@ class NativeTranslator {
     // A player's address, and whether this client may be told it.
     this.addressOf = addressOf;
     this.selfIsAdmin = selfIsAdmin;
+    this.scoreOf = scoreOf;
     // The last flag MsgNearFlag named, so an unchanged answer is not repeated.
     this.lastNearFlag = null;
     this.selfBzoId = null;
@@ -214,6 +220,10 @@ class NativeTranslator {
     // told it where it is alive.
     this.clientDead = false;
     this.orders = new Map();
+    // Flag index to the bzo id holding it zoned. Zoning is on bzo's flag and
+    // on the holder's `FlagActive` in bzfs's, so every flag record that passes
+    // through here keeps this current.
+    this.zonedFlags = new Map();
     this.accepted = false;
     this.pending = null;
     this.startedAt = Date.now();
@@ -334,6 +344,8 @@ class NativeTranslator {
     const alive = this.players.get(String(move.id))?.alive !== false;
     let status = alive ? STATUS_ALIVE : 0;
     if (Number(move.vv)) status |= STATUS_FALLING;
+    // Phantom Zone's zoning, as upstream's client sends it (LocalPlayer.cxx:729).
+    if ([...this.zonedFlags.values()].includes(String(move.id))) status |= STATUS_FLAG_ACTIVE;
     // `PlayerState::pack` counts every update, and a client drops one that is
     // not newer than the last it took (playing.cxx:3488).
     const key = String(move.id);
@@ -352,9 +364,17 @@ class NativeTranslator {
   }
 
   score(record) {
-    this.write('sc', new Writer(8)
-      .u8(1).u8(this.slotFor(record.id)).u16(record.wins).u16(record.losses).u16(record.tks)
-      .done());
+    this.scores([record]);
+  }
+
+  // MsgScore (`sendPlayerScores`, bzfs.cxx:602): a count, then each player's
+  // slot, wins, losses and team kills.
+  scores(records) {
+    const w = new Writer(1 + (records.length * 7)).u8(records.length);
+    for (const record of records) {
+      w.u8(this.slotFor(record.id)).u16(record.wins || 0).u16(record.losses || 0).u16(record.tks || 0);
+    }
+    this.write('sc', w.done());
   }
 
   alive(record) {
@@ -369,6 +389,11 @@ class NativeTranslator {
 
   // `FlagInfo::pack`: index, then `Flag::pack`.
   flagBody(w, flag) {
+    if (flag.zoned === true && flag.owner !== null && flag.owner !== undefined) {
+      this.zonedFlags.set(flag.index, String(flag.owner));
+    } else {
+      this.zonedFlags.delete(flag.index);
+    }
     const pos = (p) => (p ? toBzfsPosition(p.x, p.y, p.z) : [0, 0, 0]);
     // A superflag nobody holds goes out as `PZ`, as bzfs's `fakePack` sends
     // it (Flag.cxx:265): a flag, of a type the client is not told.
@@ -462,6 +487,13 @@ class NativeTranslator {
       case 'playerLeft':
         if (this.accepted) this.removePlayer(message.id);
         break;
+      case 'matchStart':
+        // resetPlayerScores (bzfs.cxx:695): everybody back to nothing.
+        if (this.accepted) {
+          this.scores([...new Set([this.selfBzoId, ...this.players.keys()])]
+            .filter((id) => id !== null).map((id) => ({ id })));
+        }
+        break;
       case 'playerUpdated':
         if (this.accepted && message.player) {
           this.score(message.player);
@@ -493,14 +525,25 @@ class NativeTranslator {
         if (!this.accepted) break;
         const victim = this.players.get(String(message.victimId));
         if (victim) victim.alive = false;
-        this.write('kl', new Writer(10)
+        const reason = DEATH_REASONS[message.reason] ?? DEATH_REASONS.shot;
+        const w = new Writer(14)
           .u8(this.slotFor(message.victimId))
           .u8(message.shooterId === null || message.shooterId === undefined
             ? SERVER_PLAYER : this.slotFor(message.shooterId))
-          .i16(DEATH_REASONS[message.reason] ?? DEATH_REASONS.shot)
+          .i16(reason)
           .i16(message.projectileId ? this.shots.get(message.projectileId)?.id ?? -1 : -1)
-          .flag(message.shooterFlag)
-          .done());
+          .flag(message.shooterFlag);
+        if (reason === DEATH_REASONS.physicsDriver) w.i32(Number.isInteger(message.phydrv) ? message.phydrv : -1);
+        this.write('kl', w.done());
+        // bzfs follows MsgKilled with the killer's and victim's scores
+        // (bzfs.cxx:3487), which a BZFlag client does not tally itself.
+        const ids = [...new Set([message.shooterId, message.victimId]
+          .filter((id) => id !== null && id !== undefined).map(String))];
+        const records = ids.map((id) => {
+          const score = this.scoreOf(id);
+          return score ? { id, ...score } : null;
+        }).filter(Boolean);
+        if (records.length) this.scores(records);
         break;
       }
       case 'shotBegin': {
@@ -512,7 +555,6 @@ class NativeTranslator {
           }
           break;
         }
-        const speed = Number(message.speed) || 0;
         const config = this.config();
         // `_reloadTime`, upstream's default being `_shotRange / _shotSpeed`.
         const lifetime = (Number(config.SHOT_LIFETIME) / 1000)
@@ -522,7 +564,9 @@ class NativeTranslator {
           .u8(this.slotFor(message.playerId))
           .u16(this.shotId(message.id, message.shotSlot, this.slotFor(message.playerId)))
           .vec3(toBzfsPosition(message.x, message.y, message.z))
-          .vec3(toBzfsPosition(message.dirX * speed, message.dirY * speed, message.dirZ * speed))
+          // The fired velocity, which `shotBegin` carries as MsgShotBegin does;
+          // the client's strategy applies the flag.
+          .vec3(toBzfsPosition(Number(message.vx) || 0, Number(message.vy) || 0, Number(message.vz) || 0))
           .f32(0)
           .i16(this.teamIndex(message.team))
           .flag(message.flag)
@@ -530,15 +574,21 @@ class NativeTranslator {
           .done());
         // A missile fired already locked: the receiver learns its target the
         // way bzfs relays it, from the shooter's first MsgGMUpdate.
+        // A missile flies as it was fired, so its fired velocity is its
+        // velocity.
         if (message.target !== null && message.target !== undefined) {
+          const vx = Number(message.vx) || 0;
+          const vy = Number(message.vy) || 0;
+          const vz = Number(message.vz) || 0;
+          const speed = Math.hypot(vx, vy, vz);
           this.missileUpdate({
             id: message.id,
             x: message.x,
             y: message.y,
             z: message.z,
-            dirX: message.dirX,
-            dirY: message.dirY,
-            dirZ: message.dirZ,
+            dirX: speed ? vx / speed : 0,
+            dirY: speed ? vy / speed : 0,
+            dirZ: speed ? vz / speed : 0,
             speed,
             team: message.team,
           }, message.target);

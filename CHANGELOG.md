@@ -6,6 +6,62 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- A player who leaves with a score has it back on rejoining from the same
+  address within `_scoreSaveTime` seconds, 120 by default, as servers
+  running allejo's ScoreRestorer plugin do.
+- A map's `-set noWalls 1` and `-set freeCtfSpawns 1` do what the `world`
+  block's own words do, and `/set _disableBots` takes effect at once. `/list`
+  counts all three as read.
+- `_disallowSelfCap` and `_delayTeamFlagGrab`, as servers running allejo's
+  ctfOverseer plugin set them: no capturing your own flag, and a captured
+  team flag out of enemy reach for that many seconds. Off unless a map or
+  `/set` turns them on; `/set` finds `_scoreSaveTime` too.
+- Polls, as on a BZFlag server: `/poll kick`, `/poll flagreset`,
+  `/poll kill` and `/poll set`, `/vote` and `/veto`, with bzfs's own
+  settings in server.json's `poll` block. Ban polls wait on address bans.
+- `/kick`, and BZID bans: `/idban`, `/idunban`, `/idbanlist`, kept in
+  `bans.json`. A kicked or banned browser waits for its player before
+  rejoining.
+- Menus play BZFlag's menu sounds: the flag-grab sound on choosing an item
+  and the flag-drop sound on backing out, in XR too.
+- When bzo drops a player -- a restart, a shutdown, or its account signing
+  in elsewhere -- every client, browser or BZFlag, gets the reason as a
+  server message and then "Server forced a disconnect", as bzfs's
+  MsgSuperKill, instead of a lost link. #174
+
+### Changed
+- A shot hits a tank where it would in BZFlag: within `0.99 * _tankRadius`
+  (4.3 units) of the tank's middle, rather than bzo's own 2. Tanks are easier
+  to hit, and BZFlag clients and browsers now agree on what is a hit; running
+  over with Steamroller or Burrow uses the same radius. #174
+
+### Fixed
+- Ace no longer fires at a tank its shot cannot reach. Roger still does, as
+  BZFlag's autopilot does.
+- Ace, holding still, lunges at a still foe just out of reach: a moment at
+  full speed so the shot carries the tank's speed, then a stop -- base to
+  base on HiX.
+- Rapid Fire, Machine Gun, Thief and Laser shots reach BZFlag clients at
+  their real speed: `shotBegin` now carries the fired velocity as BZFlag's
+  `MsgShotBegin` does, and each screen applies the flag, rather than bzo
+  applying it before sending and a BZFlag client applying it again. #174
+- Phantom Zone carries between bzo and BZFlag clients, and through the
+  proxy, both ways: a zoned tank is zoned on every screen and to the server.
+  #174
+- A BZFlag client holding a bad flag uses its own antidote spot, rather than
+  also shedding the flag on an unseen one of bzo's. #174
+- A death-touch says what killed you on every screen, a BZFlag client's and
+  a proxied bzfs's included, rather than "shot" or "Unknown Deadly
+  Obstacle"; and a Genocide kill a BZFlag client reports takes its team. #174
+- BZFlag clients are no longer told that some flag effects may differ. #174
+- `/playerlist` shows a BZFlag client's UDP link as bzfs does (`udp`,
+  `udp+`), and any player may see their own line. #174
+- Scores agree everywhere. A BZFlag client is sent each kill's scores, as
+  bzfs sends them, and bzo's browsers tally with the server's own rule, so a
+  team kill, a self-destruct and a rabbit kill count the same on every
+  scoreboard. A new match clears team kills too. #174
+
 ## [1.3.8] - 2026-10-03
 
 ### Changed

@@ -38,6 +38,12 @@ These are deliberate. Do not "fix" them without being asked.
 - **Clients rejoin without waiting for a click.** BZFlag makes the player
   confirm before respawning; bzo respawns automatically after the same 5 second
   delay.
+- **A BZFlag client's movement findings are logged, not refused.** Its physics
+  are its own client's, and bzo's still differ from them, so refusing would
+  punish honest players. A hacked client can send illegal moves, and those
+  should be refused in the end; not yet. For now watch the warnings in
+  server.log, track which are honest physics differences, and bring bzo's
+  physics closer to the client's until a finding means cheating.
 - **The second team on a map is placed across from the first.** Upstream picks
   evenly among the teams that tie (`autoTeamSelect`, `bzfs.cxx:1902`), which
   leaves two of the three remaining teams as neighbours of the first: the team

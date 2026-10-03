@@ -85,8 +85,21 @@ Roger stays upstream's; these go into Ace. In order of payoff:
    rather than reacting to the nearest shot only.
 5. **Choosing.** Score each option (threat, flag value, team goal) rather than
    follow a fixed priority list.
-6. **Team roles** for capture-the-flag: attack, defend, escort.
-7. **Fairness.** Ace sees everything the view holds -- every tank and shot,
+6. **Team roles** for capture-the-flag: attack, defend, escort. Bots on a
+   team divide the work between them -- one goes for the enemy flag, one
+   brings ours back, one guards it -- and say so to each other, so two do
+   not chase the same job. They coordinate over team and direct messages,
+   which every player already has: the same channel for a server bot, a
+   browser's autopilot and a person, who can read along or join in.
+7. **Camping.** Holding a spot and shooting from it rather than chasing:
+   a base deck, a tower. Worth it first with `GM` Guided Missile and `L`
+   Laser, whose reach and aim do not depend on closing in. The lunge
+   (`startLunge`) is the first piece: from a standstill, a moment at full
+   speed so a shot carries to a still foe just out of reach -- base to base
+   on HiX -- then a stop. What is missing is choosing to hold the spot at
+   all; today Ace chases instead, and a lunge only happens when something
+   else has him standing still.
+8. **Fairness.** Ace sees everything the view holds -- every tank and shot,
    through walls, at any range -- and is meant to be as capable as he can be.
    How hard a bot plays against people is a setting for later: what a player
    in its seat could know (radar and window), going after whoever is winning,

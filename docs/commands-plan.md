@@ -226,14 +226,13 @@ Two things it has to decide:
 
 ### Needs a whole subsystem
 
-- **Bans** — `/ban`, `/unban`, `/banlist`, `/checkip`, `/hostban`, `/hostunban`,
-  `/hostbanlist`, `/idban`, `/idunban`, `/idbanlist`, `/masterban`. A persistent
-  store, which `sessions.json` is the pattern for, plus the address problem
-  below. **BZID bans are the ones worth building first**: bzo gets a BZID from a
-  verified login, it is stable, and it needs no address at all.
-- **Polls** — `/poll`, `/vote`, `/veto`. A vote with a quorum, a clock, and the
-  `antipoll*` counter-permissions. Sizeable, and worth nothing until a bzo server
-  has enough strangers on it to need one.
+- **Bans** — `/idban`, `/idunban`, `/idbanlist` and `/kick` are built, kept
+  in `bans.json` (`server/bans.cjs`). Address bans are planned in
+  [ban-plan.md](ban-plan.md); `/hostban` and `/masterban` after them.
+- **Polls** — `/poll ban`, which waits on address bans.
+  `/poll kill|set|flagreset`, `/vote` and `/veto` are built
+  (`server/polls.cjs`); the `antipoll*` counter-permissions have no group to
+  live in yet.
 - **Recording** — `/record`, `/replay`. bzo records nothing.
 - **Reports** — `/report`, `/viewreports`. A file to append to and read back;
   small, but it is state.
@@ -255,30 +254,15 @@ Two things it has to decide:
 - **`/plugins`, `/listplugins`.** No plugin system.
 - **`/serverdebug`.** bzo's logging is a file and a level, not a runtime dial.
 
-## Two findings worth knowing before the ban work
+## Address bans
 
-**bzo's client address is forgeable as read.** `server.js` takes
-`forwardedFor.split(',')[0]` — the *first* element — which is the value a client
-prepended if the proxy appended rather than replaced. The README's Apache config
-pins it with `RequestHeader set`, so a correctly configured deployment is fine
-today and the address is only used for logging anyway. A **ban** cannot rest on a
-deployment note: before banning on an address, bzo needs an explicit
-trusted-proxy setting and to read the element that proxy contributed, not the
-first one in the list. This is the same header `localAdmin` reasons about, and
-the two should end up reading it through one function.
-
-**A kick needs an answer to auto-rejoin.** bzo reconnects without waiting for a
-click, on purpose (AGENTS.md). A kicked player is therefore back in a few
-seconds, so `/kick` has to leave something behind — a short refusal keyed to the
-session or the BZID — or it is a no-op with a rude message attached. That makes
-`/kick` a *ban* feature wearing a kick's name, and it is why the two are one
-piece of work here rather than two.
+[ban-plan.md](ban-plan.md).
 
 ## Suggested order
 
-1. **BZID bans**, then `/kick` on top of them.
+1. **Address bans**, and `/poll ban` on them.
 2. `/modcount`; `/handicap` with Handicap.
 3. `/lagwarn` and friends with `docs/lag-plan.md` step 6; the idle commands
    with last-input tracking.
-4. Polls, reports, recording — each when something wants them.
+4. Reports, recording — each when something wants them.
 

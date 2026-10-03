@@ -2525,12 +2525,9 @@ export function traceShotStep({
 // decide it died -- which is upstream's arrangement, where each client tests
 // one tank and one shot is one hit by construction (`docs/proxy-plan.md`).
 
-// The tank a shot's hit test sees: bzo's own radius, which is not upstream's
-// `_tankRadius` 4.32, and `_tankHeight` from the collision pair, which is.
-// The dimension flags scale the radius, following upstream's own basis --
-// `Player::getRadius` is `dimensionsScale[0] * _tankRadius`, the length scale on
-// the base radius -- so the factors are upstream's and the base stays bzo's.
-export const TANK_HIT_RADIUS = 2;
+// The tank a shot's hit test sees is upstream's: `_tankRadius` and
+// `_tankHeight`. The dimension flags scale the radius on upstream's own basis --
+// `Player::getRadius` is `dimensionsScale[0] * _tankRadius`, the length scale.
 export const TANK_HIT_HEIGHT = TANK_HEIGHT;
 
 // Upstream's `_tankRadius` (`0.72 * _tankLength`) and `_muzzleHeight`, and the
@@ -2549,9 +2546,9 @@ const TANK_COLLISION_HEIGHT_DEFAULT = 2;
 // object every module holds, so a world that resizes it resizes it everywhere:
 // each host calls `configureTankDimensions` with its world's config.
 //
-// bzo's own figures that differ from upstream's on purpose -- the hit radius 2
-// against upstream's 4.32, a collision height of 2, the 3.0 muzzle -- scale
-// with the world's tank, so the ratio between the two is kept.
+// bzo's own figures that differ from upstream's on purpose -- a collision
+// height of 2, the 3.0 muzzle -- scale with the world's tank, so the ratio
+// between the two is kept.
 export const TANK = {};
 
 export function configureTankDimensions(config = {}) {
@@ -2569,7 +2566,6 @@ export function configureTankDimensions(config = {}) {
     height,
     hitHeight: height,
     radius,
-    hitRadius: TANK_HIT_RADIUS * (radius / BZFLAG_TANK_RADIUS),
     collisionHeight: TANK_COLLISION_HEIGHT_DEFAULT * (height / TANK_HEIGHT),
     muzzleHeight: positive(config.MUZZLE_HEIGHT, DEFAULT_MUZZLE_HEIGHT),
     muzzleForward: DEFAULT_MUZZLE_FORWARD * (muzzleFront / BZFLAG_MUZZLE_FRONT),
@@ -2609,16 +2605,20 @@ export function getSegmentTankHitFraction(from, to, tank, shape = {}) {
       TANK.halfLength
     );
   }
-  // Every other flag, and no flag, meets the sphere -- scaled by the length
-  // factor, which is the axis Player::getRadius reads.
-  const radius = TANK.hitRadius * radiusScale;
+  // Every other flag, and no flag, meets upstream's sphere: `0.99 * radius`
+  // around the tank's middle, half its height up (`rayAtDistanceFromOrigin`),
+  // the radius scaled by the length factor, which is the axis
+  // Player::getRadius reads.
+  const radius = 0.99 * TANK.radius * radiusScale;
   const dx = to.x - from.x;
+  const dy = to.y - from.y;
   const dz = to.z - from.z;
   const fx = from.x - tank.x;
+  const fy = from.y - ((tank.y || 0) + (TANK.hitHeight / 2));
   const fz = from.z - tank.z;
-  const a = (dx * dx) + (dz * dz);
-  const b = (fx * dx) + (fz * dz);
-  const c = (fx * fx) + (fz * fz) - (radius * radius);
+  const a = (dx * dx) + (dy * dy) + (dz * dz);
+  const b = (fx * dx) + (fy * dy) + (fz * dz);
+  const c = (fx * fx) + (fy * fy) + (fz * fz) - (radius * radius);
   if (a < 1e-12) return c <= 0 ? 0 : null;
   const discriminant = (b * b) - (a * c);
   if (discriminant < 0) return null;

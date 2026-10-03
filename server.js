@@ -213,6 +213,9 @@ const {
   parseColorString,
   worldConfig,
 } = require('./server/bzdb.cjs');
+const { POLL_DEFAULTS, VotingArbiter, parseVoteAnswer } = require('./server/polls.cjs');
+const { getKillScoreDeltas } = require('./server/scoring.cjs');
+const { createBanStore, parseDuration } = require('./server/bans.cjs');
 const {
   normalizePlayerTeamSelection,
   clampPlayingLimits,
@@ -242,7 +245,6 @@ const {
   allowTeams,
   getPlayerRanking,
   pickNewRabbit,
-  isARabbitKill,
   PLAYER_TEAM,
   PLAYER_TEAMS,
   BZFLAG_MP_TEAM_ORDER,
@@ -6576,9 +6578,6 @@ function parseBZWServerOptions(lines) {
       } else if (value === '_useLineRain') {
         const parsed = parseInt(setValue, 10);
         options.weather = { ...(options.weather || {}), lineRain: Number.isFinite(parsed) && parsed !== 0 };
-      } else if (value === '_disableBots') {
-        // What `-disableBots` publishes, so a map stating it means the same.
-        if (bzdbIsTrue(setValue ?? '')) options.disableBots = true;
       } else if (value === '_rainTexture' || value === '_rainPuddleTexture') {
         const textureName = (setValue || '').trim().toLowerCase();
         if (BZW_STOCK_TEXTURES.has(textureName)) {
@@ -6600,6 +6599,10 @@ function parseBZWServerOptions(lines) {
         // upstream saves it (CustomWorld.cxx:41-44); the block wins.
         const height = evalSet(value);
         if (Number.isFinite(height) && height >= 0) options.flagHeight = height;
+      } else if (value === 'noWalls' || value === 'freeCtfSpawns') {
+        // The `world` block's two switches, which upstream keeps as plain
+        // BZDB (CustomWorld.cxx:46-49), so a `-set` of either does the same.
+        options[value] = bzdbIsTrue(setValue ?? '');
       } else {
         options.unreadBZDBVars.push(value);
       }
@@ -7882,6 +7885,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [], text: givenT
     }
     if (currentPhysicsDriver) {
       if (token === 'end') {
+        // Upstream's own number for it, its place in the world's driver
+        // table (PHYDRVMGR), which MsgKilled names a death-touch by.
+        currentPhysicsDriver.index = physicsDriverRegistry.length;
         physicsDriverRegistry.push(currentPhysicsDriver);
         if (currentPhysicsDriver.name) {
           physicsDriversByName.set(currentPhysicsDriver.name.toLowerCase(), currentPhysicsDriver);
@@ -10633,8 +10639,9 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [], text: givenT
     weapons,
     mapSize,
     flagHeight: mapFlagHeight,
-    noWalls: mapNoWalls,
-    freeCtfSpawns: mapFreeCtfSpawns,
+    physicsDrivers: physicsDriverRegistry,
+    noWalls: mapNoWalls || serverOptions.noWalls === true,
+    freeCtfSpawns: mapFreeCtfSpawns || serverOptions.freeCtfSpawns === true,
     waterLevel: mapWaterLevel,
     weather: serverOptions.weather || null,
     groundMaterial: mapGroundMaterial,
@@ -10680,6 +10687,9 @@ let mapNoWalls = false;
 // `getSpawnPosition` alone, so this stays a plain module variable rather than
 // threading through `GAME_CONFIG` or the client's copy of the map.
 let mapFreeCtfSpawns = false;
+// The live world's physics drivers by upstream's index, for a BZFlag client's
+// death-touch, which names one that way.
+let mapPhysicsDrivers = [];
 // `waterLevel` -- `null` when the map states none. Read by `validateMovement`
 // for the kill-on-touch rule and by `findFlagSpawnPosition`/`dropSpawnPosition`
 // to keep a flag or a spawn off the surface, the server-side half of what
@@ -10767,6 +10777,7 @@ if (MAP_SOURCE === 'random') {
   mapNoWalls = mapData.noWalls;
   if (mapNoWalls) log('Map option noWalls: the world border will not be built');
   mapFreeCtfSpawns = mapData.freeCtfSpawns;
+  mapPhysicsDrivers = mapData.physicsDrivers || [];
   if (mapFreeCtfSpawns) log('Map option freeCtfSpawns: a colour team spawns in any of its zones every life');
   mapWaterLevel = mapData.waterLevel || null;
   if (mapWaterLevel) log(`Map option waterLevel: height=${mapWaterLevel.height}`);
@@ -11464,9 +11475,13 @@ function getMatchTimeLeft() {
 // clock-specific state below is conditional on one being configured.
 function startMatch() {
   teamScores.clear();
+  // resetPlayerScores (bzfs.cxx:695): everybody back to nothing, which every
+  // browser does too on `matchStart`, and a BZFlag client hears as MsgScore.
+  broadcastAll({ type: 'matchStart' });
   players.forEach((candidate) => {
     candidate.wins = 0;
     candidate.losses = 0;
+    candidate.tks = 0;
     // Whoever the previous match's game-over held dead gets back in: nothing
     // else was going to lift that hold, since the respawn timeout that would
     // have revived them already saw `matchClock.gameOver` and gave up.
@@ -11796,6 +11811,49 @@ function rejoinWaitMs(callsign, now = Date.now()) {
   }
   const leftAt = rejoinList.get(String(callsign || '').toLowerCase());
   return leftAt === undefined ? 0 : Math.max(0, limit - (now - leftAt));
+}
+
+// allejo's ScoreRestorer (github.com/allejo/ScoreRestorer), which many bzfs
+// servers load: a player who leaves with a score has it back on rejoining
+// from the same address within `_scoreSaveTime` seconds, 120 unless a world
+// says otherwise (`PLUGIN_BZDB_DEFAULTS`). Keyed by lower-case callsign. An observer coming back keeps
+// the record waiting, timed again from when it leaves.
+const savedScores = new Map();
+
+function scoreSaveTimeMs() {
+  const seconds = Number(GAME_CONFIG.SCORE_SAVE_TIME ?? PLUGIN_BZDB_DEFAULTS._scoreSaveTime);
+  return (Number.isFinite(seconds) ? seconds : 0) * 1000;
+}
+
+function saveScore(player) {
+  if (bots.has(player.id)) return;
+  const key = String(player.name || '').toLowerCase();
+  const saved = savedScores.get(key);
+  if (saved && isObserverTeam(player.team)) {
+    saved.leftAt = Date.now();
+  } else if (player.wins || player.losses) {
+    savedScores.set(key, {
+      address: player.clientIP, wins: player.wins, losses: player.losses, tks: player.tks, leftAt: Date.now(),
+    });
+  }
+}
+
+// The record's words to say to it, or null.
+function restoreScore(player, now = Date.now()) {
+  const key = String(player.name || '').toLowerCase();
+  const saved = savedScores.get(key);
+  if (!saved) return null;
+  if (saved.leftAt + scoreSaveTimeMs() <= now) {
+    savedScores.delete(key);
+    return null;
+  }
+  if (saved.address !== player.clientIP) return null;
+  if (isObserverTeam(player.team)) return 'Your score record will be saved while you are in observer mode.';
+  player.wins = saved.wins;
+  player.losses = saved.losses;
+  player.tks = saved.tks;
+  savedScores.delete(key);
+  return 'Your score has been restored.';
 }
 
 // bzfs.cxx:2939: on leaving, if they ever spawned and are not already waiting.
@@ -12407,6 +12465,25 @@ class Player {
 }
 
 // Projectile class
+
+// What `shotBegin` says a shot was fired with: upstream's FiringInfo velocity
+// (`MsgShotBegin`), before the flag's strategy makes anything of it. Every
+// screen makes the flight itself (`getShotFlight`), as every upstream client's
+// strategy does, so a BZFlag client, a proxied bzfs and a browser all read the
+// same number. A segmented shot's speed carries its flag's factor, taken back
+// out here; a Guided Missile flies at the world's speed along its heading, and
+// a shock wave does not move.
+function firedVelocity(proj) {
+  const effects = getShotEffects(proj.flag);
+  const speed = effects.shockwave ? 0
+    : (effects.guided ? GAME_CONFIG.SHOT_SPEED : proj.speed / effects.velocityFactor);
+  return {
+    vx: proj.dirX * speed,
+    vy: proj.dirY * speed,
+    vz: proj.dirZ * speed,
+  };
+}
+
 class Projectile {
   constructor(id, playerId, shotSlot, x, y, z, dirX, dirZ, dirY = 0, flag = null, now = Date.now(), speed = null) {
     this.id = id;
@@ -12745,6 +12822,425 @@ defineCommand('/kill', COMMAND_TIER.OPERATOR,
       : 'You were killed by an operator');
   });
 
+// Bans (BanCommands.cxx): BZID bans, kept in bans.json beside sessions.json
+// so a restart keeps them, and `/kick`. Address bans come with the address
+// read through `forwardedForPolicy`. server.json's `banTime` is upstream's
+// `-bantime`, the minutes a `short` or `default` ban lasts.
+const BANS_PATH = path.join(path.dirname(configPath), 'bans.json');
+const BAN_TIME_MINUTES = Number.isFinite(serverConfig.banTime) ? serverConfig.banTime : 300;
+let bansWriteTimer = null;
+function writeBansSoon() {
+  if (bansWriteTimer) return;
+  bansWriteTimer = setTimeout(() => {
+    bansWriteTimer = null;
+    try {
+      fs.writeFileSync(BANS_PATH, JSON.stringify(bans.serialize(), null, 2), { mode: 0o600 });
+    } catch (error) {
+      logError(`Could not write bans to ${BANS_PATH}:`, error);
+    }
+  }, 1000);
+  bansWriteTimer.unref?.();
+}
+const bans = createBanStore({ onChange: writeBansSoon });
+try {
+  if (fs.existsSync(BANS_PATH)) log(`Bans: restored ${bans.load(JSON.parse(fs.readFileSync(BANS_PATH, 'utf8')))}`);
+} catch (error) {
+  logError(`Could not read bans from ${BANS_PATH}, starting empty:`, error);
+}
+
+// rejectPlayer's words for a BZID ban (bzfs.cxx:2257), less the colours.
+function idBanRefusal(ban) {
+  return `REFUSED:${ban.reason || 'General Ban'}${ban.bannedBy ? ` by ${ban.bannedBy}` : ''}`;
+}
+
+// removePlayer with its MsgSuperKill (bzfs.cxx:2907). `rejoin: false` keeps a
+// browser from reconnecting by itself, which is what makes a kick stick: it
+// comes back only when its player asks, as a BZFlag client's does.
+function removeFromServer(victim) {
+  sendToPlayer(victim, { type: 'superKill', rejoin: false });
+  try {
+    victim.ws.close();
+  } catch (error) {
+    logError(`Could not close the connection for "${victim.name}"`, error);
+  }
+}
+
+// doBanKick (BanCommands.cxx): tell the player, tell the admins, remove it.
+function banKick(victim, banner, reason) {
+  replyToPlayer(victim, 'You were banned from this server');
+  if (reason) replyToPlayer(victim, `Reason given: ${reason}`);
+  announceToAdmins(null, `${victim.name} banned by ${banner.name}, reason: ${reason}`);
+  removeFromServer(victim);
+}
+
+defineCommand('/kick', COMMAND_TIER.OPERATOR,
+  '<#slot|PlayerName|"Player Name"> <reason> - kick a player off the server',
+  (player, args) => {
+    const target = resolveCommandTarget(args);
+    if (!target.id || !target.rest) {
+      if (target.id || !args.trim()) {
+        replyToPlayer(player, 'Syntax: /kick <#slot | PlayerName | "Player Name"> <reason>');
+        replyToPlayer(player, '\tPlease keep in mind that reason is displayed to the user.');
+      } else {
+        replyToPlayer(player, target.error || `player "${args.trim()}" not found`);
+      }
+      return;
+    }
+    const victim = players.get(target.id);
+    replyToPlayer(victim, 'You were kicked off the server');
+    replyToPlayer(victim, `Reason given: ${target.rest}`);
+    announceToAdmins(null, `${victim.name} kicked by ${player.name}, reason: ${target.rest}`);
+    log(`[CMD] "${player.name}" kicked "${victim.name}": ${target.rest}`);
+    removeFromServer(victim);
+  });
+
+defineCommand('/idban', COMMAND_TIER.OPERATOR,
+  '<#slot|+id|PlayerName|"Player Name"> <duration> <reason> - ban using BZID',
+  (player, args) => {
+    const syntax = () => {
+      replyToPlayer(player, 'Syntax: /idban <#slot|+id|PlayerName|"Player Name"> <duration> <reason>');
+      replyToPlayer(player, '  Please keep in mind that reason is displayed to the user.');
+    };
+    let bzid;
+    let victim = null;
+    let rest;
+    const trimmed = args.trim();
+    if (trimmed.startsWith('+')) {
+      const split = trimmed.search(/\s/);
+      bzid = split === -1 ? trimmed.slice(1) : trimmed.slice(1, split);
+      rest = split === -1 ? '' : trimmed.slice(split).trim();
+      if (!bzid) {
+        replyToPlayer(player, 'Error: invalid id pattern');
+        return;
+      }
+      victim = [...players.values()].find((other) => other.joined && other.bzid === bzid) || null;
+    } else {
+      const target = resolveCommandTarget(trimmed);
+      if (!target.id) {
+        if (!trimmed) syntax();
+        else replyToPlayer(player, `could not find player (${trimmed.split(/\s/)[0]})`);
+        return;
+      }
+      victim = players.get(target.id);
+      if (!victim.bzid) {
+        replyToPlayer(player, `no BZID for player (${victim.name})`);
+        return;
+      }
+      bzid = victim.bzid;
+      rest = target.rest;
+    }
+    const split = rest.search(/\s/);
+    if (split === -1) {
+      syntax();
+      return;
+    }
+    const minutes = parseDuration(rest.slice(0, split));
+    if (minutes === null) {
+      replyToPlayer(player, 'Error: invalid ban duration');
+      replyToPlayer(player, 'Duration examples:  30m 1h  1d  1w  and mixing: 1w2d4h 1w2d1m');
+      return;
+    }
+    let reason = rest.slice(split).trim();
+    if (victim && !reason.includes(victim.name)) reason = `(${victim.name}) ${reason}`;
+    if (victim) banKick(victim, player, reason);
+    bans.idBan(bzid, { bannedBy: player.name, minutes: minutes < 0 ? BAN_TIME_MINUTES : minutes, reason });
+    log(`[CMD] "${player.name}" banned BZID ${bzid} for ${minutes < 0 ? BAN_TIME_MINUTES : minutes || 'ever'}`
+      + ` minutes: ${reason}`);
+    replyToPlayer(player, 'Pattern added to the BZID banlist');
+  });
+
+defineCommand('/idunban', COMMAND_TIER.OPERATOR,
+  '<id> - remove a BZID from the ban list',
+  (player, args) => {
+    if (bans.idUnban(args.trim())) {
+      log(`[CMD] "${player.name}" lifted the ban on BZID ${args.trim()}`);
+      replyToPlayer(player, 'Removed id from the ban list');
+    } else {
+      replyToPlayer(player, 'No pattern removed');
+    }
+  });
+
+defineCommand('/idbanlist', COMMAND_TIER.OPERATOR,
+  '[pattern] - List the BZIDs currently banned from this server',
+  (player, args) => {
+    for (const line of bans.listIdBans(args)) replyToPlayer(player, line);
+  });
+
+// Polls (commands.cxx:3064, bzfs.cxx:7267): `/poll kick|kill|set|flagreset`,
+// `/vote` and `/veto`, counted by `server/polls.cjs`. server.json's `poll`
+// block takes upstream's `-poll` settings (`voteTime`, `vetoTime`,
+// `votesRequired`, `votePercentage`, `voteRepeatTime`); a `voteTime` of 0
+// turns polls off. `ban` waits on address bans.
+const POLL_SETTINGS = { ...POLL_DEFAULTS, ...(serverConfig.poll || {}) };
+const pollArbiter = POLL_SETTINGS.voteTime > 0 ? new VotingArbiter(POLL_SETTINGS) : null;
+const pollAnnounced = { opening: false, closure: false, results: false, heartbeatAt: -1 };
+
+// What upstream's default groups allow (bzfs.cxx:5960): a signed-in player
+// (VERIFIED) may poll, vote, and poll a kick or a flag reset; an admin may
+// do all of it, kill and set polls and the veto included.
+function pollRights(player) {
+  const admin = isAdmin(player);
+  const known = admin || player.verified === true;
+  return {
+    known, poll: known, vote: known, kick: known, flagreset: known, kill: admin, set: admin, veto: admin,
+  };
+}
+
+function announceToAll(text) {
+  broadcastAll({ type: 'message', src: SERVER_PLAYER, dst: ALL_PLAYERS, msgType: 'server', text, ts: Date.now() });
+}
+
+function pollUsage(player) {
+  const rights = pollRights(player);
+  replyToPlayer(player, 'Usage: /poll vote yes|no');
+  if (rights.kick) replyToPlayer(player, '    or /poll kick playername');
+  if (rights.kill) replyToPlayer(player, '    or /poll kill playername');
+  if (rights.set) replyToPlayer(player, '    or /poll set variable value');
+  if (rights.flagreset) replyToPlayer(player, '    or /poll flagreset');
+}
+
+defineCommand('/vote', COMMAND_TIER.OPEN,
+  '<yes|no> - place a vote in favor or in opposition to the poll',
+  (player, args) => {
+    if (!pollRights(player).vote) {
+      replyToPlayer(player, `${player.name}, you are presently not authorized to run /vote`);
+      return;
+    }
+    if (!pollArbiter) {
+      replyToPlayer(player, 'ERROR: the poll arbiter has disappeared (this should never happen)');
+      return;
+    }
+    if (!pollArbiter.knowsPoll()) {
+      replyToPlayer(player, 'A poll is not presently in progress.  There is nothing to vote on');
+      return;
+    }
+    const { answer, vote } = parseVoteAnswer(args);
+    if (!vote) {
+      replyToPlayer(player, answer
+        ? `${player.name}, you did not vote in favor or in opposition`
+        : `${player.name}, you did not provide a vote answer`);
+      replyToPlayer(player, 'Usage: /vote yes|no|y|n|1|0|yea|nay|si|ja|nein|oui|non|sim|nao');
+      return;
+    }
+    const cast = vote === 'yes' ? pollArbiter.voteYes(player.name) : pollArbiter.voteNo(player.name);
+    if (cast) {
+      replyToPlayer(player, `${player.name}, your vote ${vote === 'yes' ? 'in favor of' : 'in opposition of'}`
+        + ` the ${pollArbiter.action} has been recorded`);
+    } else if (pollArbiter.hasVoted(player.name)) {
+      replyToPlayer(player, `${player.name}, you have already voted on the poll to ${pollArbiter.action} ${pollArbiter.target}`);
+    } else {
+      replyToPlayer(player, `${player.name}, there was an error while voting on the poll to`
+        + ` ${pollArbiter.action} ${pollArbiter.target}`);
+    }
+  });
+
+defineCommand('/veto', COMMAND_TIER.OPEN,
+  '- will cancel the poll if there is one active',
+  (player) => {
+    if (!pollRights(player).veto) {
+      replyToPlayer(player, `${player.name}, you are presently not authorized to run /veto`);
+      return;
+    }
+    if (!pollArbiter) {
+      replyToPlayer(player, 'ERROR: the poll arbiter has disappeared (this should never happen)');
+      return;
+    }
+    if (!pollArbiter.knowsPoll()) {
+      replyToPlayer(player, `${player.name}, there is presently no active poll to veto`);
+      return;
+    }
+    replyToPlayer(player, `${player.name}, you have cancelled the poll to ${pollArbiter.action} ${pollArbiter.target}`);
+    log(`[POLL] "${player.name}" vetoed the poll to ${pollArbiter.action} ${pollArbiter.target}`);
+    pollArbiter.forgetPoll();
+    resetPollAnnouncements();
+    announceToAll(`The poll was cancelled by ${player.name}`);
+  });
+
+defineCommand('/poll', COMMAND_TIER.OPEN,
+  '<kick|kill|set|flagreset|vote|veto> <callsign> - interact and make requests of the bzflag voting system',
+  (player, args) => {
+    const rights = pollRights(player);
+    if (!rights.poll) {
+      replyToPlayer(player, `${player.name}, you are presently not authorized to run /poll`);
+      return;
+    }
+    if (!pollArbiter) {
+      replyToPlayer(player, 'ERROR: the poll arbiter has disappeared (this should never happen)');
+      return;
+    }
+    const trimmed = args.trim();
+    const split = trimmed.search(/\s/);
+    const cmd = (split === -1 ? trimmed : trimmed.slice(0, split)).toLowerCase();
+    const rest = split === -1 ? '' : trimmed.slice(split);
+    if (cmd === 'vote') {
+      SERVER_COMMANDS.get('/vote').run(player, rest);
+      return;
+    }
+    if (cmd === 'veto') {
+      SERVER_COMMANDS.get('/veto').run(player, rest);
+      return;
+    }
+    if (pollArbiter.knowsPoll()) {
+      replyToPlayer(player, `A poll to ${pollArbiter.action} ${pollArbiter.target} is presently in progress`);
+      replyToPlayer(player, 'Unable to start a new poll until the current one is over');
+      return;
+    }
+    const voters = [...players.values()].filter((other) => other.joined && pollRights(other).poll);
+    if (voters.length - 1 < pollArbiter.votesRequired) {
+      replyToPlayer(player, 'Unable to initiate a new poll.  There are not enough registered players playing.');
+      const others = Math.max(0, voters.length - 1);
+      replyToPlayer(player, `There needs to be at least ${pollArbiter.votesRequired} other`
+        + ` ${pollArbiter.votesRequired === 1 ? 'player' : 'players'} and only ${others} ${others === 1 ? 'is' : 'are'} available.`);
+      return;
+    }
+    if (!['ban', 'kick', 'kill', 'set', 'flagreset'].includes(cmd)) {
+      pollUsage(player);
+      return;
+    }
+    if (!rest.trim() && cmd !== 'flagreset') {
+      replyToPlayer(player, '/poll: incorrect syntax, argument required.');
+      return;
+    }
+    // The rest of the line, a quote at either end dropped.
+    const target = rest.trim().replace(/^"/, '').replace(/"$/, '');
+    if (!target && cmd !== 'flagreset') {
+      replyToPlayer(player, `${player.name}, no target was specified for the [${cmd}] vote`);
+      replyToPlayer(player, `Usage: /poll ${cmd} target`);
+      return;
+    }
+    if (!rights[cmd]) {
+      replyToPlayer(player, `${player.name}, you may not /poll ${cmd} on this server`);
+      return;
+    }
+    let started;
+    if (cmd === 'kick' || cmd === 'kill') {
+      const victim = players.get(resolveCallsign(target));
+      if (!victim) {
+        replyToPlayer(player, `The player specified for a ${cmd} vote is not here`);
+        return;
+      }
+      if (cmd === 'kill' && isObserverTeam(victim.team)) {
+        replyToPlayer(player, "You can't kill an observer!");
+        return;
+      }
+      // An admin holds upstream's `antipoll`, which only another admin
+      // overrides.
+      if (!isAdmin(player) && isAdmin(victim)) {
+        replyToPlayer(player, `${victim.name} is protected from being polled against.`);
+        return;
+      }
+      started = cmd === 'kick'
+        ? pollArbiter.pollToKick(target, player.name, player.id)
+        : pollArbiter.pollToKill(target, player.name, player.id);
+    } else if (cmd === 'set') {
+      started = pollArbiter.pollToSet(target, player.name, player.id);
+    } else {
+      started = pollArbiter.pollToResetFlags(player.name, player.id);
+    }
+    if (!started) {
+      replyToPlayer(player, `You are not able to request a ${cmd} poll right now, ${player.name}`);
+      return;
+    }
+    log(`[POLL] "${player.name}" asked to ${pollArbiter.action} ${pollArbiter.target}`);
+    announceToAll(`A poll to ${cmd} ${target} has been requested by ${player.name}`);
+    const available = voters.length;
+    const needed = Math.floor((pollArbiter.votePercentage / 100) * available);
+    announceToAll(`${available} player${available === 1 ? ' is' : 's are'} available, ${needed} additional affirming`
+      + ` vote${needed === 1 ? '' : 's'} required to pass the poll (${pollArbiter.votePercentage.toFixed(6)} %)`);
+    pollArbiter.setAvailableVoters(available);
+    for (const voter of voters) pollArbiter.grantSuffrage(voter.name);
+    if (!pollArbiter.voteYes(player.name)) {
+      replyToPlayer(player, 'Unable to automatically place your vote for some unknown reason');
+    }
+  });
+
+function resetPollAnnouncements() {
+  pollAnnounced.opening = false;
+  pollAnnounced.closure = false;
+  pollAnnounced.results = false;
+  pollAnnounced.heartbeatAt = -1;
+}
+
+// What a successful poll does, once its veto time is over.
+function carryOutPoll(action, target) {
+  if (action === 'kick') {
+    const victim = players.get(resolveCallsign(target));
+    if (victim) {
+      replyToPlayer(victim, 'You have been kicked due to sufficient votes to have you removed');
+      removeFromServer(victim);
+    }
+  } else if (action === 'kill') {
+    const victim = players.get(resolveCallsign(target));
+    if (victim && victim.alive && !isObserverTeam(victim.team)) {
+      replyToPlayer(victim, 'You have been killed due to sufficient votes');
+      killPlayer(victim, victim, DEATH_REASON.SELF_DESTRUCT);
+    }
+  } else if (action === 'set') {
+    const split = target.search(/\s/);
+    const name = split === -1 ? target : target.slice(0, split);
+    const value = split === -1 ? '' : target.slice(split).trim();
+    if (value && worldVariableExists(name) && !READ_ONLY_VARIABLES.has(name)) setWorldVariable(name, value);
+  } else if (action === 'reset') {
+    flags.forEach((flag) => {
+      if (flag.owner === null || flag.owner === undefined) resetFlag(flag);
+    });
+  }
+  log(`[POLL] carried out: ${action} ${target}`);
+}
+
+// The poll's clock, as bzfs's main loop runs it (bzfs.cxx:7267): announce
+// the opening, a reminder every fifteen seconds, the result, and once the
+// veto time is over, the action.
+function tickPoll() {
+  if (!pollArbiter?.knowsPoll()) return;
+  const { action, target } = pollArbiter;
+  if (!pollAnnounced.opening) {
+    announceToAll(`A poll to ${action} ${target} has begun.  Players have up to ${pollArbiter.voteTime} seconds to vote.`);
+    pollAnnounced.opening = true;
+  }
+  const elapsed = Math.floor(pollArbiter.elapsed());
+  if ((pollArbiter.voteTime - elapsed - 1) % 15 === 0 && pollAnnounced.heartbeatAt !== elapsed
+    && pollArbiter.timeRemaining() > 0) {
+    announceToAll(`${pollArbiter.timeRemaining()} seconds remain in the poll to ${action} ${target}.`);
+    pollAnnounced.heartbeatAt = elapsed;
+  }
+  if (!pollArbiter.isPollClosed()) {
+    if (pollArbiter.isPollSuccessful()) {
+      announceToAll(action !== 'flagreset'
+        ? `Enough votes were collected to ${action} ${target} early.`
+        : 'Enough votes were collected to reset all unused flags early.');
+      pollArbiter.closePoll();
+    }
+    return;
+  }
+  if (!pollAnnounced.results) {
+    announceToAll(`Poll Results: ${pollArbiter.getYesCount()} in favor, ${pollArbiter.getNoCount()} oppose,`
+      + ` ${pollArbiter.getAbstentionCount()} abstain`);
+    pollAnnounced.results = true;
+  }
+  const successful = pollArbiter.isPollSuccessful();
+  if (!successful) {
+    if (!pollAnnounced.closure) {
+      announceToAll(`The poll to ${action} ${target} was not successful`);
+      log(`[POLL] failed: ${action} ${target}`);
+      pollArbiter.forgetPoll();
+      resetPollAnnouncements();
+    }
+    return;
+  }
+  if (!pollAnnounced.closure) {
+    announceToAll(`The poll is now closed and was successful.  ${target} is scheduled to be`
+      + ` ${{ kick: 'kicked', kill: 'killed' }[action] ?? action}.`);
+    pollAnnounced.closure = true;
+  }
+  if (!pollArbiter.isPollExpired()) return;
+  announceToAll(`${target} has been ${{ kick: 'kicked.', kill: 'killed.' }[action] ?? action}`);
+  carryOutPoll(action, target);
+  pollArbiter.forgetPoll();
+  resetPollAnnouncements();
+}
+setInterval(tickPoll, 250).unref?.();
+
 // ClientQueryCommand (commands.cxx:3539): every playing tank's client
 // version, or one player's. Upstream's needs `clientQuery`, an admin's right.
 // A BZFlag client's version is what it sent with MsgEnter; a browser's is
@@ -12878,10 +13374,13 @@ defineCommand('/mutelist', COMMAND_TIER.OPERATOR,
 // addresses". bzo's address comes from a forwarding header on a proxied
 // deployment, so it is reported as what it is -- see the note in
 // docs/commands-plan.md about why a ban cannot rest on it as read.
-defineCommand('/playerlist', COMMAND_TIER.OPERATOR,
+defineCommand('/playerlist', COMMAND_TIER.OPEN,
   '- list player slots, names and IP addresses',
   (player) => {
-    const joined = [...players.values()].filter((other) => other.joined);
+    // Everybody may see their own connection, and only an admin everyone's
+    // (PlayerListCommand, commands.cxx:2149).
+    const joined = [...players.values()]
+      .filter((other) => other.joined && (isAdmin(player) || other.id === player.id));
     if (joined.length === 0) {
       replyToPlayer(player, 'Nobody is here');
       return;
@@ -12897,7 +13396,11 @@ defineCommand('/playerlist', COMMAND_TIER.OPERATOR,
         // `[id]callsign: host` with no such note at all (`commands.cxx`).
         other.verified ? 'verified' : null,
       ].filter(Boolean);
-      replyToPlayer(player, `#${other.id} ${other.name} [${other.team}] ${other.clientIP || 'unknown'}`
+      // A BZFlag client's link as upstream's `/playerlist` says it
+      // (`getPlayerHostInfo`): ` udp` once heard from on UDP, `+` once sent to.
+      const link = other.nativeLink;
+      const udp = link?.udpIn() ? ` udp${link.udpOut() ? '+' : ''}` : '';
+      replyToPlayer(player, `#${other.id} ${other.name} [${other.team}] ${other.clientIP || 'unknown'}${udp}`
         + (marks.length ? ` (${marks.join(', ')})` : ''));
     }
   });
@@ -13565,7 +14068,7 @@ function applyServerConfigChanges(requested, byWhom) {
     if (!Number.isFinite(fill) || fill < 0 || fill > MAX_REAL_PLAYERS) {
       return { error: `Bot fill is 0 to ${MAX_REAL_PLAYERS}` };
     }
-    if (fill > 0 && DISABLE_BOTS) return { error: 'Bots are disabled on this server (-disableBots)' };
+    if (fill > 0 && botsDisabled()) return { error: 'Bots are disabled on this server (-disableBots)' };
     next.botFill = fill;
   }
   if (has('botPilot')) {
@@ -13717,8 +14220,20 @@ const SETTABLE_VARIABLES = Object.freeze({
 //
 // `poll` is the one variable upstream marks read-only.
 const READ_ONLY_VARIABLES = new Set(['poll']);
+// Variables a plugin registers on a bzfs that loads it, with the plugin's
+// meaning and bzo's default, so `/set` finds them here as it would there.
+const PLUGIN_BZDB_DEFAULTS = Object.freeze({
+  _scoreSaveTime: '120',
+  _disallowSelfCap: '0',
+  _delayTeamFlagGrab: '0',
+});
+
+function worldVariableDefault(name) {
+  return BZDB_DEFAULTS[name] ?? PLUGIN_BZDB_DEFAULTS[name];
+}
+
 function worldVariableExists(name) {
-  return liveBzdb.has(name) || Object.prototype.hasOwnProperty.call(BZDB_DEFAULTS, name);
+  return liveBzdb.has(name) || worldVariableDefault(name) !== undefined;
 }
 
 defineCommand('/set', COMMAND_TIER.OPERATOR,
@@ -13750,7 +14265,7 @@ defineCommand('/set', COMMAND_TIER.OPERATOR,
       return;
     }
     if (valueParts.length === 0) {
-      replyToPlayer(player, `${name} is ${liveBzdb.get(name) ?? BZDB_DEFAULTS[name]}`);
+      replyToPlayer(player, `${name} is ${liveBzdb.get(name) ?? worldVariableDefault(name)}`);
       return;
     }
     if (READ_ONLY_VARIABLES.has(name)) {
@@ -14079,6 +14594,7 @@ function resolveJoinName(player, requestedName) {
         msgType: 'server',
         text: `You signed in as ${callsign} on another device.`,
       });
+      sendToPlayer(other, { type: 'superKill' });
       try {
         other.ws.close();
       } catch (error) {
@@ -14573,8 +15089,8 @@ function reportCheat(player, kind, headline, detail = null, enforceable = true) 
   counters.totalWarnings++;
   counters.lastWarningTime = Date.now();
 
-  // A BZFlag client's tank is its own physics and cannot be corrected, so a
-  // finding about one is reported and never refused.
+  // A BZFlag client's tank is its own physics, which bzo cannot correct and
+  // does not yet match, so a finding about one is reported, not refused.
   const refused = enforceable && ANTICHEAT_CONFIG.mode === 'strict' && !player.native;
   // One line per finding, the detail after the headline, so a finding is
   // one grep hit and never interleaves with another player's.
@@ -14757,7 +15273,7 @@ function validateMovement(player, newX, newY, newZ, newRotation, extrapolationSe
   // caller already uses as a fixed lookup key, not display text.
   const deathDriver = getSupportPhysicsDriver(newX, newY, newZ);
   if (deathDriver && deathDriver.death) {
-    killPlayer(player, null, DEATH_REASON.PHYSICS_DRIVER, null, null, deathDriver.death);
+    killPlayer(player, null, DEATH_REASON.PHYSICS_DRIVER, null, null, deathDriver);
   }
 
   // `waterLevel` -- upstream's own words for it: "Any tanks that move below
@@ -15145,11 +15661,16 @@ if (Number.isFinite(mapServerOptions.angularAcceleration)) {
 
 const NO_TEAM_KILLS = serverConfig.noTeamKills === true
   || mapServerOptions.noTeamKills === true;
-// `-disableBots`, which upstream also publishes as `_disableBots` so a client
-// knows before it asks. Off by default, as upstream has it.
-const DISABLE_BOTS = serverConfig.disableBots === true
+// `-disableBots`, which upstream publishes as `_disableBots` so a client
+// knows before it asks; a map may `-set` that directly instead, and `/set`
+// changes it live. Off by default, as upstream has it.
+preBzdbConfig.DISABLE_BOTS = serverConfig.disableBots === true
   || mapServerOptions.disableBots === true;
-GAME_CONFIG.DISABLE_BOTS = DISABLE_BOTS;
+if (preBzdbConfig.DISABLE_BOTS) GAME_CONFIG.DISABLE_BOTS = true;
+else GAME_CONFIG.DISABLE_BOTS = GAME_CONFIG.DISABLE_BOTS === true;
+function botsDisabled() {
+  return GAME_CONFIG.DISABLE_BOTS === true;
+}
 // `-tk`, which runs the opposite way round from its name: upstream kills a team
 // killer *by default* (`teamKillerDies` starts true, CmdLineOptions.h:79) and
 // `-tk` is what turns that off. So the default here is the strict one, and a map
@@ -15554,7 +16075,7 @@ function computeListServerStatus() {
     gameOptionsBits: computeLocalGameOptionsBits(),
     // Whether bots are refused, autopilot included (`-disableBots`), which a
     // player choosing a server for its bots, or to fly one, wants to know first.
-    disableBots: DISABLE_BOTS,
+    disableBots: botsDisabled(),
     // The two fields the bzfs table on this same page already shows
     // (Shots, Style) that a bzo row was missing -- GAME_TYPE is already the
     // same vocabulary GAME_STYLES uses to decode a remote server's style.
@@ -15877,6 +16398,10 @@ async function seatNativeClient(link, payload) {
     config: () => GAME_CONFIG,
     flagName: (type) => getFlagType(type)?.name || '',
     addressOf: (id) => players.get(id)?.clientIP ?? null,
+    scoreOf: (id) => {
+      const player = players.get(id);
+      return player ? { wins: player.wins, losses: player.losses, tks: player.tks } : null;
+    },
     selfIsAdmin: () => Boolean(seated && isAdmin(seated)),
     guidedShots: (shooterId) => [...projectiles.values()]
       .filter((proj) => proj.guided && String(proj.playerId) === shooterId)
@@ -15947,6 +16472,24 @@ async function seatNativeClient(link, payload) {
       // An exploding tank keeps reporting as its pieces fly, with the alive
       // bit clear; that is not a tank bzo should move.
       if ((update.status & BZFS_PLAYER_STATUS.ALIVE) === 0) return;
+      // A Phantom Zone holder zones itself crossing a teleporter and says so
+      // only with `FlagActive` on its updates (LocalPlayer.cxx:729), naming no
+      // face. The face is looked up along its path and checked as a browser's
+      // `zone` is; a finding is logged and the toggle stands, since the client
+      // is zoned on its own screen either way.
+      const zonedFlag = getPlayerFlag(seated.id);
+      const flagActive = (update.status & BZFS_PLAYER_STATUS.FLAG_ACTIVE) !== 0;
+      if (zonedFlag && togglesZoneOnTeleport(zonedFlag.type) && zonedFlag.zoned !== flagActive) {
+        const to = moveFromBzfs(update, GAME_CONFIG);
+        const crossing = findCrossedTeleporterFace({ x: seated.x, y: seated.y, z: seated.z }, to);
+        const refusal = crossing
+          ? getZoneRefusal(seated, { ...crossing.at, r: to.r }, crossing.faceId, Date.now())
+          : 'its path crossed no teleporter';
+        if (refusal) reportCheat(seated, 'flagRejected', `ZONE REJECTED: ${refusal}`);
+        zonedFlag.zoned = flagActive;
+        log(`"${seated.name}" ${flagActive ? 'zoned' : 'unzoned'}`);
+        broadcastFlagUpdate(zonedFlag);
+      }
       // The update after a MsgTeleport is the far side of it.
       if (seated.nativeTeleport) {
         applyNativeTeleport(seated, moveFromBzfs(update, GAME_CONFIG), seated.nativeTeleport);
@@ -16041,9 +16584,10 @@ async function seatNativeClient(link, payload) {
   if (!player) return;
   seated = player;
   player.clientVersion = enter.version;
-  // Its moves are its own client's physics, which bzo cannot correct: a
-  // finding is logged, never refused (`reportCheat`).
+  // Its moves are its own client's physics, which bzo cannot correct and
+  // does not yet match: a finding is logged, not refused (`reportCheat`).
   player.native = true;
+  player.nativeLink = link;
   // What a browser's session gives it at `acceptConnection`, from the token
   // instead of a cookie. A session record, as `/login` makes, because
   // `isAdmin` re-reads the session every time it is asked; nothing sends its
@@ -16055,6 +16599,13 @@ async function seatNativeClient(link, payload) {
     player.bzid = login.bzid;
     player.globalCallsign = callsign;
     player.admin = isAdminSession(sessions.get(player.sessionId), ADMIN_GROUPS);
+  }
+  // Turned away as bzfs turns a banned BZID away, with MsgReject.
+  const idBan = bans.idBanned(player.bzid);
+  if (idBan) {
+    log(`[BZFLAG] "${enter.callsign}" refused: BZID ${player.bzid} is banned`);
+    link.reject(idBanRefusal(idBan));
+    return;
   }
   // The team it asked for, by upstream's number (`TeamColor`, global.h:59):
   // AutomaticTeam is -2, and the rabbit and hunter teams are bzo's to assign.
@@ -16074,9 +16625,6 @@ async function seatNativeClient(link, payload) {
   } else if (login) {
     replyToPlayer(player, 'This callsign is not registered.');
     replyToPlayer(player, 'You can register it at https://forums.bzflag.org/');
-  }
-  if (!isObserverTeam(player.team)) {
-    replyToPlayer(player, 'BZFlag clients can play in bzo; some flag effects may still differ.');
   }
 }
 
@@ -16143,6 +16691,10 @@ function applyNativeDeath(victim, body, translator) {
   const killerId = String(body.readUInt8(0));
   const reason = body.readInt16BE(1);
   const shotId = body.readUInt16BE(3);
+  // The flag of the shot that did it, and a death-touch's driver
+  // (`MsgKilled`, bzfs.cxx:4884).
+  const shotFlag = body.length >= 7 ? body.toString('latin1', 5, 7).replace(/\0.*$/s, '') : '';
+  const phydrv = body.length >= 11 ? body.readInt32BE(7) : -1;
   const killer = players.get(killerId) || null;
   if (reason === BLOWED_UP.GOT_SHOT) {
     // The bzo shot the client means: the one it was told about under that id.
@@ -16154,6 +16706,12 @@ function applyNativeDeath(victim, body, translator) {
       applyShotPlayerHit(proj, projectileId, victim, { x: victim.x, y: victim.y, z: victim.z });
     } else if (killer) {
       killPlayer(victim, killer, DEATH_REASON.SHOT, projectileId, killer.id);
+      // The shot has already ended here, so Genocide is read off the flag the
+      // client names, as bzfs's `playerKilled` reads it -- taken only when the
+      // killer is firing it, so a client cannot name one into being.
+      if (shotFlag && shotFlag === getShotFlagFor(killer)) {
+        applyGenocide({ flag: shotFlag, playerId: killer.id }, victim);
+      }
     }
   } else if (reason === BLOWED_UP.GOT_RUN_OVER && killer) {
     killPlayer(victim, killer, DEATH_REASON.RUN_OVER);
@@ -16162,7 +16720,7 @@ function applyNativeDeath(victim, body, translator) {
   } else if (reason === BLOWED_UP.WATER_DEATH) {
     killPlayer(victim, null, DEATH_REASON.WATER);
   } else if (reason === BLOWED_UP.DEATH_TOUCH) {
-    killPlayer(victim, null, DEATH_REASON.PHYSICS_DRIVER);
+    killPlayer(victim, null, DEATH_REASON.PHYSICS_DRIVER, null, null, mapPhysicsDrivers[phydrv] ?? null);
   }
   if (victim.alive) log(`[BZFLAG] "${victim.name}" reported a death bzo did not take (reason ${reason})`);
 }
@@ -16677,6 +17235,7 @@ function grabFlag(player, flag, now = Date.now(), { checkPos = true } = {}) {
   // that turns it off, because the operator handing the flag out is not the
   // tank receiving it, and the flag need not be lying on the ground.
   if (checkPos && flag.status !== FLAG_STATUS.ON_GROUND) return;
+  if (checkPos && isTeamFlagGrabDelayed(player, flag, now)) return;
 
   const reach = GAME_CONFIG.TANK_SPEED + TANK.radius + FLAG_RADIUS;
   const extrapolated = player.getExtrapolatedPosition(now);
@@ -16730,10 +17289,14 @@ function findAntidotePosition() {
 // validation. Picking it here costs one message and makes the antidote as
 // server-authoritative as the timeout, and the flag is drawn from the same
 // numbers either way.
+//
+// A BZFlag client picks and draws its own spot (LocalPlayer.cxx:1663) and asks
+// to drop there, so it gets none from here: two spots, one it cannot see,
+// would be two ways off.
 function armBadFlagRelease(player, flag) {
   const sticky = flag.endurance === FLAG_ENDURANCE.STICKY;
   player.flagShakeWins = sticky ? FLAG_SHAKE_WINS : 0;
-  const antidote = sticky && ANTIDOTE_FLAGS ? findAntidotePosition() : null;
+  const antidote = sticky && ANTIDOTE_FLAGS && !player.native ? findAntidotePosition() : null;
   if (antidote === null && player.antidote === null) return;
   player.antidote = antidote;
   sendToPlayer(player, { type: 'antidoteFlag', position: antidote });
@@ -16928,6 +17491,32 @@ function dropFlag(flag, now = Date.now()) {
   broadcastFlagUpdate(flag);
 }
 
+// allejo's ctfOverseer (github.com/allejo/ctfOverseer), which many CTF
+// servers load. `_disallowSelfCap` refuses a capture of the capper's own
+// flag. `_delayTeamFlagGrab` keeps a team flag from enemy hands for that many
+// seconds after it was captured; its own team may still take it. Both are off
+// unless a world sets them. The refusal is said at most every five seconds,
+// in the plugin's words.
+const teamFlagCappedAt = new Map();
+const delayedGrabWarnedAt = new Map();
+const DELAYED_GRAB_WARN_INTERVAL_MS = 5000;
+
+function isTeamFlagGrabDelayed(player, flag, now) {
+  const delay = Number(GAME_CONFIG.DELAY_TEAM_FLAG_GRAB);
+  if (flag.team === null || !Number.isFinite(delay) || delay <= 0) return false;
+  if (getTeamColorIndex(player.team) === flag.team) return false;
+  const cappedAt = teamFlagCappedAt.get(flag.team);
+  if (cappedAt === undefined || now >= cappedAt + (delay * 1000)) return false;
+  if (now > (delayedGrabWarnedAt.get(player.id) ?? -Infinity) + DELAYED_GRAB_WARN_INTERVAL_MS) {
+    delayedGrabWarnedAt.set(player.id, now);
+    const team = getTeamFromColorIndex(flag.team);
+    replyToPlayer(player, `Team flags cannot be grabbed for ${delay} seconds after they were last capped.`);
+    replyToPlayer(player, `You cannot grab the ${team.charAt(0).toUpperCase()}${team.slice(1)} team flag`
+      + ` for another ~${Math.round((cappedAt + (delay * 1000) - now) / 1000)} seconds`);
+  }
+  return true;
+}
+
 // captureFlag(). Either an enemy flag brought onto the player's own base, or the
 // player's own flag carried onto an enemy base. `baseColorIndex` is the base the
 // client says it reached; the team that loses the flag is always the flag's own,
@@ -16953,6 +17542,8 @@ function captureFlag(player, baseColorIndex) {
   const cappedIndex = flag.team;
   const cappedTeam = getTeamFromColorIndex(cappedIndex);
   const ownGoal = cappedIndex === cappingIndex;
+  if (ownGoal && GAME_CONFIG.DISALLOW_SELF_CAP === true) return;
+  teamFlagCappedAt.set(cappedIndex, Date.now());
   log(
     `"${player.name}" captured the ${cappedTeam} flag ` +
     `on the ${getTeamFromColorIndex(baseColorIndex)} base${ownGoal ? ' (their own)' : ''}`
@@ -17130,7 +17721,7 @@ function setPaused(player, paused) {
 // while it does, and the player's own comes back when it lands. Asking again
 // with another pilot only changes the name.
 function setAutopilot(player, on, pilot) {
-  if (on && DISABLE_BOTS) {
+  if (on && botsDisabled()) {
     replyToPlayer(player, "I'm sorry, we do not allow autopilot on this server.");
     return;
   }
@@ -17648,6 +18239,30 @@ function isPointInsideTeleporterPortal(obs, x, y, z, tankRadius = 2) {
 // server has since extrapolated the tank to. At tank speed a frame is several
 // units, so the extrapolated position is past the portal by the time the
 // message lands.
+// The teleporter face a tank passed through between two positions, and the
+// point where. A BZFlag client zones with no face named (only `FlagActive`),
+// so the server finds the one its path crossed and checks it as it checks a
+// browser's `zone`. The face is upstream's (`Teleporter::isTeleported`,
+// Teleporter.cxx:365): 0 entered from the teleporter's own east, 1 from west.
+function findCrossedTeleporterFace(from, to) {
+  const length = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+  const steps = Math.min(200, Math.max(1, Math.ceil(length / 0.5)));
+  for (let step = 0; step <= steps; step += 1) {
+    const t = step / steps;
+    const at = {
+      x: from.x + ((to.x - from.x) * t),
+      y: from.y + ((to.y - from.y) * t),
+      z: from.z + ((to.z - from.z) * t),
+    };
+    for (const [index, obs] of TELEPORTER_OBSTACLES_BY_INDEX) {
+      if (!isPointInsideTeleporterPortal(obs, at.x, at.y, at.z, 2)) continue;
+      const side = getColliderLocalPoint(from.x, from.z, obs).x > 0 ? 0 : 1;
+      return { faceId: (index * 2) + side, at };
+    }
+  }
+  return null;
+}
+
 function getZoneRefusal(player, at, faceId, now) {
   if (!Number.isInteger(faceId)) return `face ${faceId} is not a teleporter face`;
   if (!Number.isFinite(at.x) || !Number.isFinite(at.y) || !Number.isFinite(at.z)) {
@@ -17867,10 +18482,7 @@ function fireWorldWeaponShot(weapon, now) {
     y: proj.y,
     z: proj.z,
     shotSlot: proj.shotSlot,
-    dirX: proj.dirX,
-    dirY: proj.dirY,
-    dirZ: proj.dirZ,
-    speed: proj.speed,
+    ...firedVelocity(proj),
     flag: proj.flag,
     ricochet: proj.ricochet,
     segments: proj.segments,
@@ -17946,7 +18558,7 @@ function applySteamrollerSweep(now) {
       // tank. Both need the roller above ground, which is what stops two
       // burrowed tanks killing each other the instant they meet.
       if (!canRunOver(roller.flag, victimFlag, roller.at.y, roller.zoned)) continue;
-      const radius = getRunOverRadius(victimFlag, roller.flag, TANK.hitRadius);
+      const radius = getRunOverRadius(victimFlag, roller.flag, TANK.radius);
       const separation = getRunOverSeparation(
         victimAt.x - roller.at.x,
         victimAt.y - roller.at.y,
@@ -18211,11 +18823,6 @@ function applyDeath(victim, killerId, hit) {
   // here, which is what upstream's `setTarget(NULL)` does to them too.
   setLockTarget(victim, null);
 
-  // bzfs.cxx:3537. Killing the rabbit is what deposes it, and under
-  // `-rabbit killer` whoever did the killing takes it if they still can. Every
-  // way to depose a rabbit by killing it arrives here, which is the point.
-  if (RABBIT_SELECTION && victim.id === rabbitPlayerId) anointNewRabbit(killerId);
-
   dropPlayerFlag(victim.id);
 
   broadcastAll({
@@ -18225,6 +18832,13 @@ function applyDeath(victim, killerId, hit) {
     projectileId: null,
     ...hit,
   });
+
+  // bzfs.cxx:3537. Killing the rabbit is what deposes it, and under
+  // `-rabbit killer` whoever did the killing takes it if they still can. Every
+  // way to depose a rabbit by killing it arrives here, which is the point.
+  // After MsgKilled, as upstream sends them, so every client scores the kill
+  // with the victim still the rabbit (`getKillScoreDeltas`).
+  if (RABBIT_SELECTION && victim.id === rabbitPlayerId) anointNewRabbit(killerId);
 
   setTimeout(() => {
     if (!players.has(victim.id)) return;
@@ -18238,14 +18852,18 @@ function applyDeath(victim, killerId, hit) {
   }, GAME_CONFIG.RESPAWN_DELAY);
 }
 
-function killPlayer(victim, killer, reason, projectileId = null, shooterId = null, deathMessage = null) {
+function addScore(player, delta) {
+  player.wins += delta.wins;
+  player.losses += delta.losses;
+  player.tks += delta.tks;
+}
+
+function killPlayer(victim, killer, reason, projectileId = null, shooterId = null, physicsDriver = null) {
   // "victim was already dead. keep score." Upstream's own guard, and bzo needs
   // it for the same reason plus one of its own: genocide kills a team in a loop,
   // and a team killer who dies for the first of them must not die again for the
   // rest.
   if (!victim.alive) return;
-
-  victim.losses++;
 
   // areFoes(): a kill across teams, a rogue killing anyone, or any kill at all
   // on a world without teams. Everything else is a team kill.
@@ -18256,21 +18874,22 @@ function killPlayer(victim, killer, reason, projectileId = null, shooterId = nul
   // next spawn. Decided before `applyDeath` below, because the anointing in
   // there is what stops the victim being the rabbit; upstream's order too.
   //
-  // Note this is not the same question as "was it a suicide" for the notice
-  // below: a world weapon has no killer to score, and is nobody's suicide.
-  const selfKill = !killer || killer.id === victim.id;
-  const teamKill = !selfKill && !areFoes(killer.team, victim.team, TEAMS_ALLOWED)
-    && !isARabbitKill(killer, victim);
-  if (!selfKill) {
-    if (teamKill) {
-      // Upstream scores the killer a death rather than a kill for it
-      // (`killerData->score.killedBy()`), so a team kill never counts towards
-      // shaking a bad flag either. `killerData->score.tK()` is the same call's
-      // other half, tallied on the killer for the scoreboard's `[NN]` column.
-      killer.losses++;
-      killer.tks++;
-    } else {
-      killer.wins++;
+  // The tally itself is `getKillScoreDeltas`, which every browser runs on the
+  // same `killed` to keep its own scoreboard. A team kill scores the killer a
+  // death and a team kill, so it never counts towards shaking a bad flag.
+  const deltas = getKillScoreDeltas({
+    killerId: killer?.id ?? null,
+    victimId: victim.id,
+    killerTeam: killer?.team ?? null,
+    victimTeam: victim.team,
+    teamsAllowed: TEAMS_ALLOWED,
+    killerWasRabbit: Boolean(killer?.wasRabbit),
+  });
+  const { teamKill } = deltas;
+  addScore(victim, deltas.victim);
+  if (deltas.killer) {
+    addScore(killer, deltas.killer);
+    if (!teamKill) {
       recordShakeWin(killer);
       // Score::reached() (Score.cxx:108), asked of the killer after every
       // ordinary kill -- not a team kill or a suicide, neither of which raises
@@ -18295,7 +18914,10 @@ function killPlayer(victim, killer, reason, projectileId = null, shooterId = nul
   applyDeath(victim, killerId, {
     projectileId,
     reason,
-    deathMessage,
+    // A death-touch's own message, and upstream's index for its driver, which
+    // MsgKilled carries (`phydrv`).
+    deathMessage: physicsDriver?.death ?? null,
+    phydrv: Number.isInteger(physicsDriver?.index) ? physicsDriver.index : null,
     victimFlag: getPlayerFlag(victim.id)?.type ?? null,
     shooterFlag: killer ? (getPlayerFlag(killer.id)?.type ?? null) : null,
     // The client words its death notice from this, and derives the same thing
@@ -18865,8 +19487,22 @@ function forceClientReload() {
   }, 500);
 }
 
+// Dropping everyone, as bzfs does with MsgSuperKill (bzfs.cxx:1029): the
+// reason as a server message, then `superKill`, which a browser shows as a
+// BZFlag client shows MsgSuperKill (playing.cxx:2115). BZFlag clients get the
+// same message and then MsgSuperKill itself.
+let serverGoingSaid = false;
+function sayServerIsGoing(reason) {
+  if (serverGoingSaid) return;
+  serverGoingSaid = true;
+  broadcastAll({ type: 'message', src: SERVER_PLAYER, dst: ALL_PLAYERS, msgType: 'server', text: `Server ${reason}`, ts: Date.now() });
+  broadcastAll({ type: 'superKill' });
+  bzflagServer?.close();
+}
+
 function requestServerRestart(reason) {
   log(`Restart requested: ${reason}`);
+  sayServerIsGoing(`restarting: ${reason}`);
   forceClientReload();
 
   if (reason === 'server.js change') {
@@ -19478,7 +20114,7 @@ function proxyPhysics(session) {
 // the two agree about which flags those are. A real PZ lying on the ground is
 // indistinguishable from a hidden one at this end -- and is one bzo would
 // have hidden anyway.
-function proxyFlagState(flag) {
+function proxyFlagState(flag, zonedOf = () => false) {
   const carried = flag.status === FLAG_STATUS.ON_TANK && flag.owner !== NO_PLAYER;
   const hidden = !carried && !TEAM_FLAG_ABBREVIATIONS.has(flag.type);
   return {
@@ -19494,7 +20130,7 @@ function proxyFlagState(flag) {
     initialVelocity: flag.initialVelocity,
     // Phantom Zone's own `PlayerState::FlagActive`, which rides on the
     // carrier's update rather than on the flag -- so it is read off them.
-    zoned: false,
+    zoned: carried && zonedOf(flag.owner),
   };
 }
 
@@ -19532,8 +20168,6 @@ function proxyShot(shot, ricochetAll) {
   const velocity = { x: shot.velocity[0], y: shot.velocity[2], z: -shot.velocity[1] };
   const position = proxyPosition(shot.pos);
   const flag = shot.flag || null;
-  const effects = getShotEffects(flag);
-  const flight = getShotFlight(velocity, effects, null) || { x: 0, y: 0, z: 0, speed: 0 };
   return {
     type: 'shotBegin',
     id: `${shot.player}-${shot.id}`,
@@ -19544,10 +20178,9 @@ function proxyShot(shot, ricochetAll) {
     y: round2(position.y),
     z: round2(position.z),
     shotSlot: shot.slot,
-    dirX: round3(flight.x),
-    dirY: round3(flight.y),
-    dirZ: round3(flight.z),
-    ...(effects.guided ? {} : { speed: round2(flight.speed) }),
+    vx: round2(velocity.x),
+    vy: round2(velocity.y),
+    vz: round2(velocity.z),
     flag,
     ricochet: shotRicochets(flag, ricochetAll),
     // A beam's path is walked by whoever owns the simulation, and that is the
@@ -19866,6 +20499,15 @@ async function handleProxyConnection(ws, req, request) {
   // what the *browser* has been told, and our own liveness is what we tell the
   // *target*.
   let selfAlive = false;
+  // Whether this browser's own tank is phantom zoned: the browser says so as it
+  // crosses a teleporter (`zone`), and the target hears it as `FlagActive` on
+  // our updates, which is all upstream's client sends (LocalPlayer.cxx:729).
+  let proxyZoned = false;
+  // Who on the target is zoned: our own from the above, everybody else's from
+  // the `FlagActive` on their updates.
+  const proxyZonedOf = (id) => (id === session?.playerId
+    ? proxyZoned
+    : session?.state.motion.get(id)?.zoned === true);
   // What the target will accept of a shot, read off its own BZDB rather than
   // assumed: `shotFired` compares the lifetime against its `_reloadTime` within
   // an epsilon and drops a shot that misses without telling anyone
@@ -20040,10 +20682,19 @@ async function handleProxyConnection(ws, req, request) {
     const announcedAlive = new Map();
     for (const [id, motion] of session.state.motion) announcedAlive.set(id, motion.alive);
 
+    const announcedZoned = new Map();
     session.on('motion', ({ id, motion }) => {
       // Our own tank is the browser's to place once it can play; until then
       // this connection is an observer and has none.
       if (id === session.playerId) return;
+      // Zoning is a flag fact on bzo's side and a status bit on bzfs's, so a
+      // change of the bit is a change of the carried flag.
+      if ((announcedZoned.get(id) ?? false) !== motion.zoned) {
+        announcedZoned.set(id, motion.zoned);
+        const carried = session.state.flags.find((flag) => flag
+          && flag.owner === id && flag.status === FLAG_STATUS.ON_TANK);
+        if (carried) send({ type: 'flagUpdate', flags: [proxyFlagState(carried, proxyZonedOf)] });
+      }
       if (announcedAlive.get(id) !== motion.alive) {
         announcedAlive.set(id, motion.alive);
         const player = session.state.players.get(id);
@@ -20202,15 +20853,17 @@ async function handleProxyConnection(ws, req, request) {
     });
 
     session.on('flags', (flags) => {
-      send({ type: 'flagUpdate', flags: flags.map(proxyFlagState) });
+      send({ type: 'flagUpdate', flags: flags.map((flag) => proxyFlagState(flag, proxyZonedOf)) });
     });
 
     session.on('grab', ({ id, flag }) => {
-      send({ type: 'grabFlag', playerId: String(id), flag: proxyFlagState(flag) });
+      if (id === session.playerId) proxyZoned = false;
+      send({ type: 'grabFlag', playerId: String(id), flag: proxyFlagState(flag, proxyZonedOf) });
     });
 
     session.on('drop', ({ id, flag }) => {
-      send({ type: 'dropFlag', playerId: String(id), flag: proxyFlagState(flag) });
+      if (id === session.playerId) proxyZoned = false;
+      send({ type: 'dropFlag', playerId: String(id), flag: proxyFlagState(flag, proxyZonedOf) });
     });
 
     session.on('transfer', ({ from, to, flag }) => {
@@ -20218,7 +20871,7 @@ async function handleProxyConnection(ws, req, request) {
         type: 'transferFlag',
         fromId: String(from),
         toId: String(to),
-        flag: proxyFlagState(flag),
+        flag: proxyFlagState(flag, proxyZonedOf),
       });
     });
 
@@ -20584,7 +21237,8 @@ async function handleProxyConnection(ws, req, request) {
           message,
           physics,
           (selfAlive ? BZFS_PLAYER_STATUS.ALIVE : 0)
-            | (proxyPaused ? BZFS_PLAYER_STATUS.PAUSED : 0),
+            | (proxyPaused ? BZFS_PLAYER_STATUS.PAUSED : 0)
+            | (proxyZoned ? BZFS_PLAYER_STATUS.FLAG_ACTIVE : 0),
         );
         session.sendPlayerUpdate(lastMotion);
       }
@@ -20763,6 +21417,17 @@ async function handleProxyConnection(ws, req, request) {
       session.sendAutoPilot(message.on === true);
       return;
     }
+    // Crossing a teleporter with Phantom Zone, which upstream's client says
+    // only with `FlagActive` from its next update on. The target relays that
+    // to everybody else and tells us nothing, so the browser hears it here.
+    if (message.type === 'zone') {
+      if (!playingTeam || !selfAlive || !togglesZoneOnTeleport(proxyCarriedFlagType(session))) return;
+      proxyZoned = !proxyZoned;
+      const carried = session.state.flags.find((flag) => flag
+        && flag.owner === session.playerId && flag.status === FLAG_STATUS.ON_TANK);
+      if (carried) send({ type: 'flagUpdate', flags: [proxyFlagState(carried, proxyZonedOf)] });
+      return;
+    }
     if (message.type === 'pause') {
       if (!playingTeam) return;
       proxyPaused = !proxyPaused;
@@ -20854,11 +21519,8 @@ async function handleProxyConnection(ws, req, request) {
         // victim was holding (`gotBlowedUp`, playing.cxx:3886).
         flag: typeof message.flag === 'string' ? message.flag : '',
         // Upstream sends `myTank->getDeathPhysicsDriver()`, an index into its
-        // own driver table. bzo's client resolves a driver to the object
-        // rather than the index and has no number to send, so this says "some
-        // driver" and the target prints its own "Killed by unknown obstacle".
-        // The death still counts, which is what the message is for.
-        phydrv: -1,
+        // own driver table, which the browser's driver carries.
+        phydrv: Number.isInteger(message.phydrv) ? message.phydrv : -1,
       });
       return;
     }
@@ -20914,7 +21576,9 @@ function acceptConnection(ws, req) {
     // making this round trip; recording when it went out is the whole of the
     // measurement, and costs no message of its own -- ping and pong are
     // WebSocket frames.
-    player.lag.pongReceived(now);
+    // Logged to judge whether moves need a lossy transport (docs/lag-plan.md).
+    const spike = player.lag.pongReceived(now);
+    if (spike) log(`[LAG] "${player.name}" RTT spike ${spike.rttMs}ms (median ${spike.medianMs}ms)`);
     // The client is *shown* the answer, never asked for it (docs/lag-plan.md):
     // this is the player's own figure only, not a broadcast to the roster, so
     // it carries no anti-cheat weight -- it just fills in the debug HUD's ping.
@@ -21329,7 +21993,14 @@ function acceptConnection(ws, req) {
           // this packet, and how long the client says it took to send it -- so
           // jitter needs no field the move does not carry. Measured whatever
           // the anti-cheat mode is: it is a statistic, not a judgement.
-          player.lag.recordUpdate(now, Number(message.sdt));
+          const stall = player.lag.recordUpdate(now, Number(message.sdt));
+          // A move held up on TCP: logged, at most once a second a player, to
+          // judge whether moves need a lossy transport (docs/lag-plan.md).
+          // A server bot's moves never cross a network, so it is left out.
+          if (stall && !bots.has(player.id) && now - (player.lastStallLogAt || 0) >= 1000) {
+            player.lastStallLogAt = now;
+            log(`[LAG] "${player.name}" stalled ${stall.waitedMs}ms (sent ${stall.sentMs}ms apart)`);
+          }
           // A third thing the acceleration model has no term for, beside the two
           // in "The acceleration check cannot see the stick": air control. A
           // `WG` tank steers in mid air, and with `_wingsSlideTime` 0 -- which is
@@ -21664,10 +22335,7 @@ function acceptConnection(ws, req) {
             y: proj.y,
             z: proj.z,
             shotSlot: proj.shotSlot,
-            dirX: proj.dirX,
-            dirY: proj.dirY,
-            dirZ: proj.dirZ,
-            speed: proj.speed,
+            ...firedVelocity(proj),
             flag: proj.flag,
             ricochet: proj.ricochet,
             segments: proj.segments,
@@ -21756,13 +22424,19 @@ function acceptConnection(ws, req) {
           // the grab -- otherwise a modified client sheds a bad flag on contact.
           if (flag.endurance === FLAG_ENDURANCE.STICKY) {
             const held = (now - flag.grabbedAt) / 1000;
-            if (!canShakeFlag(flag.type, FLAG_SHAKE_TIMEOUT, held)) {
+            // A BZFlag client's own antidote spot is one this server never
+            // saw, so its drop there is taken as bzfs takes any drop.
+            const name = getFlagType(flag.type).name;
+            if (canShakeFlag(flag.type, FLAG_SHAKE_TIMEOUT, held)) {
+              log(`"${player.name}" shook off ${name} after ${held.toFixed(2)}s`);
+            } else if (player.native && ANTIDOTE_FLAGS) {
+              log(`"${player.name}" dropped ${name} at its own antidote after ${held.toFixed(2)}s`);
+            } else {
               const refused = reportCheat(player, 'flagRejected',
-                `SHAKE REJECTED ${getFlagType(flag.type).name} held ${held.toFixed(2)}s `
-                + `of ${FLAG_SHAKE_TIMEOUT}s`);
+                `SHAKE REJECTED ${name} held ${held.toFixed(2)}s of ${FLAG_SHAKE_TIMEOUT}s`);
               if (refused) break;
+              log(`"${player.name}" shook off ${name} after ${held.toFixed(2)}s`);
             }
-            log(`"${player.name}" shook off ${getFlagType(flag.type).name} after ${held.toFixed(2)}s`);
           }
           // cmdDrop's `!myTank->isPhantomZoned()`: a zoned tank cannot put the
           // flag down at all. Dropping it would leave the tank phased with
@@ -21838,6 +22512,15 @@ function acceptConnection(ws, req) {
         }
 
         case 'joinGame': {
+          // checkBan (bzfs.cxx:2257): a banned BZID is turned away at the join,
+          // so a signed-in player can still reach the dialog to sign out.
+          const idBan = bans.idBanned(player.bzid);
+          if (idBan) {
+            log(`Player ${player.id} refused: BZID ${player.bzid} is banned`);
+            replyToPlayer(player, idBanRefusal(idBan));
+            removeFromServer(player);
+            break;
+          }
           let joinName = resolveJoinName(player, message.name);
           const requestedTankModel = typeof message.tankModel === 'string'
             ? normalizeTankModelId(message.tankModel)
@@ -21994,6 +22677,7 @@ function acceptConnection(ws, req) {
           player.lag.resetUpdateGap();
           player.losses = 0;
           player.wins = 0;
+          const scoreRestored = previousTeam === null && !bots.has(player.id) ? restoreScore(player) : null;
           // The tank is named here as well as on a later change, so a join
           // line says what a player is driving without the log having to be
           // read backwards for a change that may never have happened.
@@ -22014,6 +22698,7 @@ function acceptConnection(ws, req) {
           }
 
           broadcastPlayerRecord('playerJoined', player);
+          if (scoreRestored) replyToPlayer(player, scoreRestored);
           clearTimeout(player.rejoinTimer);
           if (rejoinWait > 0) {
             replyToPlayer(player, `You are unable to begin playing for ${(rejoinWait / 1000).toFixed(1)} seconds.`);
@@ -22361,7 +23046,11 @@ function acceptConnection(ws, req) {
     player.joined = false;
     clearPauseTimers(player);
     const leavingTeam = player.team;
-    if (wasJoined) noteRejoinWait(player);
+    if (wasJoined) {
+      noteRejoinWait(player);
+      saveScore(player);
+      pollArbiter?.retractVote(player.name);
+    }
     clearTimeout(player.rejoinTimer);
     dropPlayerFlag(player.id);
     players.delete(player.id);
@@ -22380,6 +23069,12 @@ function acceptConnection(ws, req) {
     retireTeamFlags(getTeamColorIndex(leavingTeam));
 
     let logMsg = `"${playerName}" (#${playerNum}) disconnected. ${playerWins} kills, ${playerLosses} deaths.`;
+    const lagSummary = player.lag.getStallSummary();
+    if (!bots.has(player.id) && (lagSummary.pings || lagSummary.updates)) {
+      log(`[LAG] "${playerName}" left: ${lagSummary.rttSpikes} RTT spikes in ${lagSummary.pings} pings,`
+        + ` ${lagSummary.stalls} stalls in ${lagSummary.updates} updates`
+        + (lagSummary.stalls ? ` (worst ${lagSummary.worstStallMs}ms)` : ''));
+    }
     if (cheatWarnings > 0 && ANTICHEAT_CONFIG.mode !== 'disabled') {
       logMsg += ` [ANTICHEAT: ${cheatWarnings} warnings (${formatCheatWarnings(player)})]`;
     }
@@ -22655,7 +23350,7 @@ function botCheckEnvironment(bot, self) {
 function addBot(pilotId = botFillPilot, team = PLAYER_TEAM.AUTOMATIC, { auto = false } = {}) {
   const entry = findAutopilot(pilotId);
   if (!entry) return { error: `no pilot "${pilotId}"` };
-  if (DISABLE_BOTS) return { error: 'bots are disabled on this server (-disableBots)' };
+  if (botsDisabled()) return { error: 'bots are disabled on this server (-disableBots)' };
   const socket = createBotSocket();
   acceptConnection(socket, BOT_FAKE_REQUEST);
   const player = [...players.values()].find((candidate) => candidate.ws === socket);
@@ -22733,7 +23428,7 @@ function countRealPlayers() {
 }
 
 function reconcileBots() {
-  if (!AUTOPILOT_MODULE || DISABLE_BOTS) return;
+  if (!AUTOPILOT_MODULE || botsDisabled()) return;
   const autoBots = [...bots.values()].filter((bot) => bot.auto);
   let change = planBotFill({ fill: botFill, humans: countRealPlayers(), bots: autoBots.length });
   while (change > 0) {
@@ -22943,10 +23638,17 @@ function reportListServerShutdown(signal) {
   listServerShuttingDown = true;
   log(`[LISTSERVER] ${signal} received; reporting removal before exit`);
   reportToListServer('shutdown');
+  sayServerIsGoing('shutting down');
   setTimeout(() => process.exit(0), 500);
 }
 process.on('SIGTERM', () => reportListServerShutdown('SIGTERM'));
 process.on('SIGINT', () => reportListServerShutdown('SIGINT'));
+// nodemon restarts with SIGUSR2: tell every client the server is going, then
+// let the signal end the process as it would have.
+process.once('SIGUSR2', () => {
+  sayServerIsGoing('restarting');
+  setTimeout(() => process.kill(process.pid, 'SIGUSR2'), 100);
+});
 
 // Watch for file changes and auto-reload clients
 const publicDir = path.join(__dirname, 'public');

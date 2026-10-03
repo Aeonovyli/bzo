@@ -229,6 +229,8 @@ export const BZDB_CONFIG_VARS = new Map([
   ['_hideTeamFlagsOnRadar', { key: 'HIDE_TEAM_FLAGS_ON_RADAR', parse: bzdbIsTrue }],
   ['_hideFlagsOnRadar', { key: 'HIDE_FLAGS_ON_RADAR', parse: bzdbIsTrue }],
   ['_forbidHunting', { key: 'FORBID_HUNTING', parse: bzdbIsTrue }],
+  // No robots or autopilot, as `-disableBots` publishes it.
+  ['_disableBots', { key: 'DISABLE_BOTS', parse: bzdbIsTrue }],
   ['_drawSky', { key: 'DRAW_SKY', parse: bzdbIsTrue }],
   ['_fogNoSky', { key: 'FOG_NO_SKY', parse: bzdbIsTrue }],
   // Always on in bzo -- a browser has no place of its own -- so read and kept.
@@ -236,6 +238,13 @@ export const BZDB_CONFIG_VARS = new Map([
   ['_drawGroundLights', { key: 'DRAW_GROUND_LIGHTS', parse: bzdbIsTrue }],
   // How long a player may go unheard before it is marked not responding.
   ['_notRespondingTime', { key: 'NOT_RESPONDING_TIME' }],
+  // How long a player's score waits for them to come back (allejo's
+  // ScoreRestorer plugin, which many servers run).
+  ['_scoreSaveTime', { key: 'SCORE_SAVE_TIME', allowZero: true }],
+  // allejo's ctfOverseer plugin: no capturing a team's own flag, and a
+  // captured team flag out of enemy reach for this many seconds.
+  ['_disallowSelfCap', { key: 'DISALLOW_SELF_CAP', parse: bzdbIsTrue }],
+  ['_delayTeamFlagGrab', { key: 'DELAY_TEAM_FLAG_GRAB', any: true }],
   // The width of a world the server generates (server/world-generator.cjs),
   // as upstream's generators read it. A map file's own `world size` wins.
   ['_worldSize', { key: 'WORLD_SIZE' }],

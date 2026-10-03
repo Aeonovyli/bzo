@@ -1936,7 +1936,6 @@ for (const theirs of ['ST', 'CL', 'MQ', 'SE', null]) {
   configureTankDimensions({ TANK_LENGTH: 5 });
   assert.equal(TANK.halfLength, 2.5);
   close(TANK.radius, 3.6, '_tankRadius follows _tankLength');
-  close(TANK.hitRadius, 2 * (3.6 / 4.32), 'bzo\'s hit radius keeps its ratio');
   close(getFlagGrabRadius(), 3.6 + (6.82 - 4.32), 'and so does the grab reach');
   close(TANK.muzzleForward, 3.0 * (3.7 / 4.42), '_muzzleFront follows _tankRadius');
   close(TANK.modelScale.length, 5 / 6);

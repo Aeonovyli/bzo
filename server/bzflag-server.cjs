@@ -222,8 +222,19 @@ function createBzflagServer({
     return false;
   }
 
+  // MsgSuperKill, which bzfs sends a player it drops (`removePlayer`,
+  // bzfs.cxx:2907) and every player as it shuts down (bzfs.cxx:1029), so the
+  // client says the server cut it off rather than that it lost the link.
+  // Not to one that said MsgExit, as bzfs leaves those unnotified.
+  function superKill(connection) {
+    if (connection.socket.writableEnded || connection.exited) return;
+    sendFrame(connection.socket, 'sk');
+    connection.socket.end();
+  }
+
   function answer(connection, code, payload) {
     const { socket } = connection;
+    if (code === 'ex') connection.exited = true;
     if (connection.link) {
       connection.link.onFrame?.(code, payload);
       return !connection.link.closed;
@@ -277,7 +288,11 @@ function createBzflagServer({
           else sendFrame(socket, frameCode, body);
         },
         reject: (reason) => reject(connection, reason),
-        close: () => { link.closed = true; socket.end(); },
+        // `getPlayerHostInfo`'s ` udp` and `+` (NetHandler.cxx:831): heard
+        // from on UDP, and sent to on UDP.
+        udpIn: () => Boolean(connection.udpAddr),
+        udpOut: () => Boolean(connection.udpOut),
+        close: () => { link.closed = true; superKill(connection); },
         onFrame: null,
         onClose: null,
       };
@@ -432,7 +447,7 @@ function createBzflagServer({
       });
     },
     close() {
-      for (const connection of connections) connection.socket.destroy();
+      for (const connection of connections) superKill(connection);
       server.close();
       udp?.close();
     },

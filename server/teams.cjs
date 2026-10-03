@@ -631,18 +631,6 @@ function pickNewRabbit({ candidates, oldRabbitId = null, killerId = null, select
   return anointRabbit(candidates, oldRabbitId);
 }
 
-// PlayerInfo::isARabbitKill (PlayerInfo.h:324) -- `wasRabbit || victim is the
-// rabbit`. Shooting the rabbit is never a team kill, and neither is anything the
-// deposed rabbit does before its next spawn: hunters are team mates, so
-// hunter-on-hunter fire *is* team killing, and this one window is the whole
-// exception to that. `wasRabbit` is set the moment a rabbit is deposed and
-// cleared when it spawns again (bzfs.cxx:3287).
-//
-// Server-only.
-function isARabbitKill(killer, victim) {
-  return Boolean(killer?.wasRabbit) || isRabbitTeam(victim?.team);
-}
-
 function getTeamScoreDeltasForKill(killerTeam, victimTeam, selfKill = false) {
   const deltas = [];
   if (killerTeam && killerTeam === victimTeam) {
@@ -790,7 +778,6 @@ module.exports = {
   canBeRabbit,
   anointRabbit,
   pickNewRabbit,
-  isARabbitKill,
   teamScoreMovesOnKill,
   getTeamScoreDeltasForKill,
   getTeamScoreDeltasForCapture,

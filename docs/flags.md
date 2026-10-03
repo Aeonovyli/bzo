@@ -308,10 +308,9 @@ compares against the fraction the player actually asked for.
   polyline through whatever it met, tagged with what ended each segment, which is
   the one thing a client cannot work out for itself. The shooter gets the muzzle
   flash and the report at once and the beam when `shotBegin` lands.
-- **The hit sphere is bzo's own radius**, so upstream's `0.99 *` shrink is not
-  applied -- that factor exists to sit inside `_tankRadius`, which bzo does not
-  use. The dimension ease is cosmetic only: the server owns hits and tests the
-  target size from the moment the flag changes hands.
+- **The dimension ease is cosmetic only.** The hit sphere is upstream's
+  (`0.99 * _tankRadius`, half the tank's height up), but the server owns hits
+  and tests the target size from the moment the flag changes hands.
 - **`getPauseRefusal` still asks a cylinder**, not the oriented box every other
   occupancy test uses. It is a bzo-only guard with no upstream equivalent, and a
   cylinder is deliberately more generous, so a flag can only ever make it

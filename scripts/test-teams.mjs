@@ -20,6 +20,7 @@ import {
   normalizePlayerTeam,
   normalizePlayerTeamSelection,
 } from '../public/teams.mjs';
+import { getKillScoreDeltas } from '../public/scoring.mjs';
 
 const require = createRequire(import.meta.url);
 const serverTeams = require('../server/teams.cjs');
@@ -322,7 +323,7 @@ for (const capping of [RED, BLUE, ROGUE, PLAYER_TEAM.OBSERVER, null, undefined])
 // PlayerInfo::canBeRabbit (PlayerInfo.cxx:504) and
 // GameKeeper::Player::anointRabbit (GameKeeper.cxx:145).
 {
-  const { canBeRabbit, anointRabbit, pickNewRabbit, isARabbitKill } = serverTeams;
+  const { canBeRabbit, anointRabbit, pickNewRabbit } = serverTeams;
   const player = (id, extra = {}) => ({
     id, paused: false, observer: false, alive: true, playing: true, ranking: 0.5, ...extra,
   });
@@ -411,14 +412,22 @@ for (const capping of [RED, BLUE, ROGUE, PLAYER_TEAM.OBSERVER, null, undefined])
     assert.equal(chosen, 'good', 'a random ranking must still respect eligibility');
   }
 
-  // isARabbitKill (PlayerInfo.h:324). Hunters are team mates, so hunter fire is
-  // team killing -- except on the rabbit, and except for a deposed rabbit until
-  // its next spawn.
-  assert.equal(isARabbitKill({ wasRabbit: false }, { team: PLAYER_TEAM.RABBIT }), true);
-  assert.equal(isARabbitKill({ wasRabbit: true }, { team: PLAYER_TEAM.HUNTER }), true);
-  assert.equal(isARabbitKill({ wasRabbit: false }, { team: PLAYER_TEAM.HUNTER }), false);
-  assert.equal(isARabbitKill(null, { team: PLAYER_TEAM.HUNTER }), false);
-  assert.equal(isARabbitKill({ wasRabbit: false }, null), false);
+  // getKillScoreDeltas (bzfs.cxx:3437). The victim takes a loss; a foe's kill
+  // is a win, a team mate's a loss and a team kill -- and hunters are team
+  // mates, so hunter fire is team killing, except on the rabbit and except for
+  // a deposed rabbit until its next spawn (isARabbitKill, PlayerInfo.h:324).
+  const kill = (killerTeam, victimTeam, extra = {}) => getKillScoreDeltas({
+    killerId: 'k', victimId: 'v', killerTeam, victimTeam, teamsAllowed: true, ...extra,
+  });
+  const { HUNTER, RABBIT, RED, BLUE } = PLAYER_TEAM;
+  assert.deepEqual(kill(RED, BLUE).killer, { wins: 1, losses: 0, tks: 0 });
+  assert.deepEqual(kill(RED, BLUE).victim, { wins: 0, losses: 1, tks: 0 });
+  assert.deepEqual(kill(RED, RED).killer, { wins: 0, losses: 1, tks: 1 });
+  assert.equal(kill(HUNTER, HUNTER).teamKill, true);
+  assert.equal(kill(HUNTER, RABBIT).teamKill, false);
+  assert.equal(kill(HUNTER, HUNTER, { killerWasRabbit: true }).teamKill, false);
+  assert.equal(getKillScoreDeltas({ killerId: null, victimId: 'v', victimTeam: RED }).killer, null);
+  assert.equal(getKillScoreDeltas({ killerId: 'v', victimId: 'v', victimTeam: RED }).killer, null);
 }
 
 // `rabbit` in server.json and `-rabbit` in a map, normalized to upstream's three

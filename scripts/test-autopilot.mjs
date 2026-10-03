@@ -90,6 +90,55 @@ function enemy(x, z, extra = {}) {
   assert.equal(plain.fire, false, 'a normal shot would fly under it');
 }
 
+// Ace fires only at a foe the shot can reach, which Roger does not ask: a
+// 100-unit shot that lives 3.5 seconds carries about 350 past the muzzle.
+{
+  const reach = { self: { shotSpeed: 100, shotLifetime: 3.5, muzzleForward: 3 } };
+  const near = new Ace().think(makeView({ ...reach, players: [enemy(0, -150)] }));
+  assert.equal(near.fire, true, 'a foe in range is shot');
+  const far = new Ace().think(makeView({ ...reach, players: [enemy(0, -600)] }));
+  assert.equal(far.fire, false, 'a foe out of range is not');
+  const roger = new Roger().think(makeView({ ...reach, players: [enemy(0, -600)] }));
+  assert.equal(roger.fire, true, 'Roger fires anyway, as upstream does');
+}
+
+// A lunge: Ace holding still, a still foe 415 away -- base to base on HiX --
+// past a standing shot's 350 but inside one fired at full speed. He drives
+// forward, fires on the next frame with the move saying so, and stops.
+{
+  const pilot = new Ace();
+  const frame = (now, speed) => {
+    const view = makeView({
+      now,
+      self: { shotSpeed: 100, shotLifetime: 3.5, muzzleForward: 4.42, topSpeed: 25, velocity: { x: 0, y: 0, z: -speed } },
+      players: [enemy(0, -415)],
+      firstHit: () => ({ y: 0 }),
+    });
+    const ctx = {
+      view,
+      me: { ...view.self, azimuth: Math.PI / 2, vx: 0, vy: speed, vz: 0 },
+      out: { rotation: 0, speed: 0, fire: false, intent: {} },
+    };
+    pilot.fireAtTank(ctx);
+    return ctx.out;
+  };
+  const start = frame(100, 0);
+  assert.equal(start.fire, false, 'a standing shot falls short');
+  assert.equal(start.speed, 1, 'so he drives forward');
+  const shot = frame(100.02, 25);
+  assert.equal(shot.fire, true, 'and fires once the speed carries it');
+  assert.equal(shot.speed, 1, 'still moving, as the move it goes with says');
+  assert.equal(frame(100.04, 25).speed, 0, 'then stops');
+  const moving = new Ace();
+  const ctx = {
+    view: makeView({ now: 100, self: { shotSpeed: 100, shotLifetime: 3.5 }, players: [enemy(0, -415, { vz: -10 })] }),
+    out: { rotation: 0, speed: 0, fire: false, intent: {} },
+  };
+  ctx.me = { ...ctx.view.self, azimuth: Math.PI / 2, vx: 0, vy: 0, vz: 0 };
+  moving.fireAtTank(ctx);
+  assert.equal(ctx.out.speed, 0, 'not at a foe on the move');
+}
+
 // An enemy off to the west turns the tank left, and is not fired on.
 {
   const out = new Roger().think(makeView({ players: [enemy(-100, 0)] }));

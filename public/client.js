@@ -114,7 +114,9 @@ import {
   ADMIN_PLAYERS,
   FIRST_TEAM,
 } from './player-ids.mjs';
-import { getMenuClickDirection } from './menus.js';
+import { getMenuClickDirection, playMenuBackSound, playMenuSelectSound, setMenuSoundPlayer } from './menus.js';
+
+setMenuSoundPlayer((name) => renderManager.playLocalSound(name));
 import { DestructCountdown, PauseState } from './pause.mjs';
 import { HUNT_MARKER_COLOR, HuntState } from './hunt.mjs';
 import { XRMenuRenderer } from './xr-menu.js';
@@ -222,6 +224,7 @@ import {
   normalizePlayerTeam,
   normalizePlayerTeamSelection,
 } from './teams.mjs';
+import { getKillScoreDeltas } from './scoring.mjs';
 import {
   RADAR_BOX_CORNERS,
   clipPolygonToRadarSquare,
@@ -1582,6 +1585,10 @@ function rebuildTankColor(playerId) {
 function applyNewRabbit(nextRabbitId) {
   const previousRabbitId = rabbitPlayerId;
   rabbitPlayerId = nextRabbitId;
+  // PlayerInfo::wasARabbit: deposed, and excused a team kill until it spawns
+  // again, when its fresh state clears this.
+  const deposed = previousRabbitId !== nextRabbitId ? getPlayerStateOf(previousRabbitId) : null;
+  if (deposed) deposed.wasRabbit = true;
 
   tanks.forEach((tank, id) => {
     const state = tank.userData?.playerState;
@@ -7086,6 +7093,38 @@ function sendToServer(message) {
 }
 
 
+// A player's scoreboard state, my own included.
+function getPlayerStateOf(playerId) {
+  if (playerId === null || playerId === undefined) return null;
+  return (playerId === myPlayerId ? myTank : tanks.get(playerId))?.userData?.playerState ?? null;
+}
+
+function addScore(state, delta) {
+  if (!state || !delta) return;
+  state.wins = (state.wins || 0) + delta.wins;
+  state.losses = (state.losses || 0) + delta.losses;
+  state.tks = (state.tks || 0) + delta.tks;
+}
+
+// Set by `superKill`, so the close after it is not reported as a lost link.
+let serverForcedDisconnect = false;
+// Set by a `superKill` that says not to come straight back: a kick or a ban.
+let waitToRejoin = false;
+
+// Once, on the player's next key, tap or XR select.
+function onNextPlayerAction(run) {
+  const session = renderManager.renderer?.xr?.getSession?.();
+  const once = () => {
+    window.removeEventListener('keydown', once, true);
+    window.removeEventListener('pointerdown', once, true);
+    session?.removeEventListener('select', once);
+    run();
+  };
+  window.addEventListener('keydown', once, true);
+  window.addEventListener('pointerdown', once, true);
+  session?.addEventListener('select', once);
+}
+
 function connectToServer() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   // `?proxy=<target>` rides on the socket as well as the page: it is how the
@@ -7167,7 +7206,16 @@ function connectToServer() {
       scheduleReconnect(2000);
       return;
     }
-    showMessage(`Disconnected from server | Kills: ${wins} | Deaths: ${losses}`, 'death');
+    if (!serverForcedDisconnect) showMessage(`Disconnected from server | Kills: ${wins} | Deaths: ${losses}`, 'death');
+    serverForcedDisconnect = false;
+    if (waitToRejoin) {
+      waitToRejoin = false;
+      setTimeout(() => {
+        showMessage('Press a key, tap or pull a trigger to rejoin', 'death');
+        onNextPlayerAction(() => scheduleReconnect(0));
+      }, 3000);
+      return;
+    }
     scheduleReconnect(3000);
   };
 
@@ -7754,6 +7802,18 @@ function handleServerMessage(message) {
       applyNewRabbit(message.playerId ?? null);
       break;
 
+    case 'matchStart':
+      // resetPlayerScores: everybody back to nothing, as on the server.
+      for (const id of [myPlayerId, ...tanks.keys()]) {
+        const state = getPlayerStateOf(id);
+        if (!state) continue;
+        state.wins = 0;
+        state.losses = 0;
+        state.tks = 0;
+      }
+      refreshScoreboards();
+      break;
+
     case 'timeUpdate':
       applyMatchTimeUpdate(typeof message.timeLeft === 'number' ? message.timeLeft : null);
       break;
@@ -8162,6 +8222,16 @@ function handleServerMessage(message) {
       }
       break;
 
+    case 'superKill':
+      // MsgSuperKill's words (playing.cxx:2115); the reason came before it
+      // as a server message.
+      serverForcedDisconnect = true;
+      // A kick or a ban: come back only when the player asks, as a BZFlag
+      // client must, rather than straight back into what removed it.
+      waitToRejoin = message.rejoin === false;
+      showMessage('Server forced a disconnect', 'death');
+      break;
+
     case 'reload':
       // The server usually says this on its way out -- a map change restarts it
       // -- so the reload waits for it to come back rather than racing it.
@@ -8388,6 +8458,7 @@ function createProjectile(data) {
   // unlike a tank there is nothing worth keeping track of underneath.
   if (isPreviewingAltWorld()) return;
   const effects = getShotEffects(data.flag ?? null);
+  data = withShotFlight(data, effects);
 
   // A beam is traced whole when it is fired and does not move, so there is no
   // local copy to re-anchor and nothing to integrate: it is drawn from the
@@ -8406,7 +8477,7 @@ function createProjectile(data) {
       { colliders: getCollisionColliders(), teleports: TELEPORTER_INDEX, mapSize: currentWorldMapSize ?? DEFAULT_MAP_SIZE },
       { x: data.x, y: data.y, z: data.z },
       { x: data.dirX, y: Number.isFinite(data.dirY) ? data.dirY : 0, z: data.dirZ },
-      getAnnouncedShotSpeed(data) * getShotLifetimeSeconds(data.flag ?? null),
+      data.speed * getShotLifetimeSeconds(data.flag ?? null),
       { ricochet: data.ricochet === true, throughBuildings: effects.throughBuildings === true },
     ).segments;
     const beam = renderManager.createShotBeam({
@@ -8449,7 +8520,7 @@ function createProjectile(data) {
       localProjectile.userData.pendingServerAck = false;
       localProjectile.userData.flag = data.flag ?? null;
       localProjectile.userData.ricochet = data.ricochet === true;
-      localProjectile.userData.speed = getAnnouncedShotSpeed(data);
+      localProjectile.userData.speed = data.speed;
       localProjectile.userData.lifeFactor = effects.lifeFactor;
       localProjectile.userData.hiddenOnRadar = effects.hiddenOnRadar;
       localProjectile.userData.guided = effects.guided;
@@ -8494,7 +8565,7 @@ function createProjectile(data) {
   projectile.userData.ricochet = data.ricochet === true;
   // How fast it flies, how long its slot is held, and whether anybody else's
   // radar shows it -- all three come off the firing flag.
-  projectile.userData.speed = getAnnouncedShotSpeed(data);
+  projectile.userData.speed = data.speed;
   projectile.userData.lifeFactor = effects.lifeFactor;
   projectile.userData.hiddenOnRadar = effects.hiddenOnRadar;
   // A missile's heading is not fixed at the muzzle: `updateProjectiles` turns it
@@ -8508,11 +8579,14 @@ function createProjectile(data) {
   projectiles.set(data.id, projectile);
 }
 
-// A shot's speed is its own -- its tank's velocity is part of it -- and
-// `shotBegin` says what it is. A proxied Guided Missile's is left out, being the
-// world's.
-function getAnnouncedShotSpeed(data) {
-  return Number.isFinite(data.speed) ? data.speed : getShotSpeed(data.flag ?? null);
+// `shotBegin` carries the velocity the shot was fired with, as upstream's
+// MsgShotBegin does, and this screen makes its flight from it the way every
+// upstream client's shot strategy does: the flag's factor on a segmented shot,
+// the world's speed along the heading for a Guided Missile, none for a wave.
+function withShotFlight(data, effects) {
+  const flight = getShotFlight({ x: data.vx, y: data.vy, z: data.vz }, effects, getShotSpeed(null))
+    || { x: 0, y: 0, z: 0, speed: 0 };
+  return { ...data, dirX: flight.x, dirY: flight.y, dirZ: flight.z, speed: flight.speed };
 }
 
 function createLocalProjectile({ x, y, z, dirX, dirZ, dirY = 0, speed }) {
@@ -8785,13 +8859,22 @@ function handlePlayerHit(message) {
   }
   // Update other players' stats
 
-  if (!isCapture) {
-    if (shooterTank && shooterTank.userData.playerState) {
-      shooterTank.userData.playerState.wins = (shooterTank.userData.playerState.wins || 0) + 1;
-    }
-    if (victimTank && victimTank.userData.playerState) {
-      victimTank.userData.playerState.losses = (victimTank.userData.playerState.losses || 0) + 1;
-    }
+  // The scoreboard, tallied here from the kill as the server tallies it
+  // (`getKillScoreDeltas`, one rule for both). A capture's and the match end's
+  // deaths score nobody, there as here.
+  if (!isCapture && message.reason !== 'gameOver') {
+    const shooterState = getPlayerStateOf(message.shooterId);
+    const victimState = getPlayerStateOf(message.victimId);
+    const deltas = getKillScoreDeltas({
+      killerId: shooterState ? message.shooterId : null,
+      victimId: message.victimId,
+      killerTeam: shooterState?.team ?? null,
+      victimTeam: victimState?.team ?? null,
+      teamsAllowed: gameConfig?.TEAMS_ALLOWED !== false,
+      killerWasRabbit: shooterState?.wasRabbit === true,
+    });
+    addScore(victimState, deltas.victim);
+    addScore(shooterState, deltas.killer);
     // Personal head-to-head record (Player::changeLocalScore, playing.cxx:2556):
     // kept on the opponent's own state, not mine, so their scoreboard row can
     // show my score against them specifically -- the aggregate kills/deaths
@@ -13960,6 +14043,8 @@ function checkFlagCapture() {
   const ownFlagOnEnemyBase = flagTeamIndex === myTeamIndex && baseTeamIndex !== myTeamIndex;
   const enemyFlagOnMyBase = flagTeamIndex !== myTeamIndex && baseTeamIndex === myTeamIndex;
   if (!ownFlagOnEnemyBase && !enemyFlagOnMyBase) return;
+  // `_disallowSelfCap`: the server would refuse it.
+  if (ownFlagOnEnemyBase && gameConfig?.DISALLOW_SELF_CAP === true) return;
 
   const now = performance.now();
   if (now - lastCaptureRequestAt < FLAG_GRAB_INTERVAL_MS) return;
@@ -14349,7 +14434,7 @@ function checkOwnEnvironmentDeath() {
   );
   if (driver && driver.death) {
     reportedOwnDeath = true;
-    sendOwnDeath({ reason: 'physicsDriver', deathMessage: driver.death });
+    sendOwnDeath({ reason: 'physicsDriver', deathMessage: driver.death, phydrv: driver.index ?? -1 });
     return;
   }
   // `(waterLevel > 0.0f) && (myTank->getPosition()[2] <= waterLevel)`
@@ -14400,7 +14485,7 @@ function checkOwnRunOver() {
       myTank.position.y - tank.position.y,
       myTank.position.z - tank.position.z,
     );
-    if (separation >= getRunOverRadius(myFlagType, rollerFlagType, TANK.hitRadius)) continue;
+    if (separation >= getRunOverRadius(myFlagType, rollerFlagType, TANK.radius)) continue;
 
     reportedOwnDeath = true;
     sendOwnDeath({ reason: 'runOver', killerId: playerId, shotId: null, flag: null });
@@ -17257,9 +17342,13 @@ function handleXRSettingsMenuInput(now = performance.now()) {
   const pressed = Boolean(xrInput.buttonB);
   if (pressed && !xrSettingsShortcutLatched) {
     xrSettingsShortcutLatched = true;
-    if (!xrSettingsMenuOpen) toggleXRSettingsMenu();
-    else if (xrSettingsMenuScreen === 'settings') closeXRSettingsMenu();
-    else setXRSettingsMenuScreen('settings');
+    if (!xrSettingsMenuOpen) {
+      toggleXRSettingsMenu();
+    } else {
+      playMenuBackSound();
+      if (xrSettingsMenuScreen === 'settings') closeXRSettingsMenu();
+      else setXRSettingsMenuScreen('settings');
+    }
   } else if (!pressed) {
     xrSettingsShortcutLatched = false;
   }
@@ -17301,6 +17390,7 @@ function handleXRSettingsMenuInput(now = performance.now()) {
   const activatePressed = xrInput.leftTrigger > 0.5 || xrInput.rightTrigger > 0.5 || xrInput.buttonA;
   if (activatePressed && !xrSettingsMenuActivateLatched) {
     const selectedItem = items[xrSettingsMenuSelectedIndex];
+    playMenuSelectSound();
     activateXRSettingsMenuSelection(selectedItem);
   }
   xrSettingsMenuActivateLatched = activatePressed;
@@ -17309,6 +17399,7 @@ function handleXRSettingsMenuInput(now = performance.now()) {
   // way back out of a submenu.
   const backPressed = xrInput.buttonGrip;
   if (backPressed && !xrSettingsMenuBackLatched) {
+    playMenuBackSound();
     if (xrSettingsMenuScreen === 'settings') closeXRSettingsMenu();
     else setXRSettingsMenuScreen('settings');
   }

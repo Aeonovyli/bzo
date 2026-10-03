@@ -105,7 +105,7 @@ omitted rather than sent null.
 | `watchBots` | `on`, `follow` | send `botIntents`: `on` while the client's debug labels show the server bots' modes, `follow` the bot an observer follows with debug geometry on, or null |
 | `selfDestruct` | -- | `/kill` on yourself |
 | `identify` | -- | toggle the lock/identify target |
-| `killed` | `reason`,`killerId`,`shotId`,`flag`,`stoppedByHit`,`deathMessage` | the client reporting its own death. Only on a proxied connection, where bzfs takes the victim's word for it -- bzo's own server decides deaths itself and ignores this |
+| `killed` | `reason`,`killerId`,`shotId`,`flag`,`stoppedByHit`,`deathMessage`,`phydrv` | the client reporting its own death. Only on a proxied connection, where bzfs takes the victim's word for it -- bzo's own server decides deaths itself and ignores this |
 | `lockTarget` | `targetId`,`shotId`,`x`,`y`,`z`,`dirX`,`dirY`,`dirZ`,`speed` | a guided missile of the client's own naming who it is chasing. Proxied connections only, and only when the target changes |
 | `message` | `dst`, `msgType`, `text` | chat. `dst` is a player id, or one of the reserved ids below; `msgType` is `chat`/`action`/`team`/`admin`/... |
 | `setTankModel` | `tankModel` | change tank mid-session |
@@ -135,8 +135,8 @@ omitted rather than sent null.
 | `positionCorrection` | `x`,`y`,`z`,`r`,`vv` | the server moved you; the client snaps |
 | `playerJoined` / `playerLeft` / `playerUpdated` / `playerList` | player records | roster. A record carries `bzid` only to an admin -- `broadcastPlayerRecord` sends two payloads, and `getState` omits the field entirely for everyone else |
 | `alive` | player record | spawn |
-| `killed` | `victimId`, `shooterId`, `projectileId`, plus the hit's own fields | somebody died, and why |
-| `shotBegin` | `id`, `playerId`, `x`,`y`,`z`, `shotSlot`, `dirX`,`dirY`,`dirZ`, `speed`, `flag`, `ricochet`, `segments`, `target`, `createdAt` | a shot exists; `dir` is a unit heading and `speed` what the flag made of the fired velocity (absent on a proxied Guided Missile, which flies at the world's) |
+| `killed` | `victimId`, `shooterId`, `projectileId`, plus the hit's own fields | somebody died, and why; a death-touch carries its message and `phydrv`, the driver's index as upstream's `MsgKilled` names it |
+| `shotBegin` | `id`, `playerId`, `x`,`y`,`z`, `shotSlot`, `vx`,`vy`,`vz`, `flag`, `ricochet`, `segments`, `target`, `createdAt` | a shot exists; `v` is the velocity it was fired with, as `MsgShotBegin` carries it, and each receiver makes the flight from it and the flag (`getShotFlight`), as each upstream client's shot strategy does |
 | `shotEnd` | `id`, `reason`, `x`,`y`,`z` | it stopped, and where |
 | `reload` | -- | reload the page: the server is restarting, usually for a map change |
 | `flagUpdate` | `flags` | the whole flag array |
@@ -148,6 +148,7 @@ omitted rather than sent null.
 | `teamUpdate` | `teams` | team scores and sizes |
 | `scoreOver` | `playerId`, `team` | the match ended on score |
 | `timeUpdate` | `timeLeft` | the match clock |
+| `matchStart` | | a match begins: every player's score is back to nothing. Scores are never sent; each client tallies them from `killed` with the server's own rule (`getKillScoreDeltas`), so this and the scores a join carries are all it needs |
 | `newRabbit` | `playerId` | rabbit anointed |
 | `gmUpdate` | `playerId`, `targetId` | a GM lock (`MsgGMUpdate`'s target half) |
 | `identifyResult` | `targetId`, `locked` | the identify answer |

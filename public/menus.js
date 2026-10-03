@@ -264,9 +264,25 @@ function getOpenDialogForElement(activeElement) {
   return getDialogRoots().find((dialog) => isElementVisible(dialog) && dialog.contains(activeElement)) || null;
 }
 
+// Upstream's menu keys (MenuDefaultKey.cxx:41): Escape out of a menu plays the
+// flag-drop sound and Enter on an item the flag-grab one. The client hands in
+// what plays them.
+let playMenuSound = () => {};
+export function setMenuSoundPlayer(play) {
+  playMenuSound = play;
+}
+export function playMenuBackSound() {
+  playMenuSound('flagDrop');
+}
+export function playMenuSelectSound() {
+  playMenuSound('flagGrab');
+}
+
 function dismissVisibleDialog(dismissDialog, dialog) {
   if (typeof dismissDialog !== 'function' || !dialog) return false;
-  return Boolean(dismissDialog(dialog.id, dialog));
+  const dismissed = Boolean(dismissDialog(dialog.id, dialog));
+  if (dismissed) playMenuBackSound();
+  return dismissed;
 }
 
 function activateFocusedControl(dialog) {
@@ -276,6 +292,7 @@ function activateFocusedControl(dialog) {
     return focusFirstDialogControl(dialog);
   }
   if (typeof target.click === 'function') {
+    playMenuSelectSound();
     target.click();
     return true;
   }
@@ -365,6 +382,10 @@ export function handleDialogKeydown(event, { dismissDialog } = {}) {
     }
     return false;
   }
+
+  // Enter stays the browser's, which clicks the focused control; only the
+  // sound is added.
+  if (event.key === 'Enter' && !event.repeat) playMenuSelectSound();
 
   // A dialog you read rather than one you operate: the arrows scroll it. Cycling
   // focus through its handful of links leaves most of the text unreachable, and
