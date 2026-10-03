@@ -3917,6 +3917,18 @@ breaking change. The override lifts qs to 6.16.0 inside express's tree, which is
 a semver-minor bump. Drop it when express 4 ships a body-parser that allows
 6.16, and re-run `npm audit`.
 
+**`npm audit`'s high `braces` findings are known and dev-only** (#175).
+GHSA-vfj7-8cjw-p6xm (stack exhaustion on deeply nested brace patterns)
+covers every `braces` release, 3.0.3 included, and reaches bzo only through
+dev tools: `nodemon` -> `chokidar` 3 and `lint-staged` -> `micromatch`.
+`npm audit --omit=dev`, which CI and the release run, finds nothing, and the
+Docker image installs with `--omit=dev`. The patterns those tools expand are
+our own config, not player input. Do not run `npm audit fix --force`: it
+answers this by downgrading nodemon to 1.14.10. lint-staged 17 drops
+`micromatch` but needs Node 22.22.1, outside the pins above; nodemon 3.1.14
+is the latest and still on `chokidar` 3. Revisit when `braces` ships a fix
+or nodemon moves to `chokidar` 4+, and re-run `npm audit`.
+
 There is no automated browser or gameplay test. Manual play sessions remain the
 regression check for rendering, prediction, and XR. Use
 `docs/webxr-validation.md` for XR changes.

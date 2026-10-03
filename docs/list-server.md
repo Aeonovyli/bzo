@@ -338,6 +338,14 @@ stale*, using three signals, cheapest first:
 3. **The world itself**, the only expensive signal, fetched only when the hash
    says the picture is stale or missing.
 
+**A server's build** is learned on the same visit. The BZFlag list carries
+only the protocol (`BZFS0221`), never the `build` an ADD sends, so the
+momentary observer join that reads a server's variables also sends
+`/serverquery` and keeps bzfs's private answer, "BZFS Version:
+<getAppVersion()>" (`commands.cxx:817`). It shows as Version in the row's pane,
+beside a bzo row's own `bzo-<release>-<build>`. A server not asked yet is
+visited for it, at most once a week, spaced like every other visit.
+
 With no signal at all a server is rechecked every 24 hours. That floor is what
 makes a weak fingerprint safe -- a map change it misses delays a redraw by a
 day rather than losing it -- and it makes "your thumbnail will update

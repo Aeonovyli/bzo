@@ -511,10 +511,32 @@ async function enterAndProbe(socket, readFrame, selfId, probe = null, motto = IM
     }
   }
 
+  // `/serverquery` (commands.cxx:817), which any player may send: the one
+  // place bzfs says its build, "BZFS Version: <getAppVersion()>". Answered
+  // privately, so nobody else's chat shows it.
+  let serverVersion = null;
+  if (accepted && !gone) {
+    const query = Buffer.alloc(1 + MESSAGE_LEN);
+    query.writeUInt8(SERVER_PLAYER_ID, 0);
+    query.write('/serverquery', 1, MESSAGE_LEN - 1, 'ascii');
+    sendFrame(socket, 'mg', query);
+    const until = Date.now() + GUEST_REPLY_TIMEOUT_MS;
+    for (;;) {
+      const { code, payload } = await read(until);
+      if (!code || code === 'sk' || code === 'rj') break;
+      if (code !== 'mg') continue;
+      const match = /^BZFS Version: (.+)$/.exec(serverLine(payload) || '');
+      if (match) {
+        serverVersion = match[1].replace(/[^\x20-\x7e]/g, '').trim().slice(0, 80) || null;
+        break;
+      }
+    }
+  }
+
   // Leave whether or not anything arrived: a server that is told frees the
   // slot now rather than waiting out a timeout on it.
   try { sendFrame(socket, 'ex'); } catch { /* already gone */ }
-  return { variables: vars.size > 0 ? vars : null, guest: chat || spawn ? guest : null };
+  return { variables: vars.size > 0 ? vars : null, guest: chat || spawn ? guest : null, serverVersion };
 }
 
 // The same visit without the world: for a server whose world bzo already holds
@@ -546,8 +568,9 @@ function probeGuestAccess(host, port, { spawn = false, motto, timeout = 20000 } 
           throw new Error(`protocol ${version} (bzo speaks ${PROTOCOL_VERSION})`);
         }
         if (playerId === 0xff) throw new Error('rejected (full, banned, or closed)');
-        const { guest } = await enterAndProbe(socket, readFrame, playerId, { chat: true, spawn }, motto);
-        done(null, guest || {});
+        const { guest, serverVersion } = await enterAndProbe(socket, readFrame, playerId, { chat: true, spawn }, motto);
+        // The version rides on the answers; the tracker takes it off.
+        done(null, { ...(guest || {}), ...(serverVersion ? { serverVersion } : {}) });
       } catch (err) {
         done(err);
       }
@@ -664,11 +687,13 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
         // connection, and only the variables need a seat.
         let variables = null;
         let guest = null;
+        let serverVersion = null;
         if (options.enterForVariables !== false) {
           try {
             const joined = await enterAndProbe(socket, readFrame, playerId, options.guest, options.motto);
             variables = joined.variables;
             guest = joined.guest;
+            serverVersion = joined.serverVersion;
           } catch {
             variables = null;
           }
@@ -680,6 +705,7 @@ function fetchWorldFromServer(host, port, timeout, options = {}) {
           queryGame,
           variables,
           guest,
+          serverVersion,
           worldHash: /^[pt][0-9a-f]{32}$/.test(worldHash) ? worldHash : '',
         });
       } catch (err) {

@@ -1317,6 +1317,8 @@ function publishWorldFacts(host, port) {
     json: measured.json || record?.json || 0,
     brotli: measured.brotli || record?.brotli || 0,
     variables: record?.variables?.length ? record.variables : undefined,
+    // bzfs's own `getAppVersion()`, from `/serverquery` on a visit.
+    version: record?.serverVersion || undefined,
     // What an unregistered player may do there, where a visit has found out
     // (`server/bzfs-worlds.cjs`). Absent until it has.
     guestWatch: guestAnswer(record?.guest?.watch),
@@ -1505,6 +1507,7 @@ function isForumBzid(bzid) {
 
 function describeRelayedWorld(world) {
   return [
+    ['Version', escapeHtml(String(world.version || '').slice(0, 80))],
     ['BZFlag hash', escapeHtml(world.hash || '')],
     // A `t` hash is a world bzfs generated rather than read from a file, which
     // usually changes when that server restarts (`isBzfsWorldHash`).
@@ -3511,7 +3514,7 @@ async function performRemoteMapImport(host, port, timeout, guest = null) {
 // and the address bzo reaches it on is private (`docs/proxy.md`).
 async function performRemoteMapImportNow(listedServer, safeMapName, timeout, guestQuestions = null) {
   const { host, port, dialHost = host, dialPort = port } = listedServer;
-  const { worldDatabase, gameSettings, queryGame, variables, worldHash, guest } =
+  const { worldDatabase, gameSettings, queryGame, variables, worldHash, guest, serverVersion } =
     await fetchWorldFromServer(dialHost, dialPort, timeout || IMPORT_WORLD_TIMEOUT_MS,
       { guest: guestQuestions, motto: serverCheckMotto() });
   const tree = parseWorldDatabase(worldDatabase);
@@ -3524,7 +3527,7 @@ async function performRemoteMapImportNow(listedServer, safeMapName, timeout, gue
     byteLength: worldDatabase.length,
     compressedSize: tree.compressedSize,
     uncompressedSize: tree.uncompressedSize,
-  }, variables ? collectNonDefaultVariables(variables) : null, guest);
+  }, variables ? collectNonDefaultVariables(variables) : null, guest, serverVersion);
   // The server's own world variables, for the `-set` lines in the exported
   // map. Null when the momentary observer join that carries them was refused
   // or timed out (see `fetchWorldFromServer`); the map imports either way.
@@ -15476,7 +15479,7 @@ function computeListServerStatus() {
       .filter((p) => p.joined && p.team !== PLAYER_TEAM.OBSERVER && !p.bot).length,
     bots,
     maxPlayers: MAX_REAL_PLAYERS,
-    version: SERVER_VERSION,
+    version: BZO_APP_VERSION,
     gameOptionsBits: computeLocalGameOptionsBits(),
     // Whether bots are refused, autopilot included (`-disableBots`), which a
     // player choosing a server for its bots, or to fly one, wants to know first.

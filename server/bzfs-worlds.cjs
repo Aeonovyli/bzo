@@ -64,6 +64,9 @@ const GUEST_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 // hundred servers a couple of days to go round. A server whose turn comes too
 // soon is simply asked on a later day's check.
 const GUEST_VISIT_GAP_MS = 10 * 60 * 1000;
+// A server's build changes when its operator upgrades, and one that never
+// answers `/serverquery` is asked again only this often.
+const VERSION_RECHECK_MS = GUEST_RETRY_MS;
 
 function isGuestAnswer(value) {
   return value === 'yes' || value === 'no';
@@ -306,7 +309,11 @@ function createBzfsWorldTracker(deps) {
     const wantChat = guestFactDue(record.guest, 'chat', now, listChanged)
       || guestFactDue(record.guest, 'watch', now, listChanged);
     const wantSpawn = empty && guestFactDue(record.guest, 'spawn', now, listChanged);
-    const guestQuestions = wantChat || wantSpawn ? { chat: true, spawn: wantSpawn } : null;
+    // A server whose build bzo has not read yet (`/serverquery`, asked on the
+    // same join) is worth the visit too.
+    const wantVersion = !(now - (record.serverVersionAskedAt || 0) < VERSION_RECHECK_MS);
+    const guestQuestions = wantChat || wantSpawn || wantVersion
+      ? { chat: true, spawn: wantSpawn } : null;
 
     // The whole point of the dial: a world that has not changed needs no
     // download, however long ago the picture was drawn.
@@ -317,6 +324,7 @@ function createBzfsWorldTracker(deps) {
       && hasPicture(server.host, server.port, record.worldHash)
       && Array.isArray(record.variables)) {
       let guest = record.guest;
+      let { serverVersion, serverVersionAskedAt } = record;
       if (guestQuestions && probeGuestAccess && now - lastGuestVisitAt >= GUEST_VISIT_GAP_MS) {
         // A join is a join, so it is spaced like an import is too.
         if (now - lastImportAt < IMPORT_GAP_MS) {
@@ -326,8 +334,13 @@ function createBzfsWorldTracker(deps) {
         lastImportAt = now;
         lastGuestVisitAt = now;
         try {
-          guest = mergeGuest(guest, await probeGuestAccess(server.host, server.port, guestQuestions), now);
+          const { serverVersion: visitedVersion, ...answers } =
+            await probeGuestAccess(server.host, server.port, guestQuestions);
+          if (visitedVersion) serverVersion = visitedVersion;
+          serverVersionAskedAt = now;
+          guest = mergeGuest(guest, answers, now);
         } catch (error) {
+          serverVersionAskedAt = now;
           // Dated all the same, so a server that will not take the join is
           // asked again in a week rather than on every check.
           guest = mergeGuest(guest, {
@@ -339,10 +352,19 @@ function createBzfsWorldTracker(deps) {
           }, now);
         }
         log(`[WORLDS] ${key} guests: watch ${guest.watch || '?'}, chat ${guest.chat || '?'}`
-          + `${guestQuestions.spawn ? `, spawn ${guest.spawn || '?'}` : ''}`);
+          + `${guestQuestions.spawn ? `, spawn ${guest.spawn || '?'}` : ''}`
+          + `${serverVersion ? `; ${serverVersion}` : ''}`);
       }
       records.set(key, {
-        ...record, guest, fingerprint, checkedAt: now, error: null, errorAt: null, dueNow: false,
+        ...record,
+        guest,
+        serverVersion,
+        serverVersionAskedAt,
+        fingerprint,
+        checkedAt: now,
+        error: null,
+        errorAt: null,
+        dueNow: false,
       });
       save();
       return;
@@ -380,6 +402,8 @@ function createBzfsWorldTracker(deps) {
         // Recorded by `noteImport` during the import just made.
         variables: records.get(key)?.variables || record.variables || [],
         guest: records.get(key)?.guest || record.guest,
+        serverVersion: records.get(key)?.serverVersion || record.serverVersion,
+        serverVersionAskedAt: records.get(key)?.serverVersionAskedAt || record.serverVersionAskedAt,
         fingerprint,
         checkedAt: now,
         error: null,
@@ -437,7 +461,7 @@ function createBzfsWorldTracker(deps) {
     // `variables` are the world variables that server set away from upstream's
     // defaults, as `[name, value]` pairs; null when the join that carries them
     // was refused, which keeps what an earlier import learned.
-    noteImport(host, port, worldHash, sizes = null, variables = null, guest = null) {
+    noteImport(host, port, worldHash, sizes = null, variables = null, guest = null, serverVersion = null) {
       if (!host || !port) return;
       load();
       const key = serverKey(host, port);
@@ -455,6 +479,9 @@ function createBzfsWorldTracker(deps) {
         worldUncompressed: sizes?.uncompressedSize || record.worldUncompressed || 0,
         variables: Array.isArray(variables) ? variables : (record.variables || []),
         guest: guest ? mergeGuest(record.guest, guest, Date.now()) : record.guest,
+        serverVersion: serverVersion || record.serverVersion,
+        // Asked whenever the join was made, answered or not.
+        serverVersionAskedAt: Array.isArray(variables) ? Date.now() : record.serverVersionAskedAt,
         checkedAt: Date.now(),
         error: null,
         errorAt: null,
