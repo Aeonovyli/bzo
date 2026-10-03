@@ -31,8 +31,8 @@
              registered, as the title on /list's bzo-servers table
              (docs/list-server.md) -- so it's live, the same as MOTD. -->
         <div class="operatorRow operatorConfigRow">
-          <label for="serverNameInput">Server Name:</label>
-          <input type="text" id="serverNameInput" maxlength="60" placeholder="Server name">
+          <label for="serverTitleInput">Title:</label>
+          <input type="text" id="serverTitleInput" maxlength="100" placeholder="What this server is">
         </div>
         <div class="operatorRow operatorConfigRow">
           <label for="motdInput">Set MOTD:</label>
@@ -396,8 +396,7 @@
   <div id="entryDialog">
     <h2>Battlezone Online <button id="closeEntryBtn" class="closeBtn" type="button" aria-label="Close">&times;</button></h2>
     <div id="serverInfo">
-      <span id="serverName">Server:</span><br>
-      <span id="serverDescription"></span><br>
+      <span id="serverTitle"></span><br>
       <span id="serverMotd"></span>
     </div>
     <input type="text" id="entryInput" maxlength="20" placeholder="Enter your name">

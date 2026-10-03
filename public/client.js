@@ -575,11 +575,9 @@ function configForWorld(world) {
   const bzdb = new Map([...serverBzdb, ...bzdbFromObject(world?.bzdb)]);
   return evaluateWorldConfig({ ...worldBaseConfig, ...(world?.gameplay || {}) }, bzdb);
 }
-let serverDescriptionText = '';
 let serverMotdText = '';
-let serverNameText = '';
+let serverTitleText = '';
 let startupBuildInfoAnnounced = false;
-let lastAnnouncedServerDescription = null;
 let lastAnnouncedServerMotd = null;
 let radarCanvas, radarCtx;
 // One record per XR HUD overlay: the canvas it paints, the texture wrapping it,
@@ -3150,15 +3148,6 @@ function announceBuildInfoOnce() {
 
 function announceServerTextIfChanged() {
   let announced = false;
-
-  if (typeof serverDescriptionText === 'string') {
-    const nextDescription = serverDescriptionText.trim();
-    if (nextDescription.length > 0 && nextDescription !== lastAnnouncedServerDescription) {
-      addChatEntry(['server', 'all'], `[SERVER] Description: ${nextDescription}`, CHAT_KIND_SERVER);
-      lastAnnouncedServerDescription = nextDescription;
-      announced = true;
-    }
-  }
 
   if (typeof serverMotdText === 'string') {
     const nextMotd = serverMotdText.trim();
@@ -7365,14 +7354,11 @@ function handleServerMessage(message) {
       pendingJoinRequest = null;
 
       // Show server info in entryDialog
-      const serverNameEl = document.getElementById('serverName');
-      const serverDescriptionEl = document.getElementById('serverDescription');
+      const serverTitleEl = document.getElementById('serverTitle');
       const serverMotdEl = document.getElementById('serverMotd');
-      serverDescriptionText = message.description || '';
       serverMotdText = message.motd || '';
-      serverNameText = message.serverName || '';
-      if (serverNameEl) serverNameEl.textContent = 'Server: ' + serverNameText;
-      if (serverDescriptionEl) serverDescriptionEl.textContent = serverDescriptionText;
+      serverTitleText = message.title || '';
+      if (serverTitleEl) serverTitleEl.textContent = serverTitleText;
       if (serverMotdEl) serverMotdEl.textContent = serverMotdText;
       announceServerTextIfChanged();
       worldTime = message.worldTime;
@@ -9442,18 +9428,12 @@ function attachSortFilter(tableId, filterId) {
 }
 
 function handleServerConfigUpdate(message) {
-  if (typeof message.serverName === 'string') {
-    serverNameText = message.serverName;
-    const serverNameEl = document.getElementById('serverName');
-    const serverNameInput = document.getElementById('serverNameInput');
-    if (serverNameEl) serverNameEl.textContent = 'Server: ' + serverNameText;
-    if (serverNameInput) serverNameInput.value = serverNameText;
-  }
-
-  if (typeof message.description === 'string') {
-    serverDescriptionText = message.description;
-    const serverDescriptionEl = document.getElementById('serverDescription');
-    if (serverDescriptionEl) serverDescriptionEl.textContent = serverDescriptionText;
+  if (typeof message.title === 'string') {
+    serverTitleText = message.title;
+    const serverTitleEl = document.getElementById('serverTitle');
+    const serverTitleInput = document.getElementById('serverTitleInput');
+    if (serverTitleEl) serverTitleEl.textContent = serverTitleText;
+    if (serverTitleInput) serverTitleInput.value = serverTitleText;
   }
 
   if (typeof message.motd === 'string') {
@@ -9521,7 +9501,7 @@ let currentMapFile = '';
 // bzo server traces every shot and says where it stopped; a proxied target
 // leaves that to each client the way upstream always has.
 let clientTracesShots = false;
-let liveConfigKeys = ['serverName', 'motd', 'shotMaxActive', 'ricochet'];
+let liveConfigKeys = ['title', 'motd', 'shotMaxActive', 'ricochet'];
 // Sent in `init` too: what every setting the panel offers is currently set to.
 // The three live ones are read from the live config below instead, since a
 // `serverConfigUpdate` moves those without an `init` to carry them.
@@ -9568,7 +9548,7 @@ const operatorLimitKey = (team) => `${team}Limit`;
 function getOperatorServerState() {
   return {
     ...serverOperatorConfig,
-    serverName: serverNameText || '',
+    title: serverTitleText || '',
     motd: serverMotdText || '',
     // `|| SHOT_MAX_ACTIVE_MIN` would read a real zero as "no value" and then
     // answer with the minimum, which is now zero itself -- so the panel has
@@ -9752,9 +9732,9 @@ function paintOperatorRows(state) {
 
 function syncOperatorPanel() {
   if (!operatorStaged) return;
-  const serverNameInput = document.getElementById('serverNameInput');
-  if (serverNameInput && serverNameInput.value !== operatorStaged.serverName) {
-    serverNameInput.value = operatorStaged.serverName;
+  const serverTitleInput = document.getElementById('serverTitleInput');
+  if (serverTitleInput && serverTitleInput.value !== operatorStaged.title) {
+    serverTitleInput.value = operatorStaged.title;
   }
   const motdInput = document.getElementById('motdInput');
   if (motdInput && motdInput.value !== operatorStaged.motd) motdInput.value = operatorStaged.motd;
@@ -9875,9 +9855,9 @@ function wireOperatorPanel() {
   // type a space at all, only ever paste one in already-trimmed. The server
   // trims on commit regardless (applyServerConfigChanges), so nothing here
   // needs to.
-  const serverNameInput = document.getElementById('serverNameInput');
-  if (serverNameInput) {
-    serverNameInput.addEventListener('input', () => stageOperatorChange('serverName', serverNameInput.value));
+  const serverTitleInput = document.getElementById('serverTitleInput');
+  if (serverTitleInput) {
+    serverTitleInput.addEventListener('input', () => stageOperatorChange('title', serverTitleInput.value));
   }
   const motdInput = document.getElementById('motdInput');
   if (motdInput) {
@@ -16926,11 +16906,11 @@ function getXROperatorMenuItems() {
     : 'Loading...';
   return [
     {
-      id: 'operatorServerNameXR',
-      label: 'Server Name',
+      id: 'operatorTitleXR',
+      label: 'Title',
       // The headset's own keyboard where the session has one; see
       // beginXRTextEntry. A paired physical keyboard is untested.
-      value: keyboard ? (staged.serverName || '(empty)') : 'Desktop only',
+      value: keyboard ? (staged.title || '(empty)') : 'Desktop only',
       disabled: !keyboard,
     },
     {
@@ -17189,11 +17169,11 @@ function activateXRSettingsMenuSelection(item) {
   else if (item.id === 'voiceEchoXR') document.getElementById('voiceEchoCancellation')?.click();
   else if (item.id === 'voiceNoiseXR') document.getElementById('voiceNoiseSuppression')?.click();
   else if (item.id === 'voiceGainXR') document.getElementById('voiceAutoGainControl')?.click();
-  else if (item.id === 'operatorServerNameXR') {
+  else if (item.id === 'operatorTitleXR') {
     // Staged like every other row: the headset keyboard returns the text and the
     // confirm is what sends it.
-    beginXRTextEntry((operatorStaged || getOperatorServerState()).serverName, (typed) => {
-      stageOperatorChange('serverName', typed.trim());
+    beginXRTextEntry((operatorStaged || getOperatorServerState()).title, (typed) => {
+      stageOperatorChange('title', typed.trim());
     });
   }
   else if (item.id === 'operatorMotdXR') {

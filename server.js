@@ -2834,7 +2834,7 @@ app.get('/manifest.webmanifest', (req, res) => {
     id: '/',
     name: host,
     short_name: shortHostName(host),
-    description: serverConfig.description,
+    description: serverConfig.title || undefined,
     start_url: '/',
     scope: '/',
     display: 'fullscreen',
@@ -3656,6 +3656,26 @@ try {
 } catch (e) {
   logError(`Could not load server config at ${configPath}:`, e);
 }
+
+// `title`: the one line that says what this server is -- the entry dialog,
+// both lists, the Operator panel. bzfs's `-publictitle`. Older configs said it
+// as `serverName`, or as `publicTitle` in the `bzflag` block, and kept a
+// `description` beside it that nothing needs now.
+function readServerTitle(config) {
+  const moved = [];
+  let title = typeof config.title === 'string' ? config.title.trim() : '';
+  for (const [key, value] of [['bzflag.publicTitle', config.bzflag?.publicTitle], ['serverName', config.serverName]]) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    moved.push(key);
+    if (!title) title = value.trim();
+  }
+  if (moved.length > 0) log(`Config: server.json ${moved.join(' and ')} read as "title"; rename to "title"`);
+  if (typeof config.description === 'string' && config.description.trim()) {
+    log('Config: server.json "description" is no longer used; "title" says what the server is');
+  }
+  return title;
+}
+serverConfig.title = readServerTitle(serverConfig);
 
 // Where to answer, decided in one place because the two halves of an address
 // are one decision. The environment wins over `server.json` for both, which is
@@ -13216,14 +13236,13 @@ defineCommand('/pos', COMMAND_TIER.OPEN,
 // `maxPlayerScore`/`maxTeamScore` are live for the same reason: they only
 // decide what the next kill or capture checks against.
 const LIVE_CONFIG_KEYS = Object.freeze([
-  'serverName', 'motd', 'shotMaxActive', 'ricochet', 'timeLimit', 'timeManualStart', 'maxPlayerScore', 'maxTeamScore',
+  'title', 'motd', 'shotMaxActive', 'ricochet', 'timeLimit', 'timeManualStart', 'maxPlayerScore', 'maxTeamScore',
   'botFill', 'botPilot',
 ]);
-// A server's own name, not upstream's -- bzfs has no such thing to cap.
-// Well under the 120 characters `/api/list-server/report` accepts for the
-// same value as its `title` field, so a name typed here is never silently
-// truncated on the way to `/list`.
-const SERVER_NAME_MAX_LENGTH = 60;
+// bzfs truncates `-publictitle` at 127 (CmdLineOptions.cxx:1044), and the
+// BZFlag list's title has the map's name added to it; this leaves room for
+// that, and stays under the 120 characters `/api/list-server/report` takes.
+const SERVER_TITLE_MAX_LENGTH = 100;
 // Upstream keeps no fixed ceiling on `-time`; this is the panel slider's own,
 // so a drag has somewhere to stop. A map or `server.json` may still set a
 // higher `timeLimit` directly -- the slider just cannot reach past an hour.
@@ -13268,7 +13287,7 @@ function getOperatorConfigState() {
     normalizeTeamLimits(serverConfig.teamMode?.limits, PLAYER_TEAMS, MAX_REAL_PLAYERS),
     MAX_REAL_PLAYERS);
   return {
-    serverName: serverConfig.serverName || '',
+    title: serverConfig.title || '',
     motd: serverConfig.motd || '',
     shotMaxActive: GAME_CONFIG.SHOT_MAX_ACTIVE,
     ricochet: GAME_CONFIG.ALL_SHOTS_RICOCHET,
@@ -13311,6 +13330,11 @@ function writeOperatorConfigFields(config, next) {
       // `false` is the config's own off position, and what resolveRabbitSelection
       // reads; `"off"` is the row's.
       config.rabbit = value === 'off' ? false : value;
+    } else if (key === 'title') {
+      // Written under its own name, and the old spellings go with it.
+      config.title = value;
+      delete config.serverName;
+      if (config.bzflag && typeof config.bzflag === 'object') delete config.bzflag.publicTitle;
     } else {
       config[key] = value;
     }
@@ -13342,14 +13366,14 @@ function applyServerConfigChanges(requested, byWhom) {
   const current = getOperatorConfigState();
   const has = (key) => Object.prototype.hasOwnProperty.call(requested, key);
   const next = {};
-  if (has('serverName')) {
-    if (typeof requested.serverName !== 'string') return { error: 'Invalid server name value' };
-    const serverName = requested.serverName.trim();
-    if (!serverName) return { error: 'Server name cannot be empty' };
-    if (serverName.length > SERVER_NAME_MAX_LENGTH) {
-      return { error: `Server name must be ${SERVER_NAME_MAX_LENGTH} characters or fewer` };
+  if (has('title')) {
+    if (typeof requested.title !== 'string') return { error: 'Invalid title value' };
+    const title = requested.title.trim();
+    if (!title) return { error: 'Title cannot be empty' };
+    if (title.length > SERVER_TITLE_MAX_LENGTH) {
+      return { error: `Title must be ${SERVER_TITLE_MAX_LENGTH} characters or fewer` };
     }
-    next.serverName = serverName;
+    next.title = title;
   }
   if (has('motd')) {
     if (typeof requested.motd !== 'string') return { error: 'Invalid motd value' };
@@ -13466,9 +13490,10 @@ function applyServerConfigChanges(requested, byWhom) {
   }
 
   const changed = [];
-  if (next.serverName !== undefined) {
-    serverConfig.serverName = next.serverName;
-    changed.push('serverName');
+  if (next.title !== undefined) {
+    serverConfig.title = next.title;
+    changed.push('title');
+    publishToBzflagListServer('title');
   }
   if (next.motd !== undefined) {
     serverConfig.motd = next.motd;
@@ -13545,7 +13570,7 @@ function applyServerConfigChanges(requested, byWhom) {
 
   broadcastAll({
     type: 'serverConfigUpdate',
-    serverName: serverConfig.serverName || '',
+    title: serverConfig.title || '',
     motd: serverConfig.motd || '',
     shotMaxActive: GAME_CONFIG.SHOT_MAX_ACTIVE,
     ricochet: GAME_CONFIG.ALL_SHOTS_RICOCHET,
@@ -15384,8 +15409,7 @@ function computeListServerStatus() {
     // What that world costs, so a bzo row can say the same things the bzfs
     // pane beside it says about an imported one.
     world: measureLiveWorld(),
-    title: serverConfig.serverName || '',
-    description: serverConfig.description || '',
+    title: serverConfig.title || '',
     // People, which is what the list sorts on. Bots are in the team counts,
     // as upstream's ping has them, and counted on their own beside this.
     players: [...players.values()]
@@ -15442,7 +15466,7 @@ function reportToListServer(reason) {
     if (!self) {
       self = listServerKeys.requestKey({
         bzid: LIST_SERVER_OWNER_BZID || 'self',
-        callsign: LIST_SERVER_OWNER_CALLSIGN || serverConfig.serverName || '',
+        callsign: LIST_SERVER_OWNER_CALLSIGN || serverConfig.title || '',
         url: PUBLIC_URL,
       });
       // Never expires like an ordinary key would: it is re-validated (by
@@ -15453,7 +15477,7 @@ function reportToListServer(reason) {
       // who names their bzid after the row already exists sees it take
       // effect on the next boot rather than needing to revoke and re-create.
       self.bzid = LIST_SERVER_OWNER_BZID || 'self';
-      self.callsign = LIST_SERVER_OWNER_CALLSIGN || serverConfig.serverName || '';
+      self.callsign = LIST_SERVER_OWNER_CALLSIGN || serverConfig.title || '';
     }
     if (reason === 'shutdown') {
       listServerKeys.unreport(self);
@@ -15764,6 +15788,16 @@ async function seatNativeClient(link, payload) {
   replyToPlayer(player, `BZFlag clients can watch bzo but not play yet. To play, use a browser: ${PUBLIC_URL || 'this server\'s web page'}`);
 }
 
+// The title with the live map's name on the end, which bzfs has no way to
+// say: `HiX 3 - bzo` on bzo.bzw. Held to bzfs's 127 characters
+// (CmdLineOptions.cxx:1044), cutting the title rather than the map.
+const BZFLAG_TITLE_MAX = 127;
+function bzflagListTitle() {
+  const base = String(serverConfig.title || '').trim();
+  const suffix = ` - ${path.basename(MAP_SOURCE).replace(/\.bzw$/i, '')}`;
+  return `${base.slice(0, Math.max(0, BZFLAG_TITLE_MAX - suffix.length))}${suffix}`;
+}
+
 // bzfs re-adds on every join and part and every `ListServerReAddTime`; the
 // same moments bzo reports to its own list.
 function publishToBzflagListServer(reason) {
@@ -15774,7 +15808,7 @@ function publishToBzflagListServer(reason) {
     action,
     nameport: BZFLAG_PUBLIC_ADDR,
     key: BZFLAG_PUBLIC_KEY,
-    title: String(BZFLAG_CONFIG.publicTitle || serverConfig.serverName || ''),
+    title: bzflagListTitle(),
     status: computeBzflagStatus(),
     build: BZO_APP_VERSION,
     userAgent: BZO_USER_AGENT,
@@ -19303,8 +19337,7 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
     localMap: MAP_SOURCE,
     flags: session.state.flags.filter(Boolean).map(proxyFlagState),
     worldTime: currentWorldTime(),
-    serverName: `${viewer.key} (proxied)`,
-    description: '',
+    title: `${viewer.key} (proxied)`,
     motd: '',
   };
 }
@@ -20644,8 +20677,7 @@ function acceptConnection(ws, req) {
     localMap: MAP_SOURCE,
     flags: getFlagStates(),
     worldTime: currentWorldTime(),
-    serverName: serverConfig.serverName || '',
-    description: serverConfig.description || '',
+    title: serverConfig.title || '',
     motd: serverConfig.motd || '',
   }));
 

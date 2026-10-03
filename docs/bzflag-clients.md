@@ -13,7 +13,9 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
 - **The list.** bzo adds itself to my.bzflag.org with the `bzfs` key, on
   start, on every join and part, and every 15 minutes, and removes itself on
   shutdown. The request goes over IPv4, since the list checks that
-  `publicAddr` resolves to the address it came from.
+  `publicAddr` resolves to the address it came from. The title is
+  server.json's `title` with the live map's name after it, `- bzo` on bzo.bzw, held
+  to bzfs's 127 characters.
 - **The counts.** They follow bzfs's ping: humans only, the rabbit and hunters
   counted as rogues.
 

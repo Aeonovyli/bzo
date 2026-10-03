@@ -30,7 +30,7 @@ const TIMEOUT_MS = 30000;
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'bzo-boot-'));
 const configPath = path.join(dir, 'server.json');
-writeFileSync(configPath, JSON.stringify({ serverName: 'boot check', listen: '127.0.0.1:0' }));
+writeFileSync(configPath, JSON.stringify({ title: 'boot check', listen: '127.0.0.1:0' }));
 
 const child = spawn(process.execPath, ['server.js'], {
   env: {

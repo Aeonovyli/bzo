@@ -128,7 +128,7 @@ omitted rather than sent null.
 
 | type | fields | meaning |
 |---|---|---|
-| `init` | `clientBuild`, `serverVersion`, `player`, `players`, `config`, `bzdb`, `teamMode`, `teamScores`, `liveConfigKeys`, `operatorConfig`, `listServer`, `rabbitId`, `timeLeft`, `gameOver`, `voiceRtcConfig`, `world`, `viewableMaps`, `flags`, `worldTime`, `serverName`, `description`, `motd` | everything, once, on connect |
+| `init` | `clientBuild`, `serverVersion`, `player`, `players`, `config`, `bzdb`, `teamMode`, `teamScores`, `liveConfigKeys`, `operatorConfig`, `listServer`, `rabbitId`, `timeLeft`, `gameOver`, `voiceRtcConfig`, `world`, `viewableMaps`, `flags`, `worldTime`, `title`, `motd` | everything, once, on connect |
 | `pmBatch` | `moves` | one tick's accepted moves, one entry per mover. The normal motion path |
 | `pm` | `id`,`x`,`y`,`z`,`r`,`fs`,`rs`,`vv`,`vx`,`vz` | a single move, outside the batch |
 | `pt` | as `pm` plus `fromFaceId`,`toFaceId`,`jd`,`d?` | an accepted teleport |
@@ -156,7 +156,7 @@ omitted rather than sent null.
 | `botIntents` | `bots` (`id`,`mode`,`targetId`), `plan?` (`id`,`intent`) | each server bot's current mode and target, twice a second, only to a client that sent `watchBots`; `plan` is the followed bot's whole intent (route, target, landing, shot) |
 | `message` | `src`, `dst`, `msgType`, `text`, `ts` | chat, in and out |
 | `lag` | `lagMs` | the server's measurement of *your* lag |
-| `serverConfigUpdate` | `serverName`, `motd`, `shotMaxActive`, `ricochet`, `timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore` | live config changed |
+| `serverConfigUpdate` | `title`, `motd`, `shotMaxActive`, `ricochet`, `timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore` | live config changed |
 | `setVar` | `name`, `value` | one world variable set, or with a null value reset (`MsgSetVar`); the client evaluates it with the `bzdb` pair |
 | `mapList` | `maps`, `viewableMaps`, `currentMap`, `shotMaxActive`, `ricochet` | operator map list |
 | `remoteServerList` | `servers` | the list-server answer |

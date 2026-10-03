@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The BZFlag list shows which map bzo is running, after the title:
+  `<title> - bzo` on bzo.bzw. #174
+
+### Changed
+- One `title` in server.json says what a server is: the entry dialog, both
+  server lists and the Operator panel. `serverName` and the `bzflag` block's
+  `publicTitle` are still read as it, and `description` is no longer shown;
+  the startup log names the keys to rename.
+
 ## [1.3.2] - 2026-10-03
 
 ### Added

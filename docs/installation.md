@@ -222,12 +222,12 @@ A `bzflag` block also lists the server where BZFlag clients look, with a
 "bzflag": {
   "listen": "0.0.0.0:5154",
   "publicAddr": "your.host:5154",
-  "publicKey": "<key>",
-  "publicTitle": "What the list shows"
+  "publicKey": "<key>"
 }
 ```
 
-The port, TCP and UDP, has to be reachable at `publicAddr`, and the host
+The list shows server.json's `title` with the map's name after it. The
+port, TCP and UDP, has to be reachable at `publicAddr`, and the host
 name has to resolve to this server's IPv4 address. BZFlag clients can join
 to watch, but not to play yet, on any map with a `.bzw` file;
 [docs/bzflag-clients.md](bzflag-clients.md) has the details.
