@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-10-03
+
 ### Added
 - BZFlag clients can play in bzo: they join on the team they pick, spawn
   where bzo puts them, drive, shoot and die, with either side's word on a
