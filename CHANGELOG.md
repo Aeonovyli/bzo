@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.2.104] - 2026-10-03
+
 ### Added
 - The sky is upstream's: the real sun, moon and stars over the world's
   `_latitude` and `_longitude` at the real time, or the instant `_syncTime`
