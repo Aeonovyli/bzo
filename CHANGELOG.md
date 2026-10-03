@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The server warns at boot when `adminWhitelist` names addresses but
+  `localAdmin` is off, since the whitelist then grants nothing.
+
 ## [1.2.102] - 2026-10-02
 
 ### Fixed

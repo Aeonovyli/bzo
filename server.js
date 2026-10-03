@@ -3738,12 +3738,22 @@ if (Object.keys(PROXY_TARGETS).length === 0) log('Proxy: no servers configured')
 
 // `adminWhitelist` in server.json: addresses beyond loopback that `localAdmin`
 // should also cover, e.g. an operator's home network. Entries are addresses or
-// IPv4 CIDR blocks; validated and logged the same way ADMIN_GROUPS is.
+// CIDR blocks, IPv4 or IPv6; validated and logged the same way ADMIN_GROUPS is.
 const { entries: ADMIN_WHITELIST, refused: refusedAdminWhitelist } =
   parseAdminWhitelist(serverConfig.adminWhitelist);
 if (refusedAdminWhitelist.length > 0) {
-  log(`Admin whitelist entries refused (not an address or IPv4 CIDR block):`
+  log(`Admin whitelist entries refused (not an address or CIDR block):`
     + ` ${refusedAdminWhitelist.map((entry) => JSON.stringify(entry)).join(', ')}`);
+}
+// The whitelist only widens `localAdmin`, so with that off it does nothing at
+// all -- and nothing else would say so. Loopback entries are left out of the
+// test: the example config lists them, and they are what `localAdmin` covers
+// anyway.
+const nonLoopbackWhitelist = (Array.isArray(serverConfig.adminWhitelist) ? serverConfig.adminWhitelist : [])
+  .filter((entry) => typeof entry === 'string' && !isLoopbackAddress(entry.split('/')[0].trim()));
+if (!LOCAL_ADMIN && nonLoopbackWhitelist.length > 0) {
+  log(`Admin whitelist ignored: "localAdmin" is off in server.json, so`
+    + ` ${nonLoopbackWhitelist.join(', ')} get no admin. Set "localAdmin": true to use it.`);
 }
 
 // `publicUrl` in server.json: this server's own externally-reachable address,
