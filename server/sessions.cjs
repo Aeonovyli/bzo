@@ -321,20 +321,35 @@ function isLocalAdminRequest(remoteAddress, headers = {}, options = {}) {
   if (enabled !== true) return false;
   const hasForwarded = Object.keys(headers).some((name) => /^x-forwarded-/i.test(name));
   if (!hasForwarded) return isLoopbackAddress(remoteAddress);
-  if (forwardedForPolicy === 'distrust') return false;
-  const xff = headers['x-forwarded-for'];
-  if (typeof xff !== 'string' || xff.trim() === '') return false;
-  const parts = xff.split(',').map((part) => part.trim()).filter(Boolean);
-  if (parts.length === 0) return false;
-  const address = forwardedForPolicy === 'trust-last' ? parts[parts.length - 1] : parts[0];
+  const address = trustedClientAddress(remoteAddress, headers, forwardedForPolicy);
+  if (!address) return false;
   if (isLoopbackAddress(address)) return true;
   return addressMatchesWhitelist(address, whitelist);
+}
+
+// The client's address as far as anything may rest on it -- the admin
+// whitelist above, an address ban, a saved score -- read by the same probe
+// result. Without a forwarded header it is the peer's own. Behind a proxy it
+// is the entry that proxy wrote: the only one under `trust-first`, the last
+// under `trust-last`. Under `distrust`, or with no X-Forwarded-For to read, a
+// forwarded connection has none, and null says so.
+function trustedClientAddress(remoteAddress, headers = {}, forwardedForPolicy = 'distrust') {
+  const hasForwarded = Object.keys(headers).some((name) => /^x-forwarded-/i.test(name));
+  if (!hasForwarded) return remoteAddress || null;
+  if (forwardedForPolicy === 'distrust') return null;
+  const xff = headers['x-forwarded-for'];
+  if (typeof xff !== 'string' || xff.trim() === '') return null;
+  const parts = xff.split(',').map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  return forwardedForPolicy === 'trust-last' ? parts[parts.length - 1] : parts[0];
 }
 
 module.exports = {
   isLoopbackAddress,
   isLocalAdminRequest,
+  trustedClientAddress,
   parseAdminWhitelist,
+  parseWhitelistEntry,
   addressMatchesWhitelist,
   SESSION_TTL_MS,
   SESSION_ID_BYTES,

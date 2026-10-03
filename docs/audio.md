@@ -50,9 +50,16 @@ attenuation, from `getWorldStuff()` in `src/bzflag/sound.cxx`, is
 `amplitude = d < 86.4 ? 1 : 86.4 / d`, where `86.4` is 20 BZFlag tank radii
 (`20 * 4.32`). That is the Web Audio `inverse` distance model with
 `refDistance = 86.4` and `rolloffFactor = 1`, which reproduces the curve exactly.
-The constant scales with the world, not the vehicle, so it stays `4.32` even
-though a bzo tank has radius 2. Tune `MASTER_VOLUME` in `public/audio.js`, not
+The constant scales with the world, not the vehicle, so it stays `4.32` when a
+world resizes the tank. Tune `MASTER_VOLUME` in `public/audio.js`, not
 individual sounds.
+
+**A limiter holds the mix** (`GAME_LIMITER`, `public/audio.js`). The samples
+peak at full scale, so an explosion beside another sound sums past it; clipped,
+that is a pop, and on some outputs a second of near silence after. A
+compressor just under full scale between the Game volume and the speakers
+catches only those pile-ups. Upstream's mixer clamps the sum instead. Voice
+does not go through it.
 
 ## Shipped but not triggered
 

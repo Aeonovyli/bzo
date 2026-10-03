@@ -226,10 +226,10 @@ Two things it has to decide:
 
 ### Needs a whole subsystem
 
-- **Bans** — `/idban`, `/idunban`, `/idbanlist` and `/kick` are built, kept
-  in `bans.json` (`server/bans.cjs`). Address bans are planned in
-  [ban-plan.md](ban-plan.md); `/hostban` and `/masterban` after them.
-- **Polls** — `/poll ban`, which waits on address bans.
+- **Bans** — `/ban`, `/unban`, `/banlist`, `/checkip`, `/idban`,
+  `/idunban`, `/idbanlist` and `/kick` are built, kept in `bans.json`
+  (`server/bans.cjs`; [ban-plan.md](ban-plan.md)). `/hostban` and
+  `/masterban` are not.
   `/poll kill|set|flagreset`, `/vote` and `/veto` are built
   (`server/polls.cjs`); the `antipoll*` counter-permissions have no group to
   live in yet.
@@ -260,9 +260,8 @@ Two things it has to decide:
 
 ## Suggested order
 
-1. **Address bans**, and `/poll ban` on them.
-2. `/modcount`; `/handicap` with Handicap.
-3. `/lagwarn` and friends with `docs/lag-plan.md` step 6; the idle commands
+1. `/modcount`; `/handicap` with Handicap.
+2. `/lagwarn` and friends with `docs/lag-plan.md` step 6; the idle commands
    with last-input tracking.
-4. Reports, recording — each when something wants them.
+3. Reports, recording — each when something wants them.
 

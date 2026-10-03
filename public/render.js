@@ -39,6 +39,7 @@ import {
   GAME_SOUNDS,
   GAME_SOUND_NAMES,
   MASTER_VOLUME,
+  GAME_LIMITER,
   SOUND_DISTANCE_MODEL,
   SOUND_REF_DISTANCE,
   SOUND_ROLLOFF_FACTOR,
@@ -2573,6 +2574,11 @@ class RenderManager {
 
     this.audioListener = new THREE.AudioListener();
     this.camera.add(this.audioListener);
+    // Between the master gain and the speakers (`setFilter`), so it holds
+    // every game sound and nothing else: voice goes to the destination itself.
+    const limiter = this.audioListener.context.createDynamicsCompressor();
+    for (const [name, value] of Object.entries(GAME_LIMITER)) limiter[name].value = value;
+    this.audioListener.setFilter(limiter);
     this._applyGameVolume();
     // Sample buffers are filled by preloadGameplayAudio() on map entry.
 

@@ -268,6 +268,7 @@ const {
   parseCookies,
   isAdminSession,
   isLocalAdminRequest,
+  trustedClientAddress,
   isLoopbackAddress,
   parseAdminWhitelist,
   createSessionStore,
@@ -344,7 +345,9 @@ function computeClientBuild() {
 }
 const { isHeadsetBrowserUA } = require('./server/headset.cjs');
 const { describeListenTarget, resolveListenTarget } = require('./server/listen-address.cjs');
-const { createBzflagServer, publishToBzflagList } = require('./server/bzflag-server.cjs');
+const {
+  createBzflagServer, publishToBzflagList, REJECT_IP_BANNED, REJECT_ID_BANNED,
+} = require('./server/bzflag-server.cjs');
 const { generateWorldBzw } = require('./server/world-generator.cjs');
 const { addCardinalLetters } = require('./server/bzflag-extras.cjs');
 const {
@@ -418,13 +421,15 @@ app.use(express.urlencoded({ extended: true }));
 //
 // Keyed on the address the proxy names rather than on `req.ip`, which behind the
 // proxy the README describes is the *proxy* for every player at once: one bucket
-// for the whole internet is a self-inflicted outage rather than a limit. Same
-// derivation the handshake logs and `/playerlist` use, and only as trustworthy
-// as the proxy -- which is the other reason the ceiling is generous.
+// for the whole internet is a self-inflicted outage rather than a limit. The
+// trusted address where the probe allows one (`trustedClientAddress`), and the
+// header's own first entry until it does -- a key, not a verdict, which is the
+// other reason the ceiling is generous.
 function requestAddress(req) {
   const forwardedFor = req.headers['x-forwarded-for'];
   const forwarded = typeof forwardedFor === 'string' ? forwardedFor.split(',')[0].trim() : '';
-  return forwarded || req.socket.remoteAddress || 'unknown';
+  return trustedClientAddress(req.socket.remoteAddress, req.headers, forwardedForPolicy)
+    || forwarded || req.socket.remoteAddress || 'unknown';
 }
 
 const loginRateLimit = rateLimit({
@@ -3927,6 +3932,32 @@ const ADMIN_PROBE_SENTINEL = '203.0.113.66'; // RFC 5737 TEST-NET-3: never a rea
 const ADMIN_PROBE_ATTEMPTS = 4;
 const ADMIN_PROBE_RETRY_DELAY_MS = 5000;
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+function normalizeAddress(address) {
+  return String(address || '').trim().replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '').toLowerCase();
+}
+
+// Every address this server answers as: its interfaces', and the public ones
+// ip4.me and ip6.me see its traffic leave by -- a home network or a cloud's
+// NAT, where a request to its own public URL comes back from the router. A
+// lookup that fails leaves the interfaces, which a CDN's edge never is.
+async function ownAddresses() {
+  const own = new Set();
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) own.add(normalizeAddress(entry.address));
+  }
+  await Promise.all(['https://ip4.me/api/', 'https://ip6.me/api/'].map(async (url) => {
+    try {
+      const response = await fetch(url, { headers: { 'User-Agent': BZO_USER_AGENT }, signal: AbortSignal.timeout(5000) });
+      // "IPv4,203.0.113.7,v1.1,,,..." -- the second field.
+      const address = (await response.text()).split(',')[1];
+      if (address) own.add(normalizeAddress(address));
+    } catch {
+      // The interfaces stand alone.
+    }
+  }));
+  return own;
+}
+
 async function probeAdminWhitelist() {
   if (!LOCAL_ADMIN || !PUBLIC_URL) return;
   const probeUrl = `${PUBLIC_URL.replace(/\/+$/, '')}/api/_admin-probe`;
@@ -3953,6 +3984,18 @@ async function probeAdminWhitelist() {
       const last = poisonedChain[poisonedChain.length - 1] ?? null;
       if (last === null || last === ADMIN_PROBE_SENTINEL || expected === null || last !== expected) {
         log(`[ADMIN] ${PUBLIC_URL} does not confirm its proxy replaces X-Forwarded-For;`
+          + ' admin whitelist stays limited to unproxied loopback');
+        return;
+      }
+      // The probe's own request came from this server, so the proxy's entry
+      // has to name it: one of this machine's addresses, or the public one
+      // its traffic leaves by. A proxy in front of the proxy -- a CDN -- names
+      // itself instead, the same on every request, and would hand every
+      // player its address. docs/ban-plan.md.
+      const own = await ownAddresses();
+      if (!own.has(normalizeAddress(expected))) {
+        log(`[ADMIN] ${PUBLIC_URL}'s proxy names ${expected} for this server's own request, which is`
+          + ` not this server (${[...own].join(', ')}): another proxy is in front of it;`
           + ' admin whitelist stays limited to unproxied loopback');
         return;
       }
@@ -11847,7 +11890,7 @@ function restoreScore(player, now = Date.now()) {
     savedScores.delete(key);
     return null;
   }
-  if (saved.address !== player.clientIP) return null;
+  if (!saved.address || saved.address !== player.clientIP) return null;
   if (isObserverTeam(player.team)) return 'Your score record will be saved while you are in observer mode.';
   player.wins = saved.wins;
   player.losses = saved.losses;
@@ -12894,6 +12937,106 @@ defineCommand('/kick', COMMAND_TIER.OPERATOR,
     removeFromServer(victim);
   });
 
+// BanCommand (BanCommands.cxx:718): a player, whose address and BZID are
+// both banned, or an address or block. Anybody on at the time whom the new
+// ban covers goes too.
+defineCommand('/ban', COMMAND_TIER.OPERATOR,
+  '<#slot|PlayerName|"Player Name"|ip> <duration> <reason> - ban a player, IP address or IP range off the server',
+  (player, args) => {
+    const syntax = () => {
+      replyToPlayer(player, 'Syntax: /ban <#slot | PlayerName | "Player Name" | ip> <duration> <reason>');
+      replyToPlayer(player, "\t<duration> can be 'short' or 'default' for the default ban time ");
+      replyToPlayer(player, "\tor 'forever' or 'max' for infinite bans ");
+      replyToPlayer(player, '\tor a time in the format <weeks>W<days>D<hours>H<minutes>M ');
+      replyToPlayer(player, '\tor just a number of minutes ');
+      replyToPlayer(player, '\tPlease keep in mind that reason is displayed to the user.');
+    };
+    const trimmed = args.trim();
+    const target = resolveCommandTarget(trimmed);
+    const victim = target.id ? players.get(target.id) : null;
+    let mask;
+    let rest;
+    if (victim) {
+      mask = victim.clientIP;
+      rest = target.rest;
+    } else {
+      const split = trimmed.search(/\s/);
+      mask = split === -1 ? trimmed : trimmed.slice(0, split);
+      rest = split === -1 ? '' : trimmed.slice(split).trim();
+    }
+    const split = rest.search(/\s/);
+    if (!trimmed || split === -1) {
+      syntax();
+      return;
+    }
+    const minutes = parseDuration(rest.slice(0, split));
+    if (minutes === null) {
+      replyToPlayer(player, 'Error: invalid ban duration');
+      replyToPlayer(player, 'Duration examples:  30m 1h  1d  1w  and mixing: 1w2d4h 1w2d1m');
+      return;
+    }
+    let reason = rest.slice(split).trim();
+    if (victim && !reason.includes(victim.name)) reason = `(${victim.name}) ${reason}`;
+    const length = minutes < 0 ? BAN_TIME_MINUTES : minutes;
+    if (victim && !mask) {
+      // Behind a proxy the probe has not vouched for, a browser's address is
+      // its own claim (docs/ban-plan.md): its BZID can still go.
+      replyToPlayer(player, `${victim.name} has no trusted address to ban`);
+    }
+    if (victim) {
+      banKick(victim, player, reason);
+      if (victim.bzid) {
+        bans.idBan(victim.bzid, { bannedBy: player.name, minutes: length, reason });
+        replyToPlayer(player, 'Pattern added to the BZID banlist');
+      }
+      if (!mask) return;
+    }
+    const stored = bans.ipBan(mask, { bannedBy: player.name, minutes: length, reason });
+    if (!stored) {
+      replyToPlayer(player, `Malformed address or invalid Player/Slot: ${trimmed.split(/\s/)[0]}`);
+      return;
+    }
+    log(`[CMD] "${player.name}" banned ${stored} for ${length || 'ever'} minutes: ${reason}`);
+    replyToPlayer(player, 'Pattern added to the IP banlist');
+    for (const other of [...players.values()]) {
+      if (other !== victim && other.joined && bans.ipBanned(other.clientIP)) banKick(other, player, reason);
+    }
+  });
+
+defineCommand('/unban', COMMAND_TIER.OPERATOR,
+  '<ip> - remove a ip pattern from the ban list',
+  (player, args) => {
+    if (bans.ipUnban(args.trim())) {
+      log(`[CMD] "${player.name}" lifted the ban on ${args.trim()}`);
+      replyToPlayer(player, 'Removed IP pattern from the ban list');
+    } else {
+      replyToPlayer(player, 'No pattern removed');
+    }
+  });
+
+defineCommand('/banlist', COMMAND_TIER.OPERATOR,
+  '[pattern] - List the IPs currently banned from this server',
+  (player, args) => {
+    for (const line of bans.listIpBans(args)) replyToPlayer(player, line);
+  });
+
+defineCommand('/checkip', COMMAND_TIER.OPERATOR,
+  '<ip> - check if an IP address is banned and print corresponding ban info',
+  (player, args) => {
+    const address = args.trim().split(/\s+/)[0];
+    if (!address) {
+      replyToPlayer(player, 'Syntax: /checkip <ip>');
+      return;
+    }
+    const ban = bans.ipBanned(address);
+    if (!ban) {
+      replyToPlayer(player, `${address} is not banned.`);
+      return;
+    }
+    replyToPlayer(player, `${address} is banned:`);
+    for (const line of bans.ipBanLines(ban)) replyToPlayer(player, line);
+  });
+
 defineCommand('/idban', COMMAND_TIER.OPERATOR,
   '<#slot|+id|PlayerName|"Player Name"> <duration> <reason> - ban using BZID',
   (player, args) => {
@@ -12976,13 +13119,13 @@ const pollArbiter = POLL_SETTINGS.voteTime > 0 ? new VotingArbiter(POLL_SETTINGS
 const pollAnnounced = { opening: false, closure: false, results: false, heartbeatAt: -1 };
 
 // What upstream's default groups allow (bzfs.cxx:5960): a signed-in player
-// (VERIFIED) may poll, vote, and poll a kick or a flag reset; an admin may
-// do all of it, kill and set polls and the veto included.
+// (VERIFIED) may poll, vote, and poll a kick, a ban or a flag reset; an
+// admin may do all of it, kill and set polls and the veto included.
 function pollRights(player) {
   const admin = isAdmin(player);
   const known = admin || player.verified === true;
   return {
-    known, poll: known, vote: known, kick: known, flagreset: known, kill: admin, set: admin, veto: admin,
+    known, poll: known, vote: known, kick: known, ban: known, flagreset: known, kill: admin, set: admin, veto: admin,
   };
 }
 
@@ -12993,6 +13136,7 @@ function announceToAll(text) {
 function pollUsage(player) {
   const rights = pollRights(player);
   replyToPlayer(player, 'Usage: /poll vote yes|no');
+  if (rights.ban) replyToPlayer(player, '    or /poll ban playername');
   if (rights.kick) replyToPlayer(player, '    or /poll kick playername');
   if (rights.kill) replyToPlayer(player, '    or /poll kill playername');
   if (rights.set) replyToPlayer(player, '    or /poll set variable value');
@@ -13057,7 +13201,7 @@ defineCommand('/veto', COMMAND_TIER.OPEN,
   });
 
 defineCommand('/poll', COMMAND_TIER.OPEN,
-  '<kick|kill|set|flagreset|vote|veto> <callsign> - interact and make requests of the bzflag voting system',
+  '<ban|kick|kill|set|flagreset|vote|veto> <callsign> - interact and make requests of the bzflag voting system',
   (player, args) => {
     const rights = pollRights(player);
     if (!rights.poll) {
@@ -13113,7 +13257,7 @@ defineCommand('/poll', COMMAND_TIER.OPEN,
       return;
     }
     let started;
-    if (cmd === 'kick' || cmd === 'kill') {
+    if (cmd === 'ban' || cmd === 'kick' || cmd === 'kill') {
       const victim = players.get(resolveCallsign(target));
       if (!victim) {
         replyToPlayer(player, `The player specified for a ${cmd} vote is not here`);
@@ -13129,9 +13273,13 @@ defineCommand('/poll', COMMAND_TIER.OPEN,
         replyToPlayer(player, `${victim.name} is protected from being polled against.`);
         return;
       }
-      started = cmd === 'kick'
-        ? pollArbiter.pollToKick(target, player.name, player.id)
-        : pollArbiter.pollToKill(target, player.name, player.id);
+      if (cmd === 'ban' && !victim.clientIP) {
+        replyToPlayer(player, `${victim.name} has no trusted address to ban`);
+        return;
+      }
+      if (cmd === 'ban') started = pollArbiter.pollToBan(target, player.name, player.id, victim.clientIP);
+      else if (cmd === 'kick') started = pollArbiter.pollToKick(target, player.name, player.id);
+      else started = pollArbiter.pollToKill(target, player.name, player.id);
     } else if (cmd === 'set') {
       started = pollArbiter.pollToSet(target, player.name, player.id);
     } else {
@@ -13162,8 +13310,25 @@ function resetPollAnnouncements() {
 }
 
 // What a successful poll does, once its veto time is over.
-function carryOutPoll(action, target) {
-  if (action === 'kick') {
+// "banned for 5 hours." (bzfs.cxx:7395).
+function pollBanLength() {
+  const hours = Math.floor(BAN_TIME_MINUTES / 60);
+  const minutes = BAN_TIME_MINUTES % 60;
+  return `banned for ${hours > 0 ? `${hours} hour${hours === 1 ? '.' : 's'}${minutes > 0 ? ' and ' : ''}` : ''}`
+    + `${minutes > 0 ? `${minutes} minute${minutes > 1 ? 's' : ''}` : ''}.`;
+}
+
+function carryOutPoll(action, target, address) {
+  if (action === 'ban') {
+    // `acl.ban(realIP, target, banTime)`: whatever the victim is called now,
+    // the address the poll was about.
+    if (address) bans.ipBan(address, { bannedBy: target, minutes: BAN_TIME_MINUTES, reason: 'poll ban' });
+    for (const victim of [...players.values()]) {
+      if (!victim.joined || (victim.name !== target && !(address && victim.clientIP === address))) continue;
+      replyToPlayer(victim, 'You have been temporarily banned due to sufficient votes to have you removed');
+      removeFromServer(victim);
+    }
+  } else if (action === 'kick') {
     const victim = players.get(resolveCallsign(target));
     if (victim) {
       replyToPlayer(victim, 'You have been kicked due to sufficient votes to have you removed');
@@ -13230,12 +13395,12 @@ function tickPoll() {
   }
   if (!pollAnnounced.closure) {
     announceToAll(`The poll is now closed and was successful.  ${target} is scheduled to be`
-      + ` ${{ kick: 'kicked', kill: 'killed' }[action] ?? action}.`);
+      + ` ${{ ban: 'temporarily banned', kick: 'kicked', kill: 'killed' }[action] ?? action}.`);
     pollAnnounced.closure = true;
   }
   if (!pollArbiter.isPollExpired()) return;
-  announceToAll(`${target} has been ${{ kick: 'kicked.', kill: 'killed.' }[action] ?? action}`);
-  carryOutPoll(action, target);
+  announceToAll(`${target} has been ${{ ban: pollBanLength(), kick: 'kicked.', kill: 'killed.' }[action] ?? action}`);
+  carryOutPoll(action, target, pollArbiter.targetAddress);
   pollArbiter.forgetPoll();
   resetPollAnnouncements();
 }
@@ -13400,7 +13565,8 @@ defineCommand('/playerlist', COMMAND_TIER.OPEN,
       // (`getPlayerHostInfo`): ` udp` once heard from on UDP, `+` once sent to.
       const link = other.nativeLink;
       const udp = link?.udpIn() ? ` udp${link.udpOut() ? '+' : ''}` : '';
-      replyToPlayer(player, `#${other.id} ${other.name} [${other.team}] ${other.clientIP || 'unknown'}${udp}`
+      const address = other.clientIP || (other.claimedIP ? `${other.claimedIP} (unverified)` : 'unknown');
+      replyToPlayer(player, `#${other.id} ${other.name} [${other.team}] ${address}${udp}`
         + (marks.length ? ` (${marks.join(', ')})` : ''));
     }
   });
@@ -16371,6 +16537,14 @@ async function seatNativeClient(link, payload) {
     link.reject('bad MsgEnter');
     return;
   }
+  // addPlayer's address check (bzfs.cxx:2217), ahead of the BZID one. A
+  // BZFlag client's address is its socket's own, which needs no proxy trust.
+  const ipBan = bans.ipBanned(link.remoteAddress);
+  if (ipBan) {
+    log(`[BZFLAG] "${enter.callsign}" refused: ${link.remoteAddress} is banned (${ipBan.mask})`);
+    link.reject(bans.ipBanRefusal(ipBan), REJECT_IP_BANNED);
+    return;
+  }
   // bzfs asks the list server about every callsign, token or none
   // (ListServerLink::addMe), and says what it heard (ListServerConnection.cxx:
   // 272-293). The token is spent here and never logged.
@@ -16604,7 +16778,7 @@ async function seatNativeClient(link, payload) {
   const idBan = bans.idBanned(player.bzid);
   if (idBan) {
     log(`[BZFLAG] "${enter.callsign}" refused: BZID ${player.bzid} is banned`);
-    link.reject(idBanRefusal(idBan));
+    link.reject(idBanRefusal(idBan), REJECT_ID_BANNED);
     return;
   }
   // The team it asked for, by upstream's number (`TeamColor`, global.h:59):
@@ -21607,11 +21781,13 @@ function acceptConnection(ws, req) {
   }
   // Never silently: an operator who turned this on should see it happen, and an
   // operator who did not mean to should see it too.
-  // Kept for `/playerlist`, which is upstream's "list player slots, names and IP
-  // addresses". It is the forwarded address where there is one, so it is only as
-  // trustworthy as the proxy -- see docs/commands-plan.md on why a ban cannot
-  // rest on it as read.
-  player.clientIP = clientIP;
+  // The address bans, saved scores and `/playerlist` rest on: read through the
+  // startup probe's verdict on the proxy (`trustedClientAddress`), or null where
+  // it cannot be trusted. The header's first entry, which the log line above
+  // shows, is the client's own claim behind an appending proxy.
+  // docs/ban-plan.md.
+  player.clientIP = trustedClientAddress(req.socket.remoteAddress, req.headers, forwardedForPolicy);
+  player.claimedIP = clientIP;
   // What `/clientquery` says it runs: bzo's own build for a browser, and the
   // browser; a BZFlag client replaces it with what it sent (`seatNativeClient`).
   player.clientVersion = `${BZO_APP_VERSION} web, ${shortUserAgent(req.headers['user-agent'] || '')}`;
@@ -22514,6 +22690,13 @@ function acceptConnection(ws, req) {
         case 'joinGame': {
           // checkBan (bzfs.cxx:2257): a banned BZID is turned away at the join,
           // so a signed-in player can still reach the dialog to sign out.
+          const ipBan = bans.ipBanned(player.clientIP);
+          if (ipBan) {
+            log(`Player ${player.id} refused: ${player.clientIP} is banned (${ipBan.mask})`);
+            replyToPlayer(player, bans.ipBanRefusal(ipBan));
+            removeFromServer(player);
+            break;
+          }
           const idBan = bans.idBanned(player.bzid);
           if (idBan) {
             log(`Player ${player.id} refused: BZID ${player.bzid} is banned`);

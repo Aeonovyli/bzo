@@ -1,9 +1,10 @@
 # Address bans
 
 `/ban`, `/unban`, `/banlist` and `/checkip` on IPv4 and IPv6 addresses and
-CIDR blocks, and `/poll ban` on them. BZID bans and `/kick` are built (see
-**Kicks and bans** in [installation.md](installation.md)); upstream
-references are paths under `$HOME/bzflag/`.
+CIDR blocks, and `/poll ban` on them, beside the BZID bans and `/kick` (see
+**Kicks and bans** in [installation.md](installation.md)). All of it is
+built; what is left is under **Then**. Upstream references are paths under
+`$HOME/bzflag/`.
 
 ## An address worth banning
 
@@ -17,16 +18,18 @@ and once with a forged `X-Forwarded-For`, and sets `forwardedForPolicy`:
   last entry is the address the proxy saw. bz.rikers.org is this case.
 - `distrust`: anything else, or no answer. No forwarded address is used.
 
-Address bans rest on the same answer, with two changes first.
+Address bans rest on the same answer.
 
 ### Read the address through the policy
 
-`player.clientIP` (what `/playerlist` shows and a ban would match) and
-`requestAddress` (the login rate limit's key) take the header's *first*
-entry whatever the probe found. Behind an appending proxy that is the
-client's own choice. Both should read it as `isLocalAdminRequest`
-(`server/sessions.cjs`) does: the last entry under `trust-last`, and no
-forwarded address under `distrust`. One function for all three.
+`trustedClientAddress` (`server/sessions.cjs`) is the one reader: the peer's
+own address without a forwarded header, the proxy's entry with one (the
+last under `trust-last`), and null under `distrust`. The admin whitelist,
+`player.clientIP` -- what a ban matches, `/playerlist` shows and a saved
+score is keyed by -- and the login rate limit all read it. The header's
+first entry is kept as `claimedIP`, for logs and for `/playerlist` to show
+as `(unverified)`. A player with no trusted address cannot be banned by
+address, only by BZID.
 
 ### Make the probe refuse a second proxy
 
@@ -35,15 +38,12 @@ the probe as it stands: the last entry is the CDN's edge, the same on both
 requests, and the forged value never reaches the end. Every player would
 then have the CDN's address, and banning one would ban them all.
 
-The probe's own request comes from this server, so the last entry should be
-this server's address. Trust the proxy only when it is one of:
-
-- an address on this machine (`os.networkInterfaces()`), and
-- the public addresses `https://ip4.me/api/` and `https://ip6.me/api/` report
-  for this machine.
-
-Otherwise `distrust`, logging both addresses. If neither lookup answers,
-compare against the local addresses alone, which a CDN still fails.
+The probe's own request comes from this server, so the proxy's entry has to
+name it (`ownAddresses`): an address on this machine
+(`os.networkInterfaces()`), or a public one `https://ip4.me/api/` or
+`https://ip6.me/api/` reports for it. Otherwise `distrust`, logging both. If
+neither lookup answers, the local addresses stand alone, which a CDN still
+fails.
 
 Both kinds are needed. Measured on bz.rikers.org:
 
@@ -77,9 +77,16 @@ comes back through the router, matches the ip4.me/ip6.me answer instead.
   upstream's `REFUSED:` text.
 - Everybody on at the time of a ban.
 
+A browser is checked at `joinGame`, as a BZID is, so its player sees why;
+a BZFlag client at `MsgEnter`, with `RejectIPBanned` (`RejectIDBanned` for
+a BZID).
+
+`/poll ban` bans the address the target had when the poll began, for
+`banTime`, as upstream's does -- and, as upstream's does, names the target
+as who banned it.
+
 ## Then
 
-- `/poll ban`, which bans the target's address for `banTime`, as upstream's
-  (`bzfs.cxx`, the poll's `ban` action).
 - `/hostban` (reverse DNS names) and `/masterban` (the list server's shared
   list).
+- Browsers on IPv6: port 3000 listens on IPv4 only today.

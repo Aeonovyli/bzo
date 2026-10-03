@@ -31,6 +31,9 @@ const MOTTO_LEN = 128;
 const NUM_TEAMS = 8;
 // RejectBadRequest (Protocol.h).
 const REJECT_BAD_REQUEST = 0;
+// `RejectIPBanned` and `RejectIDBanned` (Protocol.h:168).
+const REJECT_IP_BANNED = 0x0009;
+const REJECT_ID_BANNED = 0x000B;
 // A connection that never finishes its handshake or asks anything is closed.
 const IDLE_TIMEOUT_MS = 30000;
 // Connections held at once; past it a client gets 0xff, bzfs's "full".
@@ -185,9 +188,9 @@ function packAddPlayer(player) {
 }
 
 // `rejectPlayer` (bzfs.cxx:1770): a code and the reason in a MessageLen field.
-function packReject(reason) {
+function packReject(reason, code = REJECT_BAD_REQUEST) {
   const payload = Buffer.alloc(2 + MESSAGE_LEN);
-  payload.writeUInt16BE(REJECT_BAD_REQUEST, 0);
+  payload.writeUInt16BE(code, 0);
   payload.write(String(reason), 2, MESSAGE_LEN - 1, 'latin1');
   return payload;
 }
@@ -214,10 +217,10 @@ function createBzflagServer({
     return reserveId();
   }
 
-  function reject(connection, reason) {
+  function reject(connection, reason, code) {
     log(`[BZFLAG] ${connection.address} rejected: ${reason}`);
     connection.rejected = true;
-    sendFrame(connection.socket, 'rj', packReject(reason));
+    sendFrame(connection.socket, 'rj', packReject(reason, code));
     connection.socket.end();
     return false;
   }
@@ -287,7 +290,7 @@ function createBzflagServer({
           if (connection.udpOut && UDP_CODES.has(frameCode)) sendUdp(connection.udpAddr, frameCode, body);
           else sendFrame(socket, frameCode, body);
         },
-        reject: (reason) => reject(connection, reason),
+        reject: (reason, code) => reject(connection, reason, code),
         // `getPlayerHostInfo`'s ` udp` and `+` (NetHandler.cxx:831): heard
         // from on UDP, and sent to on UDP.
         udpIn: () => Boolean(connection.udpAddr),
@@ -501,6 +504,8 @@ async function publishToBzflagList({ listUrl, action, nameport, key, title, stat
 }
 
 module.exports = {
+  REJECT_IP_BANNED,
+  REJECT_ID_BANNED,
   createBzflagServer,
   publishToBzflagList,
   packPingHex,

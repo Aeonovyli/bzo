@@ -285,7 +285,12 @@ An admin's `/kick <player> <reason>` removes a player, and
 `/idban <player|+bzid> <duration> <reason>` bans a signed-in player's
 bzflag.org account, as on a BZFlag server: `30m`, `1h`, `1w2d`, `forever`,
 or `short` for server.json's `banTime` (300 minutes by default).
-`/idbanlist` and `/idunban <bzid>` read and lift them. Bans are kept in
+`/idbanlist` and `/idunban <bzid>` read and lift them. `/ban <player|ip>
+<duration> <reason>` bans an address or a block -- `1.2.3.4`, `1.2.*.*`,
+`1.2.0.0/16`, an IPv6 `2001:db8::/32` -- and a named player's BZID with it;
+`/banlist`, `/checkip <ip>` and `/unban <ip>` go with it. Behind a reverse
+proxy bzo bans only an address its startup check of that proxy vouches for
+([ban-plan.md](ban-plan.md)). Bans are kept in
 `bans.json` beside `server.json`. A kicked or banned browser stays off
 until its player presses a key, taps or pulls a trigger, rather than
 rejoining by itself.

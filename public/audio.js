@@ -41,6 +41,20 @@ export const SOUND_DISTANCE_MODEL = 'inverse';
 // the AudioListener's master gain; this is the per-sound level underneath it.
 export const MASTER_VOLUME = 1;
 
+// A limiter on the mix of game sounds, after the Game volume. The samples peak
+// at full scale, so an explosion beside another sound sums past it, and the
+// browser hard-clips: a pop, and on some outputs a second of near silence while
+// whatever is downstream recovers. Upstream's mixer clamps the sum the same
+// way, only harder. Set just under full scale, fast to catch the peak and
+// quick to let go, so ordinary play is untouched and only a pile-up is held.
+export const GAME_LIMITER = Object.freeze({
+  threshold: -3,
+  knee: 0,
+  ratio: 20,
+  attack: 0.002,
+  release: 0.1,
+});
+
 // Voice is placed in the world the gameplay sounds are already placed in, so a
 // player heard over voice comes from where their tank is standing. The numbers
 // are a voice's, not a shot's: a talking tank is audible well past the 86.4 a

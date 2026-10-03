@@ -62,6 +62,7 @@ class VotingArbiter {
     this.target = 'nobody';
     this.action = '';
     this.organizer = null;
+    this.targetAddress = null;
     this.suffraged = [];
     return true;
   }
@@ -90,6 +91,14 @@ class VotingArbiter {
     this.organizer = organizer;
     this.startTime = this.now();
     return true;
+  }
+
+  // The address goes with the poll, so the ban lands on it even if the
+  // victim has left or changed name by then (`_polleeIP`).
+  pollToBan(victim, requester, organizer, address) {
+    const started = this.poll(victim, requester, 'ban', organizer);
+    if (started) this.targetAddress = address;
+    return started;
   }
 
   pollToKick(victim, requester, organizer) {

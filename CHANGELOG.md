@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- Address bans, as on a BZFlag server: `/ban` a player, an address or a
+  block (IPv4 or IPv6, CIDR or `1.2.*.*`), `/banlist`, `/checkip`, `/unban`,
+  and `/poll ban`. Behind a proxy, only an address its startup check vouches
+  for is banned. #174
+
+### Fixed
+- Game sound no longer pops and drops out for a moment when an explosion
+  lands on top of other sounds: a limiter holds the mix under full scale.
+
+### Changed
+- The startup check of a reverse proxy also requires it to name this server
+  for the server's own request, so a second proxy in front -- a CDN -- is
+  not trusted with players' addresses.
+
 ## [1.3.9] - 2026-10-03
 
 ### Added
