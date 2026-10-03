@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.10] - 2026-10-03
+
 ### Added
 - Address bans, as on a BZFlag server: `/ban` a player, an address or a
   block (IPv4 or IPv6, CIDR or `1.2.*.*`), `/banlist`, `/checkip`, `/unban`,
