@@ -5,9 +5,9 @@ What bzo reads out of a BZFlag `.bzw` file, and what it ignores. The importer is
 `parseBZWServerOptions` there and `parseBZWTeamMode` in the `teams` pair.
 
 Maps live in `maps/`; `mapFile` in `server.json` picks one, and `"random"`
-generates a world instead. A map is parsed once, on startup, and the obstacle
-list goes to every client in the `init` payload, so the client and the server
-collide against the same geometry by construction.
+generates a world instead (see **Generated worlds**). A map is parsed once, on
+startup, and the obstacle list goes to every client in the `init` payload, so
+the client and the server collide against the same geometry by construction.
 
 Every keyword is matched case-insensitively against the line's first
 whitespace-delimited token, as upstream matches with `strcasecmp` -- so
@@ -22,6 +22,46 @@ is the authority on what a keyword *does* -- `WorldFileLocation::read`,
 `WorldFileObstacle::read`, `CustomPyramid`. The BZW format documentation at
 <https://projects.porteighty.org/bzw_docs/documentation/world-design/bzw/> is
 the authority on what a mapper is allowed to write.
+
+## Generated worlds
+
+`"mapFile": "random"` builds the world bzfs builds when it is given no map --
+its own generators, `defineRandomWorld` and `defineTeamWorld`
+(`src/bzfs/WorldGenerators.cxx`), ported to `server/world-generator.cjs`. The
+result is the `.bzw` it amounts to, read by `parseBZWMap` like any map and
+compiled from the same text for a BZFlag client, so the two cannot disagree.
+It is a new world every boot.
+
+- **The random city**: `(0.5 to 1.2) * density²` boxes and as many pyramids,
+  anywhere and at any heading, at upstream's `_boxBase`/`_boxHeight` and
+  `_pyrBase`/`_pyrHeight`; and 8 to 16 teleporters kept clear of the
+  buildings and linked in random pairs.
+- **The team world**, which bzfs builds for capture-the-flag (`-c`,
+  `bzfs.cxx:1166`): with team mode on, each colour that has player slots gets
+  its base in the middle of its own side, four pyramids round it and two flag
+  safety points beside it, and the city between is upstream's fixed avenue
+  grid with eight teleporters -- or, with `randomCtf`, a random city mirrored so
+  every team faces the same one, its teleporters mirrored too. Bases make it
+  capture-the-flag, as a map's bases do.
+
+The world is `_worldSize` across (800 by default, `-set`able in the
+`bzdb` block as bzfs's `-worldsize` is), and server.json's `randomWorld` block
+holds bzfs's generator switches:
+
+| key | default | bzfs | effect |
+|---|---|---|---|
+| `density` | 5 | `-density` | the city's size, scaled to the world |
+| `teleporters` | true | `-t` | teleporters at all |
+| `randomHeights` | true | `-h` | buildings 0.5 to 2.5 times the default height |
+| `randomCtf` | false | `-cr` | the team world's city random and mirrored, not the fixed grid |
+| `randomBoxes` | false | `-b` | the fixed grid's boxes turned up to 45° either way |
+| `randomSizes` | true | bzo's | each box and pyramid in the random city 0.5 to 1.5 times as wide and as deep, apart, rather than all the same |
+| `floating` | 0.2 | bzo's | the share of the random city's boxes and pyramids raised 3 to 6 units, room to drive under |
+| `upsideDown` | 0.1 | bzo's | the share of the random city's pyramids upside down |
+
+One departure: in the mirrored team world upstream builds the blue and purple
+pair of each teleporter set `2 * _teleportWidth` tall, a typo for the height
+of the rest (`WorldGenerators.cxx:422`); bzo builds them all the same height.
 
 ## Coordinates
 
@@ -847,6 +887,15 @@ gives 0 for a missing count and 0 is then overwritten -- so `-s`, `-s 0` and
 only in marking every slot `required`, which keeps all of them in the world at
 once where `-s` lets a slot sit empty between insertions; bzo has only the
 insertion schedule, so it reads both spellings the same way.
+
+**A map that names any flags decides its flags alone.** `+f`, `-s` or `+s` in
+its `options` block replaces the server's flag settings rather than adding to
+them: a map with only `+f SW{2}` gets its zone flags and two Shock Waves, and
+no random slots whatever server.json's `superFlags.count` says. A map that
+names none -- a generated world included -- takes server.json's `superFlags`
+and `requiredFlags` (each a `+f` value, so `["good", "bad"]` is bzfs's
+`+f good +f bad`). Upstream adds a map's `+f` to the command line's; bzo lets
+a map say "only these", since `-s 0` cannot.
 
 `-set _maxFlagGrabs` is a plain BZDB assignment, so the map's number replaces the
 config's `maxFlagGrabs` as `-ms` and `-s` do. Only the server acts on it -- it is

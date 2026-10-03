@@ -50,6 +50,7 @@ const {
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
   decodePlayerUpdate,
   decodeShotBegin,
+  decodeGMUpdate,
 } = require('./server/bzfs-session.cjs');
 const {
   normalizeShotSlotCount,
@@ -342,6 +343,7 @@ function computeClientBuild() {
 const { isHeadsetBrowserUA } = require('./server/headset.cjs');
 const { describeListenTarget, resolveListenTarget } = require('./server/listen-address.cjs');
 const { createBzflagServer, publishToBzflagList } = require('./server/bzflag-server.cjs');
+const { generateWorldBzw } = require('./server/world-generator.cjs');
 const { addCardinalLetters } = require('./server/bzflag-extras.cjs');
 const {
   NativeTranslator, decodeEnter, decodeClientMessage, moveFromBzfs, shootFromBzfs,
@@ -1377,13 +1379,12 @@ function measureLiveWorld() {
       return 0;
     }
   };
-  // A generated world was never a file, so it has no `.bzw` to weigh --
-  // which is itself the honest answer for `random`.
+  // A generated world's `.bzw` is the text it was generated as.
   const mapFilePath = MAP_SOURCE === 'random' ? null : resolveMapFilePath(MAP_SOURCE);
   const brotliName = `${LIVE_MAP_ENTRY.hash}.json`;
   return {
     hash: LIVE_MAP_ENTRY.hash,
-    bzw: mapFilePath ? sizeOf(mapFilePath) : 0,
+    bzw: mapFilePath ? sizeOf(mapFilePath) : (RANDOM_WORLD_BZW ? Buffer.byteLength(RANDOM_WORLD_BZW) : 0),
     json: sizeOf(path.join(MAP_CACHE_DIR, `${LIVE_MAP_ENTRY.hash}.json`)),
     brotli: sizeOf(path.join(MAP_CACHE_BR_DIR, brotliSidecarName(brotliName) || '\0')),
   };
@@ -2118,6 +2119,7 @@ function renderFilterHelp(listId) {
       ['/+ctf,vt=2', 'Capture-the-flag between exactly two teams'],
       ['/d)*league*', 'Leagues, by description'],
       ['/ve)bzo-*', 'bzo servers only'],
+      ['/ve]^$', 'No version known yet'],
       ['/op&gt;0', 'Somebody is watching'],
       ['/+rabbit,+rico,s=3', 'Rabbit chase, ricochet, three shots'],
       ['/+ctf/+rabbit', 'Either capture-the-flag or rabbit chase'],
@@ -6471,23 +6473,7 @@ function parseBZWServerOptions(lines) {
     // Unlike a `zoneflag` they have no zone of their own, so they spawn and
     // respawn anywhere, or in a zone a `flag` line names their type in.
     // `team` and a team type ask for extra team flags, which bzo does not have.
-    if (readOption('+f') && value) {
-      const raw = value.trim();
-      const brace = raw.indexOf('{');
-      const parsedCount = brace >= 0 ? parseInt(raw.slice(brace + 1), 10) : 1;
-      const count = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 1;
-      const wanted = (brace >= 0 ? raw.slice(0, brace) : raw).toUpperCase();
-      const add = (abbreviation) => {
-        options.requiredFlagCounts[abbreviation] = (options.requiredFlagCounts[abbreviation] || 0) + count;
-      };
-      if (wanted === 'GOOD' || wanted === 'BAD') {
-        for (const abbreviation of FLAG_ABBREVIATIONS) {
-          if (!isTeamFlag(abbreviation) && isBadFlag(abbreviation) === (wanted === 'BAD')) add(abbreviation);
-        }
-      } else if (getFlagType(wanted) && !isTeamFlag(wanted)) {
-        add(wanted);
-      }
-    }
+    if (readOption('+f') && value) addRequiredFlags(value, options.requiredFlagCounts);
     // -f <abbreviation|good|bad>: take a flag type out of the pool a slot draws
     // from, upstream's flagDisallowed table. Disallows accumulate and nothing
     // puts one back, so this is a switch like the rest even though it names its
@@ -6846,7 +6832,9 @@ function faceMaxCrossSqr(vertices, indices) {
 // Upstream's own threshold, `MeshFace.cxx:114`.
 const MIN_FACE_CROSS_SQR = 1.0e-20;
 
-function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
+// `text` is a world given rather than read from `filename`, which then only
+// names it: a generated one (server/world-generator.cjs).
+function parseBZWMap(filename, { quiet = false, extraMessages = [], text: givenText = null } = {}) {
   const degenerateFaceCounts = new Map();
   // Diagnostic detail about this one file -- which refs, textures, or spins
   // it dropped -- worth an operator's attention for the live map and for one
@@ -6880,7 +6868,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
   // always this same process's own absolute `maps/` path, which only repeats
   // noise a reader already knows on every line.
   const mapLabel = path.basename(filename);
-  const text = fs.readFileSync(filename, 'utf8');
+  const text = givenText ?? fs.readFileSync(filename, 'utf8');
   const lines = text.split(/\r?\n/);
   const teamMode = parseBZWTeamMode(lines);
   const serverOptions = parseBZWServerOptions(lines);
@@ -10663,61 +10651,6 @@ function formatInstancing({ instanced, groups, templates, faces, repeats = 0, re
     + (repeats > 0 ? `, ${repeats} repeated meshes as ${repeatShapes}` : '');
 }
 
-// Generate random obstacles on server start
-function generateObstacles() {
-  const obstacles = [];
-  GAME_CONFIG.MAP_SIZE = 100;
-  const mapSize = GAME_CONFIG.MAP_SIZE;
-  const numBoxes = Math.floor(mapSize * mapSize / 2000 + Math.random() * 3);
-  const numPyramids = Math.floor(numBoxes / 2);
-  const minDistance = 15; // Minimum distance from center and other obstacles
-
-  // Helper to check overlap for both types
-  function isTooClose(x, z, w, d, others) {
-    for (const other of others) {
-      const dist = Math.sqrt(Math.pow(x - other.x, 2) + Math.pow(z - other.z, 2));
-      if (dist < (w + other.w) / 2 + minDistance) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // Place one obstacle at random, retrying until it clears the centre and every
-  // obstacle already placed. Boxes and pyramids differ only in what is built.
-  function placeObstacles(count, build) {
-    for (let i = 0; i < count; i++) {
-      for (let attempts = 0; attempts < 50; attempts++) {
-        const x = (Math.random() - 0.5) * (mapSize * 0.8);
-        const z = (Math.random() - 0.5) * (mapSize * 0.8);
-        const w = 6 + Math.random() * 6;
-        const d = 6 + Math.random() * 6;
-
-        if (Math.sqrt(x * x + z * z) < minDistance) continue;
-        if (isTooClose(x, z, w, d, obstacles)) continue;
-
-        // Most sit on the ground; the rest float, leaving a gap to drive under.
-        const grounded = Math.random() < 0.6;
-        const h = grounded ? 4 + Math.random() * 4 : 3 + Math.random() * 2;
-        const baseY = grounded ? 0 : 3 + Math.random() * 3;
-
-        obstacles.push(build({ x, z, w, d, h, baseY, rotation: Math.random() * Math.PI * 2 }, i));
-        break;
-      }
-    }
-  }
-
-  placeObstacles(numBoxes, (shape, i) => ({ ...shape, name: `O${i}`, type: 'box' }));
-  placeObstacles(numPyramids, (shape, i) => ({
-    ...shape,
-    name: `P${i}`,
-    type: 'pyramid',
-    inverted: Math.random() < 0.2, // 20% chance for random inverted pyramid
-  }));
-
-  return obstacles;
-}
-
 let OBSTACLES;
 let TELEPORTER_GRAPH = { teleporters: [], links: [] };
 let mapTeamMode = null;
@@ -10769,12 +10702,50 @@ let mapGroundMaterial = null;
 // them, so they only ride along in the map's JSON for the client to draw.
 let mapMeshTemplates = {};
 let mapMeshInstances = [];
+// A world with no map is generated (server/world-generator.cjs, after bzfs's
+// own generators) as the `.bzw` it amounts to, and read exactly as a map file is
+// -- and compiled from the same text for a BZFlag client (`getBzflagWorld`).
+// Kept in memory rather than written out: each process has its own, and two
+// on one checkout must not trade theirs. bzfs builds its team world, with
+// bases, for capture-the-flag (`-c`, bzfs.cxx:1166); bzo's `-c` is its team
+// mode, so the team world goes to a server with colour teams on, with a base
+// for each colour that has player slots, as upstream checks `maxTeam > 0`.
+// Resolved here from the config alone, since a generated world states no team
+// options of its own; `TEAM_MODE` below comes to the same answer.
+let RANDOM_WORLD_BZW = null;
 if (MAP_SOURCE === 'random') {
-  OBSTACLES = generateObstacles();
-  TELEPORTER_GRAPH = { teleporters: [], links: [] };
-  log(`Generated ${OBSTACLES.length} random obstacles`);
-} else {
-  const mapData = parseBZWMap(mapPath);
+  const maxPlayers = Number(serverConfig.maxPlayers);
+  const configTeams = resolveTeamMode(serverConfig.teamMode, null,
+    Number.isInteger(maxPlayers) && maxPlayers > 0 ? maxPlayers : 16, serverConfig.rabbit);
+  const colourTeams = configTeams.enabled
+    ? configTeams.teams
+      .filter((team) => isColorTeam(team) && (configTeams.limits[team] || 0) > 0)
+      .map((team) => BZFLAG_TEAM_ORDER.indexOf(team))
+    : [];
+  const randomWorld = serverConfig.randomWorld && typeof serverConfig.randomWorld === 'object'
+    ? serverConfig.randomWorld : {};
+  RANDOM_WORLD_BZW = generateWorldBzw({
+    bzdb: SERVER_BZDB,
+    teamWorld: colourTeams.length > 0,
+    teams: colourTeams,
+    options: {
+      density: Number(randomWorld.density),
+      teleporters: randomWorld.teleporters,
+      randomHeights: randomWorld.randomHeights,
+      randomCtf: randomWorld.randomCtf,
+      randomBoxes: randomWorld.randomBoxes,
+      randomSizes: randomWorld.randomSizes,
+      floating: randomWorld.floating,
+      upsideDown: randomWorld.upsideDown,
+    },
+  });
+  log(`Generated a ${colourTeams.length > 0 ? `team world for ${colourTeams.length} colour(s)` : 'random world'}`
+    + `, ${Buffer.byteLength(RANDOM_WORLD_BZW)} bytes of .bzw`);
+}
+{
+  const mapData = RANDOM_WORLD_BZW !== null
+    ? parseBZWMap('random', { text: RANDOM_WORLD_BZW })
+    : parseBZWMap(mapPath);
   OBSTACLES = mapData.obstacles;
   TELEPORTER_GRAPH = mapData.teleporterGraph;
   mapTeamMode = mapData.teamMode;
@@ -11169,16 +11140,11 @@ function sweepStaleImports() {
   }
 }
 
-const LIVE_MAP_ENTRY = MAP_SOURCE === 'random'
-  ? registerMapFile(
-    'random', OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls,
-    mapWaterLevel, null, null, null
-  )
-  : registerMapFile(
-    MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls,
-    mapWaterLevel, mapWeather, mapGroundMaterial, mapServerOptions,
-    { templates: mapMeshTemplates, instances: mapMeshInstances }
-  );
+const LIVE_MAP_ENTRY = registerMapFile(
+  MAP_SOURCE, OBSTACLES, TELEPORTER_GRAPH, mapTeamMode, GAME_CONFIG.MAP_SIZE, mapMessages, mapNoWalls,
+  mapWaterLevel, mapWeather, mapGroundMaterial, mapServerOptions,
+  { templates: mapMeshTemplates, instances: mapMeshInstances }
+);
 
 // A Map Viewer's requested map file, checked against what this process has
 // actually hashed -- the client fetched its preview from `init.viewableMaps`
@@ -11909,6 +11875,10 @@ class Player {
     // id is kept so a login on a second device can invalidate this one; it is
     // never sent to a client. See `isAdmin` and docs/login-plan.md.
     this.sessionId = null;
+    // `hasStartedToNotRespond` (PlayerInfo.cxx): unheard from past
+    // `notRespondingLimitMs`, until its next move.
+    this.notResponding = false;
+    this.lastHeardAt = Date.now();
     this.verified = false;
     this.bzid = null;
     this.globalCallsign = null;
@@ -12232,6 +12202,9 @@ class Player {
     this.rotation = spawnPos.rotation;
     this.alive = true;
     this.hasSpawned = true;
+    // A new life is heard from as it starts; its first move comes after.
+    this.lastHeardAt = Date.now();
+    this.notResponding = false;
     // `LocalPlayer::restart` (LocalPlayer.cxx:1052) deletes every shot the tank
     // had, so a tank that comes back comes back loaded. The life that fired
     // them is over; nothing is left in the air to hold a slot.
@@ -12270,6 +12243,7 @@ class Player {
       losses: this.losses,
       tks: this.tks,
       paused: this.paused,
+      notResponding: this.notResponding,
       autopilot: this.autopilot,
       bot: this.bot,
       forwardSpeed: this.forwardSpeed,
@@ -12771,6 +12745,33 @@ defineCommand('/kill', COMMAND_TIER.OPERATOR,
       : 'You were killed by an operator');
   });
 
+// ClientQueryCommand (commands.cxx:3539): every playing tank's client
+// version, or one player's. Upstream's needs `clientQuery`, an admin's right.
+// A BZFlag client's version is what it sent with MsgEnter; a browser's is
+// this server's own build and the browser it runs in.
+defineCommand('/clientquery', COMMAND_TIER.OPERATOR,
+  '[#slot|PlayerName|"Player Name"] - show client versions',
+  (player, args) => {
+    const report = (other) => {
+      replyToPlayer(player, `${other.name}'s client version:`);
+      replyToPlayer(player, `  ${other.clientVersion || 'unknown'}`);
+    };
+    if (args.trim()) {
+      const target = resolveCommandTarget(args);
+      const other = target.id ? players.get(target.id) : null;
+      if (!other) {
+        replyToPlayer(player, 'Player not found.');
+        return;
+      }
+      report(other);
+      return;
+    }
+    replyToPlayer(player, `BZFS Version: ${BZO_APP_VERSION}`);
+    for (const other of players.values()) {
+      if (other.joined && !isObserverTeam(other.team)) report(other);
+    }
+  });
+
 // CountdownCommand (commands.cxx:1252). Upstream's own pre-match delay -- the
 // "3...2...1...GO" chat countdown before the clock actually starts -- is not
 // reproduced here; the bare form starts the match at once. `pause`/`resume`
@@ -13258,6 +13259,9 @@ defineCommand('/mv', COMMAND_TIER.OPERATOR,
     sendToPlayer(subject, {
       type: 'positionCorrection',
       x: subject.x, y: subject.y, z: subject.z, r: subject.rotation, vv: 0,
+      // Said, so a BZFlag client -- which has no correction, only a spawn to
+      // be placed by -- is placed by this one and by nothing else.
+      moved: true,
     });
     broadcast({
       type: 'pm',
@@ -14805,7 +14809,9 @@ function getShotRejection(player, shotX, shotY, shotZ, now = Date.now()) {
   // upstream's circle ever allows. The client now clamps its model-derived
   // muzzle offset the same way (render.js, MAX_MUZZLE_FORWARD, issue #83):
   // tied to *this* tank's actual closest approach, not upstream's looser one.
-  const barrelLength = TANK.halfLength + 0.1;
+  // And it scales with the tank as `Player::getMuzzle` (Player.cxx:224) moves
+  // the muzzle: Obesity, Tiny and Thief by their factor, Narrow not at all.
+  const barrelLength = (TANK.halfLength * getPlayerTankScale(player).length) + 0.1;
 
   if (!Number.isFinite(shotX) || !Number.isFinite(shotY) || !Number.isFinite(shotZ)) {
     return { reason: `shot origin is not finite (${shotX}, ${shotY}, ${shotZ})`, fatal: true };
@@ -15290,6 +15296,41 @@ function isTeamEmpty(colorIndex) {
   return true;
 }
 
+// One `+f <abbreviation|good|bad>[{count}]` into a type -> count table:
+// upstream's `flagCount` (CmdLineOptions.cxx:1635-1675), one by default,
+// `{n}` for n, `good`/`bad` one of every type in the set. A team type is not
+// one bzo adds extras of.
+function addRequiredFlags(spec, into) {
+  const raw = String(spec).trim();
+  const brace = raw.indexOf('{');
+  const parsedCount = brace >= 0 ? parseInt(raw.slice(brace + 1), 10) : 1;
+  const count = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 1;
+  const wanted = (brace >= 0 ? raw.slice(0, brace) : raw).toUpperCase();
+  const add = (abbreviation) => {
+    into[abbreviation] = (into[abbreviation] || 0) + count;
+  };
+  if (wanted === 'GOOD' || wanted === 'BAD') {
+    for (const abbreviation of FLAG_ABBREVIATIONS) {
+      if (!isTeamFlag(abbreviation) && isBadFlag(abbreviation) === (wanted === 'BAD')) add(abbreviation);
+    }
+  } else if (getFlagType(wanted) && !isTeamFlag(wanted)) {
+    add(wanted);
+  }
+  return into;
+}
+
+// Which flags a world carries beyond its zones and team flags. A map that
+// names any (`+f`, `-s`, `+s`) decides them alone; one that names none -- a
+// generated world, or a map written without flags -- takes the server's,
+// server.json's `requiredFlags` (each a `+f` value, `["good", "bad"]` being
+// bzfs's `+f good +f bad`) and `superFlags`.
+const MAP_NAMES_ITS_FLAGS = Object.keys(mapServerOptions.requiredFlagCounts || {}).length > 0
+  || Number.isInteger(mapServerOptions.superFlagCount);
+const REQUIRED_FLAG_COUNTS = MAP_NAMES_ITS_FLAGS
+  ? (mapServerOptions.requiredFlagCounts || {})
+  : (Array.isArray(serverConfig.requiredFlags) ? serverConfig.requiredFlags : [])
+    .reduce((into, spec) => addRequiredFlags(spec, into), {});
+
 // +s/-s upstream: how many superflag slots the world carries, and which types
 // may fill them. A server carries none unless it is asked, as upstream's
 // `numExtraFlags(0)` does, so a map written without flags is played without
@@ -15318,7 +15359,7 @@ function normalizeSuperFlagConfig(value) {
 const SUPER_FLAGS = normalizeSuperFlagConfig(
   Number.isInteger(mapServerOptions.superFlagCount)
     ? { ...serverConfig.superFlags, count: mapServerOptions.superFlagCount }
-    : serverConfig.superFlags
+    : (MAP_NAMES_ITS_FLAGS ? { ...serverConfig.superFlags, count: 0 } : serverConfig.superFlags)
 );
 
 // What a slot is actually drawn from: everything the config allows, less
@@ -15706,9 +15747,11 @@ if (BZFLAG_CONFIG?.listen) {
 // no `.bzw` to compile.
 let bzflagWorld = null;
 
-function bzflagWorldFromBlob(blob, how) {
-  // `'p'` for a world from a file, then the MD5 of the blob (bzfs.cxx:1208).
-  const hash = `p${crypto.createHash('md5').update(blob).digest('hex')}`;
+function bzflagWorldFromBlob(blob, how, generated = false) {
+  // `'p'` for a world from a file and `'t'` for one made up at start, which a
+  // client caches only for the session; then the MD5 of the blob
+  // (bzfs.cxx:1208).
+  const hash = `${generated ? 't' : 'p'}${crypto.createHash('md5').update(blob).digest('hex')}`;
   log(`[BZFLAG] world for ${MAP_SOURCE} (${how}): ${blob.length} bytes, ${hash}`);
   return { blob, hash };
 }
@@ -15737,13 +15780,17 @@ function bzfsCacheout(mapPath, reason) {
 
 function getBzflagWorld() {
   if (bzflagWorld && bzflagWorld.mapHash === LIVE_MAP_ENTRY?.hash) return bzflagWorld.promise;
-  const mapPath = MAP_SOURCE === 'random' ? null : resolveMapFilePath(MAP_SOURCE);
-  if (!mapPath) return Promise.resolve(null);
+  const generated = MAP_SOURCE === 'random';
+  const mapPath = generated ? null : resolveMapFilePath(MAP_SOURCE);
+  if (!generated && !mapPath) return Promise.resolve(null);
   let promise;
   try {
-    const tree = compileBzwWorld(fs.readFileSync(mapPath, 'latin1'), { bzdb: SERVER_BZDB });
+    const text = generated ? RANDOM_WORLD_BZW : fs.readFileSync(mapPath, 'latin1');
+    const tree = compileBzwWorld(text, { bzdb: SERVER_BZDB });
     if (tree.unsupported.length > 0) {
-      promise = bzfsCacheout(mapPath, `the compiler cannot reproduce ${[...new Set(tree.unsupported)].join(', ')}`);
+      promise = generated
+        ? Promise.resolve(null)
+        : bzfsCacheout(mapPath, `the compiler cannot reproduce ${[...new Set(tree.unsupported)].join(', ')}`);
     } else {
       // bzo's compass letters, which its browsers draw for themselves, at the
       // height they draw them (`_addCompassMarker`, public/render.js).
@@ -15752,10 +15799,12 @@ function getBzflagWorld() {
         mapSize: GAME_CONFIG.MAP_SIZE,
         height: Math.max((GAME_CONFIG.WALL_HEIGHT || 0) + 8, tallest + 5),
       });
-      promise = Promise.resolve(bzflagWorldFromBlob(packWorldDatabase(tree), 'compiled'));
+      promise = Promise.resolve(bzflagWorldFromBlob(packWorldDatabase(tree), generated ? 'generated' : 'compiled', generated));
     }
   } catch (error) {
-    promise = bzfsCacheout(mapPath, `the compiler failed (${error.message})`);
+    promise = generated
+      ? (logError(`[BZFLAG] the generated world did not compile: ${error.message}`), Promise.resolve(null))
+      : bzfsCacheout(mapPath, `the compiler failed (${error.message})`);
   }
   bzflagWorld = { mapHash: LIVE_MAP_ENTRY?.hash, promise };
   return promise;
@@ -15826,6 +15875,22 @@ async function seatNativeClient(link, payload) {
     send: (code, body) => link.send(code, body),
     teamIndex: bzflagTeamIndex,
     config: () => GAME_CONFIG,
+    flagName: (type) => getFlagType(type)?.name || '',
+    addressOf: (id) => players.get(id)?.clientIP ?? null,
+    selfIsAdmin: () => Boolean(seated && isAdmin(seated)),
+    guidedShots: (shooterId) => [...projectiles.values()]
+      .filter((proj) => proj.guided && String(proj.playerId) === shooterId)
+      .map((proj) => ({
+        id: proj.id,
+        x: proj.x,
+        y: proj.y,
+        z: proj.z,
+        dirX: proj.dirX,
+        dirY: proj.dirY,
+        dirZ: proj.dirZ,
+        speed: proj.speed,
+        team: players.get(String(proj.playerId))?.team ?? null,
+      })),
   });
   socket.send = (data) => {
     try {
@@ -15834,7 +15899,18 @@ async function seatNativeClient(link, payload) {
       logError(`[BZFLAG] "${enter.callsign}": ${error.message}`);
     }
   };
-  socket.ping = () => setTimeout(() => socket.emit('pong'), 0);
+  // bzo's keep-alive ping (`server/lag.cjs`) as bzfs's own, MsgLagPing with
+  // a sequence number the client echoes (`LagInfo::getNextPingSeqno`); the
+  // echo is the pong, so a native player's lag is measured like anyone's.
+  let lagPingSeqno = 0;
+  let lagPingPending = null;
+  socket.ping = () => {
+    lagPingSeqno = (lagPingSeqno + 1) & 0xffff;
+    lagPingPending = lagPingSeqno;
+    const body = Buffer.alloc(2);
+    body.writeUInt16BE(lagPingSeqno, 0);
+    link.send('pi', body);
+  };
   let seated = null;
   const close = () => {
     if (socket.readyState !== 1) return;
@@ -15871,7 +15947,62 @@ async function seatNativeClient(link, payload) {
       // An exploding tank keeps reporting as its pieces fly, with the alive
       // bit clear; that is not a tank bzo should move.
       if ((update.status & BZFS_PLAYER_STATUS.ALIVE) === 0) return;
+      // The update after a MsgTeleport is the far side of it.
+      if (seated.nativeTeleport) {
+        applyNativeTeleport(seated, moveFromBzfs(update, GAME_CONFIG), seated.nativeTeleport);
+        seated.nativeTeleport = null;
+        return;
+      }
       say(moveFromBzfs(update, GAME_CONFIG));
+      // bzfs answers Identify on every update its holder sends
+      // (`sendClosestFlagMessage`); the translator passes on only a change.
+      searchFlag(seated);
+    } else if (code === 'pi') {
+      // Its echo of our MsgLagPing; one that is not the latest is stale.
+      if (body.length >= 2 && body.readUInt16BE(0) === lagPingPending) {
+        lagPingPending = null;
+        socket.emit('pong');
+      }
+    } else if (code === 'tp') {
+      // It went through a teleporter (`LocalPlayer::doUpdateMotion`,
+      // LocalPlayer.cxx:764): which face it entered and which it left by,
+      // upstream's teleporter index times two plus the face -- bzo's face
+      // ids. Where it came out is the update that follows.
+      if (!seated?.joined || !seated.alive || body.length < 4) return;
+      seated.nativeTeleport = { from: body.readUInt16BE(0), to: body.readUInt16BE(2) };
+    } else if (code === 'pa') {
+      // Paused or not (`pausePlayer`, bzfs.cxx:2778). The client has already
+      // counted its five seconds down, as upstream's does, so it takes hold
+      // now; bzo's own countdown is for its browsers.
+      if (!seated?.joined || !seated.alive || isObserverTeam(seated.team) || body.length < 1) return;
+      const paused = body.readUInt8(0) !== 0;
+      if (seated.paused !== paused) setPaused(seated, paused);
+    } else if (code === 'au') {
+      // Its autopilot (`autopilotPlayer`, bzfs.cxx:5217), which BZFlag's own
+      // client calls Roger.
+      if (body.length >= 1) say({ type: 'autopilot', on: body.readUInt8(0) !== 0, pilot: 'Roger' });
+    } else if (code === 'gf') {
+      // The flag its tank touched, by index; bzo decides, as for a browser.
+      if (body.length >= 2) say({ type: 'grabFlag', index: body.readUInt16BE(0) });
+    } else if (code === 'df') {
+      // Where it let go is bzo's own reckoning (`dropFlag`), not the client's.
+      say({ type: 'dropFlag' });
+    } else if (code === 'cf') {
+      // The team whose base it carried the flag into.
+      if (body.length >= 2) say({ type: 'captureFlag', team: body.readUInt16BE(0) });
+    } else if (code === 'gm') {
+      // Its guided missile's target (`GuidedMissileStrategy::sendUpdate`).
+      // bzo steers a shooter's missiles at its lock, so the lock is what moves.
+      if (!seated?.joined) return;
+      let update;
+      try {
+        update = decodeGMUpdate(body);
+      } catch {
+        return;
+      }
+      if (update.player !== link.id) return;
+      const target = players.get(String(update.target));
+      setLockTarget(seated, target && canLockOn(seated) && canLockOnto(target) ? target.id : null);
     } else if (code === 'sb') {
       // A shot it fired. bzo's server flies it and decides what it hits, as
       // it does for a browser's; the client's own id for it is kept so what
@@ -15909,6 +16040,7 @@ async function seatNativeClient(link, payload) {
   const player = [...players.values()].find((candidate) => candidate.ws === socket);
   if (!player) return;
   seated = player;
+  player.clientVersion = enter.version;
   // Its moves are its own client's physics, which bzo cannot correct: a
   // finding is logged, never refused (`reportCheat`).
   player.native = true;
@@ -15944,7 +16076,7 @@ async function seatNativeClient(link, payload) {
     replyToPlayer(player, 'You can register it at https://forums.bzflag.org/');
   }
   if (!isObserverTeam(player.team)) {
-    replyToPlayer(player, 'BZFlag clients can drive, shoot and die in bzo; flags come next.');
+    replyToPlayer(player, 'BZFlag clients can play in bzo; some flag effects may still differ.');
   }
 }
 
@@ -15956,6 +16088,50 @@ function bzflagListTitle() {
   const base = String(serverConfig.title || '').trim();
   const suffix = ` - ${path.basename(MAP_SOURCE).replace(/\.bzw$/i, '')}`;
   return `${base.slice(0, Math.max(0, BZFLAG_TITLE_MAX - suffix.length))}${suffix}`;
+}
+
+// The far side of a native teleport: where the client says it came out, which
+// bzo takes as it takes the client's moves, sent to every browser as bzo's
+// own teleport move (`pt`) so it is drawn as one rather than a slide. A link
+// bzo does not know -- a group-placed teleporter numbered differently -- is
+// still a teleport, said with no faces.
+function applyNativeTeleport(player, move, { from, to }) {
+  const now = Date.now();
+  const known = getTeleportDestinationFace(TELEPORTER_LINKS_BY_SOURCE_FACE, from) === to;
+  player.x = move.x;
+  player.y = move.y;
+  player.z = move.z;
+  player.rotation = move.r;
+  player.forwardSpeed = move.fs;
+  player.rotationSpeed = move.rs;
+  player.verticalVelocity = move.vv;
+  player.airVelocityX = move.vx;
+  player.airVelocityZ = move.vz;
+  player.jumpDirection = move.air ? move.r : null;
+  player.slideDirection = move.d;
+  player.lastUpdate = now;
+  if (Number.isFinite(move.ct)) player.lastClientTimestamp = move.ct;
+  noteHeardFrom(player, now);
+  const packet = {
+    type: 'pt',
+    id: player.id,
+    x: player.x,
+    y: player.y,
+    z: player.z,
+    r: player.rotation,
+    fs: player.forwardSpeed,
+    rs: player.rotationSpeed,
+    vv: player.verticalVelocity,
+    vx: player.airVelocityX,
+    vz: player.airVelocityZ,
+    fromFaceId: known ? from : null,
+    toFaceId: known ? to : null,
+    jd: player.jumpDirection,
+  };
+  if (player.slideDirection !== undefined) packet.d = player.slideDirection;
+  broadcastAll(packet);
+  log(`[PLAYER_TP] player=${player.id} srcFace=${from} dstFace=${to}${known ? '' : ' (link not in bzo\'s map)'}`
+    + ` pos=(${player.x.toFixed(2)},${player.y.toFixed(2)},${player.z.toFixed(2)}) native`);
 }
 
 // A native client's own MsgKilled (`ServerLink::sendKilled`): killer, reason,
@@ -16818,6 +16994,40 @@ function captureFlag(player, baseColorIndex) {
 // zapFlagByPlayer(). Death, disconnect, a pause, or a self-destruct all give up
 // the flag: a droppable one is thrown where the tank stood, a sticky one just
 // goes away.
+// Not responding: a playing tank unheard from for `_notRespondingTime`
+// (global.cxx:103). bzo's idle heartbeat may be five seconds
+// (`MAX_UPDATE_INTERVAL`), so the limit is never under two of those -- an
+// honest idle tank would otherwise flicker. What bzfs does when one stops
+// (bzfs.cxx:5808): a new rabbit, and its flag dropped where it was last seen.
+// Browsers mark it `[nr]` and say so in chat, as upstream's client does.
+function notRespondingLimitMs() {
+  const seconds = Number(GAME_CONFIG.NOT_RESPONDING_TIME);
+  return Math.max((Number.isFinite(seconds) && seconds > 0 ? seconds : 5) * 1000,
+    2 * GAME_CONFIG.MAX_UPDATE_INTERVAL);
+}
+
+function checkNotResponding(now = Date.now()) {
+  const limit = notRespondingLimitMs();
+  players.forEach((player) => {
+    if (player.notResponding || !player.joined || !player.alive || isObserverTeam(player.team)) return;
+    if (now - player.lastHeardAt <= limit) return;
+    player.notResponding = true;
+    log(`"${player.name}" not responding (${((now - player.lastHeardAt) / 1000).toFixed(1)}s)`);
+    if (RABBIT_SELECTION && rabbitPlayerId === player.id) anointNewRabbit();
+    dropPlayerFlag(player.id);
+    broadcastPlayerRecord('playerUpdated', player);
+  });
+}
+setInterval(() => checkNotResponding(), 1000).unref?.();
+
+function noteHeardFrom(player, now = Date.now()) {
+  player.lastHeardAt = now;
+  if (!player.notResponding) return;
+  player.notResponding = false;
+  log(`"${player.name}" okay`);
+  broadcastPlayerRecord('playerUpdated', player);
+}
+
 function dropPlayerFlag(playerId) {
   const flag = getPlayerFlag(playerId);
   if (!flag) return;
@@ -17037,7 +17247,7 @@ function createFlags() {
   // `+f` flags next: required types with no zone, so they spawn anywhere a
   // `flag` zone does not claim them. A forbidden type is skipped, as a zone's
   // is below.
-  Object.entries(mapServerOptions.requiredFlagCounts || {}).forEach(([abbreviation, count]) => {
+  Object.entries(REQUIRED_FLAG_COUNTS).forEach(([abbreviation, count]) => {
     if (getForbiddenFlags().includes(abbreviation)) return;
     for (let slot = 0; slot < count; slot++) {
       flags.push(createFlagSlot(flags.length, null, { requiredType: abbreviation }));
@@ -17795,6 +18005,8 @@ function canLockOnto(player) {
   if (!player || !player.joined) return false;
   if (isObserverTeam(player.team)) return false;
   if (!player.alive || player.paused) return false;
+  // Not a lock target while it is not responding (playing.cxx:4426).
+  if (player.notResponding) return false;
   // `ST` is one flag doing both jobs upstream: off the radar, and out of reach
   // of a lock.
   if (hidesFromRadar(getPlayerFlag(player.id)?.type ?? null)) return false;
@@ -20736,6 +20948,9 @@ function acceptConnection(ws, req) {
   // trustworthy as the proxy -- see docs/commands-plan.md on why a ban cannot
   // rest on it as read.
   player.clientIP = clientIP;
+  // What `/clientquery` says it runs: bzo's own build for a browser, and the
+  // browser; a BZFlag client replaces it with what it sent (`seatNativeClient`).
+  player.clientVersion = `${BZO_APP_VERSION} web, ${shortUserAgent(req.headers['user-agent'] || '')}`;
   player.localAdmin = isLocalAdminRequest(req.socket.remoteAddress, req.headers, {
     enabled: LOCAL_ADMIN,
     whitelist: ADMIN_WHITELIST,
@@ -21043,6 +21258,7 @@ function acceptConnection(ws, req) {
           // about: its stored position is still the default, so judging one
           // reports the client's previous session as drift.
           if (!player.joined) break;
+          noteHeardFrom(player);
           if (isObserverTeam(player.team)) {
             applyObserverHeartbeat(player, message, ws);
             break;
@@ -21773,6 +21989,8 @@ function acceptConnection(ws, req) {
           player.teleportReentryBlockUntil = 0;
           player.teleportCooldownUntil = 0;
           player.lastUpdate = Date.now();
+          player.lastHeardAt = player.lastUpdate;
+          player.notResponding = false;
           player.lag.resetUpdateGap();
           player.losses = 0;
           player.wins = 0;
@@ -22442,6 +22660,7 @@ function addBot(pilotId = botFillPilot, team = PLAYER_TEAM.AUTOMATIC, { auto = f
   acceptConnection(socket, BOT_FAKE_REQUEST);
   const player = [...players.values()].find((candidate) => candidate.ws === socket);
   if (!player) return { error: 'the bot could not connect' };
+  player.clientVersion = `${BZO_APP_VERSION} bot, ${entry.name}`;
   let name;
   do {
     name = `${entry.name}${nextBotNumber++}`;

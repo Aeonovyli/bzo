@@ -234,6 +234,11 @@ export const BZDB_CONFIG_VARS = new Map([
   // Always on in bzo -- a browser has no place of its own -- so read and kept.
   ['_syncLocation', { key: 'SYNC_LOCATION', parse: bzdbIsTrue }],
   ['_drawGroundLights', { key: 'DRAW_GROUND_LIGHTS', parse: bzdbIsTrue }],
+  // How long a player may go unheard before it is marked not responding.
+  ['_notRespondingTime', { key: 'NOT_RESPONDING_TIME' }],
+  // The width of a world the server generates (server/world-generator.cjs),
+  // as upstream's generators read it. A map file's own `world size` wins.
+  ['_worldSize', { key: 'WORLD_SIZE' }],
   // Read and kept, with nothing to steer. bzfs kicks a client that reports
   // more shot ends than this; a bzo client never reports one, the server
   // ending every shot itself.

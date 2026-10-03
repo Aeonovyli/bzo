@@ -78,6 +78,10 @@ function packQueryGame(status, elapsedSeconds) {
   return payload;
 }
 
+// What rides UDP once the link is up (`ServerLink::send`, ServerLink.cxx:428):
+// the messages sent constantly, and the link's own.
+const UDP_CODES = new Set(['sb', 'se', 'pu', 'ps', 'gm', 'of', 'og']);
+
 // MsgPingCodeRequest and MsgPingCodeReply (Protocol.h), bzfs's UDP ping on
 // its game port (bzfs.cxx:7690).
 const PING_REQUEST = 0x0404;
@@ -265,7 +269,13 @@ function createBzflagServer({
         address: connection.address,
         remoteAddress: socket.remoteAddress,
         closed: false,
-        send: (frameCode, body) => { if (!socket.destroyed) sendFrame(socket, frameCode, body); },
+        send: (frameCode, body) => {
+          if (socket.destroyed) return;
+          // The constant messages ride UDP once both ends have heard each
+          // other there (`NetHandler::pwrite`); everything else stays on TCP.
+          if (connection.udpOut && UDP_CODES.has(frameCode)) sendUdp(connection.udpAddr, frameCode, body);
+          else sendFrame(socket, frameCode, body);
+        },
         reject: (reason) => reject(connection, reason),
         close: () => { link.closed = true; socket.end(); },
         onFrame: null,
@@ -345,6 +355,53 @@ function createBzflagServer({
 
   const server = net.createServer(accept);
   let udp = null;
+
+  function sendUdp(to, code, body = Buffer.alloc(0)) {
+    const header = Buffer.alloc(4);
+    header.writeUInt16BE(body.length, 0);
+    header.write(code, 2, 2, 'latin1');
+    udp?.send(Buffer.concat([header, body]), to.port, to.address);
+  }
+
+  // The client's half of the UDP link, the same handshake a bzfs answers
+  // (`sendUDPupdate`, bzfs.cxx:329). It sends `MsgUDPLinkRequest` naming its
+  // player id from the socket it will listen on, straight after the
+  // handshake; that address is kept for it -- only from the address its TCP
+  // connection came from -- and answered with `MsgUDPLinkEstablished` over
+  // TCP and a `MsgUDPLinkRequest` back over UDP. Its own
+  // `MsgUDPLinkEstablished`, over UDP, says it heard that; from then on the
+  // constant messages go both ways on UDP. A datagram is whole frames, walked
+  // in place.
+  function receiveUdp(datagram, from) {
+    const sameHost = (a, b) => String(a).replace(/^::ffff:/i, '') === String(b).replace(/^::ffff:/i, '');
+    let at = 0;
+    while (at + 4 <= datagram.length) {
+      const length = datagram.readUInt16BE(at);
+      const code = datagram.toString('latin1', at + 2, at + 4);
+      if (at + 4 + length > datagram.length) return;
+      const body = Buffer.from(datagram.subarray(at + 4, at + 4 + length));
+      at += 4 + length;
+      if (code === 'of') {
+        if (body.length < 1) continue;
+        const id = body.readUInt8(0);
+        const connection = [...connections].find((c) => c.id === id && sameHost(c.socket.remoteAddress, from.address));
+        if (!connection) continue;
+        connection.udpAddr = { address: from.address, port: from.port };
+        sendFrame(connection.socket, 'og');
+        sendUdp(connection.udpAddr, 'of');
+        continue;
+      }
+      const connection = [...connections]
+        .find((c) => c.udpAddr && c.udpAddr.address === from.address && c.udpAddr.port === from.port);
+      if (!connection) continue;
+      if (code === 'og') {
+        if (!connection.udpOut) log(`[BZFLAG] ${connection.address} on UDP`);
+        connection.udpOut = true;
+      } else if (UDP_CODES.has(code) && connection.link) {
+        connection.link.onFrame?.(code, body);
+      }
+    }
+  }
   return {
     async listen(host, port) {
       await new Promise((resolve, reject) => {
@@ -358,8 +415,12 @@ function createBzflagServer({
       // UDP link comes with play.
       udp = dgram.createSocket(host.includes(':') ? 'udp6' : 'udp4');
       udp.on('message', (message, from) => {
-        if (message.length < 4 || message.readUInt16BE(2) !== PING_REQUEST) return;
-        udp.send(packPingReply(getStatus(), port), from.port, from.address);
+        if (message.length < 4) return;
+        if (message.readUInt16BE(2) === PING_REQUEST) {
+          udp.send(packPingReply(getStatus(), port), from.port, from.address);
+          return;
+        }
+        receiveUdp(message, from);
       });
       udp.on('error', (error) => log(`[BZFLAG] UDP: ${error.message}`));
       await new Promise((resolve, reject) => {

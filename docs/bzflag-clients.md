@@ -36,7 +36,9 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
   installed. A construct the compiler cannot reproduce (a tinted group
   instance placing an arc, cone, sphere or tetra) falls back to bzfs
   `-cacheout`, and is turned away where bzfs is not installed. A generated
-  world has no `.bzw` and is turned away.
+  world is generated as a `.bzw` in the first place (see **Generated worlds**
+  in [bzw.md](bzw.md)) and compiled from that text, with a `t` hash, as bzfs
+  gives a world it made up, so a client keeps it only for the session.
 - **Compass letters.** bzo's own N/S/E/W markers, which its browsers draw for
   themselves, are added to the world a BZFlag client gets
   (`server/bzflag-extras.cjs`) and to nobody else's: the four letters in bzo's
@@ -109,6 +111,59 @@ own. Browsers rejoin by themselves; a BZFlag client does not.
   request is answered only where the client died on its own screen and bzo
   still has it alive.
 
+- **Flags.** A client asks to grab (`MsgGrabFlag`, the flag's index), drop
+  and capture, as bzo's own browser does, and bzo decides and tells every
+  player; the client holds a flag only once bzo says so, and runs its
+  effects itself. A drop lands where bzo reckons the tank to be. Identify is
+  searched on each of its holder's updates, as bzfs does, and `MsgNearFlag`
+  sent only when the answer changes. A native guided missile's target
+  (`MsgGMUpdate`) becomes the shooter's lock, which steers its missiles on
+  bzo's server.
+
+- **Teleports.** A client's `MsgTeleport` names the faces it went through,
+  upstream's teleporter index times two plus the face, as bzo numbers them;
+  the update after it is where it came out, taken as given and sent to every
+  browser as bzo's own teleport move, so it is drawn as one rather than a
+  slide (`applyNativeTeleport`). A bzo player's teleport reaches a BZFlag
+  client as `MsgTeleport` and the position.
+- **Pause.** A client counts its own five seconds down and then sends
+  `MsgPause`, so bzo pauses it at once, and a bzo player's pause reaches it as
+  `MsgPause` too.
+- **bzo's guided missiles.** bzo announces a lock per shooter; a BZFlag
+  client wants a `MsgGMUpdate` per missile, with where it is. So a missile
+  fired locked carries one after its `MsgShotBegin`, and a shooter's lock
+  moving sends one for each of its missiles in the air, from where bzo's
+  server has them; the client steers each from there, as bzo's server does.
+- **UDP.** The client asks for the link straight after the handshake, a
+  `MsgUDPLinkRequest` naming its id from the socket it listens on; bzo keeps
+  that address -- only from the host its TCP came from -- and answers as
+  bzfs does (`sendUDPupdate`), `MsgUDPLinkEstablished` over TCP and a
+  request back over UDP. Once the client says it heard that, player
+  updates, shots and guided missile updates go both ways on UDP, as
+  `ServerLink::send` lists them; everything else stays on TCP.
+- **`/mv`.** Upstream has no message that moves a client's own tank but its
+  spawn, so an operator moving a BZFlag player sends it `MsgAlive` at the
+  new spot.
+- **Lag.** bzo's keep-alive ping is bzfs's `MsgLagPing` for a native
+  client, a sequence number it echoes, so its lag is measured as a
+  browser's is and shows in `/lagstats`.
+- **Admin addresses.** A BZFlag client an admin is on gets every player's
+  address (`MsgAdminInfo`), each as it arrives, for its scoreboard -- IPv4
+  only, as upstream packs it, so an IPv6 player is left out. `/clientquery`
+  (an operator's, as bzfs's needs `clientQuery`) lists every playing tank's
+  client: a BZFlag client's own version from `MsgEnter`, a browser's as bzo's
+  build and the browser, a bot's as bzo's build and its pilot.
+- **Team scores and the match's end.** `MsgTeamUpdate` on arrival and on
+  every change, as bzfs sends it; `MsgScoreOver` naming who reached the limit
+  and the team, `NoTeam` where a player's own score did. The end blowing every
+  tank up is the server's word, `GotKilledMsg`.
+- **Autopilot.** `MsgAutoPilot` both ways: a BZFlag client's own, which it
+  calls Roger, turns on bzo's autopilot mark for that player, and a bzo
+  player's autopilot reaches a BZFlag client's scoreboard as `[auto]`,
+  including on arrival. A server bot always shows `[auto]`: the machine is
+  always driving it.
+
 ## What doesn't yet
 
-1. **Flags.** Grabbing, dropping and capturing, and flag effects.
+1. **Handicap.** `MsgHandicap`, which only a handicap game sends.
+2. **Trust.** A native player's movement findings are logged, never refused.

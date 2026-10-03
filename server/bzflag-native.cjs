@@ -31,8 +31,12 @@ const STATUS_ALIVE = 1 << 0;
 const STATUS_FALLING = 1 << 6;
 // `BlowedUpReason` (playing.h:128).
 const DEATH_REASONS = {
-  shot: 1, runOver: 2, captured: 3, genocide: 4, selfDestruct: 5, water: 6,
+  // The match's end blowing every tank up is the server's word alone,
+  // `GotKilledMsg`.
+  gameOver: 0, shot: 1, runOver: 2, captured: 3, genocide: 4, selfDestruct: 5, water: 6,
 };
+// `NoTeam` (global.h), as MsgScoreOver packs it for a player's win.
+const NO_TEAM = 0xffff;
 
 // bzo is Y up, three.js style; bzfs is Z up. The proxy's `proxyPosition`
 // inverted.
@@ -93,6 +97,13 @@ class Writer {
   bytes(b) { this.ensure(b.length); b.copy(this.buf, this.o); this.o += b.length; return this; }
 
   done() { return this.buf.subarray(0, this.o); }
+}
+
+// MsgTeamUpdate's body: a count, then (team, size, wins, losses).
+function packTeams(teams) {
+  const w = new Writer(1 + (teams.length * 8)).u8(teams.length);
+  for (const entry of teams) w.u16(entry.team).u16(entry.size).u16(entry.wins).u16(entry.losses);
+  return w.done();
 }
 
 // A native client's own `PlayerState`, as the move bzo's browser would have
@@ -176,11 +187,22 @@ function decodeClientMessage(payload) {
 // the handshake gave this connection; `options.config()` is the live game
 // config, for speeds.
 class NativeTranslator {
-  constructor({ selfSlot, send, teamIndex, config }) {
+  constructor({
+    selfSlot, send, teamIndex, config, flagName = () => '', guidedShots = () => [],
+    addressOf = () => null, selfIsAdmin = () => false,
+  }) {
     this.selfSlot = selfSlot;
     this.write = send;
     this.teamIndex = teamIndex;
     this.config = config;
+    this.flagName = flagName;
+    // A shooter's guided missiles in the air, as bzo's server has them now.
+    this.guidedShots = guidedShots;
+    // A player's address, and whether this client may be told it.
+    this.addressOf = addressOf;
+    this.selfIsAdmin = selfIsAdmin;
+    // The last flag MsgNearFlag named, so an unchanged answer is not repeated.
+    this.lastNearFlag = null;
     this.selfBzoId = null;
     this.players = new Map();
     this.shots = new Map();
@@ -229,6 +251,64 @@ class NativeTranslator {
     this.write('ap', w.done());
     this.players.set(String(record.id), record);
     this.playerInfo(record);
+    // `sendIPUpdate(-1, playerIndex)` (bzfs.cxx:2430): an arrival's address,
+    // to whoever holds `playerList`. Alone, which the client reads as that
+    // player joining (playing.cxx:3364); the roster at this client's own
+    // arrival goes as one list instead (`accept`).
+    if (this.accepted && !this.accepting) this.adminInfo([record.id]);
+    // A server bot is always the machine driving; a person's autopilot is as
+    // they last set it (`sendAutopilotStatus`, bzfs.cxx:2399).
+    if (record.bot || record.autopilot) this.autopilot(record.id, true);
+  }
+
+  // MsgGMUpdate (`GuidedMissileStrategy::sendUpdate`): one missile as it is
+  // now -- who, which shot, where, how fast -- and what it is locked on. A
+  // BZFlag client steers a missile itself toward that target from there, as
+  // its own does; bzo's server steers it the same way.
+  missileUpdate(shot, targetBzoId) {
+    const known = this.shots.get(shot.id);
+    if (!known) return;
+    const speed = Number(shot.speed) || 0;
+    this.write('gm', new Writer(32)
+      .u8(known.shooter)
+      .u16(known.id)
+      .vec3(toBzfsPosition(shot.x, shot.y, shot.z))
+      .vec3(toBzfsPosition(shot.dirX * speed, shot.dirY * speed, shot.dirZ * speed))
+      .f32(0)
+      .i16(this.teamIndex(shot.team))
+      .u8(targetBzoId === null || targetBzoId === undefined ? NO_PLAYER : this.slotFor(targetBzoId))
+      .done());
+  }
+
+  // MsgAdminInfo (`packAdminInfo`, GameKeeper.cxx:201): a count, then for each
+  // player a size, its id and its address -- IPv4 only, a type byte and four,
+  // which is all upstream packs or reads, so an IPv6 player is left out.
+  adminInfo(bzoIds) {
+    if (!this.selfIsAdmin()) return;
+    const entries = [];
+    for (const id of bzoIds) {
+      const raw = String(this.addressOf(String(id)) || '').replace(/^::ffff:/i, '');
+      const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(raw);
+      if (octets) entries.push({ slot: this.slotFor(id), octets: octets.slice(1).map(Number) });
+    }
+    if (entries.length === 0) return;
+    const w = new Writer(1 + (entries.length * 7)).u8(entries.length);
+    for (const { slot, octets } of entries) {
+      w.u8(5).u8(slot).u8(4);
+      for (const octet of octets) w.u8(octet);
+    }
+    this.write('ai', w.done());
+  }
+
+  // MsgTeamUpdate: each team's size, wins and losses.
+  teamUpdate(teams) {
+    this.write('tu', packTeams(teams.map((entry) => ({ ...entry, team: this.teamIndex(entry.team) }))));
+  }
+
+  // MsgAutoPilot: who, and whether the autopilot has the controls -- the
+  // scoreboard's `[auto]`.
+  autopilot(bzoId, on) {
+    this.write('au', new Writer(2).u8(this.slotFor(bzoId)).u8(on ? 1 : 0).done());
   }
 
   // MsgPlayerInfo: what the scoreboard draws as `-`, `+` and `@`
@@ -290,8 +370,10 @@ class NativeTranslator {
   // `FlagInfo::pack`: index, then `Flag::pack`.
   flagBody(w, flag) {
     const pos = (p) => (p ? toBzfsPosition(p.x, p.y, p.z) : [0, 0, 0]);
+    // A superflag nobody holds goes out as `PZ`, as bzfs's `fakePack` sends
+    // it (Flag.cxx:265): a flag, of a type the client is not told.
     return w.u16(flag.index)
-      .flag(flag.type)
+      .flag(flag.type || 'PZ')
       .u16(flag.status)
       .u16(0)
       .u8(flag.owner === null || flag.owner === undefined ? NO_PLAYER : this.slotFor(flag.owner))
@@ -328,6 +410,7 @@ class NativeTranslator {
   accept(init, self) {
     this.selfBzoId = String(self.id);
     this.accepted = true;
+    this.accepting = true;
     this.write('ac', new Writer(1).u8(this.selfSlot).done());
     const vars = Object.entries(init.bzdb || {});
     for (let start = 0; start < vars.length; start += 20) {
@@ -348,9 +431,15 @@ class NativeTranslator {
       if (record.alive) this.alive(record);
     }
     this.addPlayer(self);
+    // `sendIPUpdate(playerIndex, -1)`: everyone's, in one list, to an
+    // arriving admin.
+    this.adminInfo([...this.players.keys()]);
+    this.accepting = false;
     // bzo spawns a player as it joins; the client starts its tank where
     // MsgAlive says (playing.cxx:2370), asked for or not.
     if (self.alive) this.alive(self);
+    // `sendTeamUpdate` to an arrival (bzfs.cxx:2385).
+    if (Array.isArray(init.teamScores) && init.teamScores.length > 0) this.teamUpdate(init.teamScores);
     if (init.rabbitId !== null && init.rabbitId !== undefined) {
       this.write('nR', new Writer(1).u8(this.slotFor(init.rabbitId)).done());
     }
@@ -384,6 +473,15 @@ class NativeTranslator {
         break;
       case 'pm':
         if (this.accepted && String(message.id) !== this.selfBzoId) this.playerUpdate(message);
+        break;
+      case 'pt':
+        // A teleport (MsgTeleport, `sendTeleport` bzfs.cxx:4339), then where
+        // it came out.
+        if (!this.accepted || String(message.id) === this.selfBzoId) break;
+        this.write('tp', new Writer(5).u8(this.slotFor(message.id))
+          .u16(Number.isInteger(message.fromFaceId) ? message.fromFaceId : 0)
+          .u16(Number.isInteger(message.toFaceId) ? message.toFaceId : 0).done());
+        this.playerUpdate(message);
         break;
       case 'pmBatch':
         if (!this.accepted) break;
@@ -430,6 +528,21 @@ class NativeTranslator {
           .flag(message.flag)
           .f32(lifetime)
           .done());
+        // A missile fired already locked: the receiver learns its target the
+        // way bzfs relays it, from the shooter's first MsgGMUpdate.
+        if (message.target !== null && message.target !== undefined) {
+          this.missileUpdate({
+            id: message.id,
+            x: message.x,
+            y: message.y,
+            z: message.z,
+            dirX: message.dirX,
+            dirY: message.dirY,
+            dirZ: message.dirZ,
+            speed,
+            team: message.team,
+          }, message.target);
+        }
         break;
       }
       case 'shotEnd': {
@@ -473,6 +586,66 @@ class NativeTranslator {
         if (this.accepted) {
           this.write('cf', new Writer(5)
             .u8(this.slotFor(message.playerId)).u16(message.index).u16(message.team).done());
+        }
+        break;
+      case 'nearFlag': {
+        // `sendClosestFlagMessage` (bzfs.cxx:512): where, and the flag's name.
+        if (!this.accepted || !message.position) break;
+        const key = `${message.index}:${message.flagType}`;
+        if (key === this.lastNearFlag) break;
+        this.lastNearFlag = key;
+        const name = Buffer.from(String(this.flagName(message.flagType)), 'latin1');
+        const w = new Writer(16 + name.length)
+          .vec3(toBzfsPosition(message.position.x, message.position.y, message.position.z))
+          .u32(name.length)
+          .bytes(name);
+        this.write('Nf', w.done());
+        break;
+      }
+      case 'gmUpdate':
+        // A shooter's lock moved; every missile it has in the air turns.
+        if (!this.accepted || String(message.playerId) === this.selfBzoId) break;
+        for (const shot of this.guidedShots(String(message.playerId))) {
+          this.missileUpdate(shot, message.targetId);
+        }
+        break;
+      case 'positionCorrection':
+        // An operator's `/mv`. Upstream has no message that moves a client's
+        // own tank but the one that spawns it, MsgAlive, which the client
+        // takes as "start here" (playing.cxx:2370).
+        if (this.accepted && message.moved === true) {
+          this.write('al', new Writer(17)
+            .u8(this.selfSlot)
+            .vec3(toBzfsPosition(message.x, message.y, message.z))
+            .f32(toBzfsAzimuth(message.r))
+            .done());
+        }
+        break;
+      case 'teamUpdate':
+        if (this.accepted && Array.isArray(message.teams)) this.teamUpdate(message.teams);
+        break;
+      case 'scoreOver':
+        // MsgScoreOver (bzfs.cxx:3319, :3520): who reached the limit, and
+        // the team, or `NoTeam` where a player's own score did.
+        if (this.accepted) {
+          this.write('so', new Writer(3)
+            .u8(message.playerId === null || message.playerId === undefined ? NO_PLAYER : this.slotFor(message.playerId))
+            .u16(message.team ? this.teamIndex(message.team) : NO_TEAM)
+            .done());
+        }
+        break;
+      case 'playerPaused':
+      case 'playerUnpaused':
+        // MsgPause (`pausePlayer`, bzfs.cxx:2778): who, and whether. Its own
+        // pause is the client's to have started.
+        if (this.accepted && String(message.playerId) !== this.selfBzoId) {
+          this.write('pa', new Writer(2)
+            .u8(this.slotFor(message.playerId)).u8(message.type === 'playerPaused' ? 1 : 0).done());
+        }
+        break;
+      case 'autopilot':
+        if (this.accepted && String(message.playerId) !== this.selfBzoId) {
+          this.autopilot(message.playerId, message.on === true);
         }
         break;
       case 'newRabbit':

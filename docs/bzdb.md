@@ -100,6 +100,7 @@ flag scales both halves and not equally -- see AGENTS.md's **Shot timing**.
 
 | variable | default | effect |
 |---|---|---|
+| `_worldSize` | 800 | the width of a generated world (`"mapFile": "random"`); a map file's own `world size` wins |
 | `_wallHeight` | `3 * _tankHeight` | how high the border wall stands, which is where shots stop bouncing off it |
 | `_boxBase`, `_boxHeight` | 30, `6 * _muzzleHeight` | the half width and height of a `box` that states none; `_boxHeight` also sets how box walls tile and how fast the radar's height box grows |
 | `_pyrBase`, `_pyrHeight` | `4 * _tankHeight`, `5 * _tankHeight` | the same for a `pyramid` |
@@ -124,6 +125,7 @@ height-ignoring `WallObstacle`.
 | `_disableSpeedChecks` | 0 | the server's speed check is off |
 | `_speedChecksLogOnly` | 0 | a speed finding is logged and not refused, whatever the anti-cheat mode |
 | `_updateThrottleRate` | 30 | the most position updates a client sends a second; 0 is no limit |
+| `_notRespondingTime` | 5 | how long a playing tank may go unheard before it is marked not responding: `[nr]` on the scoreboard, its flag dropped where it was last seen, a new rabbit if it was one, and no lock on it until its next move. Never less than two of bzo's idle heartbeats (`MAX_UPDATE_INTERVAL`) |
 | `_angleTolerance` | 0.05 | how far a tank's heading may drift from what its last move predicts before its client sends another, radians |
 | `_endShotDetection` | 5 | read, no effect: bzfs kicks a client that reports more shot ends than this, and a bzo client reports none |
 | `_coldetDepth`, `_coldetElements`, `_cullDepth` | 6, 4, 6 | read, no effect: they tune upstream's collision and cull octrees, which bzo does not build |

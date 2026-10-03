@@ -22,7 +22,7 @@ const {
   stepDrive,
 } = require('./drive.cjs');
 const { TANK } = require('./collision.cjs');
-const { getFiredShotFlag, getShotEffects } = require('./flags.cjs');
+const { getFiredShotFlag, getShotEffects, getTankDimensionScale } = require('./flags.cjs');
 
 // The fill rule: bots make up the playing roster to `fill`, and there are none
 // once the people do. Returns how many to add (positive) or take away
@@ -224,6 +224,8 @@ class BotDriver {
       tankVelocity: packetVelocity(fields, config),
       config,
       shockwave: getShotEffects(fired).shockwave,
+      // `Player::getMuzzle`: the barrel's reach grows and shrinks with the tank.
+      muzzleForward: TANK.muzzleForward * getTankDimensionScale(tank.flag ?? null).length,
     }));
   }
 }

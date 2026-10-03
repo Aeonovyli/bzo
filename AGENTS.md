@@ -4027,14 +4027,14 @@ What is here is only what a maintainer reading the README does not need:
   `ws.send(JSON.stringify({ type: 'debug', message: 'your debug info' }))` and
   they appear in `server.log`. This is especially useful on headsets like Quest 2
   where browser console access is limited.
-- **Do not `grep`, `tail`, or `cat` `server.log` for its contents.** It is always
-  open in the editor as an addressable buffer, so read it with `read_file` and an
-  offset. Repeatedly grepping it wastes tokens re-reading text that can be
-  addressed directly. Cheap metadata commands are fine -- `wc -l` to watch it
-  grow is useful.
-- `server.log` is the primary runtime output surface during development. Assume
-  it is already open and read it directly whenever runtime diagnostics are
-  needed. Do not ask the user to re-open it.
+- **Check `server.log` with `grep` or `rg` for the lines you need**, not by opening it
+  in a file-reading tool. Opening it makes some agent tools track the file and
+  attach every later change to the conversation, which on a busy server floods
+  the chat. Grep narrowly -- a player's name, a log tag like `[BZFLAG]` -- and
+  pipe through `tail` to keep only recent hits; `wc -l` watches it grow.
+- `server.log` is the primary runtime output surface during development. Check
+  it whenever runtime diagnostics are needed. Do not ask the user to re-open
+  it.
 
 ## Testing
 

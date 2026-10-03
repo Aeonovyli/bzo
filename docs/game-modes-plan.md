@@ -317,8 +317,6 @@ one part of it bzo could use today: see "Admins and the admin channel" in
 - **`-g`**, serve one game and exit. Not worth having: bzo's server is a web
   server that reloads its clients on restart. Read the switch, log that it is
   ignored, and say so in `docs/bzw.md`'s ignored list.
-- **`-cr`** -- CTF with a random world. bzo has no random world generator, and
-  `-b`, `-h`, `-density` and `-t` are ignored for the same reason.
 - **`-sb`**, tanks respawning on buildings. A spawn rule rather than a game
   mode, but it is the one remaining spawn switch bzo does not read; worth its
   own small change alongside the spawn code, not here.

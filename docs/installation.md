@@ -154,6 +154,8 @@ SERVER_CONFIG_PATH=/path/to/server.json npm start
 ```
 
 See [example-server.json](../example-server.json) for the supported shape.
+`"mapFile": "random"` generates a world as bzfs does, tuned by a
+`randomWorld` block -- see **Generated worlds** in [bzw.md](bzw.md).
 
 
 ## Behind a reverse proxy

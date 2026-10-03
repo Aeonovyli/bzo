@@ -2705,10 +2705,13 @@ function applyWorldGameplay(world) {
 // where there is no model.
 function myMuzzle() {
   const data = myTank?.userData;
+  // `Player::getMuzzle` (Player.cxx:224): the barrel's reach scales with the
+  // tank's length, so Obesity, Tiny and Thief move it and Narrow does not.
+  const reach = getMyTankScale().length;
   return {
-    forward: Number.isFinite(data?.muzzleForward)
+    forward: (Number.isFinite(data?.muzzleForward)
       ? data.muzzleForward * (TANK.muzzleForward / DEFAULT_MUZZLE_FORWARD)
-      : TANK.muzzleForward,
+      : TANK.muzzleForward) * reach,
     height: Number.isFinite(data?.muzzleHeight)
       ? data.muzzleHeight * (TANK.muzzleHeight / DEFAULT_MUZZLE_HEIGHT)
       : TANK.muzzleHeight,
@@ -7772,6 +7775,16 @@ function handleServerMessage(message) {
 
     case 'playerUpdated':
       if (message.player) {
+        // Upstream's own lines when a tank goes quiet and comes back
+        // (playing.cxx:7323-7329).
+        const before = tanks.get(message.player.id)?.userData?.playerState;
+        if (before && message.player.id !== myPlayerId
+          && typeof message.player.notResponding === 'boolean'
+          && Boolean(before.notResponding) !== message.player.notResponding) {
+          addChatEntry(['server', 'all'],
+            `${message.player.name} ${message.player.notResponding ? 'not responding' : 'okay'}`,
+            CHAT_KIND_SERVER);
+        }
         addPlayer(message.player);
         if (message.player.id === myPlayerId) {
           myTank = tanks.get(myPlayerId);
@@ -15279,7 +15292,7 @@ function ensureXRScoreboardOverlay() {
     const huntLabel = huntMark ? ` ${huntMark}` : '';
     // The flat scoreboard's own paused hourglass and mic glyph, drawn after
     // the flag the same way there.
-    const pausedLabel = player.paused ? '⏳' : '';
+    const pausedLabel = player.paused ? '⏳' : (player.notResponding ? '[nr]' : '');
     const micLabel = player.speaking ? '\u{1F50A}' : player.micOn ? '\u{1F3A4}' : '';
     // A carried flag shares the row with the name, so the name gives up room for
     // it rather than the panel growing a column nothing usually fills. The mark

@@ -1239,6 +1239,7 @@ export function buildScoreboardRows({
       // rather than empty on this server's own board.
       motto: typeof state.motto === 'string' ? state.motto : '',
       paused: Boolean(state.paused),
+      notResponding: Boolean(state.notResponding),
       micOn: Boolean(state.voiceMicEnabled),
       // Mic-on says the peer could be heard; this says voice.js's own read of
       // their track's audio energy says they are being heard right now.
@@ -1454,7 +1455,9 @@ export function updateScoreboard({
     // in sync with anything.
     const pausedSpan = document.createElement('span');
     pausedSpan.className = 'scoreboardPaused';
-    pausedSpan.textContent = player.paused ? '⏳' : '';
+    // Not responding keeps upstream's own `[nr]` (ScoreboardRenderer.cxx:802):
+    // it has no glyph that says it as plainly.
+    pausedSpan.textContent = player.paused ? '⏳' : (player.notResponding ? '[nr]' : '');
     // Same reasoning as the paused hourglass: a real glyph rather than a `[m]`
     // bracket, for whether this player's microphone is currently on.
     const micSpan = document.createElement('span');

@@ -32,18 +32,35 @@ const OUTSIDE = 20;
 // footprint seen from above that the radar draws the letter.
 const TILT = Math.PI / 4;
 
-// Each letter as quads in its own plane, (u, v) from its bottom left, counter
-// clockwise as seen from the front. N, E and W are straight strokes; S is
-// squared off.
-function letterQuads(letter) {
+// Each letter as strokes in its own plane, (u, v) from its bottom left, each
+// a quad counter clockwise as seen from the front, with its white edge: an
+// upright bar, or a slanted one cut level top and bottom. N, E and W are
+// straight strokes; S is squared off.
+function letterStrokes(letter) {
   const W = WIDTH;
   const H = HEIGHT;
   const t = STROKE;
-  const rect = (u0, v0, u1, v1) => [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-  const slant = (topU, bottomU) => [[bottomU - (t / 2), 0], [bottomU + (t / 2), 0], [topU + (t / 2), H], [topU - (t / 2), H]];
+  const rect = (u0, v0, u1, v1) => {
+    const quad = (by) => [[u0 - by, v0 - by], [u1 + by, v0 - by], [u1 + by, v1 + by], [u0 - by, v1 + by]];
+    return { quad: quad(0), edge: quad(EDGE) };
+  };
+  // A stroke whose centre runs from (bottomU, v0) to (topU, v1), `t` across
+  // measured square to it: level ends are wider by 1/cos of its lean.
+  const slant = (bottomU, topU, v0 = 0, v1 = H) => {
+    const run = (topU - bottomU) / (v1 - v0);
+    const widen = Math.hypot(1, run);
+    const at = (v) => bottomU + (run * (v - v0));
+    const quad = (by) => {
+      const half = ((t / 2) + by) * widen;
+      const lo = v0 - by;
+      const hi = v1 + by;
+      return [[at(lo) - half, lo], [at(lo) + half, lo], [at(hi) + half, hi], [at(hi) - half, hi]];
+    };
+    return { quad: quad(0), edge: quad(EDGE) };
+  };
   switch (letter) {
     case 'N':
-      return [rect(0, 0, t, H), rect(W - t, 0, W, H), [[W - t, 0], [W, 0], [t, H], [0, H]]];
+      return [rect(0, 0, t, H), rect(W - t, 0, W, H), slant(W - (t / 2), t / 2)];
     case 'E':
       return [rect(0, 0, t, H), rect(0, H - t, W, H), rect(0, (H - t) / 2, W * 0.8, (H + t) / 2), rect(0, 0, W, t)];
     case 'S':
@@ -52,17 +69,15 @@ function letterQuads(letter) {
         rect(W - t, 0, W, H / 2), rect(0, 0, W, t),
       ];
     case 'W':
-      return [slant(t / 2, W * 0.25), slant(W * 0.5, W * 0.25), slant(W * 0.5, W * 0.75), slant(W - (t / 2), W * 0.75)];
+      // The outer strokes from the top corners down, the inner ones up to a
+      // middle peak below the top.
+      return [
+        slant(W * 0.25, t / 2), slant(W * 0.25, W * 0.5, 0, H * 0.6),
+        slant(W * 0.75, W * 0.5, 0, H * 0.6), slant(W * 0.75, W - (t / 2)),
+      ];
     default:
       return [];
   }
-}
-
-// A quad grown by `by` all round, about its own centre, for the white edge.
-function grow(quad, by) {
-  const cu = quad.reduce((sum, [u]) => sum + u, 0) / quad.length;
-  const cv = quad.reduce((sum, [, v]) => sum + v, 0) / quad.length;
-  return quad.map(([u, v]) => [u + (Math.sign(u - cu) * by), v + (Math.sign(v - cv) * by)]);
 }
 
 function material(name, color, { noRadar }) {
@@ -160,9 +175,9 @@ function addCardinalLetters(tree, { mapSize, height }) {
         ricochet: false,
       });
     };
-    const quads = letterQuads(letter);
-    for (const quad of quads) addQuad(grow(quad, EDGE), edgeMaterial, -1, -0.3);
-    for (const quad of quads) addQuad(quad, letterMaterial, letter === 'N' ? northDriver : -1, 0);
+    const strokes = letterStrokes(letter);
+    for (const { edge } of strokes) addQuad(edge, edgeMaterial, -1, -0.3);
+    for (const { quad } of strokes) addQuad(quad, letterMaterial, letter === 'N' ? northDriver : -1, 0);
     tree.world.obstacles.mesh.push(passableMesh(vertices, faces));
   }
   return tree;

@@ -6,12 +6,50 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Changed
+- A map that names its own flags (`+f`, `-s`, `+s`) gets only those, not the
+  server's random superflags too; one that names none, a random world
+  included, takes server.json's `superFlags` and new `requiredFlags`.
+- A random map is now bzfs's own generated world: an 800-unit city with
+  teleporters, or, with team mode on, the capture-the-flag world with a base
+  for each colour. `_worldSize` and a `randomWorld` block in server.json tune
+  it as bzfs's `-worldsize`, `-density`, `-t`, `-h`, `-cr` and `-b` do. On
+  top of upstream's city, shapes vary in size (`randomSizes`), a fifth float
+  off the ground and a tenth of the pyramids stand upside down (`floating`,
+  `upsideDown`).
+
+### Added
+- BZFlag clients grab, drop and capture flags, with Identify and guided
+  missile locks. #174
+- BZFlag clients' teleports and pauses reach bzo, and bzo's reach them: a
+  paused BZFlag tank can no longer be shot, and browsers draw its teleports.
+  #174
+- BZFlag clients see team scores, and who won when the match ends. #174
+- bzo's guided missiles steer on a BZFlag client's screen. #174
+- BZFlag clients' lag is measured, and a random map can be sent to them.
+  #174
+- BZFlag clients use UDP for movement and shots once the link is up, as
+  with bzfs, and `/mv` moves them. #174
+- `/clientquery` lists every player's client version, and a BZFlag client
+  used by an admin gets players' addresses for its scoreboard. #174
+- Autopilot shows across both: `[auto]` on a BZFlag scoreboard for bzo
+  players on autopilot and every server bot, and BZFlag's Roger on bzo's.
+  #174
+- A playing tank unheard from for `_notRespondingTime` is marked `[nr]` on
+  the scoreboard, drops its flag where it was last seen, gives up the rabbit
+  and cannot be locked on, until its next move, as in BZFlag.
+
+### Fixed
+- A tank carrying Obesity, Tiny or Thief fires from the end of its resized
+  barrel, as upstream's does, and the server expects it there. Narrow does
+  not move the muzzle.
+
 ## [1.3.7] - 2026-10-03
 
 ### Added
 - BZFlag clients can play in bzo: they join on the team they pick, spawn
   where bzo puts them, drive, shoot and die, with either side's word on a
-  hit taken. Flags come next. #174
+  hit taken. #174
 - BZFlag clients see bzo's N/S/E/W compass letters above the walls, and on
   their radar, with N in red. #174
 - `/list`'s filter boxes have an x to clear them.
