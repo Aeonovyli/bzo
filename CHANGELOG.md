@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- A `bzflag` block in server.json opens a bzfs-style port and lists the
+  server on the BZFlag list, so BZFlag clients can see it and join it to
+  watch. The world they download comes from bzfs's `-cacheout`, so this
+  needs bzfs installed and a `.bzw` map. See
+  [docs/bzflag-clients.md](docs/bzflag-clients.md). #174
+
 ## [1.2.105] - 2026-10-03
 
 ### Added

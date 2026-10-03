@@ -243,6 +243,7 @@ const {
   PLAYER_TEAM,
   PLAYER_TEAMS,
   BZFLAG_MP_TEAM_ORDER,
+  BZFLAG_TEAM_ORDER,
   teamScoreMovesOnKill,
   areFoes,
 } = require('./server/teams.cjs');
@@ -306,6 +307,8 @@ const {
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
+const os = require('os');
 
 // One short hash over everything the client is served. A tab reconnects across
 // a server restart rather than reloading -- deliberately, so multi-device
@@ -336,6 +339,8 @@ function computeClientBuild() {
 }
 const { isHeadsetBrowserUA } = require('./server/headset.cjs');
 const { describeListenTarget, resolveListenTarget } = require('./server/listen-address.cjs');
+const { createBzflagServer, publishToBzflagList } = require('./server/bzflag-server.cjs');
+const { NativeTranslator, decodeEnter, decodeClientMessage } = require('./server/bzflag-native.cjs');
 const {
   DEFAULT_VOICE_CHANNEL,
   areVoicePeers,
@@ -15408,6 +15413,7 @@ function computeListServerStatus() {
 }
 
 function reportToListServer(reason) {
+  publishToBzflagListServer(reason);
   if (!LIST_SERVER_URL) return;
   const payload = { reason, ...computeListServerStatus() };
   if (IS_DESIGNATED_LIST_SERVER) {
@@ -15462,6 +15468,210 @@ function reportToListServer(reason) {
     log(`[LISTSERVER] report (${reason}) to ${LIST_SERVER_URL} failed: ${error.message}`);
   });
 }
+// Native BZFlag clients (issue #174, docs/bzflag-clients.md): server.json's
+// `bzflag` block opens a bzfs-style port that answers queries and turns joins
+// away, and publishes it to the BZFlag list server with bzfs's own key.
+const BZFLAG_CONFIG = serverConfig.bzflag && typeof serverConfig.bzflag === 'object'
+  ? serverConfig.bzflag : null;
+const BZFLAG_PUBLIC_ADDR = typeof BZFLAG_CONFIG?.publicAddr === 'string' ? BZFLAG_CONFIG.publicAddr.trim() : '';
+const BZFLAG_PUBLIC_KEY = typeof BZFLAG_CONFIG?.publicKey === 'string' ? BZFLAG_CONFIG.publicKey.trim() : '';
+const BZFLAG_LIST_URL = typeof BZFLAG_CONFIG?.listUrl === 'string' ? BZFLAG_CONFIG.listUrl : DEFAULT_LIST_SERVER;
+const BZFLAG_PLAYER_TYPE = { TANK: 0, COMPUTER: 1 };
+
+// The list row in a bzfs ping's terms (`getTeamCounts`, bzfs.cxx:830): only
+// humans count, the rabbit and hunters count as rogues, and in Rabbit Chase
+// the rogue limit is the hunters' (CmdLineOptions.cxx:1597).
+function computeBzflagStatus() {
+  const status = computeListServerStatus();
+  const rogueSlot = BZFLAG_MP_TEAM_ORDER.indexOf(PLAYER_TEAM.ROGUE);
+  const counts = BZFLAG_MP_TEAM_ORDER.map(() => 0);
+  for (const player of players.values()) {
+    if (!player.joined || player.bot) continue;
+    const slot = player.team === PLAYER_TEAM.RABBIT || player.team === PLAYER_TEAM.HUNTER
+      ? rogueSlot : BZFLAG_MP_TEAM_ORDER.indexOf(player.team);
+    if (slot >= 0) counts[slot] += 1;
+  }
+  const maximums = [...status.teamMaximums];
+  maximums[rogueSlot] = Math.max(maximums[rogueSlot] || 0, TEAM_MODE.limits[PLAYER_TEAM.HUNTER] || 0);
+  return { ...status, teamCounts: counts, teamMaximums: maximums };
+}
+
+function bzflagTeamIndex(team) {
+  const index = BZFLAG_TEAM_ORDER.indexOf(team);
+  return index >= 0 ? index : 0;
+}
+
+let bzflagServer = null;
+if (BZFLAG_CONFIG?.listen) {
+  const { host, port } = resolveListenTarget({ configListen: String(BZFLAG_CONFIG.listen) });
+  bzflagServer = createBzflagServer({
+    getStatus: computeBzflagStatus,
+    getPlayers: () => [...players.values()]
+      .filter((player) => player.joined)
+      .map((player, index) => ({
+        id: index,
+        type: player.bot ? BZFLAG_PLAYER_TYPE.COMPUTER : BZFLAG_PLAYER_TYPE.TANK,
+        team: bzflagTeamIndex(player.team),
+        wins: player.wins,
+        losses: player.losses,
+        tks: player.tks,
+        callsign: player.name,
+        motto: player.motto,
+      })),
+    getTeams: () => {
+      const sizes = getTeamSizes();
+      return BZFLAG_TEAM_ORDER.map((team, index) => {
+        const score = teamScores.get(team) || { wins: 0, losses: 0 };
+        return { team: index, size: sizes[team] || 0, wins: score.wins, losses: score.losses };
+      });
+    },
+    getGameSettings: () => ({
+      worldSize: GAME_CONFIG.MAP_SIZE,
+      style: GAME_TYPE,
+      gameOptionsBits: computeLocalGameOptionsBits(),
+      maxShots: GAME_CONFIG.SHOT_MAX_ACTIVE,
+      numFlags: flags.length,
+      linearAcceleration: GAME_CONFIG.LINEAR_ACCELERATION,
+      angularAcceleration: GAME_CONFIG.ANGULAR_ACCELERATION,
+      shakeTimeout: Math.round(FLAG_SHAKE_TIMEOUT * 10),
+      shakeWins: FLAG_SHAKE_WINS,
+    }),
+    getWorld: getBzflagWorld,
+    onEnter: seatNativeClient,
+    rejectReason: () => `This world can't be sent to BZFlag clients yet; play in a browser at ${PUBLIC_URL || 'this server\'s web page'}`,
+    log,
+  });
+  bzflagServer.listen(host, port)
+    .then(() => log(`[BZFLAG] listening on ${host}:${port}`))
+    .catch((error) => logError(`[BZFLAG] listen on ${BZFLAG_CONFIG.listen} failed: ${error.message}`));
+}
+
+// The world as bzfs packs it, from bzfs itself: `-cacheout` writes the
+// binary a client downloads and exits. Only a map with a `.bzw` file, and
+// only where bzfs is installed (docs/bzflag-clients.md).
+let bzflagWorld = null;
+function getBzflagWorld() {
+  if (bzflagWorld && bzflagWorld.mapHash === LIVE_MAP_ENTRY?.hash) return bzflagWorld.promise;
+  const mapPath = MAP_SOURCE === 'random' ? null : resolveMapFilePath(MAP_SOURCE);
+  if (!mapPath) return Promise.resolve(null);
+  const out = path.join(os.tmpdir(), `bzo-world-${process.pid}-${Date.now()}.bwc`);
+  const promise = new Promise((resolve) => {
+    execFile('bzfs', ['-world', mapPath, '-cacheout', out], { timeout: 30000 }, (error) => {
+      let blob = null;
+      try {
+        blob = fs.readFileSync(out);
+      } catch {
+        // No file is the answer whatever the reason.
+      }
+      fs.rm(out, { force: true }, () => {});
+      if (!blob || blob.length === 0) {
+        logError(`[BZFLAG] bzfs -cacheout failed for ${MAP_SOURCE}: ${error ? error.message : 'no output'}`);
+        resolve(null);
+        return;
+      }
+      // `'p'` for a world from a file, then the MD5 of the blob (bzfs.cxx:1208).
+      const hash = `p${crypto.createHash('md5').update(blob).digest('hex')}`;
+      log(`[BZFLAG] world for ${MAP_SOURCE}: ${blob.length} bytes, ${hash}`);
+      resolve({ blob, hash });
+    });
+  });
+  bzflagWorld = { mapHash: LIVE_MAP_ENTRY?.hash, promise };
+  return promise;
+}
+
+// A native client that sent MsgEnter becomes a bzo player through the same
+// door a bot uses (`createBotSocket`): its socket's `send` is the
+// translator, and what it says arrives as a browser's message would. It
+// watches for now; playing is the next phase of #174.
+function seatNativeClient(link, payload) {
+  const enter = decodeEnter(payload);
+  if (!enter || !enter.callsign.trim()) {
+    link.reject('bad MsgEnter');
+    return;
+  }
+  const socket = new EventEmitter();
+  socket.OPEN = 1;
+  socket.readyState = 1;
+  const translator = new NativeTranslator({
+    selfSlot: link.id,
+    send: (code, body) => link.send(code, body),
+    teamIndex: bzflagTeamIndex,
+    config: () => GAME_CONFIG,
+  });
+  socket.send = (data) => {
+    try {
+      translator.handle(JSON.parse(data));
+    } catch (error) {
+      logError(`[BZFLAG] "${enter.callsign}": ${error.message}`);
+    }
+  };
+  socket.ping = () => setTimeout(() => socket.emit('pong'), 0);
+  const close = () => {
+    if (socket.readyState !== 1) return;
+    socket.readyState = 3;
+    socket.emit('close');
+    if (!link.closed) link.close();
+  };
+  socket.close = close;
+  socket.terminate = close;
+  const say = (message) => socket.emit('message', Buffer.from(JSON.stringify(message)));
+  link.onClose = close;
+  link.onFrame = (code, body) => {
+    if (code === 'ex') {
+      close();
+    } else if (code === 'mg') {
+      const chat = decodeClientMessage(body);
+      if (!chat || !chat.text.trim()) return;
+      let dst = chat.to;
+      if (dst <= 243) {
+        const entry = [...translator.slots.entries()].find(([, slot]) => slot === dst);
+        dst = entry ? entry[0] : null;
+      }
+      if (dst === null) return;
+      say({ type: 'message', dst, text: chat.text, msgType: 'chat' });
+    }
+  };
+  acceptConnection(socket, {
+    url: '/',
+    headers: { 'user-agent': `BZFlag ${enter.version}` },
+    socket: { remoteAddress: link.remoteAddress, remotePort: 0 },
+  });
+  log(`[BZFLAG] "${enter.callsign}" entered from ${link.address} (${enter.version}); watching`);
+  say({
+    type: 'joinGame', name: enter.callsign, team: PLAYER_TEAM.OBSERVER, motto: enter.motto, tankModel: 'bzflag',
+  });
+  // Said whatever team was asked for, since an observer who picked one
+  // would otherwise not know why they got none.
+  const player = [...players.values()].find((candidate) => candidate.ws === socket);
+  if (player && player.joined) {
+    replyToPlayer(player, `BZFlag clients can watch bzo but not play yet. To play, use a browser: ${PUBLIC_URL || 'this server\'s web page'}`);
+  }
+}
+
+// bzfs re-adds on every join and part and every `ListServerReAddTime`; the
+// same moments bzo reports to its own list.
+function publishToBzflagListServer(reason) {
+  if (!bzflagServer || !BZFLAG_PUBLIC_ADDR || !BZFLAG_PUBLIC_KEY) return;
+  const action = reason === 'shutdown' ? 'REMOVE' : 'ADD';
+  publishToBzflagList({
+    listUrl: BZFLAG_LIST_URL,
+    action,
+    nameport: BZFLAG_PUBLIC_ADDR,
+    key: BZFLAG_PUBLIC_KEY,
+    title: String(BZFLAG_CONFIG.publicTitle || serverConfig.serverName || ''),
+    status: computeBzflagStatus(),
+    build: `bzo-${SERVER_VERSION}`,
+    userAgent: BZO_USER_AGENT,
+  }).then((reply) => {
+    // The list prints `MSG: ADD` before it checks anything, so an error is
+    // on a later line.
+    const lines = reply.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const error = lines.find((line) => /^ERROR/i.test(line));
+    if (error) logError(`[BZFLAG] list ${action} (${reason}): ${error}`);
+    else log(`[BZFLAG] list ${action} (${reason}): ${lines[lines.length - 1] || '(empty reply)'}`);
+  }).catch((error) => logError(`[BZFLAG] list ${action} (${reason}) failed: ${error.message}`));
+}
+
 // `ListServerReAddTime` upstream, bzfs.cxx:84 -- ~15 minutes, for live counts
 // even when nobody has joined or left. The targets are dialled first, so the
 // report carries counts from this pass rather than the last one.

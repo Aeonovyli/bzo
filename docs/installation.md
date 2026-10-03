@@ -213,6 +213,25 @@ different key from <https://my.bzflag.org/listkeys/> and does not go here.
 `docs/list-server.md` has the protocol, the validation callback, key lifetime
 and what a row carries.
 
+### On the BZFlag list
+
+A `bzflag` block also lists the server where BZFlag clients look, with a
+`bzfs` key from <https://my.bzflag.org/listkeys/>:
+
+```json
+"bzflag": {
+  "listen": "0.0.0.0:5154",
+  "publicAddr": "your.host:5154",
+  "publicKey": "<key>",
+  "publicTitle": "What the list shows"
+}
+```
+
+The port, TCP and UDP, has to be reachable at `publicAddr`, and the host
+name has to resolve to this server's IPv4 address. BZFlag clients can join
+to watch, but not to play yet, and only where bzfs is installed;
+[docs/bzflag-clients.md](bzflag-clients.md) has the details.
+
 ## Proxying BZFlag servers
 
 A bzo instance can carry a browser into an ordinary `bzfs` game. Name each
