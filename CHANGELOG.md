@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The world a BZFlag client downloads is compiled by bzo itself, the same
+  bytes bzfs would send, so a server needs no bzfs installed. #174
+- A BZFlag client downloads the world over HTTPS from bzo instead of a
+  kilobyte at a time, and keeps its clock in step with the server's, as
+  bzfs's clients do. #174
+
+### Changed
+- bzo reports itself as `bzo-<release>-<build>` on the BZFlag list and in
+  `/serverquery`, which now answers in bzfs's words. #174
+
 ## [1.3.1] - 2026-10-03
 
 ### Added

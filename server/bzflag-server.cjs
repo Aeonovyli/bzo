@@ -130,6 +130,27 @@ function packWorldChunk(blob, offset) {
   return payload;
 }
 
+// MsgGameTime (`GameTime::pack`, GameTime.cxx:235): the server's clock in
+// microseconds, plus half the lag -- 75ms where there is no measure of it --
+// as two u32s. The client's animations run on it.
+function packGameTime() {
+  const now = (BigInt(Date.now()) * 1000n) + 75000n;
+  const payload = Buffer.alloc(8);
+  payload.writeUInt32BE(Number(now >> 32n), 0);
+  payload.writeUInt32BE(Number(now & 0xffffffffn), 4);
+  return payload;
+}
+// `updateNextGameTime` (GameKeeper.cxx:188): a second at first, a quarter
+// longer each time, then every ten.
+const GAME_TIME_START_RATE = 1.0;
+const GAME_TIME_FINAL_RATE = 10.0;
+function sendGameTime(connection, rate) {
+  if (connection.socket.destroyed) return;
+  sendFrame(connection.socket, 'gt', packGameTime());
+  const next = Math.min(GAME_TIME_FINAL_RATE, rate * 1.25);
+  connection.gameTimeTimer = setTimeout(() => sendGameTime(connection, next), rate * 1000);
+}
+
 // MsgTeamUpdate: a count, then (team, size, wins, losses) for each.
 function packTeamUpdate(teams) {
   const payload = Buffer.alloc(1 + (teams.length * 8));
@@ -176,8 +197,8 @@ function packReject(reason) {
 // payload)` seats a client that sent MsgEnter, and `link.onFrame` then takes
 // every frame it sends.
 function createBzflagServer({
-  getStatus, getPlayers, getTeams, getGameSettings, getWorld, onEnter, reserveId, releaseId,
-  rejectReason, log = () => {},
+  getStatus, getPlayers, getTeams, getGameSettings, getWorld, getCacheUrl = () => null, onEnter,
+  reserveId, releaseId, rejectReason, log = () => {},
 }) {
   const startedAt = Date.now();
   const connections = new Set();
@@ -227,6 +248,10 @@ function createBzflagServer({
           return;
         }
         connection.world = world;
+        // MsgCacheURL first, as bzfs sends it (bzfs.cxx:4828): the client
+        // tries the URL and falls back to MsgGetWorld.
+        const cacheUrl = getCacheUrl(world);
+        if (cacheUrl) sendFrame(socket, 'cu', Buffer.from(`${cacheUrl}\0`, 'latin1'));
         sendFrame(socket, 'wh', Buffer.from(`${world.hash}\0`, 'latin1'));
       }).catch((error) => reject(connection, `world unavailable: ${error.message}`));
     } else if (code === 'gw') {
@@ -266,6 +291,7 @@ function createBzflagServer({
     socket.setTimeout(IDLE_TIMEOUT_MS, () => socket.destroy());
     socket.on('error', () => {});
     socket.on('close', () => {
+      clearTimeout(connection.gameTimeTimer);
       connections.delete(connection);
       if (connection.id !== 0xff) releaseId(connection.id);
       if (connection.link) {
@@ -303,6 +329,7 @@ function createBzflagServer({
           return;
         }
         connections.add(connection);
+        sendGameTime(connection, GAME_TIME_START_RATE);
       }
       while (connection.buffer.length >= 4) {
         const length = connection.buffer.readUInt16BE(0);

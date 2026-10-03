@@ -341,6 +341,8 @@ const { isHeadsetBrowserUA } = require('./server/headset.cjs');
 const { describeListenTarget, resolveListenTarget } = require('./server/listen-address.cjs');
 const { createBzflagServer, publishToBzflagList } = require('./server/bzflag-server.cjs');
 const { NativeTranslator, decodeEnter, decodeClientMessage } = require('./server/bzflag-native.cjs');
+const { compileBzwWorld } = require('./server/bzw-compile.cjs');
+const { packWorldDatabase } = require('./server/bzflag-world.cjs');
 const {
   DEFAULT_VOICE_CHANNEL,
   areVoicePeers,
@@ -643,6 +645,11 @@ const SERVER_VERSION = (() => {
 // host: the release, the build that distinguishes two servers on it, and
 // where to go to find out what it is. Nothing bzo dials should have to guess
 // what called on it.
+// What bzo calls itself where bzfs gives `getAppVersion()`: the list
+// server's `build` and `/serverquery`. The release, then the build id, which
+// is what tells two servers on one release apart.
+const BZO_APP_VERSION = `bzo-${SERVER_VERSION}-${CLIENT_BUILD}`;
+
 const BZO_USER_AGENT =
   `bzo/${SERVER_VERSION} (${CLIENT_BUILD}; +https://github.com/timriker/bzo)`;
 
@@ -12523,13 +12530,13 @@ defineCommand('/uptime', COMMAND_TIER.OPEN,
     replyToPlayer(player, `${formatDuration((Date.now() - SERVER_START_TIME) / 1000)}.`);
   });
 
-// ServerQueryCommand (commands.cxx:1000) answers "BZFS Version: <version>". bzo
-// is not bzfs and says so, and adds the build id: two bzo servers on the same
-// release differ by that and by nothing else a player can see.
+// ServerQueryCommand (commands.cxx:1000) answers "BZFS Version: <version>",
+// in its words so a tool that reads the line still can; the version is
+// `BZO_APP_VERSION`, which says it is bzo.
 defineCommand('/serverquery', COMMAND_TIER.OPEN,
   '- show the server version',
   (player) => {
-    replyToPlayer(player, `bzo Version: ${SERVER_VERSION} (build ${CLIENT_BUILD})`);
+    replyToPlayer(player, `BZFS Version: ${BZO_APP_VERSION}`);
   });
 
 // DateCommand and TimeCommand (commands.cxx:418) are one implementation under
@@ -15541,6 +15548,7 @@ if (BZFLAG_CONFIG?.listen) {
       shakeWins: FLAG_SHAKE_WINS,
     }),
     getWorld: getBzflagWorld,
+    getCacheUrl: bzflagCacheUrl,
     // The handshake's id is the player's bzo number, so every id a native
     // client sees is the one bzo's own scoreboard shows.
     reserveId: () => {
@@ -15564,16 +15572,24 @@ if (BZFLAG_CONFIG?.listen) {
     .catch((error) => logError(`[BZFLAG] listen on ${BZFLAG_CONFIG.listen} failed: ${error.message}`));
 }
 
-// The world as bzfs packs it, from bzfs itself: `-cacheout` writes the
-// binary a client downloads and exits. Only a map with a `.bzw` file, and
-// only where bzfs is installed (docs/bzflag-clients.md).
+// The world as bzfs packs it. server/bzw-compile.cjs compiles the map's
+// `.bzw` the way bzfs does, and scripts/test-bzflag-world.mjs holds it to
+// bzfs's own `-cacheout` byte for byte. bzfs itself is the fallback only for
+// a map the compiler cannot reproduce, where it is installed; without it
+// such a map is turned away rather than sent wrong. A generated world has
+// no `.bzw` to compile.
 let bzflagWorld = null;
-function getBzflagWorld() {
-  if (bzflagWorld && bzflagWorld.mapHash === LIVE_MAP_ENTRY?.hash) return bzflagWorld.promise;
-  const mapPath = MAP_SOURCE === 'random' ? null : resolveMapFilePath(MAP_SOURCE);
-  if (!mapPath) return Promise.resolve(null);
+
+function bzflagWorldFromBlob(blob, how) {
+  // `'p'` for a world from a file, then the MD5 of the blob (bzfs.cxx:1208).
+  const hash = `p${crypto.createHash('md5').update(blob).digest('hex')}`;
+  log(`[BZFLAG] world for ${MAP_SOURCE} (${how}): ${blob.length} bytes, ${hash}`);
+  return { blob, hash };
+}
+
+function bzfsCacheout(mapPath, reason) {
   const out = path.join(os.tmpdir(), `bzo-world-${process.pid}-${Date.now()}.bwc`);
-  const promise = new Promise((resolve) => {
+  return new Promise((resolve) => {
     execFile('bzfs', ['-world', mapPath, '-cacheout', out], { timeout: 30000 }, (error) => {
       let blob = null;
       try {
@@ -15583,19 +15599,62 @@ function getBzflagWorld() {
       }
       fs.rm(out, { force: true }, () => {});
       if (!blob || blob.length === 0) {
-        logError(`[BZFLAG] bzfs -cacheout failed for ${MAP_SOURCE}: ${error ? error.message : 'no output'}`);
+        logError(`[BZFLAG] ${MAP_SOURCE} cannot be sent to BZFlag clients: ${reason}, and bzfs -cacheout`
+          + ` failed${error ? `: ${error.message}` : ''}`);
         resolve(null);
         return;
       }
-      // `'p'` for a world from a file, then the MD5 of the blob (bzfs.cxx:1208).
-      const hash = `p${crypto.createHash('md5').update(blob).digest('hex')}`;
-      log(`[BZFLAG] world for ${MAP_SOURCE}: ${blob.length} bytes, ${hash}`);
-      resolve({ blob, hash });
+      resolve(bzflagWorldFromBlob(blob, `bzfs -cacheout, ${reason}`));
     });
   });
+}
+
+function getBzflagWorld() {
+  if (bzflagWorld && bzflagWorld.mapHash === LIVE_MAP_ENTRY?.hash) return bzflagWorld.promise;
+  const mapPath = MAP_SOURCE === 'random' ? null : resolveMapFilePath(MAP_SOURCE);
+  if (!mapPath) return Promise.resolve(null);
+  let promise;
+  try {
+    const tree = compileBzwWorld(fs.readFileSync(mapPath, 'latin1'), { bzdb: SERVER_BZDB });
+    promise = tree.unsupported.length > 0
+      ? bzfsCacheout(mapPath, `the compiler cannot reproduce ${[...new Set(tree.unsupported)].join(', ')}`)
+      : Promise.resolve(bzflagWorldFromBlob(packWorldDatabase(tree), 'compiled'));
+  } catch (error) {
+    promise = bzfsCacheout(mapPath, `the compiler failed (${error.message})`);
+  }
   bzflagWorld = { mapHash: LIVE_MAP_ENTRY?.hash, promise };
   return promise;
 }
+
+// bzfs's `-cacheurl` (CmdLineOptions.cxx:678): where a client may fetch the
+// world over HTTP instead of a kilobyte per round trip. bzfs only points at a
+// file its operator hosts; bzo is a web server, so by default it points at
+// its own copy (`/bzflag/world/<md5>.bwc`). `cacheUrl` false turns it off,
+// and a string is used as written, as bzfs uses it.
+function bzflagCacheUrl(world) {
+  const configured = BZFLAG_CONFIG?.cacheUrl;
+  if (configured === false) return null;
+  if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  return PUBLIC_URL ? `${PUBLIC_URL}/bzflag/world/${world.hash.slice(1)}.bwc` : null;
+}
+
+app.get('/bzflag/world/:md5.bwc', (req, res) => {
+  if (!bzflagServer) {
+    res.status(404).end();
+    return;
+  }
+  Promise.resolve(getBzflagWorld()).then((world) => {
+    if (!world || world.hash.slice(1) !== req.params.md5) {
+      res.status(404).type('text/plain').send('No such world here.\n');
+      return;
+    }
+    // The client's libcurl sends no user agent, so the address says who.
+    const from = (req.get('x-forwarded-for') || '').split(',')[0].trim() || req.socket.remoteAddress;
+    log(`[BZFLAG] world ${req.params.md5} fetched over HTTP by ${from}`);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.type('application/octet-stream').send(world.blob);
+  }).catch(() => res.status(500).end());
+});
 
 // A native client that sent MsgEnter becomes a bzo player through the same
 // door a bot uses (`createBotSocket`): its socket's `send` is the
@@ -15717,7 +15776,7 @@ function publishToBzflagListServer(reason) {
     key: BZFLAG_PUBLIC_KEY,
     title: String(BZFLAG_CONFIG.publicTitle || serverConfig.serverName || ''),
     status: computeBzflagStatus(),
-    build: `bzo-${SERVER_VERSION}`,
+    build: BZO_APP_VERSION,
     userAgent: BZO_USER_AGENT,
   }).then((reply) => {
     // The list prints `MSG: ADD` before it checks anything, so an error is

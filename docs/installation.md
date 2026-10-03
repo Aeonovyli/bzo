@@ -229,7 +229,7 @@ A `bzflag` block also lists the server where BZFlag clients look, with a
 
 The port, TCP and UDP, has to be reachable at `publicAddr`, and the host
 name has to resolve to this server's IPv4 address. BZFlag clients can join
-to watch, but not to play yet, and only where bzfs is installed;
+to watch, but not to play yet, on any map with a `.bzw` file;
 [docs/bzflag-clients.md](bzflag-clients.md) has the details.
 
 ## Proxying BZFlag servers
