@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-10-03
+
 ### Added
 - A player who leaves with a score has it back on rejoining from the same
   address within `_scoreSaveTime` seconds, 120 by default, as servers
@@ -31,6 +33,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
   MsgSuperKill, instead of a lost link. #174
 
 ### Changed
+- HiX's bad flags fall off after 5 seconds or one kill, as on its reference
+  bzfs.
 - A shot hits a tank where it would in BZFlag: within `0.99 * _tankRadius`
   (4.3 units) of the tank's middle, rather than bzo's own 2. Tanks are easier
   to hit, and BZFlag clients and browsers now agree on what is a hit; running
