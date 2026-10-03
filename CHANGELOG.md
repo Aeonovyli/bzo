@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-03
+
 ### Added
 - A `bzflag` block in server.json opens a bzfs-style port and lists the
   server on the BZFlag list, so BZFlag clients can see it and join it to
