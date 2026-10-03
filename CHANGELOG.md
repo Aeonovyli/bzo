@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-10-03
+
 ### Added
 - `/list` shows a BZFlag server's build, read with `/serverquery` on the
   world tracker's visit, and a bzo row's as `bzo-<release>-<build>`.
