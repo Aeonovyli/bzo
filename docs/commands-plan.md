@@ -6,15 +6,15 @@ references are paths under `$HOME/bzflag/`.
 Issue #5 tracks this; reference it from every commit and changelog entry here, as
 flag work references #6 and game modes reference #42.
 
-**Steps 1 through 4 are done.** `server/commands.cjs` holds the parsing and the
-formatting, the table and the dispatcher are in `server.js`. The commands are
-`/?`, `/help` and `/<prefix>?`; the open tier `/uptime`, `/serverquery`,
-`/msg`, `/date`, `/time`, `/lagstats`; and the operator tier `/kill`, `/say`,
-`/mute`, `/unmute`, `/mutelist`, `/playerlist`, `/flag` (`reset`, `up`, `show`,
-`drop [player]`), `/set`, `/mv`, `/countdown` and `/gameover` (issue #66), plus
-`/me`. Step 4's whole client-local table -- `/silence`, `/unsilence`,
-`/highlight`, `/savemsgs`, `/cmds` -- is also done, entirely in
-`public/client.js` and never reaching the server. See "Server commands" in `AGENTS.md`.
+`server/commands.cjs` holds the parsing and the formatting; the table and the
+dispatcher are in `server.js`. The commands are `/?`, `/help` and
+`/<prefix>?`; the open tier `/uptime`, `/serverquery`, `/msg`, `/date`,
+`/time`, `/lagstats`, `/pos`; and the operator tier `/kill`, `/say`, `/mute`,
+`/unmute`, `/mutelist`, `/playerlist`, `/flag` (`reset`, `up`, `show`, `take`,
+`give`, `drop [player]`), `/set`, `/reset`, `/mv`, `/bot`, `/countdown` and
+`/gameover`, plus `/me`. The client-local table -- `/silence`, `/unsilence`,
+`/highlight`, `/savemsgs`, `/cmds` -- lives in `public/client.js` and never
+reaches the server. See "Server commands" in `AGENTS.md`.
 
 **`/mv` is bzo's own.** Upstream has no command that moves a tank -- not in bzfs,
 not in `BanCommands`, not in any plugin, and there is no API call for it either.
@@ -72,16 +72,15 @@ same as "open".
 how a map's `-srvmsg` lines reach a joining player. A command's request and its
 answer both have a home already.
 
-**A command table and a dispatcher**, from steps 1 and 2: `handleServerCommand`
-in `server.js` is asked before any chat destination, so a `/` line is a command
-or an "Unknown command" reply and never something said out loud. The commands so
-far are the open tier plus the help.
+**A command table and a dispatcher**: `handleServerCommand` in `server.js` is
+asked before any chat destination, so a `/` line is a command or an "Unknown
+command" reply and never something said out loud.
 
 **One boolean where upstream has sixty permissions.** `isAdmin` in `server.js` is
 the whole model: an authenticated player in an `adminGroups` group, or a
 connection from this machine when `localAdmin` is on. `refuseNonOperator` is the
-gate, and the Operator panel's four messages — `getMaps`, `setMap`, `uploadMap`,
-`setOperatorConfig` — are everything behind it.
+gate, in front of the operator-tier commands and the Operator panel's
+messages.
 
 **The Operator panel is the existing answer to "an operator wants to do
 something".** It is a dialog, it is admin-gated on the server, and it works in a
@@ -218,9 +217,9 @@ Two things it has to decide:
 | command | needs |
 |---|---|
 | `/kick <player> <reason>` | nothing technically — but see the rejoin note below |
-| `/countdown`, `/gameover`, `/modcount` | the match-end machinery in `docs/game-modes-plan.md`. They are that feature's front end and should land with it, not before |
-| `/handicap` | the Handicap game style, also in `docs/game-modes-plan.md` |
-| `/lagwarn`, `/lagdrop`, `/jitterwarn`, `/jitterdrop`, `/packetlosswarn`, `/packetlossdrop` | **`/lagstats` is done.** Every connection is measured with a `ping`/`pong` round trip (`createLagTracker`, `server.js`), which gives lag, jitter and a loss figure counted off missed pongs; `/lagstats` reports them per player, sorted worst first, with the player index shown to an operator only. What is left is the warn/kick machinery `docs/lag-plan.md` calls step 6: `lagwarn`/`lagdrop` and `jitterwarn`/`jitterdrop` thresholds in `server.json` and on the Operator panel, with these commands as their front end. A packet-loss threshold still waits on a transport that can lose more than a pong |
+| `/modcount` | adjusting a running match clock, beside `/countdown` and `/gameover` |
+| `/handicap` | the Handicap game style in `docs/game-modes-plan.md` |
+| `/lagwarn`, `/lagdrop`, `/jitterwarn`, `/jitterdrop`, `/packetlosswarn`, `/packetlossdrop` | the warn/kick machinery `docs/lag-plan.md` calls step 6: `lagwarn`/`lagdrop` and `jitterwarn`/`jitterdrop` thresholds in `server.json` and on the Operator panel, with these commands as their front end. A packet-loss threshold still waits on a transport that can lose more than a pong |
 | `/idlestats`, `/idletime` | last-input time per player, which the anti-cheat code nearly keeps already |
 | `/clientquery` | a client version reply; `init` carries the build id, so this is a round trip bzo could answer without asking the client |
 | `/showgroup`, `/showperms`, `/grouplist`, `/groupperms` | read-only against what bzflag.org returned for the session. Useful, and honest, as long as nobody expects to *set* anything |
@@ -277,26 +276,9 @@ piece of work here rather than two.
 
 ## Suggested order
 
-1. ~~**`/` never reaches public chat**, plus `/?` and `/help`.~~ **Done.** It
-   needed no client work at all: bzo's chat entry does not echo locally, so the
-   server declining to broadcast a `/` line is the whole of it.
-2. ~~**The open tier**: `/uptime`, `/serverquery`, `/msg`, `/date`, `/time`.~~
-   **Done**, with `/<prefix>?` as well -- upstream's `CmdHelp`, and the only
-   per-command help either of us has.
-3. ~~**The operator tier over things that already exist**: `/kill`, `/say`,
-   `/mute`, `/flag`, `/playerlist`, `/set`.~~ **Done**, plus `/mv`. `/set`
-   reaches the three settings the Operator panel already propagates, and both now
-   write through one `applyServerConfigChanges` -- the rule above, honoured.
-4. ~~**The client-local set**: `/silence`, `/unsilence`, `/highlight`,
-   `/savemsgs`, `/cmds`.~~ **Done.** `/silence`/`/unsilence` are extended to
-   voice, which upstream has none of to extend, and `/savemsgs` hands the
-   browser a download rather than writing a config dir it has not got.
-5. ~~**Lag measurement**~~ **Done**: every connection's lag, jitter and loss are
-   tracked and `/lagstats` reports them. `/lagwarn`, `/lagdrop`, `/jitterwarn`,
-   `/jitterdrop` and the idle commands still wait on the warn/kick machinery
-   (`docs/lag-plan.md` step 6) and on last-input tracking, respectively.
-6. **BZID bans**, then `/kick` on top of them.
-7. Match-end commands with the match-end feature; `/handicap` with Handicap.
-8. Polls, reports, recording — each when something wants them.
+1. **BZID bans**, then `/kick` on top of them.
+2. `/modcount`; `/handicap` with Handicap.
+3. `/lagwarn` and friends with `docs/lag-plan.md` step 6; the idle commands
+   with last-input tracking.
+4. Polls, reports, recording — each when something wants them.
 
-Steps 1 to 4 are all reachable without new state, which is most of the value.

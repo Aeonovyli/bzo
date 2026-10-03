@@ -3,9 +3,7 @@
 Design and staging plan for the BZFlag game types and game styles bzo does not
 have yet. Upstream references are paths under `$HOME/bzflag/`.
 
-Issue #42 tracked this and is closed -- Rabbit Chase finished what it was opened
-for. Handicap is issue #62. Match end has no tracker; open one before starting
-it, and reference it the way flag work referenced #6.
+Handicap is issue #62.
 
 ## What upstream has
 
@@ -32,171 +30,11 @@ from `/countdown`, `-g` to serve one game and exit.
 
 ## What bzo has
 
-All four game types are in. bzo has a switch only for Rabbit Chase and derives
-the rest:
-
-| type | how bzo reaches it | state |
-|---|---|---|
-| `TeamFFA` | `teamMode.enabled`, map with no `base` | **done** |
-| `ClassicCTF` | `teamMode.enabled` and at least one base -- `CTF_ENABLED` | **done** |
-| `OpenFFA` | `teamMode.enabled` false, or a map's `-offa` | **done** -- rogue and observer are the only teams offered and `broadcastTeamScores` returns early |
-| `RabbitChase` | `rabbit` in `server.json`, or a map's `-rabbit` | **done** -- see "Rabbit Chase" in `AGENTS.md` |
-
-Seven of the eight game styles are in: superflags (`+s`/`-s`), jumping (`-j`),
-inertia (`-a`), ricochet (`+r`), shakable (`-st`, `-sw`), antidote (`-sa`) and
-no-team-kills (`-noTeamKills`). **Handicap is missing.**
-
-None of the match-end switches exist: bzo has no score limit, no clock, and no
-game-over state at all. A bzo server plays until the map changes.
-
-So the gaps left are:
-
-1. **Match end** -- score limits, a clock, and a game-over state.
-2. **Handicap** -- one game style.
-
-## Name the type once -- **done**
-
-`GAME_TYPE` in `server.js` over `getGameType` in the `teams` pair, and
-`TEAMS_ALLOWED` over `allowTeams` beside it. `CTF_ENABLED` and `TEAM_MODE` stay
-the ones to ask about bases and about colour teams. See "Game types" in
-`AGENTS.md`.
-
-## ClassicCTF must not score team points for kills -- **done**
-
-`bzfs.cxx:3534` gates the whole per-kill team-score block on
-`gameType == OpenFFA || gameType == TeamFFA`: in `ClassicCTF` a capture is the
-only thing that moves the team score, which is what makes a capture worth 8
-kills' worth of attention. `teamScoreMovesOnKill` in the `teams` pair is that
-gate, asked of `GAME_TYPE` by `recordTeamScoreForKill`. See "Team scores" in
-`AGENTS.md`.
-
-## Match end -- **done**
-
-Issue #66 built the clock half and issue #67 the score-limit half.
-`timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore`, the
-game-over hold, `/countdown [pause|resume]` / `/gameover`, and the Operator
-panel's Match Timer buttons and four sliders are all in -- without upstream's
-pre-match "3...2...1...GO" chat delay or its `h:mm:ss` form of `-time`.
-
-Upstream's game-over machinery, for reference:
-
-**Score limits** are the cheap half. `-mps <score>` sets `Score::score`, and
-`Score::reached()` (`src/bzfs/Score.cxx:108`) is `wins - losses >= score`, asked
-of the killer after every kill (`bzfs.cxx:3513`). `-mts <score>` is
-`checkTeamScore` (`bzfs.cxx:3313`): a colour team whose `wins - losses` reaches
-the limit ends the game. Either one broadcasts `MsgScoreOver` carrying the
-winner -- a player id with `NoTeam`, or a team with its index -- and the client
-turns that into "*name* (*team*) won the game" (`playing.cxx:2240`). bzo's own
-`checkPlayerScoreLimit`/`checkTeamScoreLimit` ask the same question at the same
-two places -- after `killer.wins++` in `killPlayer`, and after every
-`broadcastTeamScores()` -- and both call the one `endMatch(winner)` the clock
-also calls, `winner` being `{ playerId }` or `{ team }`. The `scoreOver`
-broadcast that carries it is `{ playerId, team }` with one of the two null,
-and the client's notice is "*name* won the game" or "The *colour* team won the
-game" -- the alert-slot half of upstream's phrasing; there is no persistent
-"who won" line anywhere the way the scoreboard's clock label is persistent,
-since the standing scores already say it.
-
-**The clock** is the other half. `-time <seconds|h:mm:ss>` sets `timeLimit`;
-`countdownActive` and `gameStartTime` run it; `MsgTimeUpdate` carries the
-remaining seconds, sent on join, every 30 seconds, whenever the limit is
-adjusted, and once at zero (`bzfs.cxx:7180`). `-1` means the countdown is
-paused. At zero the client explodes the local tank, says "Time Expired" and
-"GAME OVER", and sets `gameOver` (`playing.cxx:2212`). `-timemanual` leaves the
-clock stopped until `/countdown` starts it, which is how match servers run.
-
-**Game over itself** is `cleanupGameOver` (`bzfs.cxx:3294`): every non-observer
-is killed, has its flag zapped, and is marked `restartOnBase`. Upstream then
-holds there until a new countdown starts.
-
-**Game over is the same event as a map change.** So is a game *mode* change: all
-three end the current game and put every player into a new one, and from a
-player's side they are indistinguishable -- the tank resets and comes back into a
-fresh match. Only the mechanism underneath differs, and only because of where bzo
-happens to keep the state: a map or a mode change restarts the process today,
-because `OBSTACLES`, `TEAM_MODE` and `GAME_TYPE` are resolved once at boot, while
-a match ending has to be in-process because it is a boundary *within* one server
-run.
-
-Build them as one thing. `cleanupGameOver` should reuse whatever "everyone
-re-enters" path the map change already uses rather than growing a second one, and
-the operator panel should present a mode change the way it presents a map change
--- see `docs/operator-panel-plan.md`. Two mechanisms for one event is how they
-drift apart, and the drift shows up as a tank that survives one kind of reset and
-not the other.
-
-What bzo has to decide:
-
-- **The hold has to be server-side.** bzo respawns without waiting for a click
-  (an intentional deviation), so a game-over that only stops drawing would have
-  every tank back in the world five seconds later. The server refuses the spawn
-  while the game is over, and the client shows the standing scores rather than a
-  respawn countdown. That is the same shape as the pause countdown, which bzo
-  already moved to the server because the server decides whether a tank may be
-  hit.
-- **What restarts it.** Upstream restarts when the server empties, or on
-  `/countdown`. By the time the clock was built, chat commands (issue #5) had
-  already landed, so `/countdown [pause|resume]` and `/gameover` are the chat
-  front end, and the Operator panel (flat and XR) grew its own Start/Pause/
-  Resume/End Match buttons calling the same four functions -- unstaged, like
-  Upload Map. `timeLimit` and `timeManualStart` are ordinary staged rows
-  alongside them, live rather than restart-requiring, unlike most of
-  `GAME_CONFIG` (`flagShakeTimeout` included), which the panel still does not
-  surface at all.
-- **`-g` is not worth having.** "Serve one game and then exit" makes sense for a
-  process someone launched for one match; bzo's server is a web server that
-  reloads its clients on restart. Read the switch, log that it is ignored, and
-  say so in `docs/bzw.md`'s ignored list. Still not done -- a small change
-  independent of everything else here.
-
-Config: `timeLimit`, `timeManualStart`, `maxPlayerScore` and `maxTeamScore` in
-`server.json`, and `-time`, `-timemanual`, `-mps`, `-mts` in a map's `options`
-block, all four behaving the way every other switch there does -- the map may
-set it and nothing turns it back off. All four default to bzfs's own defaults
-(no limit, no clock), so `server.json` keeps saying nothing about how a world
-plays until it is asked to.
-
-XR: the clock belongs in the header of the XR scoreboard panel next to the team
-rows, and "GAME OVER" is an XR toast like every other alert. Nothing here needs
-a new XR affordance.
-
-New messages, both broadcast: `timeUpdate` (seconds left, `-1` for paused),
-which also rides in `init` so a joining player starts with the right clock,
-and `scoreOver` (`{ playerId, team }`, one of the two null).
-
-## Rabbit Chase -- **done**
-
-`"rabbit": "score" | "killer" | "random"` in `server.json` and `-rabbit
-[score|killer|random]` in a map's `options` block. Turning it on turns the
-colour teams off, which is what makes it and CTF mutually exclusive; nobody
-picks a team; the selection functions are pure and live in the `teams` pair. See
-"Rabbit Chase" in `AGENTS.md` for the rules and for the deviations from
-upstream, and `docs/bzw.md` for the map switch.
-
-The **XR bearing cue** it wanted is built, in two halves. The XR radar panel is
-textured from the flat radar's canvas, so the rabbit's ring arrives in a headset
-for free, and the same ring marks the player's own team flags and the antidote
--- pinned to the border of the panel when the thing is past radar range, which
-is the cheapest surface bzo has, since that canvas is uploaded every frame of a
-session whatever is drawn on it.
-
-What the radar cannot do is spare the player a top-down map to rotate mentally,
-and the **world-locked sky beacon** is that (issue #61): a wedge out of the
-cloud layer down to a point just above the thing itself, over exactly what the
-radar rings. See "Three surfaces point at the same things" in `AGENTS.md`.
-
-Upstream has a second mark of its own beside the heading tape -- a screen-space
-triangle over the team flag and the antidote, from the same `prepareTheHUD`
-block -- which is not what the beacon is and does not answer the headset, since
-a mark placed in screen space has no screen to be placed on. It is described
-under "Intentional deviations from BZFlag" in `AGENTS.md`, along with the one
-thing bzo still lacks: any flat-client equivalent of it.
-
-The one candidate left unbuilt is a **head-locked bearing ribbon** with a tank
-caret, and it is rejected on cost rather than deferred: its centre is where the
-player looks, so unlike every other XR panel its canvas would repaint and
-re-upload on every frame the head moves, and the beacon already answers "lead me
-there" for nothing per frame.
+All four game types, the match-end switches except `-g`, and seven of the
+eight game styles: superflags (`+s`/`-s`), jumping (`-j`), inertia (`-a`),
+ricochet (`+r`), shakable (`-st`, `-sw`), antidote (`-sa`) and no-team-kills
+(`-noTeamKills`). See "Game types", "Rabbit Chase" and "Match end" in
+`AGENTS.md`. **Handicap is missing.**
 
 ## Handicap
 
@@ -387,17 +225,16 @@ trip that sizes it.
 1. Absolute scores on the kill message, and delete the unused
    `getTeamScoreDeltasForCapture` export from `public/teams.mjs` -- a mirrored
    copy of authoritative scoring logic that nothing calls.
-2. The round trip and the clock discipline in `docs/lag-plan.md`, which is what
-   sizes the window below.
-3. The bound window as `enforceable: false`, which stands on its own.
-4. The counter, the shared derivation, speed and turn.
-5. Size, then the signed half behind its config.
+2. The bound window as `enforceable: false` (`docs/lag-plan.md` step 3),
+   sized from the measured round trip.
+3. The counter, the shared derivation, speed and turn.
+4. Size, then the signed half behind its config.
 
 ## Publishing to the list server
 
-Worth knowing because two of the gaps above -- the score limits and the clock --
-are fields in the packet a public server publishes, so building them with
-upstream's names and units costs nothing now and saves a translation later.
+Worth knowing because the score limits and the clock are fields in the
+packet a public server publishes, so keeping upstream's names and units saves
+a translation later.
 
 **The list server itself is plain HTTP.** `ListServerLink` is a `cURLManager`
 subclass that POSTs form-encoded bodies to `https://my.bzflag.org/db/`
@@ -466,10 +303,10 @@ server, which is a conversation upstream rather than a patch here.
 The middle one is built: `docs/list-server.md`, issue #46. `my.bzflag.org`
 itself never did support adding a bzo server, for exactly the reasons above.
 
-What to do meanwhile: keep upstream's field names and units as the match-end
-work lands -- `shakeTimeout` in tenths of a second, `maxTime` in seconds --
-because bzo already holds every other field in that packet, and a publisher
-would then be a pure formatting function. Do not write the packer.
+What to do meanwhile: keep upstream's field names and units --
+`shakeTimeout` in tenths of a second, `maxTime` in seconds -- because bzo
+already holds every field in that packet, and a publisher would then be a
+pure formatting function. Do not write the packer.
 
 The `checktokens=` parameter above is the other half of the same API, and the
 one part of it bzo could use today: see "Admins and the admin channel" in
@@ -477,6 +314,9 @@ one part of it bzo could use today: see "Admins and the admin channel" in
 
 ## Adjacent switches, deliberately out of scope
 
+- **`-g`**, serve one game and exit. Not worth having: bzo's server is a web
+  server that reloads its clients on restart. Read the switch, log that it is
+  ignored, and say so in `docs/bzw.md`'s ignored list.
 - **`-cr`** -- CTF with a random world. bzo has no random world generator, and
   `-b`, `-h`, `-density` and `-t` are ignored for the same reason.
 - **`-sb`**, tanks respawning on buildings. A spawn rule rather than a game
@@ -486,11 +326,3 @@ one part of it bzo could use today: see "Admins and the admin channel" in
   are cheap now that there is an admin channel to announce into, and both belong
   with the team-kill code rather than with game modes.
 - **`-mp`** is already read, per team, from `server.json` and from a map.
-
-## Suggested order
-
-1. ~~The clock, game over, and `/countdown`/`/gameover`~~ -- done, issue #66.
-2. ~~Score limits and `scoreOver`~~ -- done, issue #67.
-3. Handicap.
-
-Each step is playable on its own.

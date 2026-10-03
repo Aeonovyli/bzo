@@ -48,14 +48,6 @@ reconnect, keyed on the session, rather than tearing it down and re-entering.
 That is the same fix a reconnect needs to stay verified -- bzflag.org answers
 a token once -- so the two are one piece of work rather than two.
 
-## A row on the list server
-
-The entry dialog's destination selector is built (`docs/proxy.md`). The other
-way in is not: a proxied target as a row on `/list`, so a player who has never
-seen one instance's dialog can still find it. That is the list server's own
-work and is planned in `docs/list-server-plan.md`; it is last here for the
-reason given there.
-
 ## A proxy-only instance
 
 Proxy mode already deletes server-side game state, so an instance with
@@ -69,8 +61,8 @@ run a bzo game.
 
 ## Voice
 
-**Nothing of it is wired on a proxied connection.** The proxy accepts ten
-message types and drops the rest, so no signalling reaches it -- and an
+**Nothing of it is wired on a proxied connection.** The proxy accepts about
+fifteen message types and drops the rest, so no signalling reaches it -- and an
 observer's `m`, which is where bzo learns a watcher is standing, is dropped
 too, so Nearby has no distance to work from.
 
@@ -132,11 +124,6 @@ asking for.
 
 ## Order of work
 
-The list server comes last. It is discovery for something that has to work
-first, it needs both ends of a bzo pair updated before a row appears, and
-every step before it is cheaper against one hardcoded loopback target than
-against a registry.
-
 1. **Holding the bzfs connection across a browser reconnect**, above. It is
    what a proxied player loses most visibly today -- a network blip costs
    verification and benches them on the rejoin list -- and death, which makes
@@ -145,12 +132,9 @@ against a registry.
 2. **Voice**, above. No protocol work, and the largest thing a proxied player
    is missing that has nothing to do with dying.
 
-3. **`MsgExit`**, to announce leaving rather than dropping the socket. The
-   last sender missing.
-
-   Untested rather than missing: shot slots cycle up to the target's
-   `maxShots` without enforcing reload timing, so `addShot` may refuse one
-   reused too soon.
+3. **Shot slots, untested.** They cycle up to the target's `maxShots`
+   without enforcing reload timing, so `addShot` may refuse one reused too
+   soon.
 
 4. **Pause, if the countdown is worth converging.** Upstream's *client* owns
    it -- five seconds, cancellable, refused in a building or in the air

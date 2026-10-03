@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The sky is upstream's: the real sun, moon and stars over the world's
+  `_latitude` and `_longitude` at the real time, or the instant `_syncTime`
+  holds -- a sky gradient with a sunset band, 400 stars turning overhead, and
+  a moon in its real phase. Only the sun casts shadows. `"sky": "minecraft"`
+  in server.json keeps the older day clock. Closes #166
+- In Rabbit Chase, Ace hunts the rabbit wherever it is on the map. As the
+  rabbit, Ace turns on the nearest tank closing on it and otherwise runs from
+  the hunters near it.
+- On a server that allows several shots, Ace keeps a quarter of them back
+  for a foe that gets close or a landing shot, instead of firing them all
+  at range.
+
+### Fixed
+- Chat to a proxied BZFlag server longer than its 127-byte limit is sent as
+  several lines broken between words, instead of being cut off. Closes #169
+
 ## [1.2.103] - 2026-10-03
 
 ### Added

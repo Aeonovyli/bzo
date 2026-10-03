@@ -157,26 +157,32 @@ These are deliberate. Do not "fix" them without being asked.
   `createTank` with one is a console error. Do not add a procedural tank or
   substitute another model for one that failed -- the rule the audio has.
 
-- **The sky follows a Minecraft clock, not real astronomy.** BZFlag computes
-  where the sun and moon actually are: `SceneRenderer::setTimeOfDay` takes a
-  Julian day and feeds `getSunPosition`/`getMoonPosition` in `daylight.cxx`,
-  which work from Greenwich sidereal time and the server's `_latitude` and
-  `_longitude`, so the arc tilts with latitude and the moon carries a real phase
-  and its own position in the sky. bzo instead runs a Minecraft-style tick
-  clock: `worldTime` 0..23999 sweeps the sun through a fixed arc in the world's
-  X--Y plane, and the moon sits exactly opposite it, full and unphased. Sun for
-  day, moon for night.
+- **The sky is upstream's** (#166). `public/daylight.mjs` is `daylight.cxx`
+  ported line for line: the sun and moon from a Julian day, Greenwich sidereal
+  time and the world's `_latitude`/`_longitude` (west positive), the light and
+  ambient colours off the sun's height, the four sky colours and the sunset
+  band. The clock is the real instant, or the one `_syncTime` freezes, read
+  off the wall clock every browser shares -- so every screen shows the same
+  sky with nothing sent -- and the sky moves when it has moved 4 s, as
+  `playing.cxx` does. There is no client-side place or time: `_syncLocation`
+  is always on.
 
-  What bzo does take from upstream is how big they look and how far away they
-  are -- `2 * worldSize`, sized by the angle they subtend
-  (`makeCelestialLists`) -- because that is what makes them read as the sun and
-  the moon rather than as spheres in the distance. Do not report the arc, the
-  missing phases, or the absence of latitude as parity gaps.
+  The renderer draws it as `BackgroundRenderer` does, ahead of the world by
+  render order and without depth: the colour pyramid around the eye
+  (`drawSky`, its turn toward the sun included), then upstream's 400 stars
+  (`public/stars.mjs`, from `stars.cxx`) turned by `getCelestialTransform` and
+  shown while the sun is down, then the sun and the phased moon -- the flat
+  strip `makeCelestialLists` builds, lit edge to the sun, added to the sky.
+  The pyramid and the stars follow the eye at the far plane's reach. The sun
+  lights the world while it is up, the moon while only it is up, and only the
+  sun casts shadows (`areShadowsCast`).
 
-  server.json's `timeOfDay` (the hour the day starts at, random when unset)
-  and `daySpeed` (1 a real day, 72 the default 20-minute one, 0 stopped) set the
-  clock. The server reads it off the wall clock (`currentWorldTime`), so
-  every joiner is told the same time.
+  server.json `"sky": "minecraft"` keeps bzo's older day clock instead:
+  `worldTime` 0..23999 sweeping a fixed arc with the moon opposite, full and
+  unphased, under one flat sky colour; `timeOfDay` (the starting hour, random
+  when unset) and `daySpeed` (72 the default 20-minute day) set it, and the
+  server reads it off the wall clock (`currentWorldTime`) so every joiner is
+  told the same time.
 
 - **The sky's clouds are upstream's flat layer** (`buildCloudLayer`, from
   `BackgroundRenderer.cxx:1829`): `clouds.png` 120 tank heights up across the
@@ -394,14 +400,13 @@ These are deliberate. Do not "fix" them without being asked.
   between two looks -- a modelled guided missile behind `useQuality() >= 3`, a
   real flag cloth behind `realFlag`, `SHELL_INSIDE_NODES` for the eighth
   dimension -- bzo builds the one a player who turns everything up would see,
-  not the one upstream ships cold, and leaves the other out. The guided
-  missile follows this: its model (`public/obj/missile.obj`) and its
-  quality-3 smoke. The flag cloth and the eighth dimension were picked under
-  the older rule (upstream's *default*) and are worth revisiting now that the
-  rule has changed -- see "bzo does not mirror
-  BZFlag's client display options" above. A setting is only added where a
-  measurement says the frame rate needs it, which is the same rule the render
-  level follows, and the fallback then is what the render level chooses
+  not the one upstream ships cold, and leaves the other out. The guided missile
+  follows this: its model (`public/obj/missile.obj`) and its quality-3 smoke.
+  The flag cloth and the eighth dimension are upstream's default variants and
+  are worth revisiting under this rule -- see "bzo does not mirror BZFlag's
+  client display options" above. A setting is only added where a measurement
+  says the frame rate needs it, which is the same rule the render level
+  follows, and the fallback then is what the render level chooses
   automatically, not a manual toggle. Every option is a second code path to
   keep correct and a second thing to test on four surfaces.
 
@@ -566,9 +571,37 @@ from an installed client: the game's rules out of `server.js` into one module
 the server and a browser Worker both run.
 
 `docs/bots-plan.md` is the plan for the autopilot and for bots (issue #151).
-`public/autopilot.mjs` reads the world only through the view that plan
-describes, so the client's autopilot and the server's own bots
-(`server/bots.cjs`) drive the same decisions -- keep it that way.
+`public/autopilot.mjs` reads the world only through a view, so the client's
+autopilot and the server's own bots (`server/bots.cjs`) drive the same
+decisions -- keep it that way:
+
+- **Roger is upstream's `AutoPilot.cxx`**, decision for decision, quirks
+  included; he is the reference. **Ace** extends him and is where
+  improvements go, each overriding one Roger decision. Where bzo forces
+  Roger off upstream: he presses Identify before a GM shot, since bzo's
+  server allows a lock only on a tank in your sights; the server refuses
+  autopilot with upstream's words under `DISABLE_BOTS` rather than kicking.
+- **`think(view)` returns `{ rotation, speed, jump, fire, dropFlag, targetId,
+  shotTargetId }`** and the client feeds it where a stick would go, so the
+  server's movement checks see an ordinary tank. The view (`now`, `self`,
+  `players`, `shots`, `flags`, `world`, `isFoe`, `myBase`, and four shot
+  probes over `findShotSegmentImpact`) is the contract `buildBotView` in
+  `server.js` fills for a server bot, with only what a client would see -- a
+  superflag on the ground keeps its type hidden.
+- **A shot always rides with a move**, for every tank, as upstream sends a
+  player update before every shot (`LocalPlayer.cxx:1268`); otherwise a tank
+  that turned since its last move fires from where the server does not put it.
+- **A server bot is a client whose socket never leaves the process.**
+  `acceptConnection` takes it like a browser's and it sends a browser's
+  messages, so validation, anti-cheat, scoring and the list treat it as any
+  player. `BotDriver` steps it with the `drive` pair; `planBotFill` is the
+  fill rule (`docs/installation.md`).
+- **A bot is a player that joined as one** (`joinGame`'s `bot`, which `?bot`
+  sets), upstream's `ComputerPlayer` -- not one on autopilot. The list's
+  `players` leaves bots out; team counts keep them, as upstream's ping does.
+  Through a proxy, `?bot` joins as a `ComputerPlayer` on the target -- except
+  an observer, which bzfs refuses as a robot, so a watching bot enters as a
+  person -- and MsgAutoPilot is forwarded both ways.
 
 **One tank, one motion.** What a tank's controls do -- the flags' clamps and
 factors, Agility, Burrow, Wings, Bouncy, momentum, coasting, jumping, the
@@ -912,9 +945,18 @@ permissive than the client, because a move packet quantizes position with
 has to know where every tank is between packets, and it dead-reckons from the
 velocities a client reported -- which is bzfs's own arrangement
 (`getPredictedState`), not a second copy of the client's resolver. Those are
-different jobs reading the same geometry. What the extrapolation is missing is a
-clock it can trust: bzo sends no timestamp with a move, so network jitter lands
-inside the number the anticheat judges. `docs/lag-plan.md` is the plan for that.
+different jobs reading the same geometry. It runs on the client's own clock, as
+upstream's does: a move carries `ct` (seconds since the client's
+`clientClockOrigin`), and `validateMovement` extrapolates over the difference
+from the last *accepted* move's `ct` (`lastClientTimestamp`), clamped by
+`clampToArrivalGap` to the server's own arrival gap plus
+`SDT_JITTER_ALLOWANCE` -- so a client's clock can refine the interval but
+never exceed what the server saw, and network jitter stays out of the drift
+it judges. Each server handler reads `Date.now()` once and passes `now` down,
+so an extrapolation and the check it feeds agree about *now*; the client
+samples once per frame (`sampleEpochClock`). `server/lag.cjs` measures lag,
+jitter and loss for `/lagstats`, and `docs/lag-plan.md` is the plan for acting
+on them.
 
 `getShotTeleporterDims` is the cheap half of that lesson already learned. It used
 to *compute* a teleporter's frame from the stated size and the border, and three
@@ -955,7 +997,7 @@ upstream line it came from.
 
 Upstream keeps three kinds of track mark and bzo draws one of them. `PuddleTrack`
 needs `_mirror` set to something other than "none" (`addMark`,
-`TrackMarks.cxx:322`) and bzo draws no reflections; `SmokeTrack` has no producer
+`TrackMarks.cxx:322`) and bzo leaves it out; `SmokeTrack` has no producer
 anywhere in the upstream tree, its texture a FIXME and nothing ever asking for
 one. What is left is the treads, which is the effect the issue is about.
 
@@ -979,16 +1021,30 @@ one alpha per vertex of them.
 The pool is a ring of 512 marks -- eight tanks driving without pause, 124KB of
 vertex data whether it is used or not -- and a full pool drops its oldest mark,
 so a crowded map shortens every trail rather than costing the client anything.
-That is the memory question `docs/effects-plan.md` asked to answer before
-building this.
 
 Two upstream knobs are absent, per the rule of shipping the default variant and
 no setting: `userTrackFade` and `trackMarkCulling`. The second is not only a
 setting -- its `PhyDrvAirCull` half re-tests every mark each frame in case a
-physics driver has carried it off the surface it was left on, and bzo has no
-physics drivers, so where a mark is laid is where it stays. The `InitAirCull`
+physics driver has carried it off the surface it was left on; bzo leaves that
+half out, so where a mark is laid is where it stays. The `InitAirCull`
 half is kept, and is what stops a tank leaving marks in the air off the edge of a
 roof.
+
+### Teleporter flash
+
+Upstream blends the whole frame toward yellow as a tank nears a portal
+(`SceneRenderer.cxx:1145`, density `t / 0.75` off `Teleporter::getProximity`),
+which hides the view discontinuity and is what makes a teleport read as one.
+`getWorldTeleporterProximity` (`client.js`) ports the proximity and
+`RenderManager.setTeleporterProximity` (`render.js`) draws the wash. It is not
+Blindness, whatever upstream's `blindnessColor` name suggests: Blindness is
+`setBlank`, a separate switch bzo already matches.
+
+The wash is a plane parented to the camera rather than a 2D screen quad,
+because a headset has no window to pin one to; three.js draws it once per eye,
+so it is stereo-correct. It gets no XR-specific cap: Blindness's full blackout
+runs in XR unmitigated as upstream's own effect, and a ~130 ms yellow ramp is a
+smaller dose.
 
 ## Radar colours
 
@@ -1067,6 +1123,16 @@ quantised opacity -- runs, not a grouping by colour, because the altitude sort
 above is load-bearing and gathering the list by colour would reorder it. Where
 two obstacles inside one run overlap, the union fills once rather than twice, so
 a partly transparent overlap does not darken at the seam.
+
+**Still obstacles are one cached image** (`getRadarObstacleCache`, #133).
+They are baked once into a world-space canvas at the player's height and drawn
+turned with the heading each frame, so most frames are one `drawImage`. Height
+is the only thing that changes the picture (depth opacity), so a player
+climbing or falling draws live, and the image is rebaked once a height has held
+for 250 ms (`RADAR_CACHE_SETTLE_MS`). A zoom, panel-size or map change rebakes;
+a bake over 2048 px a side (`RADAR_CACHE_MAX_PIXELS`, zoomed far in) stays live,
+where nearly everything is off the panel anyway. Spinning meshes are left out
+of the bake and drawn live on top.
 
 ## Flags
 
@@ -1182,6 +1248,10 @@ look away from the world to read one:
   `render.js` draws them. Upstream's own second mark is a screen-space triangle
   rather than anything standing in the world; the bearing-cue entry under
   "Intentional deviations from BZFlag" describes it and how it differs.
+
+A head-locked bearing ribbon is rejected on cost: its centre is where the
+player looks, so its canvas would re-upload on every frame the head moves,
+and the beacon already answers "lead me there" for nothing per frame.
 
 **A mark carries identity only where nothing else does.** That is what decides
 each one's colour, and it is why the two marks over a hunted tank are *not* the
@@ -2161,7 +2231,12 @@ Up and down are handled *before* `canCycleWithArrowKeys`, which a text field
 fails on purpose: left, right, Home and End stay native there because that is
 what editing needs, but a single-line input has no use for up and down and the
 browser would spend them jumping the caret to the ends of the text, stranding
-the focus in the field. That is what the MOTD row did before.
+the focus in the field.
+
+A pointer reads the same split: clicking a choice row's label steps its list
+back and clicking its value steps forward, with a chevron on each half. A
+click with no coordinates behind it -- Enter, a gamepad face button, an XR
+trigger -- steps forward.
 
 A dialog tagged `data-dialog-kind="document"` -- the help panel -- is read rather
 than operated, so its arrows scroll and only left/right move focus. Cycling
@@ -2447,6 +2522,9 @@ The other fields: `drawbuf` is the drawing buffer, which moves with the window
 and with `renderScale`; `programsWindow` is the low-high program count over the
 window, and a count that moves during play is Three recompiling rather than a
 bigger scene, since its program cache key includes the light count.
+`radarCache=cached/live/bakes` counts radar frames since the last line drawn
+from the cached obstacle image, drawn live, and baked (see "Radar colours");
+a client that is mostly `live` while standing still is not getting the cache.
 
 **Finding a leak: read `grew`, not the counters.** A leak is a trend, and no
 single sample can show one -- which is why a client whose frame rate drifts down
@@ -2465,6 +2543,9 @@ hide the finding.
   somebody is measuring, so the scene walk is asked for by the logged series and
   not by the HUD. An instrument that costs what it measures is worse than one
   field short.
+- `objectKinds`, beside `objects` and as deep, names the commonest scene
+  objects by type and draw group (`Mesh/effect:120`), so a climbing `objects`
+  says what is climbing.
 - `tanks`, `shots`, `worldFlags`, `spheres` and `labels` are bzo's own
   collections. Each is added to on one event and has to be removed from on
   another, so a count that climbs while a client sits idle names which one
@@ -2612,10 +2693,19 @@ things:
   it entirely is the case this cannot see, which is exactly why an operator has
   to ask for this rather than get it by default. Every grant is logged.
 
+  **`adminWhitelist` widens it past loopback** -- addresses or IPv4/IPv6 CIDR
+  blocks, parsed by `parseAdminWhitelist` -- but only for a forwarded address,
+  and only once the startup probe has proved the proxy trustworthy: the server
+  calls its own `publicUrl` plain and with a forged `X-Forwarded-For`
+  (`ADMIN_PROBE_SENTINEL`), and `forwardedForPolicy` stays `'distrust'` unless
+  the forged value was replaced or followed by the real peer. A whitelist
+  naming non-loopback addresses while `localAdmin` is off logs a boot warning,
+  since it then grants nothing. Operator setup is `docs/installation.md`.
+
 Whichever way it is reached, it is checked on the server for everything it
-guards. Today that is the admin channel and the Operator panel; `/`-commands are
-the next thing behind it, and `docs/commands-plan.md` is the plan for them --
-including why bzo should not port upstream's sixty permissions.
+guards: the admin channel, the Operator panel and the admin-tier
+`/`-commands. `docs/commands-plan.md` is the plan for the rest of the
+commands -- including why bzo should not port upstream's sixty permissions.
 
 It is checked on the server for everything it guards:
 
@@ -2633,6 +2723,14 @@ The client is *told* whether it is an admin, in `admin` on its own player state,
 rather than deriving it. Authority questions are the server's alone in bzo, and a
 greyed-out button is reading an answer rather than keeping a second copy of the
 question.
+
+**The Operator panel stages every row behind one button.** Each row edits
+`operatorStaged` and nothing reaches the server until the button, which names
+what it will do: *Apply* while every staged key is in `LIVE_CONFIG_KEYS`,
+*Restart* the moment one is not. Cancel and the `X` drop everything. One
+confirm is what keeps the XR operator menu one line per setting instead of a
+setting plus an apply row, which a thumbstick-scrolled list cannot afford. The
+Match Timer buttons and Upload Map are actions, not staged.
 
 **Chat destinations are small negatives**, because upstream spends reserved
 PlayerIds on the ones that are not players and bzo spends ids on players alone:
@@ -2893,9 +2991,7 @@ two questions come apart there and only there. `TEAMS_ALLOWED` is what every
 `areFoes` call passes, and passing `TEAM_MODE.enabled` instead would make Rabbit
 Chase a free-for-all in which nothing was ever a team kill.
 
-Match end's clock half (`-time`, `-timemanual`) is in -- see "Match end" below.
-Score limits (`-mps`, `-mts`) and the `Handicap` game style are still missing;
-see `docs/game-modes-plan.md`.
+The `Handicap` game style is still missing; see `docs/game-modes-plan.md`.
 
 ## Rabbit Chase
 
@@ -2981,8 +3077,8 @@ hunter, upstream's `RabbitChase`.
   textured from the same canvas, so the ring arrives there on the same frame, and
   the XR scoreboard reads the same rows. The same ring marks the player's own
   team flags and the antidote, which is what an immersive session has instead of
-  the heading tape; `docs/game-modes-plan.md` carries what a world-space bearing
-  cue would add on top of it.
+  the heading tape; the sky beacon adds a world-space bearing on top of it (see
+  "Three surfaces point at the same things").
 
 ## A thing that happened is said once
 
@@ -3471,8 +3567,7 @@ does not do because it has no `ServerCommand` for it.
 
 `timeLimit`/`timeManualStart` and `maxPlayerScore`/`maxTeamScore` in
 `server.json`, `-time`/`-timemanual`/`-mps`/`-mts` in a map's `options` block.
-Upstream's clock (issue #66) and score limits (issue #67) -- see
-`docs/game-modes-plan.md`.
+Upstream's clock (issue #66) and score limits (issue #67).
 
 - **No pre-match delay.** Upstream counts down "3...2...1...GO" in chat before
   the clock actually starts; `/countdown` here starts it at once. `pause` and
@@ -3486,8 +3581,8 @@ Upstream's clock (issue #66) and score limits (issue #67) -- see
   health 0, the way an observer always does, rather than on a fresh spawn.
   `endMatch(winner)` is not gated on a clock being active or even configured --
   a score limit, or a bare `/gameover`, ends the match on a clockless server
-  exactly as time running out does on one with a clock, since "Match end" ties
-  to neither in `docs/game-modes-plan.md`. `startMatch` is the same symmetry in
+  exactly as time running out does on one with a clock, since match end is
+  tied to neither. `startMatch` is the same symmetry in
   reverse: a clockless server still needs a working `/countdown` to start the
   *next* match once a score limit ends one, so only the clock-specific state
   (`matchClock.active`, the running `timeUpdate` broadcast, the "Match
@@ -4060,8 +4155,9 @@ used to plant a bad flag on somebody.
 
 **A probe has admin, so all of this is available from the chat line.** This is
 `localAdmin` in `server.json` (`isLocalAdminRequest` in `server/sessions.cjs`):
-a connection from loopback with no `X-Forwarded-For` header is trusted as an
-operator without signing in, specifically so a headless probe or a raw
+a connection from loopback with no `X-Forwarded-For` header -- or, through a
+proxy the startup probe trusts, from an `adminWhitelist` address -- is trusted
+as an operator without signing in, specifically so a headless probe or a raw
 WebSocket script can drive admin-only commands and the Operator panel. It is
 off by default and must stay off on a real deployment (see the comment beside
 `LOCAL_ADMIN` in `server.js`) -- it is on for this dev server. Reach for the
@@ -4420,8 +4516,8 @@ const dz = -Math.cos(moveDirection) * fs * speed * dt;
 # WebXR
 
 See `docs/webxr-validation.md` for the manual validation checklist and
-`docs/settings-dialog-plan.md` for the dialog/menu architecture and its current
-status.
+`docs/settings-dialog-plan.md` for the dialog/menu architecture and what is
+left of it.
 
 ## Modules
 

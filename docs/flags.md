@@ -234,9 +234,6 @@ compares against the fraction the player actually asked for.
   where opaque static would take away part of what the flag explicitly leaves
   you. A jammed frame replaces the panel background at the alpha the background
   would have had, so a jammed panel is exactly as heavy as a working one.
-- **A guided missile's bolt is coloured by who fired it.** Upstream paints every
-  missile the same orange; bzo colours every shot by its owner, and a missile is
-  the shot you most want the owner of.
 - **The lock-on bracket is a world-space sprite, not a screen-space overlay.** A
   screen-space bracket has no meaning in a headset, where there is no window to
   pin it to. The cost is upstream's edge clamping: a target off screen has no
@@ -274,13 +271,12 @@ compares against the fraction the player actually asked for.
   obstacle. Its pyramid envelope comes from bzo's own pyramid geometry rather
   than upstream's `slope * hypot(x, y)`, which describes a cone and knows nothing
   of an inverted pyramid.
-- **Where upstream offers a quality variant, bzo implements the default one** and
-  ships no setting for it -- see "Fewer options than BZFlag" under "Intentional
-  deviations from BZFlag" in `AGENTS.md`. The guided missile's bolt is the
-  billboard upstream draws by default rather than the modelled one behind
-  `useQuality() >= 3`; the flag cloth is the billboarded one rather than
-  `realFlag`; the eighth dimension is the triangle cloud rather than
-  `SHELL_INSIDE_NODES`.
+- **Where upstream offers a quality variant, bzo picks one** and ships no
+  setting for it -- see "Fewer options than BZFlag" under "Intentional
+  deviations from BZFlag" in `AGENTS.md`. The guided missile is the modelled
+  one upstream draws at `useQuality() >= 3` (`public/obj/missile.obj`); the
+  flag cloth is the billboarded one rather than `realFlag`; the eighth
+  dimension is the triangle cloud rather than `SHELL_INSIDE_NODES`.
 
 ### Rules that had to be rebuilt rather than ported
 

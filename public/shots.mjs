@@ -209,6 +209,17 @@ export function findFreeShotSlot(slotFreeAt, slotCount, now) {
   return -1;
 }
 
+// How many of the slots are ready to fire now -- a bot keeps some of these
+// back on a server that allows several.
+export function countFreeShotSlots(slotFreeAt, slotCount, now) {
+  let free = 0;
+  for (let slot = 0; slot < slotCount; slot++) {
+    const freeAt = Number(slotFreeAt?.[slot]);
+    if (!Number.isFinite(freeAt) || freeAt <= now) free += 1;
+  }
+  return free;
+}
+
 // How ready a slot is, 0 to 1, for the row of bars beside the control box
 // (HUDRenderer.cxx:1988). A slot that was never fired reads full.
 export function getShotSlotProgress(slotFreeAt, slot, reloadMs, now) {

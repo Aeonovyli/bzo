@@ -12,6 +12,21 @@ import { meshArrays, meshDrawArrays, NO_INDEX } from './mesh-arrays.mjs';
 import { xrState } from './webxr.js';
 import { markFramePhase, noteProgramCount } from './perf.js';
 import {
+  BELOW_HORIZON as SKY_BELOW_HORIZON,
+  MOON_COLOR as SKY_MOON_COLOR,
+  areShadowsCast,
+  areStarsVisible,
+  getCelestialTransform,
+  getMoonPhase,
+  getMoonPosition,
+  getSkyColor,
+  getSunColor,
+  getSunPosition,
+  getSunsetTop,
+  julianDayFromUnixSeconds,
+} from './daylight.mjs';
+import { STARS, STAR_COUNT } from './stars.mjs';
+import {
   TANK_PART_ALIASES, TANK_LIGHT_ALIASES, TANK_WHEEL_PREFIX_ALIASES, missingTankParts,
 } from './tank-parts.mjs';
 import {
@@ -782,6 +797,26 @@ const BZFLAG_SUN_ANGULAR_RADIUS = Math.atan(Math.PI / 3) / 60;
 const BZFLAG_MOON_ANGULAR_RADIUS = Math.atan(Math.PI / 180);
 // Before everything else in the world, as upstream draws the sky first.
 const CELESTIAL_RENDER_ORDER = -1000;
+// Upstream's sky, drawn before anything else and without depth: the pyramid of
+// colours first (BackgroundRenderer::drawSky), then the stars over it, then
+// the sun and the moon, and only then the world.
+const SKY_RENDER_ORDER = -2000;
+const SKY_EYE_SCRATCH = new THREE.Vector3();
+const SKY_SCALE_SCRATCH = new THREE.Vector3();
+const STARS_RENDER_ORDER = -1500;
+// The sky pyramid's base corners in its own plane (`squareShape`), in the
+// order `drawSky` colours them: across the sun, away from it, across, toward.
+const SKY_SQUARE = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+// `drawSky`'s turn toward the sun, as upstream writes it: the azimuth in
+// radians times 180, plus 135, over pi -- degrees off by 135/pi rather than 45,
+// which still puts the sun's corner within a couple of degrees of the sun.
+const SKY_SUN_TURN_OFFSET_DEG = 135 / Math.PI;
+// Recompute the sky when its clock has moved this far (playing.cxx:7264).
+const SKY_UPDATE_SECONDS = 4;
+// `moonSegments` at upstream's top quality (SceneRenderer.cxx:256-260).
+const MOON_SEGMENTS = 64;
+// The stars' size in pixels: upstream draws `GL_POINTS` at one, smoothed.
+const STAR_POINT_SIZE = 1.5;
 // The glow is bzo's, and rides just outside the sun's disc.
 const CELESTIAL_GLOW_RATIO = 1.5;
 // Mountains, after the sky but still well before the ordinary depth-tested
@@ -2021,8 +2056,279 @@ class RenderManager {
       sunRadius: sunDistance * BZFLAG_SUN_ANGULAR_RADIUS,
       moonRadius: moonDistance * BZFLAG_MOON_ANGULAR_RADIUS,
     });
-    // Optionally: add/update sun/moon meshes for visuals (not just lighting)
-    // ...
+    this._showUpstreamSky(false);
+  }
+
+  // Upstream's sky (#166): the real sun, moon and stars over the world's
+  // `_latitude` and `_longitude` at a Unix time -- now, or the frozen instant
+  // `_syncTime` names -- as `SceneRenderer::setTimeOfDay` places them. Every
+  // client reads the same instant, so every screen shows the same sky.
+  // Recomputed only when the clock has moved `SKY_UPDATE_SECONDS`, as upstream
+  // does, or when the place or the world changes.
+  setCelestialTime(unixSeconds, latitude = 37.5, longitude = 122) {
+    const worldSize = Number.isFinite(this.groundMapSize) ? this.groundMapSize : 100;
+    const last = this._celestialState;
+    if (last && Math.abs(unixSeconds - last.seconds) < SKY_UPDATE_SECONDS
+      && last.latitude === latitude && last.longitude === longitude
+      && last.worldSize === worldSize && last.skyTint === this._skyTint) {
+      return;
+    }
+    this._celestialState = { seconds: unixSeconds, latitude, longitude, worldSize, skyTint: this._skyTint };
+    this._worldTime = null;
+    const julianDay = julianDayFromUnixSeconds(unixSeconds);
+    const sunDir = getSunPosition(julianDay, latitude, longitude);
+    const moonDir = getMoonPosition(julianDay, latitude, longitude);
+    // Upstream's x east, y north, z up, as bzo's x east, y up, z south.
+    const toScene = (v, scale = 1) => [v[0] * scale, v[2] * scale, -v[1] * scale];
+    const distance = BZFLAG_CELESTIAL_DISTANCE_SCALE * worldSize;
+    const [sunX, sunY, sunZ] = toScene(sunDir, distance);
+    const [moonX, moonY, moonZ] = toScene(moonDir, distance);
+    const sunUp = sunDir[2] >= SKY_BELOW_HORIZON;
+    const moonUp = moonDir[2] > SKY_BELOW_HORIZON;
+    const { color, ambient, brightness } = getSunColor(sunDir);
+    const asColor = (rgb) => new THREE.Color().setRGB(rgb[0], rgb[1], rgb[2]);
+    const directColor = asColor(color);
+
+    if (this.ambientLight) {
+      this.ambientLight.color.copy(asColor(ambient));
+      this.ambientLight.intensity = 1.0;
+    }
+    // The sun lights the world while it is up, the moon while it is up and the
+    // sun is not, and neither when both are down (SceneRenderer.cxx:599-616).
+    // Only the sun casts shadows (`areShadowsCast`).
+    if (this.sunLight) {
+      this.sunLight.position.set(sunX, sunY, sunZ);
+      this.sunLight.target.position.set(0, 0, 0);
+      this.worldGroup.add(this.sunLight.target);
+      this.sunLight.color.copy(directColor);
+      this.sunLight.intensity = sunUp ? Math.max(0.35, brightness) : 0.0;
+      this.sunLight.castShadow = areShadowsCast(sunDir);
+    }
+    if (this.moonLight) {
+      this.moonLight.position.set(moonX, moonY, moonZ);
+      this.moonLight.target.position.set(0, 0, 0);
+      this.worldGroup.add(this.moonLight.target);
+      this.moonLight.color.copy(asColor(SKY_MOON_COLOR));
+      this.moonLight.intensity = !sunUp && moonUp ? 0.35 : 0.0;
+      this.moonLight.castShadow = false;
+    }
+
+    const sky = getSkyColor(sunDir, this._skyTint);
+    // What shows where the pyramid does not reach -- below the horizon, with
+    // no ground there -- is the zenith, as upstream's low-quality sky clears to.
+    this.scene.background.setRGB(sky[0][0], sky[0][1], sky[0][2], THREE.SRGBColorSpace);
+    this._showUpstreamSky(true);
+    this._updateSkyPyramid(sky, sunDir, getSunsetTop(sunDir));
+    this._updateStars(julianDay, latitude, longitude, areStarsVisible(sunDir));
+
+    this._updateCelestialBodies({
+      sunX,
+      sunY,
+      sunZ,
+      moonX,
+      moonY,
+      moonZ,
+      sunColor: directColor,
+      sunRadius: distance * BZFLAG_SUN_ANGULAR_RADIUS,
+      moonRadius: distance * BZFLAG_MOON_ANGULAR_RADIUS,
+      sunVisible: sunDir[2] > SKY_BELOW_HORIZON,
+      // The phased moon below stands in for the sphere.
+      moonVisible: false,
+    });
+    this._updateMoonPhase(sunDir, moonDir, distance, distance * BZFLAG_MOON_ANGULAR_RADIUS, moonUp);
+  }
+
+  _showUpstreamSky(shown) {
+    if (!shown) this._celestialState = null;
+    if (this._skyPyramid) this._skyPyramid.visible = shown;
+    if (this._starField) this._starField.visible = shown && this._starField.userData.wanted === true;
+    if (this._phasedMoon) this._phasedMoon.visible = shown && this._phasedMoon.userData.wanted === true;
+  }
+
+  // BackgroundRenderer::drawSky: a pyramid over the eye, its apex the zenith
+  // colour and its four base corners on the horizon, the one toward the sun in
+  // the sun's horizon colour. Around sunrise and sunset the sun's two faces
+  // split at `sunsetTop`, so the sunset climbs the sky and falls away again.
+  // Unit-sized and scaled to the far plane each frame (`_followSky`), since it
+  // stands for the sky at infinity.
+  _updateSkyPyramid(sky, sunDir, sunsetTop) {
+    if (!this._skyPyramid) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(18 * 3), 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(18 * 3), 3));
+      const material = new THREE.MeshBasicMaterial({
+        vertexColors: true, side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false,
+        toneMapped: false,
+      });
+      this._skyPyramid = new THREE.Mesh(geometry, material);
+      this._skyPyramid.renderOrder = SKY_RENDER_ORDER;
+      this._skyPyramid.frustumCulled = false;
+      this.worldGroup.add(this._tagDraws(this._skyPyramid, 'scenery'));
+    }
+    const [zenith, toward, away, across] = sky;
+    const turn = ((Math.atan2(sunDir[1], sunDir[0]) * 180) / Math.PI + SKY_SUN_TURN_OFFSET_DEG) * (Math.PI / 180);
+    const cos = Math.cos(turn);
+    const sin = Math.sin(turn);
+    // A point in upstream's frame, turned toward the sun, in the scene's.
+    const at = (x, y, z) => [(x * cos) - (y * sin), z, -((x * sin) + (y * cos))];
+    const corner = SKY_SQUARE.map(([x, y]) => at(x, y, 0));
+    const apex = at(0, 0, 1);
+    const vertices = [];
+    if (sunsetTop === null) {
+      // The fan apex, c0, c3, c2, c1, c0 as four triangles.
+      vertices.push(
+        [apex, zenith], [corner[0], across], [corner[3], toward],
+        [apex, zenith], [corner[3], toward], [corner[2], across],
+        [apex, zenith], [corner[2], across], [corner[1], away],
+        [apex, zenith], [corner[1], away], [corner[0], across],
+      );
+    } else {
+      const sun3 = SKY_SQUARE[3];
+      const top = at(sun3[0] * (1 - sunsetTop), sun3[1] * (1 - sunsetTop), sunsetTop);
+      vertices.push(
+        [apex, zenith], [corner[2], across], [corner[1], away],
+        [apex, zenith], [corner[1], away], [corner[0], across],
+        [apex, zenith], [corner[0], across], [top, zenith],
+        [apex, zenith], [top, zenith], [corner[2], across],
+        [top, zenith], [corner[0], across], [corner[3], toward],
+        [corner[2], across], [top, zenith], [corner[3], toward],
+      );
+    }
+    const position = this._skyPyramid.geometry.getAttribute('position');
+    const colour = this._skyPyramid.geometry.getAttribute('color');
+    const scratch = new THREE.Color();
+    vertices.forEach(([point, rgb], i) => {
+      position.setXYZ(i, point[0], point[1], point[2]);
+      scratch.setRGB(rgb[0], rgb[1], rgb[2], THREE.SRGBColorSpace);
+      colour.setXYZ(i, scratch.r, scratch.g, scratch.b);
+    });
+    position.needsUpdate = true;
+    colour.needsUpdate = true;
+    this._skyPyramid.geometry.setDrawRange(0, vertices.length);
+  }
+
+  // Upstream's 400 stars on the celestial sphere, turned into the local sky by
+  // `getCelestialTransform` and shown while the sun is below the horizon. The
+  // transform is set here, every few seconds; the position, each frame.
+  _updateStars(julianDay, latitude, longitude, visible) {
+    if (!this._starField) {
+      const positions = new Float32Array(STAR_COUNT * 3);
+      const colors = new Float32Array(STAR_COUNT * 3);
+      const scratch = new THREE.Color();
+      for (let i = 0; i < STAR_COUNT; i += 1) {
+        const at = i * 6;
+        positions.set([STARS[at + 3], STARS[at + 4], STARS[at + 5]], i * 3);
+        scratch.setRGB(STARS[at], STARS[at + 1], STARS[at + 2], THREE.SRGBColorSpace);
+        colors.set([scratch.r, scratch.g, scratch.b], i * 3);
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      // Additive rather than blended: it is the one blending that stays in the
+      // opaque queue, which is what puts the stars before the world rather
+      // than over it, and on a night sky the two look the same.
+      const material = new THREE.PointsMaterial({
+        size: STAR_POINT_SIZE * (this.renderer?.getPixelRatio?.() || 1),
+        sizeAttenuation: false,
+        vertexColors: true,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+        blending: THREE.AdditiveBlending,
+        toneMapped: false,
+      });
+      this._starField = new THREE.Points(geometry, material);
+      this._starField.renderOrder = STARS_RENDER_ORDER;
+      this._starField.frustumCulled = false;
+      this._starField.matrixAutoUpdate = false;
+      this.worldGroup.add(this._tagDraws(this._starField, 'scenery'));
+    }
+    const m = getCelestialTransform(julianDay, latitude, longitude);
+    // Celestial into upstream's local sky, then into the scene's axes: x stays,
+    // up is upstream's z, and south is upstream's -y.
+    this._starRotation = new THREE.Matrix4().set(
+      m[0], m[1], m[2], 0,
+      m[6], m[7], m[8], 0,
+      -m[3], -m[4], -m[5], 0,
+      0, 0, 0, 1,
+    );
+    this._starField.userData.wanted = visible;
+    this._starField.visible = visible;
+  }
+
+  // The moon as upstream draws it (`makeCelestialLists`): a flat strip from
+  // its limb to its terminator, white and added to the sky, turned so its lit
+  // edge faces the sun. Rebuilt with the sky, every few seconds.
+  _updateMoonPhase(sunDir, moonDir, distance, radius, visible) {
+    if (!this._phasedMoon) {
+      const vertexCount = 2 + ((MOON_SEGMENTS - 1) * 2);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3));
+      const indices = [];
+      for (let i = 0; i + 2 < vertexCount; i += 1) indices.push(i, i + 1, i + 2);
+      geometry.setIndex(indices);
+      const material = new THREE.MeshBasicMaterial({
+        color: 0xffffff, side: THREE.DoubleSide, depthTest: true, depthWrite: false, fog: false,
+        blending: THREE.AdditiveBlending, toneMapped: false,
+      });
+      this._phasedMoon = new THREE.Mesh(geometry, material);
+      this._phasedMoon.renderOrder = CELESTIAL_RENDER_ORDER;
+      this._phasedMoon.frustumCulled = false;
+      this.worldGroup.add(this._tagDraws(this._phasedMoon, 'scenery'));
+    }
+    const { coverage, limbAngle, moonAzimuth, moonAltitude } = getMoonPhase(sunDir, moonDir);
+    const cl = Math.cos(limbAngle); const sl = Math.sin(limbAngle);
+    const ca = Math.cos(-moonAltitude); const sa = Math.sin(-moonAltitude);
+    const cz = Math.cos(moonAzimuth); const sz = Math.sin(moonAzimuth);
+    // Rz(azimuth) * Ry(-altitude) * Rx(limb), upstream's three glRotatefs, then
+    // into the scene's axes.
+    const place = (x, y, z) => {
+      const y1 = (y * cl) - (z * sl);
+      const z1 = (y * sl) + (z * cl);
+      const x2 = (x * ca) + (z1 * sa);
+      const z2 = (-x * sa) + (z1 * ca);
+      const x3 = (x2 * cz) - (y1 * sz);
+      const y3 = (x2 * sz) + (y1 * cz);
+      return [x3, z2, -y3];
+    };
+    const points = [place(distance, 0, -radius)];
+    for (let i = 0; i < MOON_SEGMENTS - 1; i += 1) {
+      const angle = (0.5 * Math.PI * (i - (MOON_SEGMENTS / 2) - 1)) / (MOON_SEGMENTS / 2);
+      const sinA = Math.sin(angle);
+      const cosA = Math.cos(angle);
+      points.push(place(distance, coverage * radius * cosA, radius * sinA));
+      points.push(place(distance, radius * cosA, radius * sinA));
+    }
+    points.push(place(distance, 0, radius));
+    const position = this._phasedMoon.geometry.getAttribute('position');
+    points.forEach((p, i) => position.setXYZ(i, p[0], p[1], p[2]));
+    position.needsUpdate = true;
+    this._phasedMoon.userData.wanted = visible;
+    this._phasedMoon.visible = visible;
+  }
+
+  // Each frame: the sky pyramid and the stars stand around the eye, at the far
+  // plane's reach, so they read as infinitely far away from wherever it goes.
+  // In the world group's own frame, since that group carries the world's turn
+  // in an XR session and the sky has to turn with the ground under it.
+  _followSky() {
+    if (!this.camera || !this.worldGroup) return;
+    const pyramid = this._skyPyramid?.visible ? this._skyPyramid : null;
+    const stars = this._starField?.visible ? this._starField : null;
+    if (!pyramid && !stars) return;
+    const eye = this.camera.getWorldPosition(SKY_EYE_SCRATCH);
+    this.worldGroup.worldToLocal(eye);
+    const worldScale = this.worldGroup.scale.x || 1;
+    const reach = (this.camera.far * 0.6) / worldScale;
+    if (pyramid) {
+      pyramid.position.copy(eye);
+      pyramid.scale.setScalar(reach);
+    }
+    if (stars && this._starRotation) {
+      stars.matrix.copy(this._starRotation).scale(SKY_SCALE_SCRATCH.setScalar(reach))
+        .setPosition(eye);
+      stars.matrixWorldNeedsUpdate = true;
+    }
   }
   constructor() {
     this.scene = null;
@@ -3133,9 +3439,18 @@ class RenderManager {
     // stencil buffer there is no overlay to read it, so the meshes would draw
     // for nothing.
     if (!this._projectedShadowsActive() || !this.worldGroup) return;
-    // Use sun or moon depending on which is visible
-    const light = (this.sunLight && this.sunLight.intensity > 0.5) ? this.sunLight : this.moonLight;
-    const dir = this._getProjectedShadowDirection(light?.position);
+    // Whichever light casts: the sun once it is high enough (`areShadowsCast`),
+    // and the moon only on bzo's day clock -- upstream's moon casts none, so
+    // under its sky a night has no shadows at all.
+    const light = this.sunLight?.castShadow ? this.sunLight
+      : (this.moonLight?.castShadow ? this.moonLight : null);
+    if (!light) {
+      for (const mesh of [...this.obstacleMeshes, ...this.meshObjects, ...tankMeshes]) {
+        this._projectShadowForMesh(mesh, null, false);
+      }
+      return;
+    }
+    const dir = this._getProjectedShadowDirection(light.position);
     if (!dir) return;
 
     if (!this._projectedShadowProjection) {
@@ -3475,6 +3790,7 @@ class RenderManager {
     // reads the same picture on every screen watching it.
     this._updateAnimatedMaterials(Date.now() * 0.001);
     this._updateMeshSpins(Date.now() * 0.001);
+    this._followSky();
 
     if (this.projectileLights) {
       for (const [projectile, light] of this.projectileLights.entries()) {

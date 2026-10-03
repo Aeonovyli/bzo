@@ -26,9 +26,6 @@ lists the variables bzo reads. A server.json from before the block still
 works: its old keys (`tankSpeed`, `gravity`, `shotDuration` and the rest) are
 read as the variables they were, and the startup log names each one to move.
 
-Naming update: this project now uses `compose.yml`, `server.json`, and
-`example-server.json` only.
-
 Then open:
 
 - `http://localhost:3000`
@@ -180,6 +177,23 @@ RequestHeader set X-Forwarded-For   "expr=%{REMOTE_ADDR}"
 
 `set` rather than `add`, so a header a client sent cannot survive the hop.
 
+### Admin without a login
+
+`"localAdmin": true` makes a connection from this machine an operator without
+a bzflag.org login -- for a headless test client, not for a public box. A
+loopback peer counts only with no `X-Forwarded-*` header, since a same-host
+proxy makes every request arrive from `127.0.0.1`.
+
+`adminWhitelist` widens it to more addresses: a list of IPv4 or IPv6
+addresses or CIDR blocks (`"192.168.1.0/24"`, `"2001:db8::/32"`). These
+arrive through the proxy, so they need `publicUrl`: at startup the server
+calls itself there, once with a forged `X-Forwarded-For`, and trusts the
+header only if the proxy replaced or appended to it as above. Until that
+probe passes, only unproxied loopback is admin. Bad entries are logged and
+refused, and the log warns when the whitelist names non-loopback addresses
+but `localAdmin` is off, since it then does nothing. A whitelisted operator
+can also read and revoke list-server keys (`docs/list-server.md`).
+
 ## Listing your server
 
 A bzo server is listed by registering one key with the designated bzo list
@@ -241,8 +255,8 @@ An operator changes it live with `/bot fill <n> [pilot]`, adds bots outside
 the fill with `/bot add [pilot] [team] [count]`, removes them with
 `/bot remove <name|all>`, and sees what is running with `/bot`.
 `"disableBots": true`, or `-disableBots` in a map's options, turns all
-of it off, autopilot included. `docs/bots-plan.md`
-has how they work.
+of it off, autopilot included. `AGENTS.md` (the `docs/bots-plan.md`
+paragraph) has how they work.
 
 ## Updating
 

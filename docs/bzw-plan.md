@@ -68,19 +68,14 @@ be playing something else by the time you read this.
 
 | Gap | Server | Map |
 | --- | --- | --- |
-| non-vertical `spin` (24 lines) | `bmbz.ducatileague.org:6004` | LouMan's Mystic Valley |
-| non-vertical `spin` (11) | `bmbz.ducatileague.org:5152` | Airfield Attack! |
-| non-vertical `spin` (9) | `bmbz.ducatileague.org:6002` | INCOMING! :: by ahs3 |
+| box/pyramid non-vertical `spin` | `bmbz.ducatileague.org:6004` | LouMan's Mystic Valley |
+| box/pyramid non-vertical `spin` | `bmbz.ducatileague.org:5152` | Airfield Attack! |
+| box/pyramid non-vertical `spin` | `bmbz.ducatileague.org:6002` | INCOMING! :: by ahs3 |
 | zone `flag <type>` | `bmbz.ducatileague.org:5157` | Island Hopping |
 | zone `flag <type>` | `bmbz.ducatileague.org:5160` | Castle Warfare |
 | `spheremap` | `bmbz.ducatileague.org:5185` | FATALITY by tankatek |
 | `occluder` | `1purplepanzer.mooo.com:4101` | Desert War |
 | `angular`/`slide` physics | `bmbz.ducatileague.org:5179` | BMBZ: Eria Ziel |
-| missing `explode1` texture | `bmbz.ducatileague.org:5164` | LouMan's Pandemonium |
-| missing `treads` texture | `bmbz.ducatileague.org:5198` | Traxion Radial by GEP |
-| missing `dusty_flare`/`puffs` | `bmbz.ducatileague.org:5185` | FATALITY by tankatek |
-| missing `blend_flash` texture | `bmbz.ducatileague.org:5178` | Nix Dodgeball by R3lax |
-| missing `root` texture | `1vs1.catay.be:5155` | 1vs1 fancy style |
 | an `arc` bzo refuses to build | `bmbz.ducatileague.org:5162` | Pool Table by GEP |
 
 Group-placed teleporter links are broken on import for a different reason --
@@ -123,7 +118,7 @@ left:
 
 `define` / `enddef` / `group` are read now, including a `group` instance
 nested inside a `define` -- real recursion, matching `GroupDefinition::
-makeGroups`, not the flat single level first shipped. See "Groups" in
+makeGroups`. See "Groups" in
 `docs/bzw.md` for what a `group` instance takes, how nesting composes, and how
 a member's name is kept unique at any depth -- including a `teleporter`
 placed through one, which is also read now, the same as any other member.
@@ -186,15 +181,15 @@ it names one of two things:
   `roof`, `pyrwall`, `telelink`, `caution`, and one called `mesh` (a stock
   wireframe/grid texture, unrelated to mesh *geometry* -- see the callout in
   `docs/bzw.md`'s "Materials" section, so the two "mesh"es are never confused
-  with each other). bzo already shipped an equivalent PNG for six of these
-  under `public/textures/`, which is what `resolveBzwStockTexture` resolves
+  with each other). bzo ships an equivalent PNG for each of these under
+  `public/textures/`, which is what `resolveBzwStockTexture` resolves
   against.
 - One external URL, out of everything sampled:
   `http://images.bzflag.org/astevens/pine.png`, in a "wood" material. The
   BZFlag forums document uploading a texture there and linking it into a
   `material` block, so the host is real and mappers do use it -- just rarely,
   next to naming a stock texture. `maps/bzo.bzw`'s `thin_wall` names this
-  same URL now, permanently, and it actually shows the real picture:
+  same URL, and it actually shows the real picture:
   `images.bzflag.org` sends `Access-Control-Allow-Origin: *` on every response
   (checked directly), so the browser's CORS check passes and the load
   succeeds.
@@ -222,12 +217,6 @@ mesh geometry does too.
       box or pyramid they clear `isOldBox`/`isOldPyramid`, so a flush obstacle
       stating one is a mesh with degenerate faces to bzfs, and bzo's own
       zero-area check cannot report what it never reads.
-- [ ] Stock textures bzo ships no PNG for, each named by a real map and
-      each falling back to the obstacle's plain default: `explode1`,
-      `treads`, `blend_flash`, `puffs`, `dusty_flare`, `flag`, `root` (10
-      names across 10 of the 54 live maps surveyed). Several are BZFlag's
-      own effect textures rather than wall textures, so some belong with
-      `docs/effects-plan.md` rather than here.
 - [ ] `spheremap` -- a material's environment-mapped texture coordinates,
       dropped on 4 of the 54 live maps surveyed.
 
@@ -260,10 +249,9 @@ two different upstream mechanisms rather than one:
   `LocalPlayer::getHitBuilding`/`collectInsideBuildings` (LocalPlayer.cxx:
   927-937, 986-992): it deliberately ignores `driveThrough`, since a death
   face is exactly the kind of surface a tank is meant to drive straight
-  across. Originally this reused `checkCollision` (the anti-cheat
-  penetration test, whose vertical slack is written to let a tank resting
-  exactly on solid ground read as *clear* -- backwards for "what am I on"),
-  which is why the death driver silently never fired until this existed.
+  across. `checkCollision` (the anti-cheat penetration test) cannot stand
+  in: its vertical slack lets a tank resting exactly on solid ground read
+  as *clear* -- backwards for "what am I on".
 
 What's left:
 
@@ -311,10 +299,8 @@ turn off. Nor `_endShotDetection` (26): bzfs kicks a client that reports more sh
 endings than its shots allow, and a bzo server ends every shot itself. Nor
 `_angleTolerance` (16): upstream
 sends a move when its dead reckoning drifts past it, and bzo sends one when a
-speed changes, so there is no tolerance to set. Nor `_gmSize` (19): it sizes only the
-modelled missile upstream draws at its highest quality, and its default draws
-the billboard bzo does. `_rainBaseColor`
-and `_rainPuddleColor` are dropped on purpose (`docs/bzw.md`, **Weather**).
+speed changes, so there is no tolerance to set. `_rainBaseColor` is dropped
+on purpose (`docs/bzw.md`, **Weather**).
 
 ## Leftovers
 

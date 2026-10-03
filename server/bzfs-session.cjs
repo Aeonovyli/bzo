@@ -429,6 +429,29 @@ function toBzfsChatText(text) {
     .replace(/[^\x20-\x7e]/g, '');
 }
 
+// The most a chat line can carry: `MessageLen` less its terminating NUL
+// (`global.h:35`), which is the field upstream's own input stops at
+// (`HUDRenderer.cxx:113`). The text is already ASCII by the time this applies,
+// so characters and bytes are the same count.
+const CHAT_TEXT_MAX = MESSAGE_LEN - 1;
+
+// A line too long for one message, as several, each broken at the last space
+// that fits so no word is cut in two -- unless one word is longer than a whole
+// message, which has nowhere else to break. `max` is how much of a message the
+// pieces may use, so a caller adding a prefix to each passes what is left.
+function splitBzfsChat(text, max = CHAT_TEXT_MAX) {
+  const pieces = [];
+  let rest = String(text).trim();
+  while (rest.length > max) {
+    const space = rest.lastIndexOf(' ', max);
+    const cut = space > 0 ? space : max;
+    pieces.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest.length > 0) pieces.push(rest);
+  return pieces;
+}
+
 // A live connection to one bzfs. `connect()` resolves with the state bzfs
 // describes to a joining player; after that the events carry what changes.
 // Nothing here simulates: a session holds what it was told and nothing more.
@@ -1085,6 +1108,8 @@ class BzfsSession {
 module.exports = {
   BzfsSession,
   toBzfsChatText,
+  splitBzfsChat,
+  CHAT_TEXT_MAX,
   CTF_TEAMS,
   PLAYER_STATUS,
   MESSAGE_LEN,

@@ -229,9 +229,9 @@ The pane is two columns, as upstream's panel is: who is playing on the left
 -- the player count and each team's own count and maximum -- and what the
 game is on the right, being shots, style, the option words, the shake
 conditions, the score and time limits, and for a bzo row its map, version,
-voice and URL. A bzo row's own game has the world's overview picture as a
-third column; a bzfs row and a proxy row do not, because drawing one needs
-that server's world imported first (`docs/list-server-plan.md`).
+voice and URL. A row whose world this list holds has its overview picture
+as a third column: every bzo row, and a bzfs row once its world has been
+imported (see "Keeping BZFlag worlds fresh").
 
 **The designated instance draws every bzo row's picture**, rather than each
 instance drawing its own and reporting it. Not because an instance could not
@@ -413,7 +413,14 @@ hash or sizes and says so.
 
 Its pane's third column is the map's overview picture, an SVG drawn from the
 same geometry the radar panel draws and cached beside the map's JSON under the
-same hash (`server/map-overview.cjs`). A map is registered by a background
+same hash (`server/map-overview.cjs`). Obstacles are rasterised onto a
+256-cell grid re-encoded as merged rectangles, so the picture's size is
+bounded by the grid rather than the map. Elevation is opacity above a datum
+(a low percentile of surface area, so a pit is not the floor); only
+up-facing surfaces count, so a closed terrain mesh is not drawn by its
+underside; and a roof -- one altitude far above the datum holding much of
+the map -- is skipped where something is under it, so a domed arena shows its
+floor. A map is registered by a background
 trickle, so a visitor can reach the page before a given map's picture exists;
 that pane shows the app's own mark, dimmed, rather than a word.
 

@@ -65,6 +65,7 @@
   "ricochet": false,
   "noTeamKills": false,
   "teamKillerDies": true,
+  "sky": "upstream",
   "timeOfDay": null,
   "daySpeed": 72,
   "puffClouds": false,

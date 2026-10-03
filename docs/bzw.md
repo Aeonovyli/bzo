@@ -795,7 +795,8 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-set _boxBase <n>`, `_boxHeight <n>`, `_pyrBase <n>`, `_pyrHeight <n>` | the size of a `box` or `pyramid` that states none (bases are half widths); `_boxHeight` also sets how box walls tile, and how fast the radar's height box grows |
 | `-set _fogMode <none\|linear\|exp\|exp2>`, `_fogDensity <n>`, `_fogStart <n>`, `_fogEnd <n>`, `_fogColor <colour>` | the world's fog; any mode but `none` is fog, and one bzo does not know is `exp`, as upstream reads it |
 | `-set _skyColor <colour>` | a tint over the whole sky; `white` is none |
-| `-set _syncTime <seconds>`, `_longitude <degrees>` | hold the sky still at the hour that many seconds past the Unix epoch is at that longitude (west positive); `-synctime`'s `1` at upstream's default longitude is mid-afternoon |
+| `-set _latitude <degrees>`, `_longitude <degrees>` | where the sky stands: degrees north, and degrees *west* (upstream's sign); default 37.5 and 122 |
+| `-set _syncTime <seconds>` | hold the sky still at that many seconds past the Unix epoch; unset (-1), it is the real time now; `-synctime`'s `1` is the first second of 1970 |
 | `-set _drawMountains <0\|1>`, `_drawClouds`, `_drawCelestial`, `_drawGround` | whether the world draws its mountains, clouds, sun, moon and stars, and ground; a viewer's own settings can take away more, never put back |
 | `-set _mirror <colour\|none>` | a mirror ground: the world reflected in it under the colour as a tint, at the colour's alpha (half when it states none, or states 1, as upstream reads it) |
 | `-set _noShadows <0\|1>` | no tank or building shadows on this world |
@@ -1035,9 +1036,10 @@ Two of them are not quite a direct copy:
 A colour is upstream's: three or four numbers, or a name from its X11 table
 (`black`, `grey3`, `DarkGrey`), optionally with an alpha (`red 0.5`).
 
-`_latitude` and `_syncLocation` are read by nothing: they place upstream's
-real sun and moon, and bzo's sky is a clock (AGENTS.md). `_longitude` only
-turns `_syncTime` into an hour.
+`_syncLocation` is read by nothing: a bzo browser has no place of its own, so
+the world's `_latitude` and `_longitude` always place the sky. On a server
+with `"sky": "minecraft"` (AGENTS.md) only `_syncTime` and `_longitude` are
+read, and they freeze the day clock at an hour.
 
 The flag variables in the options table, the tank and box sizes, `_squishFactor`,
 `_squishTime` and `_wallHeight` are Locked too and read the same way.
@@ -1537,6 +1539,21 @@ every normal, upstream's own `Tool::modifyNormal`.
 
 A named `transform` block and the `xform <name>` line that pulls one in are
 still not read; see "What is ignored" below.
+
+### Repeated meshes are drawn once
+
+Nothing a mapper writes changes for this; it is how bzo keeps a big map
+cheap to draw. A `define` placed by passable `group` instances (nothing
+collides with any of its faces) is held once as a template in its own frame
+and drawn from it at each placement (#153); an instance naming its own
+material, tint or `phydrv` gets a template of its own. A compiled world writes
+every placement out in full, so at load the server also matches meshes that
+differ only by position and a turn about the vertical, vertex for vertex,
+and draws each shape once per handedness (`instanceRepeatedMeshes` in
+`server.js`). Spinning meshes, see-through materials and tipped placements
+are left expanded. Every copy stays in the world for collision and the radar,
+and the counts (`instanced ... groups, ... templates`) go to the server log
+and to each player on entry with the map's other messages.
 
 ### Draw info
 

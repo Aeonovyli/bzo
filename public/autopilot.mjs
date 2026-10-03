@@ -25,6 +25,7 @@ import {
 import { SHOT_COLLISION_RADIUS, traceShotStep, TANK } from './collision.mjs';
 import { buildNavGraph, NAV_CELL, planJump } from './nav.mjs';
 import { normalizeAngle } from './motion.mjs';
+import { isRabbitTeam } from './teams.mjs';
 
 const HALF_PI = Math.PI / 2;
 
@@ -71,7 +72,7 @@ const HARD_FLAGS = new Set(['US', 'MG', 'ID']);
 
 function createStats() {
   return {
-    modes: {}, shots: 0, jumps: 0, falls: 0, plans: 0, unreachable: 0, unsticks: 0, held: 0,
+    modes: {}, shots: 0, jumps: 0, falls: 0, plans: 0, unreachable: 0, unsticks: 0, held: 0, kept: 0,
   };
 }
 
@@ -582,6 +583,21 @@ const ANTIDOTE_SPARE_SECONDS = 2;
 const CAPTURE_CHASE_RANGE = 50;
 const CAPTURE_RELEASE_RANGE = 75;
 const CHASE_DEST_SLACK = 40;
+// Rabbit Chase: how near a hunter has to be before the rabbit runs from it,
+// how far ahead the rabbit aims each time it picks somewhere to run to, how
+// far it keeps from the world's edge doing so, and how fast a hunter has to
+// be closing on it to count as coming for it rather than passing by.
+const RABBIT_FLEE_RANGE = 200;
+// Shots Ace keeps back on a server that allows several: a quarter of them,
+// rounded up, so five slots fire three and keep two and two slots fire one. A
+// single slot keeps none -- there is nothing to keep. The kept ones are spent
+// on a foe this close, which is a fight now rather than a chance at range, and
+// on a landing shot (`mayUseShot`).
+const SHOT_RESERVE_FRACTION = 0.25;
+const SHOT_RESERVE_SPEND_RANGE = 60;
+const RABBIT_FLEE_DISTANCE = 150;
+const RABBIT_FLEE_MARGIN = 20;
+const RABBIT_CLOSING_SPEED = 1;
 // A step a tank drives up without a jump: `_maxBumpHeight`'s default.
 const MAX_STEP_UP = 0.33;
 // How much of one jump's height a flag may sit above Ace, and still be worth
@@ -711,7 +727,7 @@ export class Ace extends Roger {
     this.dropDriveUntil = -Infinity;
     this.lastTrace = null;
     this.extraReport = (stats) => `, routes ${stats.plans} (${stats.unreachable} none),`
-      + ` unsticks ${stats.unsticks}, held shots ${stats.held}`;
+      + ` unsticks ${stats.unsticks}, held shots ${stats.held}, kept shots ${stats.kept}`;
     // The landing each airborne foe has been shot at for, as a clock time, so
     // one jump costs one shot.
     this.landingShots = new Map();
@@ -987,6 +1003,14 @@ export class Ace extends Roger {
     const ambush = this.ambushTarget(ctx);
     if (ambush) return this.ambush(ctx, ambush);
     const chased = super.chasePlayer(ctx);
+    if (!chased) {
+      // Roger gives up a chase past 250 units, which leaves a hunter in
+      // Rabbit Chase waiting for the rabbit to wander near. Ace hunts it
+      // wherever it is; the rabbit, with nobody coming for it, runs.
+      const quarry = this.rabbitQuarry(ctx);
+      if (quarry) return this.huntFar(ctx, quarry);
+      if (this.isRabbit(ctx)) return this.flee(ctx);
+    }
     const target = ctx.view.players.find((p) => p.id === ctx.out.targetId);
     if (chased && target && !target.airborne) return this.chaseAround(ctx, target) || chased;
     if (!chased || !target?.airborne) return chased;
@@ -999,6 +1023,89 @@ export class Ace extends Roger {
     out.targetId = null;
     out.intent.target = null;
     return false;
+  }
+
+  // Rabbit Chase (`-rabbit`): one rabbit against everyone else, so the rabbit
+  // is every hunter's only foe and every tank is the rabbit's.
+  isRabbit(ctx) {
+    return isRabbitTeam(ctx.me.team);
+  }
+
+  rabbitQuarry(ctx) {
+    if (this.isRabbit(ctx)) return null;
+    return this.remotePlayers(ctx.view).find((p) => isRabbitTeam(p.team) && p.alive && !p.paused
+      && ctx.view.isFoe(p)) || null;
+  }
+
+  // The rabbit turns only on a tank that is coming for it -- the nearest one
+  // closing on it. Anything else it would sooner leave behind than fight.
+  findBestTarget(ctx, players) {
+    if (!this.isRabbit(ctx)) return super.findBestTarget(ctx, players);
+    const { me, view } = ctx;
+    let target = null;
+    let best = Infinity;
+    for (const p of players) {
+      if (!p.alive || p.paused || p.notResponding || !view.isFoe(p)) continue;
+      const dx = me.x - p.x;
+      const dy = me.y - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d === 0 || d >= best) continue;
+      const closing = ((p.vx * dx) + (p.vy * dy)) / d;
+      if (closing < RABBIT_CLOSING_SPEED) continue;
+      target = p;
+      best = d;
+    }
+    return target;
+  }
+
+  // A hunter's chase beyond Roger's range: the route to the rabbit, kept until
+  // it moves `CHASE_DEST_SLACK`, so a fleeing rabbit is not a search a frame.
+  huntFar(ctx, quarry) {
+    const { out } = ctx;
+    out.targetId = quarry.id;
+    out.intent.target = { ...toBzo(quarry), id: quarry.id };
+    out.intent.mode = 'hunt';
+    const route = typeof ctx.view.findRoute === 'function'
+      ? this.routeTo(ctx, quarry, CHASE_DEST_SLACK) : null;
+    if (route && this.followRoute(ctx, route)) return true;
+    out.rotation = normalizeAngle(azimuthTo(ctx.me, quarry) - ctx.me.azimuth);
+    out.speed = HALF_PI - Math.abs(out.rotation);
+    return true;
+  }
+
+  // Away from every hunter in range, the nearer ones counting for more, to a
+  // point a fair way off and inside the world. Nobody in range, nothing to
+  // run from: the rabbit goes about its business.
+  flee(ctx) {
+    const { me, view, out } = ctx;
+    let awayX = 0;
+    let awayY = 0;
+    for (const p of this.remotePlayers(view)) {
+      if (!p.alive || p.paused || !view.isFoe(p)) continue;
+      const dx = me.x - p.x;
+      const dy = me.y - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d === 0 || d > RABBIT_FLEE_RANGE) continue;
+      awayX += dx / (d * d);
+      awayY += dy / (d * d);
+    }
+    const length = Math.hypot(awayX, awayY);
+    if (length === 0) return false;
+    const limit = Math.max(0, ((view.world.mapSize || 800) / 2) - RABBIT_FLEE_MARGIN);
+    const clamp = (value) => Math.max(-limit, Math.min(limit, value));
+    const point = {
+      x: clamp(me.x + ((awayX / length) * RABBIT_FLEE_DISTANCE)),
+      y: clamp(me.y + ((awayY / length) * RABBIT_FLEE_DISTANCE)),
+      z: me.z,
+    };
+    out.intent.mode = 'flee';
+    out.intent.target = toBzo(point);
+    const route = typeof view.findRoute === 'function'
+      ? this.routeTo(ctx, point, CHASE_DEST_SLACK) : null;
+    if (route && this.followRoute(ctx, route)) return true;
+    out.rotation = normalizeAngle(azimuthTo(me, point) - me.azimuth);
+    out.speed = HALF_PI - Math.abs(out.rotation);
+    return true;
   }
 
   // Roger chases in a straight line, which a wall between him and the foe
@@ -1126,8 +1233,18 @@ export class Ace extends Roger {
     const lastShot = this.lastShot;
     const landingShots = new Map(this.landingShots);
     const speed = ctx.out.speed;
+    this.landingShotChosen = false;
     this.chooseShot(ctx);
     if (!ctx.out.fire) return;
+    if (!this.mayUseShot(ctx)) {
+      ctx.out.fire = false;
+      ctx.out.shotTargetId = null;
+      ctx.out.speed = speed;
+      this.lastShot = lastShot;
+      this.landingShots = landingShots;
+      this.stats.kept++;
+      return;
+    }
     const shot = { ...this.muzzleRay(ctx), ...this.shotVelocity(ctx) };
     if (this.shotEndangersSelf(ctx)) {
       ctx.out.fire = false;
@@ -1141,6 +1258,22 @@ export class Ace extends Roger {
       return;
     }
     ctx.out.intent.shot = { ...shot, segments: this.lastTrace };
+  }
+
+  // Whether the shot chosen this frame may go: always while more slots are
+  // free than Ace keeps back, and from the kept ones only at a foe close
+  // enough to need it, or at one coming down where a landing shot meets it --
+  // a tank in the air cannot turn aside, so that is the surest shot he has.
+  mayUseShot(ctx) {
+    const { view, me, out } = ctx;
+    if (this.landingShotChosen) return true;
+    const free = view.self.freeShots;
+    const maxShots = view.world.maxShots;
+    if (!Number.isFinite(free) || !(maxShots > 1)) return true;
+    const reserve = Math.ceil(maxShots * SHOT_RESERVE_FRACTION);
+    if (free > reserve) return true;
+    const target = this.remotePlayers(view).find((p) => p.id === out.shotTargetId);
+    return Boolean(target) && distance2D(me, target) <= SHOT_RESERVE_SPEND_RANGE;
   }
 
   // The shot a trigger pulled this frame fires, in bzo's frame: upstream's
@@ -1214,6 +1347,7 @@ export class Ace extends Roger {
         if (this.isObscured(ctx, { x: me.x, y: me.y, z: me.z }, plan.landing)) continue;
         out.fire = true;
         out.shotTargetId = p.id;
+        this.landingShotChosen = true;
         if (!me.inAir) out.speed = shot.speed / range.top;
         this.landingShots.set(p.id, plan.landsAt);
         this.lastShot = view.now;

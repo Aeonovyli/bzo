@@ -16,6 +16,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
   toBzfsChatText,
+  splitBzfsChat,
+  CHAT_TEXT_MAX,
   decodePlayerInfo,
   decodeScores,
   decodeCapture,
@@ -92,5 +94,23 @@ assert.equal(toBzfsChatText('one\ntwo\ttab'), 'onetwotab');
 for (const on of ['true', '1', 'yes', 'on', '']) assert.equal(bzdbIsTrue(on), true, `"${on}" is on`);
 for (const off of ['0', 'false', 'FALSE', 'no', 'off', 'disable']) assert.equal(bzdbIsTrue(off), false, `"${off}" is off`);
 assert.equal(bzdbIsTrue(undefined), false, 'unset is off');
+
+// A long chat line goes out as several, broken between words (#169).
+assert.equal(CHAT_TEXT_MAX, 127, 'MessageLen less its NUL');
+assert.deepEqual(splitBzfsChat('short line'), ['short line'], 'a line that fits is one message');
+assert.deepEqual(splitBzfsChat(''), [], 'nothing to say is no message');
+{
+  const words = Array.from({ length: 60 }, (_, i) => `word${i}`).join(' ');
+  const pieces = splitBzfsChat(words);
+  assert.ok(pieces.length > 1, 'a long line is split');
+  for (const piece of pieces) {
+    assert.ok(piece.length <= CHAT_TEXT_MAX, `a piece fits: ${piece.length}`);
+    assert.equal(piece, piece.trim(), 'no piece starts or ends with a space');
+  }
+  assert.equal(pieces.join(' '), words, 'every word arrives, in order, none cut');
+}
+assert.deepEqual(splitBzfsChat('aaaa bbbb cccc', 9), ['aaaa bbbb', 'cccc'], 'breaks at the last space that fits');
+assert.deepEqual(splitBzfsChat('x'.repeat(20), 8), ['xxxxxxxx', 'xxxxxxxx', 'xxxx'], 'one word longer than a message is cut');
+assert.deepEqual(splitBzfsChat('aaaa bbbb', 4), ['aaaa', 'bbbb'], 'a space exactly at the limit breaks there');
 
 console.log('bzfs session tests passed');

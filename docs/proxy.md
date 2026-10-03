@@ -297,8 +297,8 @@ serves, so a target imported within the hour costs a second viewer nothing.
 
 **The callsign is never the client's to choose.** In order: the one the
 weblogin callback named, for a browser that has just signed in; then the
-session's, which is that same name on every connection after the first; then
-a numbered `bzo-view-N` for a browser that has never signed in. The motto the
+session's, which is that same name on every connection after the first; then a
+random `bzo-view-<6 hex>` for a browser that has never signed in. The motto the
 target's player list shows is `via https://<this bzo>`, which is the one thing
 the operator on the other end cannot work out for themselves.
 
@@ -408,6 +408,14 @@ folded to their letters (`está` leaves as `esta`) and anything with no ASCII
 spelling is dropped, and the player is told once per connection rather than
 disconnected. bzo's own chat is untouched by this: it is JSON over a
 WebSocket, and it carries whatever you type.
+
+**A long chat line goes out as several.** A bzfs message holds 127 bytes of
+text (`MessageLen` less its NUL, `global.h:35`), which is where a native
+client's input stops. A browser's does not, so after the ASCII conversion a
+longer line is split, each piece broken at the last space that fits
+(`splitBzfsChat`). An action's pieces each start with `/me`. A slash command
+is sent whole, since a second piece would arrive as chat; bzfs keeps the first
+127 bytes, and the player is told once.
 
 ## The two conversions
 

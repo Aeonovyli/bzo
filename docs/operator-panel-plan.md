@@ -14,75 +14,20 @@ they call the same function.
 
 ## What the panel has now
 
-`motd`, `shotMaxActive`, `ricochet`, a map list, a map upload, and the game's
-shape -- teams, rabbit chase, jumping, a playing limit and a limit per team --
-all **staged, with one Apply**. Every row edits `operatorStaged` and nothing
-reaches the server until the button is pressed, which is labelled by what it will
-do: *Apply* while everything staged is live, *Restart* the moment something is
-not. What is left is the rules pass and the match-end controls.
+Server name, `motd`, `shotMaxActive`, `ricochet`, a map list, a map upload,
+bot fill and pilot, the game's shape -- teams, rabbit chase, jumping, a
+playing limit and a limit per team -- and the match limits (`timeLimit`,
+`timeManualStart`, `maxPlayerScore`, `maxTeamScore`) beside the Match Timer
+buttons. Every row is staged behind one Apply/Restart button; see "Admins and
+the admin channel" in `AGENTS.md`. What is left is the rules pass.
 
-## Stage the edits, apply once -- **done**
+## A live change still writes `server.json`
 
-**OK and Cancel, like the entry dialog.** Every row edits a staged value and
-nothing reaches the server until OK; Cancel and the `X` commit nothing. The
-entry dialog already works this way -- it stages a name, a team and a tank and
-pays for all three on OK -- so the panel is the odd one out rather than the
-innovation.
-
-**It removes rows, which is why it matters in XR.** The XR operator menu used to
-read:
-
-```
-MOTD                 Desktop only
-Map                  <adjustable>
-Restart with Map     <- apply row
-Shot Limit           <adjustable>
-Apply Shot Limit     <- apply row
-All Shots Ricochet   On
-Refresh Server Data
-Upload Map           Desktop only
-Back
-```
-
-Two rows per setting, because per-row apply leaked onto a surface scrolled with a
-thumbstick. One OK and one Cancel collapse every apply row, and each setting
-becomes a single line. Fourteen settings with per-row apply is unusable in a
-headset; fourteen settings plus OK and Cancel is a list.
-
-It reads that way now, and it took the shape rows without growing an apply row:
-MOTD, Map, Shot Limit, All Shots Ricochet, Teams, Rabbit Chase, Jumping, Playing
-Limit and a limit per team are one line each, then Apply -- which names what is
-staged -- and Cancel, with Refresh Server Data, Upload Map and Back below them.
-Fourteen rows, one confirm. MOTD is editable where the session has a system
-keyboard rather than desktop-only; map upload still is not.
-
-## Apply, or Restart -- **done**, bar the file write
-
-One button with two labels, decided by what has been staged:
-
-- **Only live-capable settings changed** -- `motd`, `shotMaxActive`, `ricochet`
-  today -- so apply them, broadcast `serverConfigUpdate`, and nothing else
-  happens. It reads **Apply**.
-- **Anything else changed**, so this is a new game: write `server.json` and
-  `requestServerRestart`. It reads **Restart**.
-
-The label changes the moment a staged edit needs one, so an operator sees what
-the button is about to do before pressing it rather than learning from the
-result. **Cancel** and the `X` abort every staged change either way, and
-re-opening the dialog starts again from what the server currently has -- so
-changing a row, seeing the label turn to Restart and thinking better of it costs
-nothing.
-
-`requestServerRestart` already handles both environments -- it touches
-`server.js` under nodemon and calls `process.exit(0)` otherwise, so a Docker
-restart policy relaunches it. Nothing new is needed to restart.
-
-**A live change still writes `server.json`, and on a dev box that restarts
-everyone.** `applyServerConfigChanges` writes the file for every apply and then
-broadcasts, and `nodemon.json` watches `server.json` -- so changing the MOTD is
-live in production and a restart in development, whatever the button said. The
-two-outcome button is honest about the tier and the file write goes behind its
-back.
+On a dev box that restarts everyone. `applyServerConfigChanges` writes the
+file for every apply and then broadcasts, and `nodemon.json` watches
+`server.json` -- so changing the MOTD is live in production and a restart in
+development, whatever the button said. The two-outcome button is honest about
+the tier and the file write goes behind its back.
 
 Not fixed here, because the fix is a trade rather than a tidy-up. Writing only
 when a restart-tier setting changed would make the environments agree, and would
@@ -97,12 +42,9 @@ which relies on a config write restarting the server. Worth deciding on purpose.
 Not a setting that happens to need a restart: **a new game**. A map change, a
 game mode change and a match ending are one event -- every player leaves the
 current game and enters a fresh one -- and from a player's side they are
-indistinguishable. See "Game over is the same event as a map change" in
-`docs/game-modes-plan.md`, which is the other half of this.
+indistinguishable.
 
-So the panel presents a mode change the way it presents a map change, and when
-match end lands its **start**, **pause** and **set limit** controls belong on the
-same surface and go through the same path.
+So the panel presents a mode change the way it presents a map change.
 
 ## Every control has to work with two buttons
 
@@ -187,10 +129,8 @@ hunter limit *from* the rogue limit, which is upstream's own derivation
 with no way to limit how many people can play, so relabel it -- "Hunters" --
 rather than disabling it, and write the same `teamMode.limits.rogue` behind it.
 
-**A player limit has to cap something.** Offering a row labelled "max players"
-that caps nothing was the one thing not to do, and until the shape rows landed
-that is what bzo's `maxPlayers` was: read once to supply the *default* per-team
-limit, with the sum of the per-team limits as the real cap.
+**A player limit has to cap something.** A row labelled "max players" that
+caps nothing is the one thing not to offer.
 
 Upstream has **two** limits, and the relationship between them is the answer to
 "does the player limit include observers":
@@ -214,7 +154,7 @@ connection outright with "This game is full" (`:2339`).
 **So the panel exposes two numbers, not three:** a playing limit and an observer
 limit. The total is arithmetic and is nowhere in the UI.
 
-bzo's `maxPlayers` is now the playing limit -- upstream's `maxRealPlayers`, and
+bzo's `maxPlayers` is the playing limit -- upstream's `maxRealPlayers`, and
 upstream's single-number `-mp N` form of it, which is the form where every
 playing team's own limit is clamped down to it (`:453`). Both of upstream's
 enforcements are bzo's too: `selectPlayerTeam` hands out observer once the tanks
@@ -255,7 +195,7 @@ lowered under them.
 | `superFlags.count` | `range` 0-32 -- zero turns superflags off, a large lever for one number |
 | `noTeamKills`, `teamKillerDies` | On/Off, a pair, and only meaningful where there are sides |
 | `flagShakeTimeout`, `flagShakeWins`, `antidoteFlags` | the bad-flag group |
-| `serverName`, `description` | text, beside MOTD, and editable in XR as it is |
+| `description` | text, beside MOTD and server name, and editable in XR as they are |
 
 ## Deliberately not offered
 
@@ -275,8 +215,7 @@ exactly what somebody using a panel does not have to hand.
 - **`antiCheat`.** Disabling the cheat checks from a panel a modified client can
   draw itself is the wrong direction, whatever the server-side gate.
 - **`testSpawn`, `voiceIceServers`, `port`, `mapFile` paths.** Development and
-  infrastructure, not gameplay. `testSpawn` in particular is answered by `/mv`
-  now.
+  infrastructure, not gameplay. `testSpawn` in particular is answered by `/mv`.
 
 Note that none of these are excluded for being hard to type in a headset. Text
 entry works there; the exclusions above are about what an operator should be able
@@ -284,19 +223,8 @@ to break from a panel, and about controls that would be poor on any surface.
 
 ## Suggested order
 
-1. ~~**OK and Cancel**, with the two-outcome button, over the four settings the
-   panel already has.~~ **Done.** It changed no setting and made every later row
-   cheaper: a new row is now one entry in a list rather than a row plus a button
-   plus a handler.
-2. ~~**Convert the existing rows to `choice` and `range`**, so shot limit stops
-   being a text box and the XR menu loses its apply rows.~~ **Done.** Shot limit
-   is a range in the DOM dialog and an adjustable row in XR.
-3. ~~**The game's shape**: teams, rabbit chase, max players, per-team limits,
-   jumping.~~ **Done.** With the playing limit enforced as upstream enforces it,
-   so the row caps something.
-4. **The rules pass**: superflags, team kills, the bad-flag group, identity text.
-   This is where the work resumes.
-5. Match-end controls, with match end (`docs/game-modes-plan.md`).
+1. **The rules pass**: superflags, team kills, the bad-flag group, identity
+   text.
 
 ## A map's options still win, and the panel does not say so
 

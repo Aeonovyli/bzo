@@ -4,21 +4,19 @@ Design and staging plan for measuring each player's lag, jitter and packet loss
 the way bzfs does, and for acting on it. Upstream references are paths under
 `$HOME/bzflag/`.
 
-Stages 1, 2 and 5 are built; 3, 4 and 6 are not. A move already
-carries `sdt`, the client's own interval since its last send, and the server
-already round-trips a WebSocket ping. Between them, jitter and a round trip are
-measurable without changing the protocol at all. Only a sequence number is
-genuinely absent, and TCP means bzo does not need one.
+The measurement, the per-frame and per-handler clock, and extrapolation on
+the client's clock are built; see "What is not duplication: the server
+extrapolating" in `AGENTS.md`. What is left is below under "Staging".
 
 ## Why bzo needs it more than bzfs does
 
 The server decides kills, so it extrapolates every tank between packets and
 compares what a client claims against where it believed that tank was. Both of
-those read a clock, and today the only clock either reads is the server's own
-receive time -- so network jitter lands inside the number the anticheat judges.
+those read a clock, and on the server's own receive time network jitter lands
+inside the number the anticheat judges. That is why `validateMovement`
+extrapolates over the client's `ct` interval, clamped to the arrival gap.
 
-`validateMovement` in `server.js` takes `(now - player.lastUpdate) / 1000` as the
-time a client had to move in. A packet that spent an extra 80ms in the network
+Over the arrival gap alone, a packet that spent an extra 80ms in the network
 buys its sender 80ms of travel against `linearDriftThreshold`, and a burst of
 jitter looks exactly like a client that teleported. The thresholds in
 `server.json` (`linearDriftThreshold` 3, and 20 when the velocity changed) are
@@ -111,17 +109,14 @@ between those two:
 jitter = |arrival gap - sdt|
 ```
 
-`getAccelerationWindow(deltaTime, message.sdt)` in `server.js` already holds both
-numbers and already bounds how far it trusts the client's half
-(`SDT_JITTER_ALLOWANCE`). So jitter needs no new field, and upstream's absolute
-timestamp is only needed if the extrapolation is ever moved onto the client's
-clock.
+`getAccelerationWindow(deltaTime, message.sdt)` in `server.js` already holds
+both numbers and already bounds how far it trusts the client's half
+(`SDT_JITTER_ALLOWANCE`). So jitter needs no new field; the move's `ct` is
+upstream's absolute timestamp, and only the extrapolation reads it.
 
-**The round trip is already being thrown away.** `WS_PING_INTERVAL` sends
-`ws.ping()` and the handler records `lastPongTime` for liveness only. Recording
-the send time makes the round trip fall out, with no new message -- ping and
-pong are WebSocket frames. The interval is 30 seconds against upstream's 10
-(`nextping += 10.0f`), which is too slow to watch a connection change.
+**The round trip rides the WebSocket ping.** `server/lag.cjs` times each
+`ws.ping()` at upstream's 10-second cadence (`PING_INTERVAL_MS`), so the round
+trip falls out with no new message -- ping and pong are WebSocket frames.
 
 **Packet loss and out-of-order are the transport's to give back.**
 `PlayerState::order` exists because `MsgPlayerUpdate` rides UDP and can arrive
@@ -181,9 +176,9 @@ For bzo:
 - **The server** samples once per handler entry. Node's message handlers are
   their own event-loop turns, so there is no single pass that both reads sockets
   and steps the game, and "once per loop" is not available. The win here is
-  consistency rather than cost -- several checks inside one move handler read the
-  clock independently today and can straddle a millisecond, disagreeing about
-  *now* within one packet. That is the same reason upstream caches
+  consistency rather than cost -- checks inside one move handler that read the
+  clock independently can straddle a millisecond, disagreeing about *now*
+  within one packet. That is the same reason upstream caches
   `PlayerInfo::now`: its jitter formula differences two timestamps and would
   otherwise be measuring its own execution.
 - **Do not coarsen past a handler.** `getAccelerationWindow` returns 0 when the
@@ -232,30 +227,8 @@ fix rather than a window to widen.
 
 ## Staging
 
-1. **Server tracking and `/lagstats`. Done.** `server/lag.cjs` holds
-   `createLagTracker`, the round trip off the existing ping/pong at a 10 second
-   cadence (`PING_INTERVAL_MS`), jitter off the `sdt` already in every move,
-   missed pongs as loss, and upstream's dynamic smoothing. `/lagstats` is a
-   `COMMAND_TIER.OPEN` command in `server.js`, sorted by lag and formatted by
-   `formatLagStats`. `scripts/test-lag.mjs` covers the arithmetic.
-
-2. **The cached clock, per the section above -- done, less the tick counter.**
-   The client samples once per frame: `sampleEpochClock()` in `public/client.js`
-   sets `frameEpochMs`, and code that can run between frames (a hidden tab still
-   receiving socket messages) calls it explicitly rather than trusting the
-   stale value. On the server, each handler entry -- the `'m'`, `'shoot'`,
-   `'grabFlag'`, `'dropFlag'` and `'zone'` message cases -- reads `Date.now()`
-   once and passes it down: `validateMovement`, `getShotRejection`, the
-   `Projectile` constructor, `grabFlag`, `dropFlag`/`getFlagDropPosition` and
-   `checkAntidote` all take `now` as a parameter rather than reading the clock
-   again partway through, which is what let an extrapolation and the drift
-   check it feeds disagree by however long the intervening code took to run.
-   `getZoneRefusal` and `applyPlayerTeleportMessage` pass their own `now` into
-   `validateMovement` the same way. There is still no tick counter -- nothing
-   in the codebase needs a comparison-only clock yet, so it stays unbuilt
-   rather than shipped with no reader.
-
-3. **The bound window** as `enforceable: false`, sized from step 1's round trip.
+3. **The bound window** as `enforceable: false`, sized from the measured round
+   trip.
    Not built. It stands on its own and is not handicap work.
 
 4. **A scoreboard column. Optional.** Not built, and not upstream: bzfs never
@@ -266,37 +239,6 @@ fix rather than a window to widen.
    second timer, plus carrying the figures in `getState()` so a joining client
    starts populated rather than blank. Worth doing only if `/lagstats` proves
    too easy to forget to run.
-
-5. **Extrapolate on the client's clock, not ours. Done.** A move packet now
-   carries `ct`: upstream puts one on every single `MsgPlayerUpdate` too
-   (`ServerLink::sendPlayerUpdate`, `timeStamp = getTick() - getNullTime()`),
-   so this is precedent, not new overhead on bzo's busiest packet -- but
-   upstream's is a 4-byte binary float and small besides, relative to a
-   per-connection origin rather than an absolute clock, so it costs nothing
-   however long the session runs. bzo's JSON wire makes a number's size its
-   digit count, so `ct` is `client.js`'s own `clientClockOrigin` subtracted out
-   the same way, not the raw epoch `sampleEpochClock` samples for everything
-   else that does need to agree with the server's absolute clock -- `sdt`
-   stays on `performance.now()` and is untouched. The server keeps
-   `player.lastClientTimestamp`, the client's `ct` as of the last *accepted*
-   move, and differences it against the incoming one for the interval
-   `getExtrapolatedPosition` extrapolates over in `validateMovement` --
-   upstream's own split, where its receive time is an input to jitter and the
-   client's is what drives the dead reckoning it checks a report against.
-   `lastClientTimestamp` only advances when a move is accepted, alongside
-   `lastUpdate`, so a move refused in strict mode does not throw off the next
-   accepted move's own interval the way summing consecutive `sdt`s across the
-   gap would.
-   Resolves the open question below: the claimed interval is bounded by
-   `clampToArrivalGap`, the same function the acceleration check's `sdt`
-   already ran through -- it may only widen the server's own measured arrival
-   gap, and only by `SDT_JITTER_ALLOWANCE`, so a client cannot claim a longer
-   interval than that to extrapolate itself further and call the difference
-   drift. Every other caller of `getExtrapolatedPosition` (radar, hit
-   detection, lock warnings) is unaffected -- the new `dtOverrideSeconds`
-   parameter is opt-in and null everywhere but this one call.
-   Thresholds are not retightened yet -- read on live numbers first, per the
-   original plan.
 
 6. **Warn and kick.** Not built. `lagwarn`/`lagdrop` and
    `jitterwarn`/`jitterdrop` in `server.json` and on the Operator panel, with
@@ -312,15 +254,6 @@ too.
 
 ## Open questions
 
-- **Whose clock, and can it be trusted? Resolved by step 5.** The timestamp is
-  a *client's* number and a modified client can send whatever it likes.
-  Upstream accepts that, because a lie only distorts that player's own lag
-  statistics. It stops being harmless the moment the timestamp decides how far
-  a tank was allowed to travel, which step 5 now does: `clampToArrivalGap`
-  bounds the claimed interval to the server's own measured arrival gap plus
-  `SDT_JITTER_ALLOWANCE`, so the client's clock can refine the number but never
-  exceed what the server saw. Untested against a client that actually lies --
-  worth trying once there is a reason to.
 - **Which clock does the client sample from?** `performance.now()` is monotonic
   and immune to an adjustment mid-game; `Date.now()` is a wall clock and is what
   the rest of `client.js` uses. Only intervals are ever compared, so an

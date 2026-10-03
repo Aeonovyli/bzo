@@ -189,7 +189,8 @@ The three time fields are bzo's own and have no upstream counterpart:
   claims it and the server bounds how far it will trust the claim.
 - `ct` -- this frame on the client's own clock, relative to its own origin.
   The server only ever differences it against the same client's previous
-  accepted value. See `docs/lag-plan.md`.
+  accepted value. See "What is not duplication: the server extrapolating" in
+  `AGENTS.md`.
 
 bzfs sends `MsgPlayerUpdate` continuously instead, and carries a `status`
 bitfield (`Alive`, `Paused`, `Exploding`, `Teleporting`, `FlagActive`,

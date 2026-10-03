@@ -307,6 +307,7 @@ import {
   getSlotReloadSeconds,
   getShotSlotProgress,
   findFreeShotSlot,
+  countFreeShotSlots,
   getShotTankHit,
   shockWaveHitsTank,
   getShotFlight,
@@ -2825,7 +2826,8 @@ async function prepareInitialRender(message, sequenceId) {
 
   // The sun and the moon are the sky and the shadow direction, not dynamic
   // lighting, so they are here whatever that setting says.
-  renderManager.setWorldTime(message.worldTime || 0);
+  worldTime = message.worldTime || 0;
+  updateSkyClock(0);
 
   setLoadingOverlayState({
     visible: true,
@@ -5167,6 +5169,28 @@ let lastSentAirVelocityX = 0;
 let lastSentAirVelocityZ = 0;
 let lastSentTime = 0;
 let worldTime = 0;
+
+// The sky's clock, each frame. Upstream's (#166) is the real instant -- or the
+// frozen one `_syncTime` names -- read off the wall clock every client shares,
+// at the world's `_latitude` and `_longitude`; the renderer moves the sky only
+// every few seconds of it. `SKY: 'minecraft'` is bzo's day clock instead: a
+// real day's 24000 ticks at `DAY_SPEED` 1, its default 72 a 20-minute day,
+// and 0 holds the sky where the server said it was.
+function updateSkyClock(deltaTime) {
+  if (gameConfig?.SKY === 'minecraft') {
+    const daySpeed = Number.isFinite(gameConfig?.DAY_SPEED) ? gameConfig.DAY_SPEED : 72;
+    worldTime = (worldTime + ((24000 / 86400) * daySpeed * deltaTime)) % 24000;
+    renderManager.setWorldTime(worldTime);
+    return;
+  }
+  const sync = gameConfig?.SYNC_TIME;
+  const seconds = Number.isFinite(sync) && sync >= 0 ? sync : frameEpochMs / 1000;
+  renderManager.setCelestialTime(
+    seconds,
+    Number.isFinite(gameConfig?.LATITUDE) ? gameConfig.LATITUDE : 37.5,
+    Number.isFinite(gameConfig?.LONGITUDE) ? gameConfig.LONGITUDE : 122,
+  );
+}
 let chatWindowDirty = true;
 let cachedCollisionColliders = null;
 // Velocity-based thresholds: only send when velocity changes significantly
@@ -11946,6 +11970,7 @@ function buildAutopilotView() {
       flagIndex: myFlag?.index ?? null,
       flagTeam: getFlagTeamIndex(myType),
       teamColor: myTeamColor,
+      team: playerTeam,
       zoned: amZoned(),
       inAir: isInAir,
       muzzleForward: myMuzzle().forward,
@@ -11955,6 +11980,8 @@ function buildAutopilotView() {
       ricochet: shotRicochets(getMyShotFlag(), gameConfig?.ALL_SHOTS_RICOCHET),
       canFire: findFreeShotSlot(
         myShotSlotFreeAt, normalizeShotSlotCount(gameConfig.SHOT_MAX_ACTIVE), frameEpochMs) >= 0,
+      freeShots: countFreeShotSlots(
+        myShotSlotFreeAt, normalizeShotSlotCount(gameConfig.SHOT_MAX_ACTIVE), frameEpochMs),
       // How the tank is moving, which a shot inherits: its velocity as of the
       // last move, its speed along the barrel, how fast it can go and how fast
       // that speed may change (0, no limit).
@@ -11986,6 +12013,7 @@ function buildAutopilotView() {
       jumpVelocity: gameConfig.JUMP_VELOCITY,
       gravity: gameConfig.GRAVITY,
       lockOnAngle: getFlagTuning().lockOnAngle,
+      mapSize: Number.isFinite(currentWorldMapSize) ? currentWorldMapSize : DEFAULT_MAP_SIZE,
       shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
     isFoe: (player) => areFoes(player.team, playerTeam, teamsAllowed),
@@ -17424,11 +17452,7 @@ function animate(frameTime) {
   const deltaTime = Math.max(0, Math.min((now - lastTime) / 1000, MAX_FRAME_DELTA_SECONDS));
   lastTime = now;
 
-  // A real day's 24000 ticks at the server's `DAY_SPEED` 1, its default 72 a
-  // 20-minute day, and 0 holds the sky where the server said it was.
-  const daySpeed = Number.isFinite(gameConfig?.DAY_SPEED) ? gameConfig.DAY_SPEED : 72;
-  worldTime = (worldTime + ((24000 / 86400) * daySpeed * deltaTime)) % 24000;
-  renderManager.setWorldTime(worldTime);
+  updateSkyClock(deltaTime);
 
   updateXRControllerInput();
   handleXRSettingsMenuInput(now);

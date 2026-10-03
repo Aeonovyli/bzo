@@ -591,10 +591,6 @@ truncation. Nothing else here waits on #113, and #113 does not wait on this.
   and connected clients reload -- the same as editing `styles.css`. Anyone
   editing a page wants to look at it anyway, so the reload is the thing they
   were about to do by hand. No special case in the walk.
-- **`fitText()` truncates by code point.** It used to cut by code unit and
-  could leave half a surrogate pair, which draws as a replacement box on any
-  non-ASCII callsign. Fixed in `public/hud.js`, covered by
-  `scripts/test-scoreboard.mjs`.
 
 ## Open Questions
 

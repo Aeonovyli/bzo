@@ -41,6 +41,8 @@ const {
 const {
   BzfsSession,
   toBzfsChatText,
+  splitBzfsChat,
+  CHAT_TEXT_MAX,
   NO_PLAYER: BZFS_NO_PLAYER,
   SERVER_PLAYER_ID: BZFS_SERVER_PLAYER,
   BLOWED_UP,
@@ -59,6 +61,7 @@ const {
   getWorldReloadSeconds,
   getSlotReloadSeconds,
   findFreeShotSlot,
+  countFreeShotSlots,
   shotIsActive,
   getShotTankHit,
   shockWaveHitsTank,
@@ -3007,6 +3010,12 @@ const GAME_CONFIG = {
   // default) turns into a local hour on bzo's clock. -1 lets the sky run.
   SYNC_TIME: -1,
   LONGITUDE: 122,
+  // BZFlag _latitude, degrees north: where the upstream sky stands.
+  LATITUDE: 37.5,
+  // Which sky: upstream's sun, moon and stars at the world's place and the
+  // real time (#166), or 'minecraft', bzo's day clock (`timeOfDay`,
+  // `daySpeed`).
+  SKY: 'upstream',
   VOICE_NEARBY_RADIUS: 60, // Maximum distance for the initial Nearby voice channel
   // -time upstream (CmdLineOptions.h:79), seconds until the match ends; 0 is no
   // limit, which is bzfs's own default -- see "Match end" in
@@ -4806,6 +4815,8 @@ if (Number.isFinite(configAngularAcceleration)) {
 const configTimeOfDay = Number(serverConfig.timeOfDay ?? NaN);
 const configDaySpeed = Number(serverConfig.daySpeed ?? NaN);
 if (Number.isFinite(configDaySpeed) && configDaySpeed >= 0) GAME_CONFIG.DAY_SPEED = configDaySpeed;
+// `sky` in server.json: upstream's sky unless it asks for the day clock.
+if (serverConfig.sky === 'minecraft') GAME_CONFIG.SKY = 'minecraft';
 
 
 
@@ -18359,7 +18370,8 @@ async function authoriseProxyRequest(req, request) {
   if (request.team !== PLAYER_TEAM.OBSERVER) {
     return { allowed: true, callsign: guestCallsign(callsign), guest: true };
   }
-  // No login, no name: numbered like any anonymous viewer (`proxyViewerCallsign`).
+  // No login, no name: a random `bzo-view-<6 hex>` like any anonymous viewer
+  // (`proxyViewerCallsign`).
   return { allowed: true, callsign: callsign || null };
 }
 
@@ -19536,6 +19548,7 @@ async function handleProxyConnection(ws, req, request) {
   // Said once: a player typing in a language with accents would otherwise be
   // told on every line.
   let warnedAboutChatText = false;
+  let warnedAboutChatLength = false;
   // The last state the browser reported, resent immediately before a shot so
   // the target measures the muzzle against where the tank actually is.
   let lastMotion = null;
@@ -19623,13 +19636,37 @@ async function handleProxyConnection(ws, req, request) {
       if (text.length === 0) return;
       const self = session.state.players.get(session.playerId);
       const target = message.dst ?? message.to ?? 0;
-      session.sendChat(
-        bzfsChatDestination(typeof target === 'string' && /^-?\d+$/.test(target)
-          ? Number(target) : target, self ? self.team : 5),
-        // `/me` is upstream's own reformatting of an action message, and it
-        // does it at the server (bzfs.cxx:1490), so the line travels as typed.
-        message.msgType === 'action' && !text.startsWith('/me ') ? `/me ${text}` : text,
-      );
+      const destination = bzfsChatDestination(typeof target === 'string' && /^-?\d+$/.test(target)
+        ? Number(target) : target, self ? self.team : 5);
+      // `/me` is upstream's own reformatting of an action message, and it does
+      // it at the server (bzfs.cxx:1490), so the line travels as typed.
+      const action = message.msgType === 'action' || text.startsWith('/me ');
+      const body = text.startsWith('/me ') ? text.slice(4) : text;
+      // A command is one line or it is nothing: a second piece would arrive
+      // as ordinary chat. It goes whole and bzfs keeps what fits, as an
+      // upstream client's own input would have stopped it there.
+      if (!action && body.startsWith('/')) {
+        if (body.length > CHAT_TEXT_MAX && !warnedAboutChatLength) {
+          warnedAboutChatLength = true;
+          send({
+            type: 'message',
+            src: SERVER_PLAYER,
+            dst: ALL_PLAYERS,
+            msgType: 'server',
+            text: `${key} takes ${CHAT_TEXT_MAX} characters a line, so a longer command is cut short.`,
+            ts: Date.now(),
+          });
+        }
+        session.sendChat(destination, body);
+        return;
+      }
+      // bzfs carries a line of at most `MessageLen` bytes, so a longer one goes
+      // as several, each broken between words (#169) -- an action's pieces
+      // each say `/me` again, or only the first would read as one.
+      const prefix = action ? '/me ' : '';
+      for (const piece of splitBzfsChat(body, CHAT_TEXT_MAX - prefix.length)) {
+        session.sendChat(destination, `${prefix}${piece}`);
+      }
       return;
     }
     // The browser's own tank, which is the one thing a proxied player is
@@ -21640,11 +21677,13 @@ function buildBotView(bot, self) {
       flagIndex: myFlag?.index ?? null,
       flagTeam: getFlagTeamIndex(myType),
       teamColor,
+      team: me.team,
       zoned: isZoned(myType, myFlag?.zoned === true),
       shotSpeed: GAME_CONFIG.SHOT_SPEED * getShotEffects(myType).velocityFactor,
       shotLifetime: getWorldReloadSeconds(GAME_CONFIG) * getShotEffects(myType).lifeFactor,
       ricochet: shotRicochets(myType, GAME_CONFIG.ALL_SHOTS_RICOCHET),
       canFire: findFreeShotSlot(me.shotSlotFreeAt, maxShots, now) >= 0,
+      freeShots: countFreeShotSlots(me.shotSlotFreeAt, maxShots, now),
     },
     players: others,
     shots,
@@ -21663,6 +21702,7 @@ function buildBotView(bot, self) {
       jumpVelocity: GAME_CONFIG.JUMP_VELOCITY,
       gravity: GAME_CONFIG.GRAVITY,
       lockOnAngle: getFlagTuning().lockOnAngle,
+      mapSize: GAME_CONFIG.MAP_SIZE,
       shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
     isFoe: (player) => areFoes(player.team, me.team, TEAMS_ALLOWED),

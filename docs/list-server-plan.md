@@ -6,54 +6,6 @@ gives (#106). This is the remainder: the rest of what #147 wondered a list
 could show, and one gap left open in #46's design discussion. Upstream
 references are paths under `$HOME/bzflag/`.
 
-## An overview image per map
-
-Built for local maps (`server/map-overview.cjs`), and drawn into the third
-column of the maps list's pane. What is left is coverage of *servers*.
-
-The picture is a rendering at a known size rather than a vector copy of the
-map: obstacles are rasterised onto a 256-cell grid and that grid is re-encoded
-as merged rectangles, so the output is bounded by the target size and not by
-the map. `ahs3_Paradise_Valley` has 81332 mesh faces and a 74 MB JSON, and its
-picture is 37 KB, 10 KB brotli, in about 300 ms. The rest of the local maps
-land between 2 and 12 KB compressed. Sub-pixel detail disappears because the
-grid has nowhere to put it, which is the trimming the panel's own LOD does in
-`RADAR_MESH_FOOTPRINT_PIXELS` terms.
-
-Three rules were not obvious and each came from a map that broke without it:
-
-- **Elevation carries by opacity, from a datum.** The datum is the altitude
-  the map is played at, taken as a low percentile of surface area rather than
-  the lowest surface anywhere, so a pit or a mesh's own skirt does not become
-  the floor. Bands above it roughly double in width, because relief near tank
-  height is what a map is read by. Flat occupancy in one colour drew a terrain
-  map as a solid rectangle, and evenly spaced bands drew `ahs3_INCOMING`,
-  whose whole layout stands under 12 units, as one flat shape.
-- **Only up-facing surfaces.** A mesh is usually a closed solid, so a terrain
-  has an underside as well as a top, and taking either drew a heightfield as
-  the sheet sealing its bottom. The winding tells which is which and agrees
-  with the map's own normals wherever it has them.
-- **A roof is skipped.** `ahs3_INCOMING` is a domed arena whose dome holds 40%
-  of the map's surface from 86 units up, and keeping each cell's highest
-  surface drew the dome and nothing else. One altitude far above the datum
-  holding a quarter of the map is a lid; it is skipped, but only where
-  something else is under it, so a mountain that is all there is still draws.
-  The figure separates cleanly from real terrain, whose busiest high altitude
-  is 11%.
-
-**bzo rows are built** -- the designated instance draws them, keyed on the
-`mapHash` a report now carries, and `docs/list-server.md` describes it.
-
-**Built** -- `server/bzfs-worlds.cjs`, and `docs/list-server.md` describes it.
-A bzfs row's picture is its import's own overview, since an import is
-registered like any other map and `registerMapFile` has already drawn one.
-What the tracker owns is deciding when an import has gone stale, as cheaply as
-the question allows.
-
-The sweep only runs on the designated instance, and every other instance reads
-its rows -- pictures included -- from the one merged list
-(`docs/list-server.md`, "One list, not two").
-
 ## Watch: what is left of it
 
 Built, and described in `docs/proxy.md` under "Watching a server this instance

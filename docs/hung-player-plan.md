@@ -37,16 +37,17 @@ accepted, intentional dead-reckoning behaviour, so this plan does not
 propose changing that.
 
 **bzo's version.** Reuse the existing heartbeat constant rather than invent
-a new number: `MAX_UPDATE_INTERVAL` (`client.js:2963`, 5000ms) is already
+a new number: `MAX_UPDATE_INTERVAL` (`server.js` `GAME_CONFIG`, 5000ms,
+read by `client.js` beside `MAX_UPDATE_INTERVAL_DEFAULT`) is already
 bzo's "an idle client still says something at least this often" figure --
 it's what `server/lag.cjs`'s jitter gate and the observer heartbeat both
 already assume. A hung-player timeout of **twice that (10s)** is a
 reasonable default: an honest client heartbeats at 5s, so silence past 10s
 is a real signal rather than jitter. Measured server-side, from
-`player.lastUpdate`, independent of whether the client claims to be airborne
--- that independence is the whole point, since the teleporter bug above is
-airborne-only and the current heartbeat rule explicitly excludes airborne
-tanks (`client.js:8282`, `!airborneState && ...`).
+`player.lastUpdate`, independent of whether the client claims to be airborne.
+The client heartbeats in the air too (`shouldSendUpdate` in `client.js`), so
+a tank wedged mid-jump still says something every 5s; the timeout is for a
+client that has stopped sending at all.
 
 What bzo's version should do once a player crosses the threshold:
 

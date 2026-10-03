@@ -101,7 +101,8 @@ this checklist.
 npm run check
 ```
 
-This runs syntax and lint checks.
+This runs the syntax and lint checks, a server boot check, and the test
+suites.
 
 CI also runs these checks on pushes and pull requests.
 

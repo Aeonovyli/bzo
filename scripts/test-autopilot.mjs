@@ -557,4 +557,74 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.equal(new Ace().think(view(60)).intent.mode, 'antidote', 'a minute is not');
 }
 
+// Rabbit Chase. A hunter goes after the rabbit wherever it is, not only inside
+// Roger's 250 units.
+{
+  const out = new Ace().think(makeView({
+    self: { team: 'hunter' },
+    players: [enemy(0, -600, { team: 'rabbit' })],
+  }));
+  assert.equal(out.intent.mode, 'hunt', 'a far rabbit is hunted');
+  assert.equal(out.targetId, 'foe');
+  assert.ok(out.speed > 0, 'and driven towards');
+}
+// The rabbit runs from a hunter that is near but not coming for it...
+{
+  const out = new Ace().think(makeView({
+    self: { team: 'rabbit' },
+    players: [enemy(0, -50, { team: 'hunter' })],
+  }));
+  assert.equal(out.intent.mode, 'flee', 'a near hunter is run from');
+  assert.ok(out.intent.target.z > 0, 'away from it, south when it is north');
+}
+// ...turns on one that is closing on it...
+{
+  const out = new Ace().think(makeView({
+    self: { team: 'rabbit' },
+    players: [enemy(0, -50, { team: 'hunter', vz: 20 })],
+  }));
+  assert.equal(out.intent.mode, 'chase', 'a hunter coming for the rabbit is fought');
+  assert.equal(out.targetId, 'foe');
+}
+// ...and pays no mind to one far off.
+{
+  const out = new Ace().think(makeView({
+    self: { team: 'rabbit' },
+    players: [enemy(0, -400, { team: 'hunter' })],
+  }));
+  assert.notEqual(out.intent.mode, 'flee', 'a hunter out of range is not run from');
+}
+
+// On a server that allows several shots, Ace keeps some back: five slots
+// fire three and keep two, spent only on a foe close enough to need them.
+{
+  const view = (freeShots, z) => makeView({
+    self: { freeShots },
+    world: { maxShots: 5 },
+    players: [enemy(0, z)],
+  });
+  assert.equal(new Ace().think(view(3, -150)).fire, true, 'a third shot goes');
+  assert.equal(new Ace().think(view(2, -150)).fire, false, 'the last two are kept from a far foe');
+  assert.equal(new Ace().think(view(2, -40)).fire, true, 'and spent on a close one');
+  const single = makeView({ self: { freeShots: 1 }, world: { maxShots: 1 }, players: [enemy(0, -150)] });
+  assert.equal(new Ace().think(single).fire, true, 'a single slot has nothing to keep');
+}
+// A kept shot is spent on a landing shot: a tank coming down cannot dodge.
+{
+  const pilot = new Ace();
+  let fired = 0;
+  for (let t = 0; t < 4.3; t += 1 / 30) {
+    const y = Math.max(0, (19 * t) - (0.5 * 9.8 * t * t));
+    const airborne = y > 0 || t === 0;
+    const out = pilot.think(makeView({
+      now: 100 + t,
+      self: { muzzleHeight: 1.57, muzzleForward: 3, shotSpeed: 100, freeShots: 2 },
+      world: { maxShots: 5, tankAngVel: Math.PI / 4 },
+      players: [enemy(0, -120, { y, airborne, gravity: 9.8, vy: airborne ? 19 - (9.8 * t) : 0 })],
+    }));
+    if (out.fire) fired += 1;
+  }
+  assert.equal(fired, 1, 'the landing shot is fired from the kept ones');
+}
+
 console.log('autopilot tests passed');

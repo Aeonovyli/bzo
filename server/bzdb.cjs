@@ -268,6 +268,7 @@ const BZDB_CONFIG_VARS = new Map([
   ['_mirror', { key: 'MIRROR', parse: parseMirror }],
   ['_skyColor', { key: 'SKY_COLOR', parse: (text) => parseColorString(text)?.slice(0, 3) ?? null }],
   ['_syncTime', { key: 'SYNC_TIME', any: true }],
+  ['_latitude', { key: 'LATITUDE', any: true }],
   ['_longitude', { key: 'LONGITUDE', any: true }],
   ['_tankLength', { key: 'TANK_LENGTH' }],
   ['_tankWidth', { key: 'TANK_WIDTH' }],
