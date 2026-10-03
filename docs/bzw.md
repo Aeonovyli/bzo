@@ -752,65 +752,9 @@ Read as a bzfs command line, one option a line. Everything bzo understands:
 | `-ms <count>` | how many shots a tank may have in the air at once |
 | `-s <count>`, `+s <count>` | how many superflag slots the world holds |
 | `-f <abbrev\|good\|bad>` | take a flag type, or a whole quality, out of the pool |
-| `-set _maxFlagGrabs <n>` | how many pickups a superflag survives |
-| `-set _wingsJumpCount <n>` | how many times `WG` Wings may flap before it needs the ground again |
-| `-set _maxBumpHeight <n>` | how high a step a tank may climb without jumping |
-| `-set _tankSpeed <n>` | how fast a tank drives |
-| `-set _tankAngVel <radians>` | how fast a tank turns |
-| `-set _gravity <n>` | the world's gravity; upstream writes it negative, bzo keeps the magnitude |
-| `-set _jumpVelocity <n>` | how hard a jump pushes off |
-| `-set _shotSpeed <n>` | how fast a shot travels |
-| `-set _shotRange <n>` | how far a shot travels before it dies |
-| `-set _shotRadius <n>` | a shot's own size |
-| `-set _reloadTime <seconds>` | how long a shot lives, and the basis each slot's reload is divided out of |
-| `-set _explodeTime <seconds>` | how long a dead tank waits before it can spawn again, and how long its pieces tumble; `0` is no wait |
-| `-set _rejoinTime <seconds>` | how long a player who left after playing waits to spawn on coming back, told so in upstream's words; it spawns by itself once the wait is up. Upstream's default is `_explodeTime`; server.json's `rejoinTime` sets it too |
-| `-set _tankExplosionSize <n>` | how big a tank's explosion is; upstream's default is `3.5 * _tankLength` |
-| `-set _mGunAdVel <n>` | how much faster than a shell a `MG` Machine Gun shot flies |
-| `-set _mGunAdRate <n>` | how many times faster `MG` reloads |
-| `-set _mGunAdLife <n>` | how long an `MG` shot lives, as a share of an ordinary one's; upstream's default follows `_mGunAdRate` |
-| `-set _laserAdVel <n>`, `_laserAdRate <n>`, `_laserAdLife <n>` | `L` Laser's speed, reload rate and life, each a multiple of an ordinary shot's |
-| `-set _shockAdLife <n>` | how long an `SW` Shock Wave lasts, as a share of an ordinary shot's life |
-| `-set _shockInRadius <n>`, `_shockOutRadius <n>` | the radius a shock wave starts at (may be `0`) and grows to |
-| `-set _gmAdLife <n>`, `_gmTurnAngle <radians>`, `_gmActivationTime <seconds>` | `GM` Guided Missile's life as a share of an ordinary shot's, how fast it turns toward its lock each second, and how long it flies before it may hit anything (may be `0`) |
-| `-set _lockOnAngle <radians>` | the cone a `GM` lock is picked from |
-| `-set _gmSize <n>` | how long the modelled `GM` missile is drawn |
-| `-set _identifyRange <n>` | how far `ID` Identify reaches for the nearest flag on the ground |
-| `-set _burrowSpeedAd <n>`, `_burrowAngularAd <n>` | how fast a `BU` Burrow tank drives and turns underground, as a share of an ordinary one's |
-| `-set _rFireAdVel <n>`, `_rFireAdRate <n>`, `_rFireAdLife <n>` | `F` Rapid Fire's speed, reload rate and life, each a multiple of an ordinary shot's; upstream's default life follows `_rFireAdRate` |
-| `-set _thiefAdShotVel <n>`, `_thiefAdRate <n>`, `_thiefAdLife <n>` | `TH` Thief's beam: speed, reload rate and life |
-| `-set _thiefVelAd <n>`, `_thiefTinyFactor <n>` | how fast a Thief tank drives, and how small it is |
-| `-set _thiefDropTime <seconds>` | the reload a Thief pays once the flag leaves it (may be `0`); upstream's default is half `_reloadTime` |
-| `-set _velocityAd <n>`, `_angularAd <n>` | how much faster `V` Velocity drives and `QT` Quick Turn turns |
-| `-set _tinyFactor <n>`, `_obeseFactor <n>`, `_narrowFactor <n>` | the size `T` Tiny, `O` Obesity and `N` Narrow make a tank |
-| `-set _agilityAdVel <n>`, `_agilityTimeWindow <seconds>`, `_agilityVelDelta <n>` | `A` Agility's burst: how fast, how long, and how big a change of speed sets it off |
-| `-set _srRadiusMult <n>` | how far `SR` Steamroller reaches, in tank radii |
-| `-set _flagEffectTime <seconds>` | how long a tank takes to change size, grow in on spawning, or fade (may be `0`) |
-| `-set _squishFactor <n>`, `_squishTime <seconds>` | how far a hard landing flattens a tank (may be `0`), and how long it takes to stand back up |
-| `-set _wingsJumpVelocity <n>`, `_wingsGravity <n>` | `WG` Wings' flap and its gravity; unset, they follow `_jumpVelocity` and `_gravity` |
-| `-set _wingsSlideTime <seconds>` | how long a Wings tank takes to reach a new speed in the air (`0`, the default, is at once) |
-| `-set _noClimb <0\|1>` | on, upstream's default, a jump from a slope -- a pyramid's side, a tetra, a sloped mesh face -- goes straight up; `0` lets a tank jump its way up one |
-| `-set _tankLength <n>`, `_tankWidth <n>`, `_tankHeight <n>` | the tank's size: how it collides, how it is hit, and how big it is drawn |
-| `-set _tankRadius <n>`, `_muzzleFront <n>`, `_muzzleHeight <n>` | the tank's radius, which a flag is grabbed within, and where its shots leave; upstream's defaults follow `_tankLength` |
-| `-set _boxBase <n>`, `_boxHeight <n>`, `_pyrBase <n>`, `_pyrHeight <n>` | the size of a `box` or `pyramid` that states none (bases are half widths); `_boxHeight` also sets how box walls tile, and how fast the radar's height box grows |
-| `-set _fogMode <none\|linear\|exp\|exp2>`, `_fogDensity <n>`, `_fogStart <n>`, `_fogEnd <n>`, `_fogColor <colour>` | the world's fog; any mode but `none` is fog, and one bzo does not know is `exp`, as upstream reads it |
-| `-set _skyColor <colour>` | a tint over the whole sky; `white` is none |
-| `-set _latitude <degrees>`, `_longitude <degrees>` | where the sky stands: degrees north, and degrees *west* (upstream's sign); default 37.5 and 122 |
-| `-set _syncTime <seconds>` | hold the sky still at that many seconds past the Unix epoch; unset (-1), it is the real time now; `-synctime`'s `1` is the first second of 1970 |
-| `-set _drawMountains <0\|1>`, `_drawClouds`, `_drawCelestial`, `_drawGround` | whether the world draws its mountains, clouds, sun, moon and stars, and ground; a viewer's own settings can take away more, never put back |
-| `-set _mirror <colour\|none>` | a mirror ground: the world reflected in it under the colour as a tint, at the colour's alpha (half when it states none, or states 1, as upstream reads it) |
-| `-set _noShadows <0\|1>` | no tank or building shadows on this world |
-| `-set _trackFade <seconds>` | how long tread marks last; `0` leaves none |
-| `-set _radarLimit <n>`, `-noradar` | the farthest the radar reaches (a quarter of it while burrowed); `0` or less, which `-noradar` sets, is no radar for anyone. Upstream's default is the world size |
-| `-set _flagAltitude <n>`, `_flagPoleSize <n>` | how high a flag is thrown or flies in from (Shield goes higher still), and how tall its pole is drawn |
-| `-set _pauseDropTime <seconds>` | how long a paused tank keeps its flag (may be `0`) |
-| `-set _speedChecksLogOnly <0\|1>` | a speed finding is logged and not refused, whatever the anti-cheat mode |
-| `-set _updateThrottleRate <n>` | the most position updates a client sends a second; `0` is no limit |
-| `-set _forbidMarkers <0\|1>` | no Guided Missile lock-on bracket |
-| `-set _spawnSafeRadMod <n>`, `_spawnSafeSRMod <n>`, `_spawnSafeSWMod <n>`, `_spawnMaxCompTime <seconds>` | upstream's spawn search: tank radii a spot must keep from a tank facing it and from a Steamroller or Burrow tank, the share of a Shock Wave's reach, and how long to look before taking the farthest-from-enemies spot found |
-| `-set _wallHeight <n>` | how high the border wall stands, which is where shots stop bouncing off it; `0` leaves only the tank barrier |
-| `-set _flagHeight <n>` | the clearance a flag spawns under; the `world` block's `flagHeight` wins, as upstream reads the options block first |
-| `-set _rainType <rain\|snow\|fatrain\|frog\|particle\|bubble>` | turns on weather -- see **Weather** |
+| `+f <abbrev\|good\|bad>[{count}]` | flags of a type always in the world, one or `count` of them, with no zone of their own (see **Flag spawn zones**); `team` is not read |
+| `-set <name> <value>` | a world variable -- see [bzdb.md](bzdb.md) for every one bzo reads |
+| `-noradar` | no radar for anyone; it sets `_radarLimit` to 0 |
 | `-srvmsg <text>` | a line the world says to each player as they join |
 | `-admsg <text>` | a line said to everyone already playing, repeated every 15 minutes |
 | `-gndtex <name>` | the ground's texture -- a stock name or an external URL, same as any other `texture` line; a map can equally get the same effect with an explicit `material name GroundMaterial ... end` block |
@@ -881,7 +825,7 @@ number is simply the later assignment. Changing it re-derives the sustained
 fire rate from `shotRange / shotSpeed / shotMaxActive`, since `maxShots` slots
 each held for one reload works out to one shot per `_reloadTime / maxShots`; a
 `shotReloadTime` pinned in `server.json` still wins, and a map stating
-`_reloadTime` replaces the basis -- see **Map physics**.
+`_reloadTime` replaces the basis -- see **Shots** in [bzdb.md](bzdb.md).
 `-ms 0` means "tanks cannot shoot", and bzo reads it that way too
 (`CmdLineOptions.cxx:897-909`, which warns and then honours it). Only a
 *negative* or unparseable count becomes one shot, upstream's own split. A
@@ -1004,45 +948,11 @@ nor bzo's, and is read and dropped like any other unhandled token.)
 
 ## Map physics
 
-`_tankSpeed`, `_tankAngVel`, `_gravity`, `_jumpVelocity`, `_shotSpeed`,
-`_shotRange`, `_shotRadius`, `_shotsKeepVerticalVelocity`, `_reloadTime` and
-`_explodeTime` are
-`StateDatabase::Locked`
-upstream (`globalDBItems`, `src/common/global.cxx`), which means the server
-owns the value and every client is told it. That is already how bzo works, so
-a map may state any of them and the map's number replaces the config's, the
-same plain assignment `-ms` and `-set _maxFlagGrabs` get.
-
-Two of them are not quite a direct copy:
-
-- `_gravity` is a downward acceleration upstream and so is written negative;
-  bzo stores the magnitude, so `-9.81` and `9.81` mean the same thing here.
-- `_reloadTime` is the basis every shot time is derived from rather than a
-  time in its own right: a shot lives for it, and the slot that fired comes
-  back after it. That is why a map stating it and a map stating `-ms` are
-  applied together, since the pair also fixes the sustained rate. A map that
-  states neither gets upstream's own default basis of
-  `_shotRange / _shotSpeed`. A flag scales both halves and does not scale them
-  equally -- see AGENTS.md's **Shot timing**.
-- `_explodeTime` is the wait before a dead tank may spawn again -- bzfs
-  sets it as each victim's spawn delay (`bzfs.cxx:3371`) -- and how long the
-  tank's pieces tumble. `_rejoinTime`, which defaults to it, is something
-  else: how long a player who left the server, after playing, waits to spawn
-  on coming back (`RejoinList.cxx:73`). bzo keeps the wait and not the key
-  press: the tank spawns by itself once it is up. Coming back through the
-  entry dialog counts as leaving, as reconnecting does, since either is a new
-  spawn.
-
-A colour is upstream's: three or four numbers, or a name from its X11 table
-(`black`, `grey3`, `DarkGrey`), optionally with an alpha (`red 0.5`).
-
-`_syncLocation` is read by nothing: a bzo browser has no place of its own, so
-the world's `_latitude` and `_longitude` always place the sky. On a server
-with `"sky": "minecraft"` (AGENTS.md) only `_syncTime` and `_longitude` are
-read, and they freeze the day clock at an hour.
-
-The flag variables in the options table, the tank and box sizes, `_squishFactor`,
-`_squishTime` and `_wallHeight` are Locked too and read the same way.
+`-set <name> <value>` sets a world variable; [bzdb.md](bzdb.md) lists every
+one bzo reads, with its default. Upstream locks these
+(`StateDatabase::Locked` in `globalDBItems`, `src/common/global.cxx`): the
+server owns the value and every client is told it. A map's value replaces the
+server's, the same plain assignment `-ms` gets.
 
 A `-set` value may be a formula, as upstream's BZDB evaluates one -- `-set
 _boxHeight 12*_muzzleHeight` -- over the block's other `-set` lines and
@@ -1051,19 +961,8 @@ upstream reads the options block before the world, so its `_boxBase` sizes the
 boxes below it. And where upstream's own default is a formula over a variable
 the block changes, the default follows: `_tankLength 5` makes `_tankRadius`
 `0.72 * 5`, and with it `_muzzleFront`, `_shockInRadius`, `_wallHeight`,
-`_boxHeight`, `_pyrBase` and `_pyrHeight`.
-
-bzo's own hit radius (2, against upstream's 4.32), its collision height and its
-default muzzle are bzo's, and keep their ratio to upstream's figures when a
-world resizes the tank. `_wallHeight` may be 0: the
-visible wall is gone, every
-shot leaves the world over it, and tanks are still held at the edge, as by
-upstream's height-ignoring `WallObstacle`.
-
-`_wingsJumpVelocity` and `_wingsGravity` are aliases for `_jumpVelocity` and
-`_gravity` upstream, so a map that moves the world's gravity moves Wings' with
-it -- unless something states the wings value itself: the map, with its own
-`-set`, which wins as every map variable does, or the server's config.
+`_boxHeight`, `_pyrBase` and `_pyrHeight`. A value with spaces in it, such as
+a colour, is quoted.
 
 **A world's variables travel as upstream's do: raw.** The server sends its
 BZDB in `init` as names and strings (`bzdb`), and each `/set` or `/reset`
@@ -1165,51 +1064,26 @@ See "Intentional deviations from BZFlag" in `AGENTS.md`.
 
 ## Weather
 
-`-set _rainType <preset>` (`src/bzflag/WeatherRenderer.cxx`) -- the generic
-`-set` mechanism above, not a block of its own, the same as `_maxFlagGrabs`.
-Nothing shows unless a map names one of upstream's six presets: `rain`,
-`snow`, `fatrain`, `frog`, `particle`, `bubble`. `maps/weather.bzw` names
-`rain` and puts a small roofed shelter over the origin to preview the roof
-culling below; view it through Map Viewer (`?viewmap=weather.bzw`) -- purely a
-client render, so no live match is needed.
+`-set _rainType <preset>` (`src/bzflag/WeatherRenderer.cxx`) turns weather
+on; the other `_rain*` variables tune it (see **Weather** in
+[bzdb.md](bzdb.md)). Nothing shows unless a map names one of upstream's six
+presets: `rain`, `snow`, `fatrain`, `frog`, `particle`, `bubble`.
+`maps/weather.bzw` names `rain` and puts a small roofed shelter over the
+origin to preview the roof culling below; view it through Map Viewer
+(`?viewmap=weather.bzw`) -- purely a client render, so no live match is
+needed.
 
 Every drop falls (or, for `bubble`, rises) from high above the map, resets
 when it reaches the ground or a roof, and -- for the presets that carry
 puddles -- leaves a splash there that grows and fades over
-`_rainMaxPuddleTime`. Upstream reads a dozen more `_rain*` variables to tune
-one of these presets; bzo reads the ones that still mean something once one
-rendering path replaces upstream's three (see below):
+`_rainMaxPuddleTime`.
 
-| `-set` variable | tunes |
-|---|---|
-| `_rainDensity <n>` | how many drops are ever in the air at once |
-| `_rainSpread <n>` | how far from the map's centre a drop may fall |
-| `_rainSpeed <n>`, `_rainSpeedMod <n>` | fall speed, and how much it varies drop to drop |
-| `_rainStartZ <n>`, `_rainEndZ <n>` | the top and bottom of the fall |
-| `_rainTexture <name>`, `_rainPuddleTexture <name>` | either stock texture, overriding the preset's own |
-| `_useRainPuddles <0\|1>` | puddles on or off, overriding the preset's own |
-| `_rainMaxPuddleTime <n>`, `_rainPuddleSpeed <n>` | how long a puddle lasts, and how fast it grows |
-| `_rainPuddleColor <color>` | the puddles' tint, overriding the preset's own |
-| `_rainSpins <0\|1>` | whether a drop tumbles as it falls |
-| `_rainRoofs <0\|1\|2>` | `0` lets rain fall through a roof to the ground beneath; `1` (upstream's default) stops it at the first roof; `2` also puddles the roof itself |
-
-`_rainBaseColor` and `_rainTopColor` are read by nothing here: both tint
-upstream's `GL_LINES` streak alone, and that rendering path does not exist on
-bzo -- see below. `_useLineRain`, `_useRainBillboards` and `userRainScale` are
-the same kind of absence for a different reason: "**Implement the
-highest-quality option upstream has for a given effect, and ship no setting
-for it**" (`AGENTS.md`) means bzo already draws the best-looking variant of
-each preset and has nothing for these to switch between. `_rainSize` is left
-to the preset alone -- a map wanting one particular drop size is better served
-naming its own `_rainTexture` on a preset already close to the size it wants.
-
-**One rendering path carries every preset**, rather than upstream's three:
-`doLineRain`'s `GL_LINES` streak (`rain` upstream, replaced here by the same
-textured cross the other falling presets use, sized on its own since a
-textured quad has no upstream-supplied width to inherit from a zero-width
-line), a camera-facing billboard (`frog`, `particle`, `bubble`), and a
-non-billboard "cross" of three quads 120 degrees apart that need not face the
-camera at all (`snow`, `fatrain`, and now `rain`). `render.js`'s
+**Drops are textured**: a camera-facing billboard (`frog`, `particle`,
+`bubble`), or a non-billboard "cross" of three quads 120 degrees apart that
+need not face the camera (`rain`, `snow`, `fatrain`). Upstream's plain `rain`
+defaults to a `GL_LINES` streak instead; bzo draws that streak only when a map
+sets `_useLineRain`, tinted from `_rainBaseColor` at the drop to
+`_rainTopColor` at its tail. `render.js`'s
 `WEATHER_PRESETS` is the table of which preset gets which texture, speed,
 size, and puddle colour, each a comment's citation away from the
 `WeatherRenderer::set()` branch it came from.
@@ -1303,6 +1177,18 @@ actually came down, not a random one among every match the way a spawn zone
 is. `bzo.bzw`'s four team-spawn pads each carry their own team's `safety` too,
 so a flag dropped on an enemy base returns to its own team's pad rather than
 the map centre.
+
+### Flag spawn zones
+
+`flag <abbrev|good|bad> [...]` (`CustomZone.cxx:80-140`) names flag types that
+spawn, and come back after a reset, somewhere in the zone. It puts no flags
+into the world -- `zoneflag <type> [count]` does that, and pins the flags it
+adds to its own zone -- so it steers the flags that have none: `+f` flags,
+and a random `-s` slot by the type it held before its reset, which is when
+upstream asks (`WorldInfo::getFlagSpawnPoint`). Several zones naming a type
+share it in proportion to their area; a type no zone names spawns anywhere.
+A team flag type is refused, as upstream refuses it. `bzo.bzw`'s grey pad
+east of the good ring is a `flag SW` zone for its two `+f SW` flags.
 
 ## World weapons
 
@@ -1707,17 +1593,8 @@ The notable absences:
   anything but the vertical axis.** `shift`, `scale` and a vertical `spin`
   are read there now. On a mesh all four are read in full, and on a `group`
   for the meshes it places; see **Mesh transforms** and **Groups** above.
-- **A `zone` block's `flag` keyword.** `zoneflag`, `team` and `safety` are all
-  read -- see **Team zones** and **Flag safety zones** above. `flag` names a
-  type any flag of which spawns in the zone; a map using it is named in the
-  load log rather than skipped silently, because a spawn zone that is ignored
-  moves every tank in the world.
-- **Every `-set` variable but the ones in the options table above** --
-  `_maxFlagGrabs`, `_wingsJumpCount`, `_maxBumpHeight`, the world physics
-  under **Map physics**, and the `_rain*` family. bzo's other world constants
-  are constants, and these are the ones it already keeps a configurable copy
-  of; see `docs/flags.md` and **Weather** above. A map that sets another is
-  named on load.
+- **A `-set` variable not in [bzdb.md](bzdb.md)** -- kept and passed to
+  clients, changing nothing. A map that sets one is named on load.
 
 A map that needs any of these is not rejected -- it is worth knowing that it
 loaded rather than that it loaded *correctly*.

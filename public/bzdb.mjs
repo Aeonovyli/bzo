@@ -219,6 +219,30 @@ export const BZDB_CONFIG_VARS = new Map([
   ['_gmSize', { key: 'GM_SIZE' }],
   // The cone a missile's lock is picked from, radians.
   ['_lockOnAngle', { key: 'LOCK_ON_ANGLE' }],
+  // Dead reckoning: how far a heading may drift from the last move's
+  // prediction before the client sends another.
+  ['_angleTolerance', { key: 'ANGLE_TOLERANCE' }],
+  // A grip on the ground: a cap on how fast a tank's velocity may change.
+  ['_friction', { key: 'FRICTION', allowZero: true }],
+  ['_momentumFriction', { key: 'MOMENTUM_FRICTION', allowZero: true }],
+  ['_disableSpeedChecks', { key: 'DISABLE_SPEED_CHECKS', parse: bzdbIsTrue }],
+  ['_hideTeamFlagsOnRadar', { key: 'HIDE_TEAM_FLAGS_ON_RADAR', parse: bzdbIsTrue }],
+  ['_hideFlagsOnRadar', { key: 'HIDE_FLAGS_ON_RADAR', parse: bzdbIsTrue }],
+  ['_forbidHunting', { key: 'FORBID_HUNTING', parse: bzdbIsTrue }],
+  ['_drawSky', { key: 'DRAW_SKY', parse: bzdbIsTrue }],
+  ['_fogNoSky', { key: 'FOG_NO_SKY', parse: bzdbIsTrue }],
+  // Always on in bzo -- a browser has no place of its own -- so read and kept.
+  ['_syncLocation', { key: 'SYNC_LOCATION', parse: bzdbIsTrue }],
+  ['_drawGroundLights', { key: 'DRAW_GROUND_LIGHTS', parse: bzdbIsTrue }],
+  // Read and kept, with nothing to steer. bzfs kicks a client that reports
+  // more shot ends than this; a bzo client never reports one, the server
+  // ending every shot itself.
+  ['_endShotDetection', { key: 'END_SHOT_DETECTION' }],
+  // Depth and leaf size of upstream's collision and cull octrees. bzo builds
+  // neither, so these tune nothing.
+  ['_coldetDepth', { key: 'COLDET_DEPTH' }],
+  ['_coldetElements', { key: 'COLDET_ELEMENTS' }],
+  ['_cullDepth', { key: 'CULL_DEPTH' }],
   // How far Identify reaches for the nearest flag on the ground.
   ['_identifyRange', { key: 'IDENTIFY_RANGE' }],
   ['_burrowSpeedAd', { key: 'BURROW_SPEED_AD' }],

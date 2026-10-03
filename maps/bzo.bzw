@@ -41,6 +41,9 @@ options
   -sw 1
   # antidote flag for whoever is carrying a bad one
   -sa
+  # Two more Shock Waves, always in the world and in no zone of their own:
+  # they spawn, and come back, in the `flag SW` zone east of the good ring.
+  +f SW{2}
 end
 
 world
@@ -592,6 +595,24 @@ box
   name WG_Wings
   position -50 30 0
   size 1 1 0
+  passable
+end
+
+# A `flag` zone: where flags of a type spawn and respawn, as opposed to a
+# `zoneflag`, which puts flags into the world. The two `+f SW` flags above
+# have no zone of their own, so they land somewhere on this pad, and come
+# back to it after a reset; the good ring's own `zoneflag SW` three stay on
+# theirs.
+zone
+  position 70 20 0
+  size 6 6 0
+  flag SW
+end
+box
+  name SW_respawn_zone
+  position 70 20 0
+  size 6 6 0.01
+  color 0.6 0.6 0.6
   passable
 end
 

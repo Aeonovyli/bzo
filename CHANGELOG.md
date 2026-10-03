@@ -6,6 +6,30 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- The autopilot's chase target gets the lock-on bracket, as upstream's
+  autopilot marks its target. Closes #170
+- With debug labels on, a server bot's name label shows what it is doing and
+  at whom (`Ace1 · chase Tim`). An observer following a server bot with debug
+  geometry on sees its route, target and planned shot drawn over the world.
+- A zone's `flag <type>` makes flags of that type spawn and respawn in it, and
+  `+f <type>[{n}]` keeps flags of a type always in the world. `bzo.bzw` has a
+  `flag SW` zone for two `+f SW` flags.
+- The server list shows how many of a server's world variables bzo reads,
+  `8/14 set`, and a tap opens the list with read and ignored ones in
+  different colours.
+- More world variables are read: `_friction` and `_momentumFriction`,
+  `_angleTolerance`, `_disableSpeedChecks`, `_hideTeamFlagsOnRadar` and
+  `_hideFlagsOnRadar`, `_forbidHunting`, `_drawSky`, `_fogNoSky` and
+  `_syncLocation`. A fogged map's sky now fades into the fog, as upstream's
+  does.
+- `_drawGroundLights` turns off the light pools on the ground, and
+  `_useLineRain` draws rain as upstream's line streaks, tinted by
+  `_rainBaseColor` and `_rainTopColor`. `_endShotDetection`, `_coldetDepth`,
+  `_coldetElements` and `_cullDepth` are read and have nothing to change.
+- [docs/bzdb.md](docs/bzdb.md) lists every world variable bzo reads, with its
+  default and what it does.
+
 ## [1.2.104] - 2026-10-03
 
 ### Added

@@ -449,6 +449,23 @@ function stepDrive(state, intended, tank, world, clock, dt) {
   } else {
     velocityX = -Math.sin(state.rotation) * forwardInput * tankSpeedNow;
     velocityZ = -Math.cos(state.rotation) * forwardInput * tankSpeedNow;
+    // doFriction (LocalPlayer.cxx:1564), on the ground only, as upstream calls
+    // it from the full-control branch: `_friction` -- `_momentumFriction` while
+    // carrying `M` -- caps how fast the tank's velocity may change at 20 units
+    // a second a second per unit of it. 0, upstream's default, is no cap.
+    const friction = motionFlag === 'M' ? config.MOMENTUM_FRICTION : config.FRICTION;
+    if (friction > 0 && dt > 0 && !state.inAir
+      && Number.isFinite(state.lastVelocityX) && Number.isFinite(state.lastVelocityZ)) {
+      const deltaX = velocityX - state.lastVelocityX;
+      const deltaZ = velocityZ - state.lastVelocityZ;
+      const accel = Math.hypot(deltaX, deltaZ) / dt;
+      const limit = 20 * friction;
+      if (accel > limit) {
+        const ratio = limit / accel;
+        velocityX = state.lastVelocityX + (deltaX * ratio);
+        velocityZ = state.lastVelocityZ + (deltaZ * ratio);
+      }
+    }
   }
 
   const groundLimit = getGroundLimit(tank.flag ?? null);
@@ -491,6 +508,10 @@ function stepDrive(state, intended, tank, world, clock, dt) {
     events.forceSend = true;
     events.jumpStarted = { flap: airControl };
   }
+
+  // The velocity this step drives with, for the next step's friction.
+  state.lastVelocityX = velocityX;
+  state.lastVelocityZ = velocityZ;
 
   // One pass: position, height and heading come back resolved together.
   const step = resolveStep(state, velocityX, state.verticalVelocity || 0, velocityZ,

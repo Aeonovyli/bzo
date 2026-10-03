@@ -86,7 +86,7 @@ on the eight teams and names which one, where bzo spends only 251 and means
 
 ## Client to server
 
-29 types, dispatched by one switch in `server.js`. Fields marked optional are
+30 types, dispatched by one switch in `server.js`. Fields marked optional are
 omitted rather than sent null.
 
 | type | fields | meaning |
@@ -102,6 +102,7 @@ omitted rather than sent null.
 | `nearFlag` | -- | ask what flag is underfoot, for the HUD line |
 | `pause` | -- | toggle; the server runs the countdown |
 | `autopilot` | `on`, `pilot` | the named pilot has, or has given back, the controls. The pilot's name is the motto meanwhile. Refused under `-disableBots` |
+| `watchBots` | `on`, `follow` | send `botIntents`: `on` while the client's debug labels show the server bots' modes, `follow` the bot an observer follows with debug geometry on, or null |
 | `selfDestruct` | -- | `/kill` on yourself |
 | `identify` | -- | toggle the lock/identify target |
 | `killed` | `reason`,`killerId`,`shotId`,`flag`,`stoppedByHit`,`deathMessage` | the client reporting its own death. Only on a proxied connection, where bzfs takes the victim's word for it -- bzo's own server decides deaths itself and ignores this |
@@ -152,6 +153,7 @@ omitted rather than sent null.
 | `identifyResult` | `targetId`, `locked` | the identify answer |
 | `playerPaused` / `playerUnpaused` / `pauseCountdown` / `pauseCancelled` | `playerId` (+ position on pause) | pause state |
 | `autopilot` | `playerId`,`on`,`pilot` | somebody's autopilot changed, or its pilot did |
+| `botIntents` | `bots` (`id`,`mode`,`targetId`), `plan?` (`id`,`intent`) | each server bot's current mode and target, twice a second, only to a client that sent `watchBots`; `plan` is the followed bot's whole intent (route, target, landing, shot) |
 | `message` | `src`, `dst`, `msgType`, `text`, `ts` | chat, in and out |
 | `lag` | `lagMs` | the server's measurement of *your* lag |
 | `serverConfigUpdate` | `serverName`, `motd`, `shotMaxActive`, `ricochet`, `timeLimit`, `timeManualStart`, `maxPlayerScore`, `maxTeamScore` | live config changed |

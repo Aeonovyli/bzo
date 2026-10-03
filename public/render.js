@@ -1384,10 +1384,13 @@ const TRACK_MARK_INDICES = TRACK_MARK_QUADS * 6;
 // billboarded quads, and a non-billboard "cross" of three quads 120 degrees
 // apart, upstream's own volumetric stand-in for a raindrop that need not face
 // the camera): the cross for `rain`/`snow`/`fatrain`, camera-facing billboards
-// for `frog`/`particle`/`bubble`. `doLineRain`'s GL_LINES streak has no
-// equivalent here, so `rain` gets the cross too, sized on its own rather than
-// upstream's zero-width line.
+// for `frog`/`particle`/`bubble`. Upstream's plain `rain` defaults to its
+// GL_LINES streak; bzo gives `rain` the cross too and draws the streak only
+// when a map sets `_useLineRain` itself.
 const WEATHER_RENDER_ORDER = 21;
+// `_rainBaseColor` / `_rainTopColor` defaults (WeatherRenderer.cxx:169-176).
+const WEATHER_LINE_BASE_COLOR = [0.75, 0.75, 0.85, 0.75];
+const WEATHER_LINE_TOP_COLOR = [0, 0, 0, 0];
 const WEATHER_DEFAULT_DENSITY = 1000;
 const WEATHER_DEFAULT_SPREAD = 500;
 const WEATHER_DEFAULT_MAX_PUDDLE_TIME = 1.5;
@@ -1406,10 +1409,8 @@ function weatherSkyHeight() {
 
 // `WeatherRenderer::set()`'s per-`_rainType` deltas over its own outer
 // defaults (density 1000, speed -100/50, size 1x1, spin on, puddles on, white
-// puddles, puddleSpeed 1). `_rainBaseColor`/`_rainTopColor` are absent because
-// they tint upstream's line-rain vertices alone -- `drawDrop`'s textured and
-// billboard branches always draw white -- so they would be no-ops on bzo's
-// single rendering path; `docs/bzw.md` documents the omission.
+// puddles, puddleSpeed 1). `_rainBaseColor`/`_rainTopColor` tint the line
+// streak alone, so they live with `WEATHER_LINE_BASE_COLOR` instead.
 const WEATHER_PRESETS = {
   rain: {
     texture: 'raindrop', size: [0.3, 0.75], speed: -100, speedMod: 50,
@@ -2043,7 +2044,8 @@ class RenderManager {
       this.moonLight.castShadow = this.moonLight.intensity > 0;
     }
 
-    this.scene.background.copy(backgroundColor);
+    if (this._worldDraws('sky')) this.scene.background.copy(backgroundColor);
+    else this.scene.background.setRGB(0, 0, 0);
 
     this._updateCelestialBodies({
       sunX,
@@ -2057,6 +2059,7 @@ class RenderManager {
       moonRadius: moonDistance * BZFLAG_MOON_ANGULAR_RADIUS,
     });
     this._showUpstreamSky(false);
+    this._applySkyFog();
   }
 
   // Upstream's sky (#166): the real sun, moon and stars over the world's
@@ -2114,12 +2117,17 @@ class RenderManager {
     }
 
     const sky = getSkyColor(sunDir, this._skyTint);
+    const skyOn = this._worldDraws('sky');
+    const celestialOn = skyOn && this.celestialEnabled && this._worldDraws('celestial');
     // What shows where the pyramid does not reach -- below the horizon, with
     // no ground there -- is the zenith, as upstream's low-quality sky clears to.
-    this.scene.background.setRGB(sky[0][0], sky[0][1], sky[0][2], THREE.SRGBColorSpace);
+    // With no sky at all, the clear colour is all there is.
+    if (skyOn) this.scene.background.setRGB(sky[0][0], sky[0][1], sky[0][2], THREE.SRGBColorSpace);
+    else this.scene.background.setRGB(0, 0, 0);
     this._showUpstreamSky(true);
     this._updateSkyPyramid(sky, sunDir, getSunsetTop(sunDir));
-    this._updateStars(julianDay, latitude, longitude, areStarsVisible(sunDir));
+    this._skyPyramid.visible = skyOn;
+    this._updateStars(julianDay, latitude, longitude, celestialOn && areStarsVisible(sunDir));
 
     this._updateCelestialBodies({
       sunX,
@@ -2135,7 +2143,8 @@ class RenderManager {
       // The phased moon below stands in for the sphere.
       moonVisible: false,
     });
-    this._updateMoonPhase(sunDir, moonDir, distance, distance * BZFLAG_MOON_ANGULAR_RADIUS, moonUp);
+    this._updateMoonPhase(sunDir, moonDir, distance, distance * BZFLAG_MOON_ANGULAR_RADIUS, celestialOn && moonUp);
+    this._applySkyFog();
   }
 
   _showUpstreamSky(shown) {
@@ -2950,7 +2959,30 @@ class RenderManager {
       celestial: config?.DRAW_CELESTIAL !== false,
       ground: config?.DRAW_GROUND !== false,
       shadows: config?.NO_SHADOWS !== true,
+      // `_drawSky`: off, upstream's `renderSky` returns before drawing
+      // anything -- the colours, the sun, the moon and the stars alike.
+      sky: config?.DRAW_SKY !== false,
+      // `_fogNoSky`: on, the sky is drawn with the fog off
+      // (SceneRenderer.cxx:950); off, upstream's default, fog covers it too.
+      skyFog: config?.FOG_NO_SKY !== true,
+      // `_drawGroundLights`: the pools of light under shots and flags.
+      groundLights: config?.DRAW_GROUND_LIGHTS !== false,
     };
+    this._applySkyFog();
+    this._celestialState = null;
+  }
+
+  // Fog over the sky parts, as `_fogNoSky` says. A material's fog flag changes
+  // its program, so it is set only when the answer does.
+  _applySkyFog() {
+    const fog = this._worldDraws('skyFog');
+    const materials = [this._skyPyramid?.material, this._starField?.material, this._phasedMoon?.material,
+      this.sunMesh?.material, this.sunGlowMesh?.material, this.moonMesh?.material];
+    for (const material of materials) {
+      if (!material || material.fog === fog) continue;
+      material.fog = fog;
+      material.needsUpdate = true;
+    }
   }
 
   _worldDraws(part) {
@@ -3644,7 +3676,7 @@ class RenderManager {
     const receivers = this._groundReceivers;
     let used = 0;
 
-    this._forEachPooledLight((light) => {
+    if (this._worldDraws('groundLights')) this._forEachPooledLight((light) => {
       const height = light.position.y;
       if (!(height > 0)) return;
       const color = light.color;
@@ -4571,21 +4603,47 @@ class RenderManager {
     const dropTexture = createStockMaterialTexture(textureName);
     const puddleTexture = createStockMaterialTexture(puddleTextureName);
 
-    const dropGeometry = billboard
-      ? buildWeatherBillboardGeometry(halfW, halfH)
-      : buildWeatherCrossGeometry(halfW, halfH);
-    const dropMaterial = createWeatherMaterial(dropTexture);
-    const dropMesh = new THREE.InstancedMesh(dropGeometry, dropMaterial, density);
-    dropMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // `_useLineRain`: upstream's `GL_LINES` streak, one segment per drop
+    // from its base colour at the drop up to its top colour.
+    const lineRain = weather.lineRain === true;
+    const lineColors = lineRain
+      ? [weather.rainBaseColor || WEATHER_LINE_BASE_COLOR, weather.rainTopColor || WEATHER_LINE_TOP_COLOR]
+        .map((rgba) => {
+          const linear = new THREE.Color().setRGB(rgba[0], rgba[1], rgba[2], THREE.SRGBColorSpace);
+          return [linear.r, linear.g, linear.b, rgba[3] ?? 1];
+        })
+      : null;
+    const lineHeight = preset.size[1];
+    let dropMesh;
+    if (lineRain) {
+      dropTexture?.dispose();
+      const lineGeometry = new THREE.BufferGeometry();
+      const linePositions = new THREE.BufferAttribute(new Float32Array(density * 6), 3);
+      const lineRgba = new THREE.BufferAttribute(new Float32Array(density * 8), 4);
+      linePositions.setUsage(THREE.DynamicDrawUsage);
+      lineRgba.setUsage(THREE.DynamicDrawUsage);
+      lineGeometry.setAttribute('position', linePositions);
+      lineGeometry.setAttribute('color', lineRgba);
+      dropMesh = new THREE.LineSegments(lineGeometry, new THREE.LineBasicMaterial({
+        vertexColors: true, transparent: true, depthWrite: false,
+      }));
+    } else {
+      const dropGeometry = billboard
+        ? buildWeatherBillboardGeometry(halfW, halfH)
+        : buildWeatherCrossGeometry(halfW, halfH);
+      const dropMaterial = createWeatherMaterial(dropTexture);
+      dropMesh = new THREE.InstancedMesh(dropGeometry, dropMaterial, density);
+      dropMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      dropGeometry.setAttribute(
+        'instanceAlpha', new THREE.InstancedBufferAttribute(new Float32Array(density).fill(1), 1),
+      );
+    }
     // Upstream draws every drop with no frustum test at all --
     // `_CULLING_RAIN` is compiled out (`#define _CULLING_RAIN false`), so the
     // "smart" chunked culling in `WeatherRenderer.cxx` is dead code even
     // there.
     dropMesh.frustumCulled = false;
     dropMesh.renderOrder = WEATHER_RENDER_ORDER;
-    dropGeometry.setAttribute(
-      'instanceAlpha', new THREE.InstancedBufferAttribute(new Float32Array(density).fill(1), 1),
-    );
 
     let puddleMesh = null;
     if (doPuddles) {
@@ -4612,7 +4670,7 @@ class RenderManager {
       preset, density, spread, speed, speedMod, halfW, halfH, startZ, endZ, falling,
       cullRoofTops, roofPuddles, doPuddles, spin, billboard, puddleSpeed, maxPuddleTime,
       obstacles, dropMesh, posX, posY, posZ, dropSpeed, roofTop, spinPhase,
-      puddleMesh, puddles: [], dummy: new THREE.Object3D(),
+      lineRain, lineColors, lineHeight, puddleMesh, puddles: [], dummy: new THREE.Object3D(),
     };
 
     // Seed every drop scattered across the whole fall/rise, upstream's own
@@ -4649,10 +4707,12 @@ class RenderManager {
     const {
       density, dropMesh, posX, posY, posZ, dropSpeed, roofTop, spinPhase,
       spread, startZ, endZ, falling, cullRoofTops, roofPuddles, doPuddles,
-      spin, billboard, speed, speedMod, obstacles, dummy,
+      spin, billboard, speed, speedMod, obstacles, dummy, lineRain, lineColors, lineHeight,
     } = weather;
     const cameraQuaternion = billboard && this.camera ? this.camera.quaternion : null;
     const dropAlpha = dropMesh.geometry.attributes.instanceAlpha;
+    const linePositions = lineRain ? dropMesh.geometry.attributes.position : null;
+    const lineRgba = lineRain ? dropMesh.geometry.attributes.color : null;
 
     for (let i = 0; i < density; i += 1) {
       posY[i] += dropSpeed[i] * dt;
@@ -4672,6 +4732,12 @@ class RenderManager {
         roofTop[i] = (cullRoofTops && falling)
           ? getWeatherTopHeight(obstacles, posX[i], posZ[i], startZ)
           : 0;
+      }
+
+      if (lineRain) {
+        this._writeLineDrop(linePositions.array, lineRgba.array, i, posX[i], posY[i], posZ[i],
+          posY[i] + lineHeight - (dropSpeed[i] * 0.15), lineColors);
+        continue;
       }
 
       dummy.position.set(posX[i], posY[i], posZ[i]);
@@ -4695,8 +4761,30 @@ class RenderManager {
       dropAlpha.array[i] = heightAboveGround < 2 ? Math.max(0, heightAboveGround * 0.5) : 1;
     }
 
+    if (lineRain) {
+      linePositions.needsUpdate = true;
+      lineRgba.needsUpdate = true;
+      return;
+    }
     dropMesh.instanceMatrix.needsUpdate = true;
     dropAlpha.needsUpdate = true;
+  }
+
+  // `drawDrop`'s line branch, near-ground term included as upstream has it:
+  // below 5 units `1 - 5/z` goes negative, so a streak brightens as it
+  // lands rather than fading.
+  _writeLineDrop(positions, rgba, i, x, y, z, topY, colors) {
+    const alphaMod = y < 5 ? 1 - (5 / y) : 0;
+    const p = i * 6;
+    positions[p] = x; positions[p + 1] = y; positions[p + 2] = z;
+    positions[p + 3] = x; positions[p + 4] = topY; positions[p + 5] = z;
+    for (let end = 0; end < 2; end += 1) {
+      const color = colors[end];
+      const c = (i * 8) + (end * 4);
+      rgba[c] = color[0]; rgba[c + 1] = color[1]; rgba[c + 2] = color[2];
+      const alpha = color[3] - alphaMod;
+      rgba[c + 3] = Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : 1;
+    }
   }
 
   _addWeatherPuddle(weather, x, y, z) {
@@ -6899,7 +6987,7 @@ class RenderManager {
     sunRadius, moonRadius, sunVisible = true, moonVisible = true,
   }) {
     if (!this.scene || !this.worldGroup) return;
-    if (!this.celestialEnabled || !this._worldDraws('celestial')) {
+    if (!this.celestialEnabled || !this._worldDraws('celestial') || !this._worldDraws('sky')) {
       this.clearCelestialBodies();
       return;
     }

@@ -71,8 +71,6 @@ be playing something else by the time you read this.
 | box/pyramid non-vertical `spin` | `bmbz.ducatileague.org:6004` | LouMan's Mystic Valley |
 | box/pyramid non-vertical `spin` | `bmbz.ducatileague.org:5152` | Airfield Attack! |
 | box/pyramid non-vertical `spin` | `bmbz.ducatileague.org:6002` | INCOMING! :: by ahs3 |
-| zone `flag <type>` | `bmbz.ducatileague.org:5157` | Island Hopping |
-| zone `flag <type>` | `bmbz.ducatileague.org:5160` | Castle Warfare |
 | `spheremap` | `bmbz.ducatileague.org:5185` | FATALITY by tankatek |
 | `occluder` | `1purplepanzer.mooo.com:4101` | Desert War |
 | `angular`/`slide` physics | `bmbz.ducatileague.org:5179` | BMBZ: Eria Ziel |
@@ -268,10 +266,6 @@ What's left:
 
 ## Zones and occluders
 
-- [ ] A zone's `flag <type>` qualifier -- "flags of this type respawn here",
-      distinct from `zoneflag <type> [count]`, which is read and puts flags
-      into the world. Dropped on 9 of the 54 live maps surveyed, the most
-      widespread single keyword bzo does not read. `CustomZone::read`.
 - [ ] `occluder` -- a mesh marked as blocking what is behind it, upstream's
       own visibility cull. One map of 54. bzo culls through three.js's own
       frustum culling and nothing else, so this is a rendering-speed
@@ -282,25 +276,14 @@ What's left:
 Native bzfs variables (`server/bzdb-defaults.cjs`) that public servers set to
 something other than upstream's default and bzo does not yet read from a map's
 `-set` lines. Counts are servers of the 231 bzo had variables for on
-2026-10-02; plugin variables are left out. What bzo does read is the `-set`
-rows of `docs/bzw.md`'s options table.
+2026-10-02; plugin variables are left out. What bzo does read is
+`docs/bzdb.md`.
 
 - [ ] Remove server.json's old names for BZDB variables once every running
       server has moved them into its `bzdb` block: `LEGACY_BZDB_KEYS`,
       `shotDuration` and `shotDistance` in `readServerBzdb` (server.js), and
       the paragraph on them in docs/installation.md. The startup log line
       "server.json keys read as BZDB" says which servers still have some.
-
-Not planned, as upstream's own collision and culling tree depths with no bzo
-equivalent: `_coldetDepth`, `_cullDepth`. Nor `_drawGroundLights` (12): it
-turns off the meshes upstream lays under each light so its vertex-lit ground
-can show the light, and three.js lights every pixel, so there is nothing to
-turn off. Nor `_endShotDetection` (26): bzfs kicks a client that reports more shot
-endings than its shots allow, and a bzo server ends every shot itself. Nor
-`_angleTolerance` (16): upstream
-sends a move when its dead reckoning drifts past it, and bzo sends one when a
-speed changes, so there is no tolerance to set. `_rainBaseColor` is dropped
-on purpose (`docs/bzw.md`, **Weather**).
 
 ## Leftovers
 

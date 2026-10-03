@@ -5168,6 +5168,8 @@ let lastSentVerticalVelocity = 0;
 let lastSentAirVelocityX = 0;
 let lastSentAirVelocityZ = 0;
 let lastSentTime = 0;
+// The heading the last move carried, for `_angleTolerance`'s drift check.
+let lastSentHeading = null;
 let worldTime = 0;
 
 // The sky's clock, each frame. Upstream's (#166) is the real instant -- or the
@@ -6178,7 +6180,51 @@ initHudControls({
 });
 
 // --- Debug Labels Button Wiring ---
+// Server bots' current plan -- what each is doing and at whom -- shown on its
+// name label while the debug labels are on. Asked for only then, so nobody
+// else is sent it; `botWatchSent` is what this connection last asked for.
+// And the whole plan of the one bot an observer follows -- its route, target
+// and shot -- drawn over it while the debug geometry is on (`followedBotPlan`).
+let botIntents = new Map();
+let botWatchSent = null;
+let followedBotPlan = null;
+
+function syncBotWatch() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const want = debugLabelsEnabled === true;
+  const follow = showDebugGeometry && isObserver() && roamViewNeedsTarget(roamView) && roamTargetId !== null
+    ? String(roamTargetId) : null;
+  const key = `${want}|${follow}`;
+  if (botWatchSent === key) return;
+  botWatchSent = key;
+  sendToServer({ type: 'watchBots', on: want, follow });
+  if (!follow) followedBotPlan = null;
+  if (!want && botIntents.size > 0) {
+    const was = [...botIntents.keys()];
+    botIntents = new Map();
+    was.forEach(refreshTankNameLabel);
+  }
+}
+
+// A tank's name label: the name, and for a server bot under the debug labels
+// what it is doing -- `Ace1 · chase Tim`.
+function tankLabelText(playerId, name) {
+  const intent = debugLabelsEnabled ? botIntents.get(playerId) : null;
+  if (!intent?.mode) return name;
+  const target = intent.targetId !== null && intent.targetId !== undefined
+    ? tanks.get(intent.targetId)?.userData?.playerState?.name : null;
+  return `${name} · ${intent.mode}${target ? ` ${target}` : ''}`;
+}
+
+function refreshTankNameLabel(playerId) {
+  const tank = tanks.get(playerId);
+  const player = tank?.userData?.playerState;
+  if (!player?.name || !tank.userData.nameLabel?.material) return;
+  renderManager.updateSpriteLabel(tank.userData.nameLabel, tankLabelText(playerId, player.name), player.color);
+}
+
 function updateDebugLabelsButton() {
+  syncBotWatch();
   const btn = document.getElementById('debugLabelsBtn');
   if (!btn) return;
   if (debugLabelsEnabled) {
@@ -7080,6 +7126,7 @@ function connectToServer() {
   ws = new WebSocket(`${protocol}//${window.location.host}${query}`);
 
   ws.onopen = () => {
+    botWatchSent = null;
     callVoiceManager('start');
     showMessage('Connected to server!');
     debugLog(`ws.open host=${window.location.host} protocol=${window.location.protocol}`);
@@ -7264,6 +7311,7 @@ function applyPlayerMoveMessage(message, isTeleportPacket) {
       localTeleportCooldownUntil = sampleEpochClock() + PLAYER_TELEPORT_COOLDOWN_MS;
       lastSentForwardSpeed = Number.isFinite(message.fs) ? message.fs : lastSentForwardSpeed;
       lastSentRotationSpeed = Number.isFinite(message.rs) ? message.rs : lastSentRotationSpeed;
+      lastSentHeading = null;
       lastSentVerticalVelocity = Number.isFinite(message.vv) ? message.vv : lastSentVerticalVelocity;
       lastSentAirVelocityX = Number.isFinite(message.vx) ? message.vx : lastSentAirVelocityX;
       lastSentAirVelocityZ = Number.isFinite(message.vz) ? message.vz : lastSentAirVelocityZ;
@@ -7502,6 +7550,7 @@ function handleServerMessage(message) {
         // Initialize dead reckoning state (velocity-based)
         lastSentForwardSpeed = 0;
         lastSentRotationSpeed = 0;
+        lastSentHeading = null;
         lastSentVerticalVelocity = 0;
         lastSentTime = performance.now();
         void prepareInitialRender(message, sequenceId);
@@ -7535,6 +7584,7 @@ function handleServerMessage(message) {
       removePausedSphere(message.player.id);
       if (message.player.id === myPlayerId) {
         gameplayJoinConfirmed = true;
+        syncBotWatch();
         // The moment this join is confirmed, not before -- whatever is
         // already applied (the live world on a fresh connection, or
         // whichever map the entry dialog's Map Viewer preview settled on) is
@@ -7917,6 +7967,13 @@ function handleServerMessage(message) {
     // which is what the rest of bzo's wire does (`docs/network.md`): on a
     // proxied server it *is* that message, and a name of bzo's own would be one
     // more thing to map.
+    case 'botIntents': {
+      followedBotPlan = message.plan ? { ...message.plan, at: performance.now() } : null;
+      const previous = botIntents;
+      botIntents = new Map(debugLabelsEnabled ? (message.bots || []).map((bot) => [bot.id, bot]) : []);
+      new Set([...previous.keys(), ...botIntents.keys()]).forEach(refreshTankNameLabel);
+      break;
+    }
     case 'gmUpdate':
       setPlayerLockTarget(message.playerId, message.targetId ?? null);
       warnLockedOnMe(message.playerId, message.targetId ?? null);
@@ -8213,7 +8270,7 @@ function addPlayer(player) {
 
   // Update name label if it exists and has a material
   if (tank.userData.nameLabel && tank.userData.nameLabel.material && player.name) {
-    renderManager.updateSpriteLabel(tank.userData.nameLabel, player.name, player.color);
+    renderManager.updateSpriteLabel(tank.userData.nameLabel, tankLabelText(player.id, player.name), player.color);
   }
 
   // Update ghost mesh name label if it exists and has a material
@@ -11132,8 +11189,25 @@ function requestLockOn() {
 // the tank, and it goes out the moment the lock does -- a target that dies,
 // pauses or takes `ST` is dropped by `getLockTargetTank` without a packet.
 // Blindness takes it too, as it takes everything else out the window.
+// The autopilot's chase marks its quarry the same way: upstream's
+// `AutoPilot::chasePlayer` makes it the tank's target (AutoPilot.cxx:394), and
+// the HUD brackets whatever the target is (playing.cxx:7351). A real lock
+// wins, and a target hidden by Stealth is not marked.
+function getAutopilotTargetTank() {
+  if (!autopilotOn) return null;
+  const targetId = autopilotOutput?.targetId;
+  if (targetId === null || targetId === undefined) return null;
+  const tank = tanks.get(targetId);
+  const state = tank?.userData?.playerState;
+  if (!state || !state.alive || state.paused || isObserverTeam(state.team)) return null;
+  if (hidesFromRadar(getPlayerFlagType(targetId))) return null;
+  return tank;
+}
+
 function updateLockOnMarker() {
-  const target = isObserver() || isViewBlinded() ? null : getLockTargetTank(myPlayerId);
+  const target = isObserver() || isViewBlinded()
+    ? null
+    : (getLockTargetTank(myPlayerId) || getAutopilotTargetTank());
   if (!target) {
     renderManager.setLockOnMarker(null);
     return;
@@ -11331,6 +11405,9 @@ function toggleHuntRow() {
 // targeting cone on its own, the same split `setPlayerTarget` already makes.
 function updateHuntBearing() {
   if (!huntState.hasHunted()) return;
+  // `_forbidHunting`: the world allows marking but no sighting
+  // (playing.cxx:4507), so a hunted tank in the sights is never announced.
+  if (gameConfig?.FORBID_HUNTING === true) return;
   if (!myTank || isObserver() || !isMyTankAlive()) return;
   // Blindness and Colourblindness both refuse the alert and the ping
   // (playing.cxx:4562). Upstream picks the target first and then checks; the
@@ -12061,11 +12138,13 @@ const AUTOPILOT_REPORT_MS = 10000;
 let autopilotReportAt = 0;
 const autopilotTally = { kills: 0, deaths: 0 };
 
-function drawAutopilotIntent(intent, nowMs) {
+// `origin` is where the route starts: the tank the plan belongs to, which is
+// this one unless it is a followed server bot's.
+function drawAutopilotIntent(intent, nowMs, origin = null) {
   const segments = [];
   const lift = (p, dy = AUTOPILOT_OVERLAY.lift) => ({ x: p.x, y: p.y + dy, z: p.z });
   if (intent?.route?.length) {
-    let from = { x: playerX, y: myTank.position.y, z: playerZ };
+    let from = origin || { x: playerX, y: myTank.position.y, z: playerZ };
     for (const node of intent.route) {
       const color = node.jump
         ? AUTOPILOT_OVERLAY.jump
@@ -12173,10 +12252,29 @@ function noteAutopilotFlight(wasInAir, nowInAir, rotationSpeed) {
   });
 }
 
+// A followed server bot's plan, drawn as an autopilot's own is: kept while the
+// server keeps sending it, dropped a second after it stops.
+const FOLLOWED_BOT_PLAN_STALE_MS = 1000;
+function drawFollowedBotPlan() {
+  syncBotWatch();
+  const plan = followedBotPlan;
+  const now = performance.now();
+  const tank = plan ? tanks.get(plan.id) : null;
+  if (!showDebugGeometry || !plan || !tank || now - plan.at > FOLLOWED_BOT_PLAN_STALE_MS) {
+    if (followedBotPlanDrawn) clearAutopilotIntent();
+    followedBotPlanDrawn = false;
+    return;
+  }
+  drawAutopilotIntent(plan.intent, now, { x: tank.position.x, y: tank.position.y, z: tank.position.z });
+  followedBotPlanDrawn = true;
+}
+let followedBotPlanDrawn = false;
+
 function runAutopilot() {
   if (!autopilotOn || isObserver() || !isMyTankAlive() || pauseState.paused) {
     if (autopilotOutput) clearAutopilotIntent();
     autopilotOutput = null;
+    if (isObserver()) drawFollowedBotPlan();
     return;
   }
   autopilotOutput = autopilots.get(autopilotId).think(buildAutopilotView());
@@ -12527,6 +12625,14 @@ function handleMotion(deltaTime) {
   // Velocity-based dead reckoning: only send when velocities change (positions are extrapolated)
   const forwardSpeedDelta = Math.abs(forwardSpeed - lastSentForwardSpeed);
   const rotationSpeedDelta = Math.abs(rotationSpeed - lastSentRotationSpeed);
+  // Player::isDeadReckoningWrong (Player.cxx:1300): the heading the others
+  // predict from the last move -- its heading, turned at its rate since -- drifts
+  // from the real one by more than `_angleTolerance` (0.05 rad by default).
+  const angleTolerance = Number.isFinite(gameConfig?.ANGLE_TOLERANCE) ? gameConfig.ANGLE_TOLERANCE : 0.05;
+  const predictedHeading = lastSentHeading === null ? playerRotation
+    : lastSentHeading + (lastSentRotationSpeed * (gameConfig?.TANK_ROTATION_SPEED || 0)
+      * (timeSinceLastSend / 1000));
+  const headingDrift = Math.abs(normalizeAngle(playerRotation - predictedHeading));
   // Don't check vertical velocity changes while in air - gravity is extrapolated
   // Only jump/land transitions matter (handled by forceMoveSend)
   const verticalVelocityDelta = airborneState ? 0 : Math.abs(verticalVelocity - lastSentVerticalVelocity);
@@ -12592,6 +12698,7 @@ function handleMotion(deltaTime) {
   if (rotationSpeedDelta > VELOCITY_THRESHOLD) reasons.push(`rs:${rotationSpeedDelta.toFixed(3)}`);
   if (verticalVelocityDelta > VERTICAL_VELOCITY_THRESHOLD) reasons.push(`vv:${verticalVelocityDelta.toFixed(3)}`);
   if (airVelocityDelta > AIR_VELOCITY_THRESHOLD) reasons.push(`av:${airVelocityDelta.toFixed(3)}`);
+  if (headingDrift > angleTolerance) reasons.push(`r:${headingDrift.toFixed(3)}`);
   if (timeSinceLastSend > getMaxUpdateInterval()) reasons.push(`time:${(timeSinceLastSend/1000).toFixed(1)}s`);
 
   // Minimum 100ms between non-forced updates to prevent rapid-fire from calculation noise
@@ -12618,7 +12725,8 @@ function handleMotion(deltaTime) {
       forwardSpeedDelta > VELOCITY_THRESHOLD ||
       rotationSpeedDelta > VELOCITY_THRESHOLD ||
       verticalVelocityDelta > VERTICAL_VELOCITY_THRESHOLD ||
-      airVelocityDelta > AIR_VELOCITY_THRESHOLD
+      airVelocityDelta > AIR_VELOCITY_THRESHOLD ||
+      headingDrift > angleTolerance
     ));
 
   // A driving observer (issue #68) resolves every bit of this exactly like a
@@ -12706,6 +12814,7 @@ function handleMotion(deltaTime) {
     // Store the ROUNDED values we actually sent to prevent rounding-induced deltas
     lastSentForwardSpeed = sentFS;
     lastSentRotationSpeed = sentRS;
+    lastSentHeading = movePacket.r;
     lastSentVerticalVelocity = sentVV;
     lastSentAirVelocityX = movePacket.vx;
     lastSentAirVelocityZ = movePacket.vz;
@@ -16587,12 +16696,18 @@ function updateRadar() {
     radarCtx.lineWidth = 1.5;
     // Upstream walks the flags backwards purely so the team flags, which come
     // first, end up drawn over the superflags. Two passes say that outright.
+    // `_hideFlagsOnRadar` takes every flag on the ground off the panel, and
+    // `_hideTeamFlagsOnRadar` the team flags (RadarRenderer.cxx:688-707); a
+    // carried flag is the tank's, and shows with it either way.
+    const hideAllFlags = gameConfig?.HIDE_FLAGS_ON_RADAR === true;
+    const hideTeamFlags = hideAllFlags || gameConfig?.HIDE_TEAM_FLAGS_ON_RADAR === true;
     flags.forEach((flag) => {
-      if (getFlagTeamIndex(flag.type) === null) drawRadarFlag(flag);
+      if (getFlagTeamIndex(flag.type) === null && !hideAllFlags) drawRadarFlag(flag);
     });
     radarSoughtFlags.length = 0;
     flags.forEach((flag) => {
       if (getFlagTeamIndex(flag.type) === null) return;
+      if (hideTeamFlags && flag.status !== FLAG_STATUS.ON_TANK) return;
       // A sought flag is held back rather than batched, so its cross is not
       // drawn twice in two different alphas.
       if (isSoughtTeamFlag(flag, myTeamIndex)) {

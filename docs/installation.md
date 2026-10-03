@@ -21,8 +21,8 @@ On first start, the server copies [example-server.json](../example-server.json) 
 Its `bzdb` block is upstream's command-line `-set`: world variables by
 upstream's names and as upstream writes the values, `"_tankSpeed": "30"` or
 `"_shotRange": "_shotSpeed * 3.5"`. A map's own `-set` lines go over it, and
-`/set` and `/reset` change it while the server runs. [docs/bzw.md](bzw.md)
-lists the variables bzo reads. A server.json from before the block still
+`/set` and `/reset` change it while the server runs. [docs/bzdb.md](bzdb.md)
+lists the variables bzo reads, with their defaults. A server.json from before the block still
 works: its old keys (`tankSpeed`, `gravity`, `shotDuration` and the rest) are
 read as the variables they were, and the startup log names each one to move.
 

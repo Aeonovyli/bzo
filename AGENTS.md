@@ -622,7 +622,8 @@ map's `-set` lines, the server's `/set`s, or a bzfs target's whole table. The
 `worldConfig`) turns them into config, and the server and every browser run it
 over the same strings -- `init.bzdb` and `setVar` carry them raw, as upstream
 carries them in `MsgSetVar`. A new world variable bzo reads is a row in
-`BZDB_CONFIG_VARS`, never a second reader on one side.
+`BZDB_CONFIG_VARS`, never a second reader on one side, and a row in
+`docs/bzdb.md`, the one place a variable's meaning and default are written.
 
 **One world's tank and flags.** The tank's size is `TANK` in the `collision`
 pair, and a flag's numbers are the `flags` pair's own (`getShotEffects`,

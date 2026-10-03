@@ -1444,10 +1444,35 @@ function describeOwnWorld(world) {
   ];
 }
 
+// Which of a world's variables bzo would ignore, as the map loader decides it:
+// the same `-set` lines through the same parser, so the list cannot disagree
+// with a load. Kept per variable list, since the page redraws every server.
+const unreadVariableCache = new Map();
+function getUnreadWorldVariables(variables) {
+  const key = JSON.stringify(variables);
+  let unread = unreadVariableCache.get(key);
+  if (!unread) {
+    const lines = ['options',
+      ...variables.map(([name, value]) => `-set ${name} "${String(value).replace(/"/g, '')}"`),
+      'end'];
+    unread = new Set(parseBZWServerOptions(lines).unreadBZDBVars.map((entry) => entry.split('=')[0]));
+    if (unreadVariableCache.size > 500) unreadVariableCache.clear();
+    unreadVariableCache.set(key, unread);
+  }
+  return unread;
+}
+
+// `8/14 set`: how many of a world's variables bzo reads, of all it sets. A tap
+// or a click opens the list -- read ones in the accent, ignored ones muted --
+// which a hover title could not do on a phone.
 function describeVariableCount(variables) {
   if (!Array.isArray(variables) || !variables.length) return '';
-  const lines = variables.map(([name, value]) => `${name} ${value}`).join('\n');
-  return `<span title="${escapeHtml(lines)}">${variables.length} set</span>`;
+  const unread = getUnreadWorldVariables(variables);
+  const read = variables.filter(([name]) => !unread.has(name)).length;
+  const rows = variables.map(([name, value]) => `<li class="${unread.has(name) ? 'var-unread' : 'var-read'}"`
+    + ` title="${unread.has(name) ? 'ignored by bzo' : 'read by bzo'}">`
+    + `${escapeHtml(name)} ${escapeHtml(String(value))}</li>`).join('');
+  return `<details class="vars"><summary>${read}/${variables.length} set</summary><ul>${rows}</ul></details>`;
 }
 
 // The bzflag.org account a server's key belongs to, as its forum profile: one
@@ -1472,8 +1497,8 @@ function describeRelayedWorld(world) {
     // A `t` hash is a world bzfs generated rather than read from a file, which
     // usually changes when that server restarts (`isBzfsWorldHash`).
     ['World', /^t/i.test(world.hash || '') ? 'temporary' : ''],
-    // Only how many: the list is long and a pane is not the place for it. The
-    // names are on hover and in the filter (`v)`).
+    // How many bzo reads of how many are set; the names open under it, and
+    // are in the filter too (`v)`).
     ['Variables', describeVariableCount(world.variables)],
     ['sent/inflated', escapeHtml(joinSizes(world.sent, world.inflated))],
     ['bzw/json/br', escapeHtml(joinSizes(world.bzw, world.json, world.brotli))],
@@ -2509,6 +2534,12 @@ function renderListPage({
   .flash.success { background: #16321f; color: #b7e2c2; border-color: #4CAF50; }
   .flash.error { background: #3a1a17; color: #f0b8b2; border-color: #c0392b; }
   .stale { color: #f0b8b2; }
+  /* A world's variables: read by bzo in the accent, ignored ones muted. */
+  details.vars summary { cursor: pointer; }
+  details.vars ul { margin: 0.3rem 0 0; padding: 0; list-style: none; font-family: monospace; font-size: 0.85em; }
+  details.vars li { overflow-wrap: anywhere; }
+  .var-read { color: #8fd19e; }
+  .var-unread { color: #9a8f86; }
   /* The same themed scrollbar the game's own panels use (public/styles.css):
      accent thumb on a dark track, standard properties first and the WebKit
      pseudo-elements for the versions that predate them. This page has its own
@@ -2964,6 +2995,7 @@ const GAME_CONFIG = {
   FLAG_ALTITUDE, // BZFlag _flagAltitude
   FLAG_POLE_SIZE, // BZFlag _flagPoleSize
   SPEED_CHECKS_LOG_ONLY: false, // BZFlag _speedChecksLogOnly
+  DISABLE_SPEED_CHECKS: false, // BZFlag _disableSpeedChecks
   UPDATE_THROTTLE_RATE: 30, // BZFlag _updateThrottleRate, updates a second at most
   FORBID_MARKERS: false, // BZFlag _forbidMarkers
   // SpawnPolicy (`findSafeSpawn`): tank radii from a tank facing the spot, from
@@ -6158,11 +6190,7 @@ function buildSphereMesh(sphere) {
 
 const WEATHER_RAIN_TYPES = new Set(['rain', 'snow', 'fatrain', 'frog', 'particle', 'bubble']);
 
-// The single-value `_rain*` variables that still mean something once
-// `doLineRain`/`useRainBillboards`/`userRainScale` are gone -- `_rainBaseColor`
-// and `_rainTopColor` are dropped for the same reason: both tint upstream's
-// line-rain vertices alone (`drawDrop`'s non-line branch always draws white),
-// so they would be no-ops here. Mapped to the `weather` field bzo's own JSON
+// The single-value `_rain*` variables bzo's weather reads. Mapped to the `weather` field bzo's own JSON
 // uses, not upstream's BZDB name, since the client never reads a BZDB var.
 const WEATHER_RAIN_NUMERIC_VARS = new Map([
   ['_rainDensity', 'density'],
@@ -6191,7 +6219,7 @@ function parseBZWServerOptions(lines) {
     // Server options in the map's own `options` block that no test above
     // claims, by option, so a map says which of its settings bzo ignored.
     unreadOptions: new Map(),
-    forbiddenFlags: [], unreadBZDBVars: [], serverMessages: [], adMessages: [], gameplay: {},
+    forbiddenFlags: [], requiredFlagCounts: {}, unreadBZDBVars: [], serverMessages: [], adMessages: [], gameplay: {},
   };
   // Every `-set`, in order, so a value may be a formula over the others and
   // upstream's defaults -- `12*_muzzleHeight` -- evaluated as BZDB evaluates
@@ -6315,6 +6343,29 @@ function parseBZWServerOptions(lines) {
         ? requestedFlags
         : 16;
     }
+    // +f <abbreviation|good|bad>[{count}]: flags of a type that are always in
+    // the world, upstream's `flagCount` (CmdLineOptions.cxx:1635-1675) --
+    // one by default, `{n}` for n, `good`/`bad` one of every type in the set.
+    // Unlike a `zoneflag` they have no zone of their own, so they spawn and
+    // respawn anywhere, or in a zone a `flag` line names their type in.
+    // `team` and a team type ask for extra team flags, which bzo does not have.
+    if (readOption('+f') && value) {
+      const raw = value.trim();
+      const brace = raw.indexOf('{');
+      const parsedCount = brace >= 0 ? parseInt(raw.slice(brace + 1), 10) : 1;
+      const count = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 1;
+      const wanted = (brace >= 0 ? raw.slice(0, brace) : raw).toUpperCase();
+      const add = (abbreviation) => {
+        options.requiredFlagCounts[abbreviation] = (options.requiredFlagCounts[abbreviation] || 0) + count;
+      };
+      if (wanted === 'GOOD' || wanted === 'BAD') {
+        for (const abbreviation of FLAG_ABBREVIATIONS) {
+          if (!isTeamFlag(abbreviation) && isBadFlag(abbreviation) === (wanted === 'BAD')) add(abbreviation);
+        }
+      } else if (getFlagType(wanted) && !isTeamFlag(wanted)) {
+        add(wanted);
+      }
+    }
     // -f <abbreviation|good|bad>: take a flag type out of the pool a slot draws
     // from, upstream's flagDisallowed table. Disallows accumulate and nothing
     // puts one back, so this is a switch like the rest even though it names its
@@ -6407,6 +6458,16 @@ function parseBZWServerOptions(lines) {
         // over the preset's own. A colour that will not parse leaves it.
         const color = parseColorString(setValue || '');
         if (color) options.weather = { ...(options.weather || {}), puddleColor: color.slice(0, 3) };
+      } else if (value === '_rainBaseColor' || value === '_rainTopColor') {
+        // `WeatherRenderer::set`: the line streak's two vertex colours.
+        const color = parseColorString(setValue || '');
+        if (color) {
+          const field = value === '_rainBaseColor' ? 'rainBaseColor' : 'rainTopColor';
+          options.weather = { ...(options.weather || {}), [field]: color.slice(0, 4) };
+        }
+      } else if (value === '_useLineRain') {
+        const parsed = parseInt(setValue, 10);
+        options.weather = { ...(options.weather || {}), lineRain: Number.isFinite(parsed) && parsed !== 0 };
       } else if (value === '_disableBots') {
         // What `-disableBots` publishes, so a map stating it means the same.
         if (bzdbIsTrue(setValue ?? '')) options.disableBots = true;
@@ -7507,12 +7568,33 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         }
         continue;
       }
-      // `flag` is the rest of CustomZone::read: a zone that any flag of a
-      // named type spawns in. Not read yet.
+      // flag <abbreviation|good|bad> [...] (CustomZone.cxx:80-140): every flag
+      // of a named type spawns, and respawns, somewhere in a zone that names
+      // it -- `getFlagSpawnZone`. Unlike `zoneflag` it puts no flags into the
+      // world; it only says where the ones already there come back. A team
+      // flag is not a type this takes: upstream refuses it ("you probably
+      // want a safety") and so does this, the word skipped.
       if (token === 'flag') {
-        unreadZoneKeywords.add(token);
+        const [, ...rest] = line.split(/\s+/);
+        for (const raw of rest) {
+          const wanted = raw.trim().toUpperCase();
+          if (!wanted) continue;
+          if (wanted === 'GOOD' || wanted === 'BAD') {
+            for (const abbreviation of FLAG_ABBREVIATIONS) {
+              if (isTeamFlag(abbreviation)) continue;
+              if (isBadFlag(abbreviation) === (wanted === 'BAD')) currentZone.flagTypes.add(abbreviation);
+            }
+          } else if (!getFlagType(wanted)) {
+            currentZone.unknownFlags.add(wanted);
+          } else if (!isTeamFlag(wanted)) {
+            currentZone.flagTypes.add(wanted);
+          }
+        }
         continue;
       }
+      // `name` is a zone's label and nothing else reads it; anything else is a
+      // keyword bzo does not act on, named once for the whole map.
+      if (token !== 'name') unreadZoneKeywords.add(token);
       continue;
     }
 
@@ -8004,6 +8086,7 @@ function parseBZWMap(filename, { quiet = false, extraMessages = [] } = {}) {
         halfDepth: 0,
         rotation: 0,
         flagCounts: new Map(),
+        flagTypes: new Set(),
         unknownFlags: new Set(),
         teams: new Set(),
         safety: new Set(),
@@ -15424,22 +15507,42 @@ function getRandomZonePoint(zone) {
 }
 
 // WorldInfo::getFlagSpawnPoint. Upstream asks the flag-id qualifier `#<index>`
-// first, which for a `zoneflag` slot names exactly one zone, then the type
-// qualifier `f<abbv>` that the `flag` keyword builds. bzo does not read `flag`,
-// so the first question is the only one there is.
+// first, which for a `zoneflag` slot names exactly one zone, then -- for a
+// flag that is not a team's -- the type qualifier `f<abbv>` the `flag` keyword
+// builds, which may name several: one of them is picked with a chance in
+// proportion to its area (`EntryZones::calculateQualifierLists`). Zones of no
+// area between them give no answer, as upstream's division by their total
+// does, and the flag goes anywhere.
 function getFlagSpawnZone(flag) {
-  if (!flag || flag.zoneIndex === null) return null;
-  return MAP_ZONES[flag.zoneIndex] || null;
+  if (!flag) return null;
+  if (flag.zoneIndex !== null && flag.zoneIndex !== undefined) return MAP_ZONES[flag.zoneIndex] || null;
+  // The type the flag has now -- upstream asks before a reset clears it -- or,
+  // for a required slot not yet in the world, the one it is pinned to.
+  const type = flag.type ?? flag.requiredType ?? null;
+  if (!type || isTeamFlag(type)) return null;
+  const named = MAP_ZONES.filter((zone) => zone.flagTypes?.has(type));
+  if (named.length === 0) return null;
+  const area = (zone) => 4 * zone.halfWidth * zone.halfDepth;
+  const total = named.reduce((sum, zone) => sum + area(zone), 0);
+  if (!(total > 0)) return null;
+  let pick = Math.random() * total;
+  for (const zone of named) {
+    pick -= area(zone);
+    if (pick < 0) return zone;
+  }
+  return named[named.length - 1];
 }
 
 function findFlagSpawnPosition(flag = null) {
-  const zone = getFlagSpawnZone(flag);
+  let zone = null;
   const span = Math.max(1, GAME_CONFIG.MAP_SIZE - BASE_SIZE);
   const maxHeight = getMaxObstacleTopY(OBSTACLES);
   for (let attempt = 0; attempt < 10000; attempt++) {
     // Upstream re-asks getFlagSpawnPoint on every attempt and only falls back to
     // a random world point when it has no answer, so a zone flag re-rolls inside
-    // its own zone rather than escaping it once the zone proves crowded.
+    // its zones rather than escaping them once one proves crowded -- and a type
+    // several zones name may land in a different one each time.
+    zone = getFlagSpawnZone(flag);
     const spot = zone
       ? getRandomZonePoint(zone)
       : {
@@ -16362,6 +16465,15 @@ function createFlags() {
     : [];
   teamFlagTeams.forEach((team) => {
     flags.push(createFlagSlot(flags.length, getTeamColorIndex(team)));
+  });
+  // `+f` flags next: required types with no zone, so they spawn anywhere a
+  // `flag` zone does not claim them. A forbidden type is skipped, as a zone's
+  // is below.
+  Object.entries(mapServerOptions.requiredFlagCounts || {}).forEach(([abbreviation, count]) => {
+    if (getForbiddenFlags().includes(abbreviation)) return;
+    for (let slot = 0; slot < count; slot++) {
+      flags.push(createFlagSlot(flags.length, null, { requiredType: abbreviation }));
+    }
   });
   // Zone flags next, before the random slots, which is upstream's order in
   // finalizeParsing: team flags, then `+f` flags, then zone flags, then the `-s`
@@ -20286,6 +20398,12 @@ function acceptConnection(ws, req) {
           forwardVoiceSignal(player, message);
           break;
         }
+        // A client showing its debug labels asks for the server bots' plans
+        // (`broadcastBotIntents`); nobody else is sent them.
+        case 'watchBots':
+          player.watchBots = message.on === true;
+          player.watchBotFollow = typeof message.follow === 'string' ? message.follow : null;
+          break;
         case 'debug': {
           // Log debug messages from clients
           const payloadName = typeof message.name === 'string' ? message.name.trim() : '';
@@ -20440,7 +20558,10 @@ function acceptConnection(ws, req) {
           // steering where nothing else can.
           const airborne = player.jumpDirection !== null && player.jumpDirection !== undefined;
           const steeringInAir = airborne && hasAirControl(getPlayerFlag(player.id)?.type ?? null);
-          if (ANTICHEAT_CONFIG.mode !== 'disabled' && accelWindow > 0 && !steeringInAir) {
+          // `_disableSpeedChecks` turns the speed check off outright, as
+          // upstream's sets its tolerance to infinity (bzfs.cxx:4442).
+          if (ANTICHEAT_CONFIG.mode !== 'disabled' && accelWindow > 0 && !steeringInAir
+            && GAME_CONFIG.DISABLE_SPEED_CHECKS !== true) {
             // The stick is not in the packet, so the server cannot tell which of
             // the client's rates applied (`updateMovement` in `client.js` picks
             // deceleration by the *desired* input, which the server never sees,
@@ -21890,7 +22011,41 @@ setInterval(() => {
       logError(`[BOT] "${bot.player.name}" ${err.stack || err.message}`);
     }
   });
+  broadcastBotIntents(now);
 }, BOT_TICK_SECONDS * 1000);
+
+// What each server bot is doing and at whom, twice a second, to the clients
+// that asked (`watchBots`) -- their debug labels show it on the bot's name.
+const BOT_INTENT_INTERVAL_MS = 500;
+let lastBotIntentsAt = 0;
+function broadcastBotIntents(now) {
+  if (now - lastBotIntentsAt < BOT_INTENT_INTERVAL_MS) return;
+  lastBotIntentsAt = now;
+  const watchers = [...players.values()]
+    .filter((p) => (p.watchBots || p.watchBotFollow) && p.ws?.readyState === 1);
+  if (watchers.length === 0) return;
+  const summary = [...bots.values()].map((bot) => ({
+    id: bot.player.id,
+    mode: bot.driver.lastOut?.intent?.mode ?? null,
+    targetId: bot.driver.lastOut?.targetId ?? null,
+  }));
+  const plain = JSON.stringify({ type: 'botIntents', bots: summary });
+  for (const watcher of watchers) {
+    // A watcher following a bot gets its whole plan too: route, target,
+    // landing and the shot it chose, as its own autopilot's overlay draws.
+    const followed = watcher.watchBotFollow !== null && watcher.watchBotFollow !== undefined
+      ? [...bots.values()].find((bot) => String(bot.player.id) === watcher.watchBotFollow) : null;
+    if (!followed?.driver.lastOut) {
+      watcher.ws.send(plain);
+      continue;
+    }
+    watcher.ws.send(JSON.stringify({
+      type: 'botIntents',
+      bots: summary,
+      plan: { id: followed.player.id, intent: followed.driver.lastOut.intent },
+    }));
+  }
+}
 
 import('./public/autopilot.mjs').then((module) => {
   AUTOPILOT_MODULE = module;
