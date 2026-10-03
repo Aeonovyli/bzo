@@ -192,4 +192,13 @@ assert.match(errorsFor('/p!1')[0], /invalid filter/);
 assert.equal(matches('/+nonsense,p>1', server({ p: 2 })), true);
 assert.equal(matches('/+nonsense,p>1', server({ p: 0 })), false);
 
+// The version tells bzo from bzfs: a pattern, and plain text too.
+const bzoRow = server({ ve: 'bzo-1.3.6-df8de6e77f54' });
+const bzfsRow = server({ ve: '2.4.26.20240416-MAINT-linux-gnu-SDL2' });
+assert.equal(matches('/ve)bzo-*', bzoRow), true);
+assert.equal(matches('/ve)bzo-*', bzfsRow), false);
+assert.equal(matches('/version]^2\\.4', bzfsRow), true);
+assert.equal(matches('bzo-', bzoRow), true, 'plain text searches the version');
+assert.equal(matches('bzo-', bzfsRow), false);
+
 console.log('server list filter tests passed');

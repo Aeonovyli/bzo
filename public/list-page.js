@@ -52,7 +52,7 @@ window.attachTable = function attachTable(tableId, filterId) {
 
 // ---------------------------------------------------------------------------
 // The filter language, which is upstream's (`src/bzflag/ServerListFilter.cxx`).
-// Text with no leading slash is a glob over address, description, hash and owner. After a
+// Text with no leading slash is a glob over address, description, version, hash and owner. After a
 // slash comes a comma-separated set of filters, combined with AND; a second
 // slash starts another set, and a server matching any set is shown (OR). A
 // filter is `+name`/`-name` for a boolean, `name<value` (`<`, `<=`, `>`, `>=`,
@@ -122,6 +122,7 @@ const PATTERN_LABELS = {
   ad: 'addrDesc', addrdesc: 'addrDesc',
   hs: 'hash', hash: 'hash',
   ow: 'owner', owner: 'owner',
+  ve: 'version', ver: 'version', version: 'version',
   ip: 'ip',
   v: 'variable', var: 'variable',
 };
@@ -307,6 +308,7 @@ function checkSet(set, entry) {
   if (set.patterns.desc && !set.patterns.desc.test(desc)) return false;
   if (set.patterns.hash && !set.patterns.hash.test(entry.hs || '')) return false;
   if (set.patterns.owner && !set.patterns.owner.test(entry.ow || '')) return false;
+  if (set.patterns.version && !set.patterns.version.test(entry.ve || '')) return false;
   if (set.patterns.ip && !set.patterns.ip.test(entry.ip || '')) return false;
   if (set.patterns.variable
     && !(entry.v || []).some((line) => set.patterns.variable.test(line))) {
@@ -356,7 +358,7 @@ window.parseServerFilter = function parseServerFilter(source) {
       if (orFilter && orFilter.check(entry)) return true;
       if (headPattern && !headPattern.test(entry.a || '')
         && !headPattern.test(entry.d || '') && !headPattern.test(entry.hs || '')
-        && !headPattern.test(entry.ow || '')) {
+        && !headPattern.test(entry.ow || '') && !headPattern.test(entry.ve || '')) {
         return false;
       }
       return checkSet(sets[0], entry);
@@ -498,3 +500,32 @@ window.attachList('bzoServerList', 'bzoServerFilter');
 // Only the glob half of the filter language means anything on it, which is why
 // it has no syntax-help button beside its box.
 window.attachList('mapList', 'mapFilter');
+
+// An x inside each filter box's right edge, shown while there is text: a
+// click empties the box and filters again, as deleting the text would.
+function addClearButtons() {
+  if (!document.querySelectorAll) return;
+  document.querySelectorAll('input.clearable').forEach((input) => {
+    const box = document.createElement('span');
+    box.className = 'clearBox';
+    input.parentNode.insertBefore(box, input);
+    box.appendChild(input);
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.textContent = '\u00d7';
+    clear.title = 'Clear';
+    clear.setAttribute('aria-label', 'Clear filter');
+    box.appendChild(clear);
+    const sync = () => { clear.hidden = input.value === ''; };
+    input.addEventListener('input', sync);
+    clear.addEventListener('click', () => {
+      input.value = '';
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      input.focus();
+    });
+    sync();
+  });
+}
+// After the whole page, the key table's box at the bottom included.
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addClearButtons);
+else addClearButtons();

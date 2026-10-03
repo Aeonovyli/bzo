@@ -37,6 +37,19 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
   instance placing an arc, cone, sphere or tetra) falls back to bzfs
   `-cacheout`, and is turned away where bzfs is not installed. A generated
   world has no `.bzw` and is turned away.
+- **Compass letters.** bzo's own N/S/E/W markers, which its browsers draw for
+  themselves, are added to the world a BZFlag client gets
+  (`server/bzflag-extras.cjs`) and to nobody else's: the four letters in bzo's
+  colours, white edged, just beyond the middle of each wall at bzo's height,
+  tilted back 45° so they read from inside the arena and show their shape on
+  the radar. Built from flat strokes and material colour, since a stock
+  client only loads images from images.bzflag.org; emissive, so they read at
+  night. Passable and beyond the wall, so the client's physics never meet
+  them and still agree with bzo's server. The radar draws every face one
+  colour, so the letters are its usual grey-cyan, except N, red there through
+  a death physics driver nothing can reach; the white edge is kept off it.
+  Added after the compile, so `test:bzflag-world` still holds the compile to
+  bzfs, and the world hash differs from bzfs's for the same map.
 - **Downloading it over HTTPS.** bzo sends `MsgCacheURL`, as bzfs does with
   `-cacheurl` or its `fastmap` plugin, naming its own copy at
   `<publicUrl>/bzflag/world/<md5>.bwc`. The client fetches that, checks its
@@ -67,8 +80,35 @@ A restart, which a map change is in bzo, drops every native client, and it
 has to rejoin: bzfs does the same, and the client has no reconnect of its
 own. Browsers rejoin by themselves; a BZFlag client does not.
 
+- **Driving.** A client joins on the team it asks for, bzo's to assign where
+  it asks for automatic, the rabbit or a hunter. bzo spawns it as it joins and
+  after each death, and the client starts its tank where `MsgAlive` says.
+  Its `MsgPlayerUpdate`s become bzo moves (`moveFromBzfs`), so every other
+  player sees it drive. Its physics are its own client's, which bzo cannot
+  correct, so a movement finding about it is logged and never refused,
+  whatever the anti-cheat mode. A spawn request while bzo has it alive means
+  it died on its own screen only, and is answered with where it is.
+
+- **Shooting.** A client's `MsgShotBegin` becomes the `shoot` a browser
+  sends (`shootFromBzfs`), and bzo's server flies it and decides what it
+  hits among bzo's players, as for any shot. bzo names the shot its own way,
+  so the client's id for it is kept and everything bzo says about it after --
+  its end, a kill -- names it as the client does. Its own shot is not sent
+  back to it.
+
+- **Dying.** bzo's server decides hits for every shot, a native player's
+  included, and tells the client with `MsgKilled`, which it takes
+  (`GotKilledMsg`). A BZFlag client also decides its own: its `MsgKilled`
+  names the shot that hit it, and bzo ends that shot on it as if its own
+  server had found the hit (`applyNativeDeath`), crediting the shooter. Run
+  over, self-destruct, water and a death touch are taken too. Whichever
+  decides first wins; the other's word is about a tank already dead. The
+  report is only ever about its sender, so it can cost nobody else a life.
+  An exploding tank keeps reporting as its pieces fly, alive bit clear, and
+  those reports are not moves. bzo respawns it as any player, and a spawn
+  request is answered only where the client died on its own screen and bzo
+  still has it alive.
+
 ## What doesn't yet
 
-1. **Playing.** A BZFlag client decides its own deaths and bzo's server
-   decides hits, so a native player's reports have to be checked rather than
-   trusted.
+1. **Flags.** Grabbing, dropping and capturing, and flag effects.

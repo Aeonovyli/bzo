@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Added
+- BZFlag clients can play in bzo: they join on the team they pick, spawn
+  where bzo puts them, drive, shoot and die, with either side's word on a
+  hit taken. Flags come next. #174
+- BZFlag clients see bzo's N/S/E/W compass letters above the walls, and on
+  their radar, with N in red. #174
+- `/list`'s filter boxes have an x to clear them.
+
+### Added
+- `/list` filters by version: `bzo-` lists bzo servers, and
+  `/ve)2.4.*` a bzfs build. #174
+
 ## [1.3.6] - 2026-10-03
 
 ### Changed

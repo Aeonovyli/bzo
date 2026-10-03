@@ -48,6 +48,8 @@ const {
   BLOWED_UP,
   PLAYER_STATUS: BZFS_PLAYER_STATUS,
   ACTION_MESSAGE: BZFS_ACTION_MESSAGE,
+  decodePlayerUpdate,
+  decodeShotBegin,
 } = require('./server/bzfs-session.cjs');
 const {
   normalizeShotSlotCount,
@@ -340,7 +342,10 @@ function computeClientBuild() {
 const { isHeadsetBrowserUA } = require('./server/headset.cjs');
 const { describeListenTarget, resolveListenTarget } = require('./server/listen-address.cjs');
 const { createBzflagServer, publishToBzflagList } = require('./server/bzflag-server.cjs');
-const { NativeTranslator, decodeEnter, decodeClientMessage } = require('./server/bzflag-native.cjs');
+const { addCardinalLetters } = require('./server/bzflag-extras.cjs');
+const {
+  NativeTranslator, decodeEnter, decodeClientMessage, moveFromBzfs, shootFromBzfs,
+} = require('./server/bzflag-native.cjs');
 const { compileBzwWorld } = require('./server/bzw-compile.cjs');
 const { packWorldDatabase } = require('./server/bzflag-world.cjs');
 const {
@@ -1902,7 +1907,7 @@ function renderMapList(listId, filterId, maps) {
     + `<div class="panes">${entries
       .map((entry, index) => renderMapReadout(entry, index, index !== 0)).join('\n')}</div>`
     + `<div class="listBar">`
-    + `<input id="${escapeHtml(filterId)}" type="text" placeholder="Filter…">`
+    + `<input id="${escapeHtml(filterId)}" class="clearable" type="text" placeholder="Filter…">`
     + entries.map((entry, index) => `<div class="rowActions" id="map-pane-${index}-actions"`
       + `${index !== 0 ? ' hidden' : ''}>`
       + (entry.hashed
@@ -2051,7 +2056,7 @@ function renderFilterHelp(listId) {
     + rows.map(([names, what]) => `<div class="helpRow">`
       + `<span><code>${names}</code></span><span>${what}</span></div>`).join('');
   return `<div class="filterHelp" id="${escapeHtml(listId)}-help" hidden>`
-    + `<p>Plain text is a glob over the address, description, hash and owner --`
+    + `<p>Plain text is a glob over the address, description, version, hash and owner --`
     + ` <code>league</code>, <code>*.org</code>, <code>bz?.</code> -- and a word`
     + ` with no <code>*</code> or <code>?</code> in it is wrapped in both, so it`
     + ` matches anywhere. A leading <code>/</code> starts filters instead:`
@@ -2101,6 +2106,7 @@ function renderFilterHelp(listId) {
       ['d desc description', 'The description'],
       ['ad addrdesc', 'Either one'],
       ['hs hash', 'The world hash the pane shows'],
+      ['ve ver version', 'The server\'s version: <code>bzo-*</code> or bzfs\'s own build'],
       ['ow owner', 'The bzflag.org account that registered it'],
       ['ip', 'The IP address the list server has for it'],
       ['v var', 'Any one world variable it sets, as <code>name=value</code>'],
@@ -2111,6 +2117,7 @@ function renderFilterHelp(listId) {
       ['/p&gt;1,s&gt;1,s&lt;4', 'Two or three shots, and somebody playing'],
       ['/+ctf,vt=2', 'Capture-the-flag between exactly two teams'],
       ['/d)*league*', 'Leagues, by description'],
+      ['/ve)bzo-*', 'bzo servers only'],
       ['/op&gt;0', 'Somebody is watching'],
       ['/+rabbit,+rico,s=3', 'Rabbit chase, ricochet, three shots'],
       ['/+ctf/+rabbit', 'Either capture-the-flag or rabbit chase'],
@@ -2172,6 +2179,7 @@ function renderServerList(listId, filterId, unsorted) {
     ip: entry.ip || '',
     v: Array.isArray(entry.variables) ? entry.variables.map(([name, value]) => `${name}=${value}`) : [],
     hs: entry.hash || '',
+    ve: entry.version || '',
     ob: typeof entry.observers === 'number' ? entry.observers : null,
     // What the Name header sorts by: a server with no title sorts under its
     // address, which is what the row shows in that case anyway.
@@ -2226,7 +2234,7 @@ function renderServerList(listId, filterId, unsorted) {
     + `<div class="panes">${entries
       .map((entry, index) => renderListReadout(entry, index !== 0)).join('\n')}</div>`
     + `<div class="listBar">`
-    + `<input id="${escapeHtml(filterId)}" type="text" placeholder="Filter…">`
+    + `<input id="${escapeHtml(filterId)}" class="clearable" type="text" placeholder="Filter…">`
     + `<button type="button" data-help="${escapeHtml(listId)}-help"`
     + ` title="Filter syntax">?</button>`
     + entries.map((entry, index) => renderListActions(entry, index !== 0)).join('')
@@ -2320,6 +2328,7 @@ function renderListPage({
       guestChat: guestAnswer(world.guestChat),
       guestSpawn: guestAnswer(world.guestSpawn),
       desc: s.title,
+      version: world.version || '',
       // Always the row's own link, imported or not -- `?viewmap=` already
       // imports on demand (`importMapForView`) the moment nothing this fresh
       // is registered yet, so there is no state where following it is wrong.
@@ -2410,6 +2419,10 @@ function renderListPage({
       id: `bzo-pane-${index}`,
       addr: proxy ? proxy.target : s.url,
       desc: proxy ? (proxy.title || proxy.target) : s.title,
+      // A carried target is a bzfs, so its version is that server's.
+      version: proxy
+        ? ((relayed?.world || publishWorldFacts(...splitHostPort(proxy.target)) || {}).version || '')
+        : (s.version || ''),
       hash: (proxy
         ? (relayed?.world || publishWorldFacts(...splitHostPort(proxy.target)) || {})
         : (s.world || {})).hash || '',
@@ -2698,6 +2711,17 @@ function renderListPage({
      onto a second rather than overflowing on a phone. */
   .listBar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
   .rowActions { display: flex; gap: 0.5rem; align-items: center; }
+  /* A filter box's clear button, inside its right edge; list-page.js shows it
+     while there is something to clear. */
+  .clearBox { position: relative; display: inline-flex; }
+  .clearBox input { padding-right: 1.6rem; }
+  .clearBox button {
+    position: absolute; right: 0.2rem; top: 50%; transform: translateY(-50%);
+    border: none; background: none; color: #999; cursor: pointer;
+    font-size: 1rem; line-height: 1; padding: 0.1rem 0.3rem;
+  }
+  .clearBox button:hover { color: #eee; }
+  .clearBox button[hidden] { display: none; }
   .rowActions[hidden] { display: none; }
   a.action {
     padding: 0.2rem 0.7rem;
@@ -4186,7 +4210,11 @@ function sanitizeListServerStatus(body) {
     description: typeof body?.description === 'string' ? body.description.slice(0, 500) : '',
     players: Number.isFinite(players) ? players : 0,
     maxPlayers: Number.isFinite(maxPlayers) ? maxPlayers : 0,
-    version: typeof body?.version === 'string' ? body.version.slice(0, 40) : '',
+    // Only a bzo instance reports, and one before 1.3.5 sent its release bare,
+    // so the prefix that tells bzo from bzfs on `/list` is added where missing.
+    version: typeof body?.version === 'string' && body.version.trim()
+      ? (/^bzo-/.test(body.version) ? body.version : `bzo-${body.version}`).slice(0, 40)
+      : '',
     gameOptionsBits: Number.isFinite(gameOptionsBits) ? gameOptionsBits : 0,
     maxShots: Number.isFinite(maxShots) ? maxShots : 0,
     style: typeof body?.style === 'string' ? body.style.slice(0, 20) : '',
@@ -4726,7 +4754,7 @@ is the designated bzo list server -- every other bzo instance reports here, so i
 <code>/list</code> can show the <a href="#bzo">bzo servers table</a> above.
 A <code>bzfs</code> server's key is a different one, from
 <a href="https://my.bzflag.org/listkeys/">my.bzflag.org/listkeys</a>.</p>
-<input id="keyFilter" type="text" placeholder="Filter…">
+<input id="keyFilter" class="clearable" type="text" placeholder="Filter…">
 <table id="keyTable">
 <thead><tr><th>URL</th>${admin ? '<th>Owner</th>' : ''}<th>Key</th><th>Requested</th><th>Last checked</th>
 <th>Status</th><th></th></tr></thead>
@@ -14541,7 +14569,9 @@ function reportCheat(player, kind, headline, detail = null, enforceable = true) 
   counters.totalWarnings++;
   counters.lastWarningTime = Date.now();
 
-  const refused = enforceable && ANTICHEAT_CONFIG.mode === 'strict';
+  // A BZFlag client's tank is its own physics and cannot be corrected, so a
+  // finding about one is reported and never refused.
+  const refused = enforceable && ANTICHEAT_CONFIG.mode === 'strict' && !player.native;
   // One line per finding, the detail after the headline, so a finding is
   // one grep hit and never interleaves with another player's.
   const parts = [headline, ...(detail ? [].concat(detail) : [])];
@@ -15712,9 +15742,18 @@ function getBzflagWorld() {
   let promise;
   try {
     const tree = compileBzwWorld(fs.readFileSync(mapPath, 'latin1'), { bzdb: SERVER_BZDB });
-    promise = tree.unsupported.length > 0
-      ? bzfsCacheout(mapPath, `the compiler cannot reproduce ${[...new Set(tree.unsupported)].join(', ')}`)
-      : Promise.resolve(bzflagWorldFromBlob(packWorldDatabase(tree), 'compiled'));
+    if (tree.unsupported.length > 0) {
+      promise = bzfsCacheout(mapPath, `the compiler cannot reproduce ${[...new Set(tree.unsupported)].join(', ')}`);
+    } else {
+      // bzo's compass letters, which its browsers draw for themselves, at the
+      // height they draw them (`_addCompassMarker`, public/render.js).
+      const tallest = OBSTACLES.reduce((top, obstacle) => Math.max(top, obstacle.bounds?.maxY ?? 0), 0);
+      addCardinalLetters(tree, {
+        mapSize: GAME_CONFIG.MAP_SIZE,
+        height: Math.max((GAME_CONFIG.WALL_HEIGHT || 0) + 8, tallest + 5),
+      });
+      promise = Promise.resolve(bzflagWorldFromBlob(packWorldDatabase(tree), 'compiled'));
+    }
   } catch (error) {
     promise = bzfsCacheout(mapPath, `the compiler failed (${error.message})`);
   }
@@ -15819,6 +15858,47 @@ async function seatNativeClient(link, payload) {
       // numbers too (server/player-ids.cjs).
       const dst = chat.to <= 243 ? String(chat.to) : chat.to;
       say({ type: 'message', dst, text: chat.text, msgType: 'chat' });
+    } else if (code === 'pu' || code === 'ps') {
+      // Its own tank only, and only once it has one to drive.
+      if (!seated?.joined || !seated.alive || isObserverTeam(seated.team)) return;
+      let update;
+      try {
+        update = decodePlayerUpdate(body, code === 'ps');
+      } catch {
+        return;
+      }
+      if (update.id !== link.id) return;
+      // An exploding tank keeps reporting as its pieces fly, with the alive
+      // bit clear; that is not a tank bzo should move.
+      if ((update.status & BZFS_PLAYER_STATUS.ALIVE) === 0) return;
+      say(moveFromBzfs(update, GAME_CONFIG));
+    } else if (code === 'sb') {
+      // A shot it fired. bzo's server flies it and decides what it hits, as
+      // it does for a browser's; the client's own id for it is kept so what
+      // bzo later says about the shot names it the way the client does.
+      if (!seated?.joined || !seated.alive || isObserverTeam(seated.team)) return;
+      let shot;
+      try {
+        shot = decodeShotBegin(body);
+      } catch {
+        return;
+      }
+      if (shot.player !== link.id) return;
+      translator.ownShotPending = shot.id;
+      say(shootFromBzfs(shot));
+      translator.ownShotPending = null;
+    } else if (code === 'kl') {
+      // It says it died: on its own screen, it is. Whichever of it and bzo's
+      // server decides a death first, the other's word is then about a tank
+      // already dead (`killPlayer`'s guard).
+      translator.clientDead = true;
+      if (seated?.joined && seated.alive) applyNativeDeath(seated, body, translator);
+    } else if (code === 'al') {
+      // MsgAlive from the client asks to spawn. bzo spawns players by itself,
+      // as its browsers expect, so a request is answered only where the
+      // client died on its own screen and bzo still has it alive -- told
+      // where it is, it plays on. Otherwise bzo's own MsgAlive is coming.
+      if (translator.clientDead && seated?.joined && seated.alive) translator.alive(seated.getState(false));
     }
   };
   acceptConnection(socket, {
@@ -15829,6 +15909,9 @@ async function seatNativeClient(link, payload) {
   const player = [...players.values()].find((candidate) => candidate.ws === socket);
   if (!player) return;
   seated = player;
+  // Its moves are its own client's physics, which bzo cannot correct: a
+  // finding is logged, never refused (`reportCheat`).
+  player.native = true;
   // What a browser's session gives it at `acceptConnection`, from the token
   // instead of a cookie. A session record, as `/login` makes, because
   // `isAdmin` re-reads the session every time it is asked; nothing sends its
@@ -15841,10 +15924,15 @@ async function seatNativeClient(link, payload) {
     player.globalCallsign = callsign;
     player.admin = isAdminSession(sessions.get(player.sessionId), ADMIN_GROUPS);
   }
-  log(`[BZFLAG] "${enter.callsign}" entered from ${link.address} (${enter.version}); watching`
+  // The team it asked for, by upstream's number (`TeamColor`, global.h:59):
+  // AutomaticTeam is -2, and the rabbit and hunter teams are bzo's to assign.
+  const askedTeam = enter.team === -2 || enter.team === 6 || enter.team === 7
+    ? PLAYER_TEAM.AUTOMATIC
+    : (BZFLAG_TEAM_ORDER[enter.team] ?? PLAYER_TEAM.AUTOMATIC);
+  log(`[BZFLAG] "${enter.callsign}" entered from ${link.address} (${enter.version}) as ${askedTeam}`
     + `${player.verified ? `, bzid=${player.bzid} admin=${player.admin}` : ''}`);
   say({
-    type: 'joinGame', name: enter.callsign, team: PLAYER_TEAM.OBSERVER, motto: enter.motto, tankModel: 'bzflag',
+    type: 'joinGame', name: enter.callsign, team: askedTeam, motto: enter.motto, tankModel: 'bzflag',
   });
   if (!player.joined) return;
   if (login?.good) {
@@ -15855,9 +15943,9 @@ async function seatNativeClient(link, payload) {
     replyToPlayer(player, 'This callsign is not registered.');
     replyToPlayer(player, 'You can register it at https://forums.bzflag.org/');
   }
-  // Said whatever team was asked for, since an observer who picked one
-  // would otherwise not know why they got none.
-  replyToPlayer(player, `BZFlag clients can watch bzo but not play yet. To play, use a browser: ${PUBLIC_URL || 'this server\'s web page'}`);
+  if (!isObserverTeam(player.team)) {
+    replyToPlayer(player, 'BZFlag clients can drive, shoot and die in bzo; flags come next.');
+  }
 }
 
 // The title with the live map's name on the end, which bzfs has no way to
@@ -15868,6 +15956,39 @@ function bzflagListTitle() {
   const base = String(serverConfig.title || '').trim();
   const suffix = ` - ${path.basename(MAP_SOURCE).replace(/\.bzw$/i, '')}`;
   return `${base.slice(0, Math.max(0, BZFLAG_TITLE_MAX - suffix.length))}${suffix}`;
+}
+
+// A native client's own MsgKilled (`ServerLink::sendKilled`): killer, reason,
+// which shot, the killer's flag, and a physics driver for a death touch. Only
+// ever about itself, so it can only cost its sender a life. The reasons the
+// server decides -- a capture, genocide, the clock -- are bzo's already.
+function applyNativeDeath(victim, body, translator) {
+  if (body.length < 7) return;
+  const killerId = String(body.readUInt8(0));
+  const reason = body.readInt16BE(1);
+  const shotId = body.readUInt16BE(3);
+  const killer = players.get(killerId) || null;
+  if (reason === BLOWED_UP.GOT_SHOT) {
+    // The bzo shot the client means: the one it was told about under that id.
+    const entry = [...translator.shots.entries()]
+      .find(([, shot]) => shot.id === shotId && String(shot.shooter) === killerId);
+    const projectileId = entry ? entry[0] : null;
+    const proj = projectileId !== null ? projectiles.get(projectileId) : null;
+    if (proj) {
+      applyShotPlayerHit(proj, projectileId, victim, { x: victim.x, y: victim.y, z: victim.z });
+    } else if (killer) {
+      killPlayer(victim, killer, DEATH_REASON.SHOT, projectileId, killer.id);
+    }
+  } else if (reason === BLOWED_UP.GOT_RUN_OVER && killer) {
+    killPlayer(victim, killer, DEATH_REASON.RUN_OVER);
+  } else if (reason === BLOWED_UP.SELF_DESTRUCT) {
+    killPlayer(victim, victim, DEATH_REASON.SELF_DESTRUCT);
+  } else if (reason === BLOWED_UP.WATER_DEATH) {
+    killPlayer(victim, null, DEATH_REASON.WATER);
+  } else if (reason === BLOWED_UP.DEATH_TOUCH) {
+    killPlayer(victim, null, DEATH_REASON.PHYSICS_DRIVER);
+  }
+  if (victim.alive) log(`[BZFLAG] "${victim.name}" reported a death bzo did not take (reason ${reason})`);
 }
 
 // bzfs re-adds on every join and part and every `ListServerReAddTime`; the

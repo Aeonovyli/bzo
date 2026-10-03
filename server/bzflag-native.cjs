@@ -95,6 +95,61 @@ class Writer {
   done() { return this.buf.subarray(0, this.o); }
 }
 
+// A native client's own `PlayerState`, as the move bzo's browser would have
+// sent (`movePacketFields`, public/drive.mjs): the proxy's
+// `proxyOutboundMotion` run backwards. bzo carries a ground speed as a
+// fraction of the tank's top speed along its heading, or along `d` where the
+// tank is sliding some other way; in the air, the velocity itself.
+function moveFromBzfs(update, config) {
+  const [px, py, pz] = update.pos;
+  const x = px;
+  const y = pz;
+  const z = -py;
+  const r = update.azimuth - (Math.PI / 2);
+  const vx = update.velocity[0];
+  const vz = -update.velocity[1];
+  const vv = update.velocity[2];
+  const air = (update.status & STATUS_FALLING) !== 0;
+  const tankSpeed = Number(config.TANK_SPEED) || 25;
+  const forwardX = -Math.sin(r);
+  const forwardZ = -Math.cos(r);
+  const along = (vx * forwardX) + (vz * forwardZ);
+  const speed = Math.hypot(vx, vz);
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const move = {
+    type: 'm',
+    x: round2(x),
+    y: round2(y),
+    z: round2(z),
+    r: round2(r),
+    fs: round2(along / tankSpeed),
+    rs: round2(update.angVel / (Number(config.TANK_ROTATION_SPEED) || 0.785398)),
+    vv: round2(air ? vv : 0),
+    vx: round2(air ? vx : 0),
+    vz: round2(air ? vz : 0),
+    air: air ? 1 : 0,
+    // The client's own clock, which bzo only ever differences.
+    ct: Math.round(update.timestamp * 1000) / 1000,
+  };
+  // Sliding off its heading: the direction of travel and the speed along it.
+  if (!air && speed > 0.01 && Math.abs(along) < speed * 0.995) {
+    move.d = round2(Math.atan2(-vx, -vz));
+    move.fs = round2(speed / tankSpeed);
+  }
+  return move;
+}
+
+// A native client's `MsgShotBegin` (decoded as `decodeShotBegin` reads one) as
+// the `shoot` bzo's browser sends (`shotFromTank`, public/drive.mjs): where it
+// left the muzzle and its whole velocity, both in bzo's axes.
+function shootFromBzfs(shot) {
+  const [px, py, pz] = shot.pos;
+  const [vx, vy, vz] = shot.velocity;
+  return {
+    type: 'shoot', x: px, y: pz, z: -py, vx, vy: vz, vz: -vy,
+  };
+}
+
 // `PlayerInfo::unpackEnter`: type, team, callsign, motto, token, version.
 function decodeEnter(payload) {
   const text = (at, length) => payload.toString('latin1', at, at + length).replace(/\0.*$/s, '');
@@ -130,6 +185,12 @@ class NativeTranslator {
     this.players = new Map();
     this.shots = new Map();
     this.shotCounter = 0;
+    // The client's own id for the shot it just fired, while bzo answers it:
+    // bzo names the shot its own way, and the client knows it only by this.
+    this.ownShotPending = null;
+    // Whether the client has said it died (its own MsgKilled) since bzo last
+    // told it where it is alive.
+    this.clientDead = false;
     this.orders = new Map();
     this.accepted = false;
     this.pending = null;
@@ -218,6 +279,7 @@ class NativeTranslator {
 
   alive(record) {
     this.players.set(String(record.id), { ...record, alive: true });
+    if (String(record.id) === this.selfBzoId) this.clientDead = false;
     this.write('al', new Writer(17)
       .u8(this.slotFor(record.id))
       .vec3(toBzfsPosition(record.x, record.y, record.z))
@@ -286,6 +348,9 @@ class NativeTranslator {
       if (record.alive) this.alive(record);
     }
     this.addPlayer(self);
+    // bzo spawns a player as it joins; the client starts its tank where
+    // MsgAlive says (playing.cxx:2370), asked for or not.
+    if (self.alive) this.alive(self);
     if (init.rabbitId !== null && init.rabbitId !== undefined) {
       this.write('nR', new Writer(1).u8(this.slotFor(init.rabbitId)).done());
     }
@@ -342,6 +407,13 @@ class NativeTranslator {
       }
       case 'shotBegin': {
         if (!this.accepted) break;
+        // Its own shot, already flying on its screen: only the name is new.
+        if (String(message.playerId) === this.selfBzoId) {
+          if (this.ownShotPending !== null) {
+            this.shots.set(message.id, { id: this.ownShotPending, shooter: this.selfSlot });
+          }
+          break;
+        }
         const speed = Number(message.speed) || 0;
         const config = this.config();
         // `_reloadTime`, upstream's default being `_shotRange / _shotSpeed`.
@@ -437,6 +509,8 @@ class NativeTranslator {
 
 module.exports = {
   NativeTranslator,
+  moveFromBzfs,
+  shootFromBzfs,
   decodeEnter,
   decodeClientMessage,
   toBzfsPosition,
