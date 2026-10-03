@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A server that has just restarted no longer drops off `/list` for 15
+  minutes. It waits until it can answer before announcing itself to either
+  list, sends one report rather than two, and the list server retries a
+  failed check after 30 seconds, 2 minutes and 10 minutes. BZFlag list ADDs
+  go one at a time, as bzfs sends them.
+
 ## [1.3.3] - 2026-10-03
 
 ### Added

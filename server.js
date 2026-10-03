@@ -3686,6 +3686,23 @@ serverConfig.title = readServerTitle(serverConfig);
 // from stepping around it to the port and reaching the uncertificated,
 // uncompressed path; `::` is every interface in both families, which is what a
 // container and a LAN game both need.
+// Ready to answer, which listening is not: the boot's map pass
+// (`hashRemainingMapsInBackground`) holds the event loop for seconds, and a
+// list server that calls back in that window -- the BZFlag list's connect
+// test, bzo's own challenge -- times out and counts it against the server.
+// So nothing is announced to either list until the pass is done, or a
+// minute has gone by.
+let serverIsReady = false;
+let markServerReady;
+const serverReady = new Promise((resolve) => {
+  markServerReady = () => {
+    if (serverIsReady) return;
+    serverIsReady = true;
+    resolve();
+  };
+});
+setTimeout(() => markServerReady(), 60 * 1000).unref?.();
+
 const { host: LISTEN_HOST, port: PORT, note: listenNote } = resolveListenTarget({
   envListen: process.env.LISTEN,
   envPort: process.env.PORT,
@@ -3709,7 +3726,23 @@ server.listen(PORT, LISTEN_HOST, () => {
       + `${Math.round(br / 1024)}KB in ${(ms / 1000).toFixed(1)}s`);
   }).catch((error) => logError(`[BR] ${error.message}`));
   probeAdminWhitelist().catch((error) => logError(`[ADMIN] probe failed: ${error.message}`));
-  reportToListServer('boot');
+  // Only the designated instance keeps BZFlag worlds fresh, for the same
+  // reason it is the only one that draws bzo rows' pictures: every instance
+  // doing it would mean every instance dialling every listed server, which is
+  // the multiplication the list server exists to avoid. A non-designated
+  // instance still shows a picture for any world it has imported on demand.
+  if (BZFS_WORLD_THUMBNAILS && IS_DESIGNATED_LIST_SERVER) {
+    log('[WORLDS] keeping BZFlag world imports fresh for /list thumbnails');
+    bzfsWorlds.start();
+  }
+  serverReady.then(announceReadyServer);
+});
+
+// One report for both lists once ready, after the proxied targets have been
+// dialled so it carries their rows.
+function announceReadyServer() {
+  log('[LISTSERVER] ready; announcing');
+  refreshProxyStatuses().finally(() => reportToListServer('boot'));
   if (IS_DESIGNATED_LIST_SERVER) {
     // Excludes this instance's own self-report row: reportToListServer just
     // above already refreshed it in-process, and validating it here would
@@ -3723,16 +3756,8 @@ server.listen(PORT, LISTEN_HOST, () => {
         .catch((error) => logError(`[LISTSERVER] boot poll failed for ${record.url}: ${error.message}`));
     }
   }
-  // Only the designated instance keeps BZFlag worlds fresh, for the same
-  // reason it is the only one that draws bzo rows' pictures: every instance
-  // doing it would mean every instance dialling every listed server, which is
-  // the multiplication the list server exists to avoid. A non-designated
-  // instance still shows a picture for any world it has imported on demand.
-  if (BZFS_WORLD_THUMBNAILS && IS_DESIGNATED_LIST_SERVER) {
-    log('[WORLDS] keeping BZFlag world imports fresh for /list thumbnails');
-    bzfsWorlds.start();
-  }
-});
+}
+
 
 // Whether this instance keeps the listed BZFlag servers' world imports fresh
 // so their `/list` rows have pictures (`server/bzfs-worlds.cjs`). On by
@@ -4322,7 +4347,36 @@ async function ensureInstanceOverview(instanceUrl, hash) {
   return work;
 }
 
-async function validateListServerKey(record) {
+// A server that has just booted reports at once and is then too busy to
+// answer its own challenge in time, so a failed check is tried again a few
+// times before its row waits for the next report. Keyed by URL: one retry
+// chain per server, however many reports arrive meanwhile.
+const LIST_SERVER_RETRY_DELAYS_MS = [30 * 1000, 2 * 60 * 1000, 10 * 60 * 1000];
+const listServerRetries = new Map();
+
+function scheduleListServerRetry(record) {
+  const pending = listServerRetries.get(record.url);
+  if (pending?.timer) return;
+  const attempt = pending ? pending.attempt : 0;
+  if (attempt >= LIST_SERVER_RETRY_DELAYS_MS.length) {
+    listServerRetries.delete(record.url);
+    return;
+  }
+  const timer = setTimeout(() => {
+    listServerRetries.set(record.url, { attempt: attempt + 1, timer: null });
+    validateListServerKey(record, { retry: true })
+      .catch((error) => logError(`[LISTSERVER] retry failed for ${record.url}: ${error.message}`));
+  }, LIST_SERVER_RETRY_DELAYS_MS[attempt]);
+  timer.unref?.();
+  listServerRetries.set(record.url, { attempt, timer });
+}
+
+async function validateListServerKey(record, { retry = false } = {}) {
+  // A fresh report starts the retries over; a retry carries on its own count.
+  if (!retry) {
+    clearTimeout(listServerRetries.get(record.url)?.timer);
+    listServerRetries.delete(record.url);
+  }
   const nonce = crypto.randomBytes(16).toString('hex');
   try {
     const response = await fetch(
@@ -4342,6 +4396,7 @@ async function validateListServerKey(record) {
     if (body.status && typeof body.status === 'object') {
       listServerKeys.report(record, sanitizeListServerStatus(body.status));
     }
+    listServerRetries.delete(record.url);
     log(`[LISTSERVER] validated ${record.url}`);
     // Only from here, which is the boot/periodic path and the daily poll --
     // never from a bare join or part, on the same rule that keeps an active
@@ -4352,7 +4407,11 @@ async function validateListServerKey(record) {
     }
   } catch (error) {
     listServerKeys.markChecked(record, false, error.message);
-    log(`[LISTSERVER] could not validate ${record.url}: ${error.message}`);
+    const next = listServerRetries.get(record.url)?.attempt ?? 0;
+    const retrying = next < LIST_SERVER_RETRY_DELAYS_MS.length;
+    log(`[LISTSERVER] could not validate ${record.url}: ${error.message}`
+      + (retrying ? `; trying again in ${LIST_SERVER_RETRY_DELAYS_MS[next] / 1000}s` : ''));
+    scheduleListServerRetry(record);
   }
 }
 
@@ -11124,6 +11183,7 @@ function hashRemainingMapsInBackground() {
       // above): still worth knowing the trickle ran and how much of it
       // landed, the same reasoning `sweepMapCache`'s own summary line below
       // already follows.
+      markServerReady();
       if (total > 0) {
         log(`Converted ${converted} of ${total} bzw file(s) to cached json`
           + (instancing.groups > 0 ? `; ${formatInstancing(instancing)}` : ''));
@@ -15448,6 +15508,9 @@ function computeListServerStatus() {
 }
 
 function reportToListServer(reason) {
+  // Before it can answer, a server says nothing (`serverReady`); the boot
+  // report covers whatever joined meanwhile. Leaving is said at once.
+  if (!serverIsReady && reason !== 'shutdown') return;
   publishToBzflagListServer(reason);
   if (!LIST_SERVER_URL) return;
   const payload = { reason, ...computeListServerStatus() };
@@ -15800,8 +15863,18 @@ function bzflagListTitle() {
 
 // bzfs re-adds on every join and part and every `ListServerReAddTime`; the
 // same moments bzo reports to its own list.
+// `ListServerLink::queueMessage` (ListServerConnection.cxx:334): one request
+// in flight, and whatever is asked for meanwhile collapses into one more, sent
+// when it returns -- a burst of joins is two ADDs, not one each.
+let bzflagListInFlight = false;
+let bzflagListQueued = null;
 function publishToBzflagListServer(reason) {
   if (!bzflagServer || !BZFLAG_PUBLIC_ADDR || !BZFLAG_PUBLIC_KEY) return;
+  if (bzflagListInFlight && reason !== 'shutdown') {
+    bzflagListQueued = reason;
+    return;
+  }
+  bzflagListInFlight = true;
   const action = reason === 'shutdown' ? 'REMOVE' : 'ADD';
   publishToBzflagList({
     listUrl: BZFLAG_LIST_URL,
@@ -15819,7 +15892,13 @@ function publishToBzflagListServer(reason) {
     const error = lines.find((line) => /^ERROR/i.test(line));
     if (error) logError(`[BZFLAG] list ${action} (${reason}): ${error}`);
     else log(`[BZFLAG] list ${action} (${reason}): ${lines[lines.length - 1] || '(empty reply)'}`);
-  }).catch((error) => logError(`[BZFLAG] list ${action} (${reason}) failed: ${error.message}`));
+  }).catch((error) => logError(`[BZFLAG] list ${action} (${reason}) failed: ${error.message}`))
+    .finally(() => {
+      bzflagListInFlight = false;
+      const next = bzflagListQueued;
+      bzflagListQueued = null;
+      if (next) publishToBzflagListServer(next);
+    });
 }
 
 // `ListServerReAddTime` upstream, bzfs.cxx:84 -- ~15 minutes, for live counts
@@ -15829,7 +15908,6 @@ setInterval(() => {
   refreshProxyStatuses().finally(() => reportToListServer('periodic'));
 }, 15 * 60 * 1000).unref?.();
 // And once at boot, so the first report is not a row of zeroes.
-refreshProxyStatuses().finally(() => reportToListServer('periodic'));
 
 // DropGeometry::dropFlag tests a tank-radius cylinder _flagHeight tall, so a
 // spawning flag never appears somewhere a tank could not drive to reach it.

@@ -10,8 +10,10 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
   `BZFLAG\r\n\r\n` handshake, `MsgQueryGame`, `MsgQueryPlayers`, and the UDP
   ping. A server browser, `bzfquery` and the list server's check all get
   their answers.
-- **The list.** bzo adds itself to my.bzflag.org with the `bzfs` key, on
-  start, on every join and part, and every 15 minutes, and removes itself on
+- **The list.** bzo adds itself to my.bzflag.org with the `bzfs` key once it
+  can answer the list's connect test (see **Ready** in
+  [list-server.md](list-server.md)), then on every join and part and every
+  15 minutes, one request at a time as bzfs sends them, and removes itself on
   shutdown. The request goes over IPv4, since the list checks that
   `publicAddr` resolves to the address it came from. The title is
   server.json's `title` with the live map's name after it, `- bzo` on bzo.bzw, held

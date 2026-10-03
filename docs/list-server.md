@@ -127,6 +127,18 @@ same row rather than creating a new one) and is attributed to
 `listServerOwnerBzid`/`listServerOwnerCallsign` if set, or a plain "self"
 placeholder otherwise -- see "Config" below.
 
+## Ready
+
+Listening is not answering. A restart's map pass
+(`hashRemainingMapsInBackground`) holds the event loop for seconds after the
+port opens, and a list server that calls back then -- bzo's challenge, the
+BZFlag list's connect test -- times out and counts it against the server. So
+a server says nothing to either list until that pass is done, or a minute
+has gone by (`serverReady`): no boot report, no join or part, no BZFlag ADD,
+and the designated server's own boot-time checks of other servers wait too,
+since a reply it is too busy to read is as late as one that never came. Then
+it sends one report, after dialling its proxied targets.
+
 ## Uptime
 
 Issue #106. A `boot` report is the one reason that means "this server just
@@ -162,6 +174,13 @@ round trip per player. A daily poll (`setInterval`, 24h) is a second trigger
 for the same check, initiated by the list server itself as a backstop for a
 server that has gone quiet on the push side but is actually still
 reachable.
+
+A failed check is tried again after 30 seconds, 2 minutes and 10 minutes
+(`LIST_SERVER_RETRY_DELAYS_MS`). A server that has just restarted reports
+`boot` and `periodic` at once and is then too busy starting up to answer its
+challenge in time -- a far one most of all, with the round trip already
+eating into the 8 second limit -- and without the retries it would wait out
+its next report, 15 minutes, as stale.
 
 A few consecutive failures (`STALE_FAIL_THRESHOLD = 3`), not one, mark a row
 stale -- a single missed push or poll is noise. A stale row leaves the
