@@ -15604,6 +15604,12 @@ function bzflagTeamIndex(team) {
 
 let bzflagServer = null;
 if (BZFLAG_CONFIG?.listen) {
+  // A BZFlag client hears from every tank at least once a second
+  // (`MaxUpdateTime`, Player.cxx:38) and dead-reckons from that; bzo's own
+  // five-second heartbeat would leave a resting bzo tank stale on its screen.
+  // So with native clients in the game, every bzo client keeps upstream's
+  // pace, as a proxied one already does (`PROXY_MAX_UPDATE_INTERVAL`).
+  GAME_CONFIG.MAX_UPDATE_INTERVAL = 1000;
   const { host, port } = resolveListenTarget({ configListen: String(BZFLAG_CONFIG.listen) });
   bzflagServer = createBzflagServer({
     getStatus: computeBzflagStatus,

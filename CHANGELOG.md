@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Changed
+- On a server with a `bzflag` listener, bzo's clients send their idle update
+  every second, as BZFlag clients do, so a BZFlag observer sees resting bzo
+  tanks kept current. #174
+
 ## [1.3.5] - 2026-10-03
 
 ### Added

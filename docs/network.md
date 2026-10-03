@@ -171,8 +171,11 @@ omitted rather than sent null.
 
 The `m` packet is sent **when the inputs change**, not on a clock: the client
 compares this frame's speeds against the last ones it sent and stays quiet if
-nothing moved, with a forced send every `MAX_UPDATE_INTERVAL` (5 s,
-`public/client.js:4060`) as a heartbeat and on any jump or land transition.
+nothing moved, with a forced send every `MAX_UPDATE_INTERVAL` as a heartbeat
+and on any jump or land transition. That is 5 s, or upstream's 1 s
+(`MaxUpdateTime`) on a proxied connection and on a server with a `bzflag`
+listener, since a BZFlag client dead-reckons from at least one update a
+second.
 Everything between two packets is extrapolated at both ends from the
 velocities in the last one.
 

@@ -44,6 +44,10 @@ Issue #174: native BZFlag clients on a bzo server. Configured by server.json's
   round trip, if it can't. `cacheUrl` in the `bzflag` block names another URL,
   or `false` turns it off. The hash matches bzfs's for the same map, so a
   world cached from either serves both.
+- **Updates once a second.** A BZFlag client hears from every tank at least
+  once a second (`MaxUpdateTime`) and dead-reckons from that, so with the
+  listener on, bzo's clients send their idle heartbeat every second rather
+  than every five.
 - **The game clock.** `MsgGameTime` at the handshake and then every second,
   stretching to every ten, as bzfs sends it; the client's texture
   animations and drawInfo spins run on it.
