@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.14] - 2026-10-04
+
+### Added
+- Voice can use a coturn TURN relay: set `voiceTurnSecret` to its
+  `static-auth-secret` and each player gets their own credential, valid for
+  24 hours. See **Voice** in [docs/installation.md](docs/installation.md). #8
+
+### Changed
+- server.json is saved with its keys sorted, and the JSON files bzo writes
+  end in a newline.
+
+### Fixed
+- Ban duration parsing no longer backtracks exponentially on crafted input.
+
 ## [1.3.13] - 2026-10-04
 
 ### Fixed
