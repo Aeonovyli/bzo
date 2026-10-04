@@ -17690,6 +17690,8 @@ const { packetVelocity } = require('./server/drive.cjs');
 const BOT_TICK_SECONDS = 0.05;
 // The longest step a bot's tank takes when the worker has fallen behind.
 const BOT_MAX_TICK_SECONDS = 0.25;
+const BOT_HEARTBEAT_MS = 1000;
+let lastBotHeartbeatAt = 0;
 const BOT_FAKE_REQUEST = Object.freeze({
   url: '/',
   headers: Object.freeze({ 'user-agent': 'bzo-bot' }),
@@ -18112,9 +18114,21 @@ setInterval(() => {
   if (idle !== botsIdle) {
     botsIdle = idle;
     log(`[BOT] ${idle ? 'idle: nobody connected' : 'awake'}`);
-    if (idle) botWorker.postMessage({ type: 'halt' });
+    lastBotHeartbeatAt = 0;
   }
-  if (idle) return;
+  // Idle, a bot only stands still and says so once a second, as a client's
+  // heartbeat, so the server does not take it for one that stopped
+  // responding.
+  if (idle) {
+    const now = Date.now();
+    if (botWorkerBusy || now - lastBotHeartbeatAt < BOT_HEARTBEAT_MS) return;
+    lastBotHeartbeatAt = now;
+    lastBotTickAt = 0;
+    botWorkerBusy = true;
+    syncBotWorkerConfig();
+    botWorker.postMessage({ type: 'halt', bots: [...bots.values()].map((bot) => botOwnView(bot, now)) });
+    return;
+  }
   // One tick in flight at a time. A tick the worker is still thinking about
   // is not queued behind: the next one carries the time that went by, so a
   // slow plan costs a bot a late move rather than a slow tank.

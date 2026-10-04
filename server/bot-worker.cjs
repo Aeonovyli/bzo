@@ -21,7 +21,9 @@
 //      config  GAME_CONFIG, whenever it changes
 //      add     { id, pilotId }       remove  { id }
 //      tick    { dt, shared, bots: [own], followId, report }
-//      halt    stop every tank where it is
+//      halt    { bots: [own] } stop every tank where it is, and say so: sent
+//              once a second while nobody is connected, as each bot's
+//              heartbeat
 // Out: results { bots: [{ id, pre, self, post, mode, targetId, intent?, report? }] }
 //      error   { id, message }
 
@@ -179,11 +181,21 @@ function tick({ dt, shared, bots: owns, followId }) {
   parentPort.postMessage({ type: 'results', bots: out });
 }
 
-function halt() {
+function halt({ bots: owns }) {
   const out = [];
-  for (const bot of bots.values()) {
-    if (!bot.own) continue;
+  for (const own of owns) {
+    const bot = bots.get(own.id);
+    if (!bot) continue;
+    bot.own = own;
     bot.sends = [];
+    // A bot that has not ticked since it joined -- the server came up with
+    // nobody on it -- stands where the server put it.
+    if (!bot.driver.alive && own.state.alive) {
+      bot.driver.alive = true;
+      bot.driver.respawn(own.state);
+    } else if (!own.state.alive) {
+      bot.driver.alive = false;
+    }
     bot.driver.halt();
     out.push({ id: bot.id, pre: bot.sends, self: null, post: [], mode: null, targetId: null });
   }
@@ -201,7 +213,7 @@ function handle(message) {
     case 'add': addBot(message); break;
     case 'remove': bots.delete(message.id); break;
     case 'tick': tick(message); break;
-    case 'halt': halt(); break;
+    case 'halt': halt(message); break;
     default: break;
   }
 }
