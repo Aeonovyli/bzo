@@ -121,7 +121,7 @@ function maxMuzzleForward() {
 const MUZZLE_TIP_EPSILON = 0.03;
 const BZFlag_DEFAULT_HORIZONTAL_FOV = 60;
 
-// Tank units of belt per tile of the tread image. Measured off bzflag.obj,
+// Tank units of belt per tile of the tread image. Measured off bzflag-notracks.obj,
 // whose authored tread runs u 0..1.6 around a loop of roughly 10.3 units, so a
 // model that arrives without texture coordinates gets tread links the size the
 // stock tank's are rather than a size of its own.
@@ -136,7 +136,7 @@ const TREAD_UNITS_PER_TILE = 6.4;
 // -x.
 //
 // These are the fallback. Upstream can hard-code one height because it has
-// one tank; 2.1 clears bzflag.obj's turret by 0.02 and is buried inside the
+// one tank; 2.1 clears bzflag-notracks.obj's turret by 0.02 and is buried inside the
 // turret of bzfourtank, bzship and modern. Every model bzo offers names its
 // own three lights, and these serve a model that does not.
 const TANK_NAV_LIGHTS = [

@@ -1160,6 +1160,13 @@ function tankModelIsBuildable(filePath) {
 // model missing its parts is left out rather than listed: the client builds
 // tanks from the file alone, so offering one it cannot build would put a
 // player in a tank nobody can see.
+// A model's name in the picker where its file name does not spell it.
+const TANK_MODEL_LABELS = {
+  bzflag: 'BZFlag',
+  'bzflag-notracks': 'BZFlag notracks',
+  wheeled6: 'Wheeled 6',
+};
+
 function getAvailableTankModels() {
   const objDir = path.join(__dirname, 'public', 'obj');
   const hiddenModelFiles = new Set(['tank.obj', 'missile.obj']);
@@ -1170,15 +1177,11 @@ function getAvailableTankModels() {
       .filter((fileName) => tankModelIsBuildable(path.join(objDir, fileName)))
       .map((fileName) => {
         const id = fileName.slice(0, -4).toLowerCase();
-        const label = id === 'bzflag'
-          ? 'BZFlag'
-          : id === 'wheeled6'
-            ? 'Wheeled 6'
-            : id
-              .split(/[-_\s]+/)
-              .filter(Boolean)
-              .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-              .join(' ');
+        const label = TANK_MODEL_LABELS[id] ?? id
+          .split(/[-_\s]+/)
+          .filter(Boolean)
+          .map((part) => (part === 'bzflag' ? 'BZFlag' : part.charAt(0).toUpperCase() + part.slice(1)))
+          .join(' ');
         return {
           id,
           path: `/obj/${fileName}`,
@@ -1207,6 +1210,8 @@ function normalizeTankModelId(modelId) {
   const normalized = typeof modelId === 'string' ? modelId.trim().toLowerCase() : '';
   if (normalized === 'default') return 'bzflag';
   if (normalized === 'bzflag-tank') return 'bzflag';
+  // The treads tank's own name before it became the stock one.
+  if (normalized === 'bzflag-treads') return 'bzflag';
   if (normalized === 'tank') return 'bzflag';
   return normalized;
 }

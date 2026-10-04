@@ -9,7 +9,7 @@
 //
 // Measured from the high level of detail in BZFlag's src/geometry/models/tank,
 // which is what upstream actually draws. They agree with misc/tank.obj, which
-// bzflag.obj was made from, so the stock tank already has these and the
+// bzflag-notracks.obj was made from, so the stock tank already has these and the
 // generated ones are being brought to the same envelope.
 //
 // They are a target to fit to, not a shape to copy. A generated tank keeps its

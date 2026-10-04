@@ -4650,12 +4650,12 @@ let TANK_MODELS = [
   { id: 'modern', path: '/obj/modern.obj', label: 'Modern' },
   { id: 'simple', path: '/obj/simple.obj', label: 'Simple' },
   { id: 'wheeled6', path: '/obj/wheeled6.obj', label: 'Wheeled 6' },
+  { id: 'bzflag-notracks', path: '/obj/bzflag-notracks.obj', label: 'BZFlag notracks' },
   // Upstream's own two cheaper tanks, which it falls back to at distance and
   // bzo had no equivalent of. Extracted from the BZFlag source rather than
   // from misc/tank.obj, because that file is packaged but never read by the
   // client -- what upstream draws is built in C++, one function per part per
   // level of detail. See scripts/extract-bzflag-lod-tanks.mjs.
-  { id: 'bzflag-treads', path: '/obj/bzflag-treads.obj', label: 'BZFlag Treads' },
   { id: 'bzflag-high', path: '/obj/bzflag-high.obj', label: 'BZFlag High' },
   { id: 'bzflag-medium', path: '/obj/bzflag-medium.obj', label: 'BZFlag Medium' },
   { id: 'bzflag-low', path: '/obj/bzflag-low.obj', label: 'BZFlag Low' },
@@ -4707,6 +4707,8 @@ function canonicalTankModelId(modelId) {
   const normalized = typeof modelId === 'string' ? modelId.trim().toLowerCase() : '';
   if (normalized === 'default') return DEFAULT_TANK_MODEL_ID;
   if (normalized === 'bzflag-tank') return 'bzflag';
+  // The treads tank's own name before it became the stock one.
+  if (normalized === 'bzflag-treads') return 'bzflag';
   if (normalized === 'tank') return DEFAULT_TANK_MODEL_ID;
   return normalized;
 }

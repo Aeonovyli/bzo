@@ -117,7 +117,7 @@ for (const fileName of offered) {
     assert.ok(
       points.has(name),
       `${fileName} should place its own ${name}, or its lights fall back to coordinates`
-      + ' fitted to bzflag.obj and can end up inside its turret',
+      + ' fitted to bzflag-notracks.obj and can end up inside its turret',
     );
   }
   for (const object of points.keys()) {
@@ -264,7 +264,7 @@ assert.deepEqual(
   'and an `o` block whose faces all went to a `g` inside it builds no part',
 );
 
-// The pairing bzflag.obj uses -- `o name` immediately followed by `g name` --
+// The pairing bzflag-notracks.obj uses -- `o name` immediately followed by `g name` --
 // is the same name twice, and names the one mesh it builds once.
 assert.deepEqual(
   readObjObjectNames(['o barrel', 'g barrel', 'f 1 2 3'].join('\n')),

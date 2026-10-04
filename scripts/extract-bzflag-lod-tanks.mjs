@@ -6,10 +6,11 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 
-// Builds public/obj/bzflag-medium.obj and bzflag-low.obj from the BZFlag
+// Builds public/obj/bzflag.obj -- the stock tank, with tracks and road wheels --
+// and bzflag-high.obj, bzflag-medium.obj and bzflag-low.obj from the BZFlag
 // source tree, which is where upstream's tank actually lives.
 //
-// misc/tank.obj -- which bzflag.obj was made from -- is packaged but never
+// misc/tank.obj -- which bzflag-notracks.obj was made from -- is packaged but never
 // read by the client: nothing compiles or loads it. What upstream draws is
 // built in C++, one function per part per level of detail, in
 // src/geometry/models/tank/. Those functions are immediate-mode OpenGL with
@@ -19,8 +20,8 @@
 //
 //   BZFLAG_SRC=~/bzflag node scripts/extract-bzflag-lod-tanks.mjs
 //
-// All three levels of detail, including the high one. bzflag.obj is upstream's
-// high geometry too, but split into bzo's three-part tread convention -- a
+// All three levels of detail, including the high one. bzflag-notracks.obj is
+// upstream's high geometry too, but split into bzo's three-part tread convention -- a
 // middle band with a cap at each end -- where upstream has one casing per
 // side. So it never gets the one-piece treatment the other two do, and its
 // belt is textured by three objects that each scale their own way. This
@@ -352,7 +353,12 @@ function buildCasing(yOffset) {
 // each wheel's cap texture by its own index -- so baking upstream's angle in
 // as well turns every cap twice and the two disagree about which way a wheel
 // is pointing. This is built square and the renderer turns it.
-function buildWheel(centre, angle, divisions) {
+//
+// `mirrored` lays the caps' picture the other way over, which a left wheel
+// needs: render.js turns a left wheel's cap texture one way and a right
+// wheel's the other, so the two sides' caps have to be mirror images for both
+// to roll forward when the tank does -- as Wheeled 6's are.
+function buildWheel(centre, angle, divisions, { mirrored = false } = {}) {
   const { wheelRadius, wheelWidth, wheelInsideTexRad } = TREAD;
   const astep = (Math.PI * 2) / divisions;
   const yLeft = centre[1] + (0.5 * wheelWidth);
@@ -406,10 +412,8 @@ function buildWheel(centre, angle, divisions) {
       // caps out from the same angle and flips one of them in `v`. Both halves
       // of that matter here.
       //
-      // Sharing the angle is what keeps the left and right wheels identical,
-      // which is what render.js is written for -- it turns the left wheels one
-      // way and the right the other, and a wheel mirrored here as well would
-      // cancel that out and roll one side of the tank backwards.
+      // The disc is mirrored again for a left wheel (`mirrored`), since
+      // render.js turns the two sides' caps opposite ways.
       //
       // Flipping `v` is what keeps the two faces of a single wheel agreeing.
       // They look at each other from opposite sides, so a disc laid on both
@@ -421,7 +425,7 @@ function buildWheel(centre, angle, divisions) {
         normal: toBzoNormal(normal),
         texcoord: [
           0.5 + (Math.cos(texAngle) * wheelInsideTexRad),
-          0.5 + (Math.sin(texAngle) * wheelInsideTexRad * sign),
+          0.5 + (Math.sin(texAngle) * wheelInsideTexRad * sign * (mirrored ? -1 : 1)),
         ],
       });
     }
@@ -1122,7 +1126,7 @@ for (const [label, files] of Object.entries(LODS)) {
     for (let wheel = 0; wheel < 4; wheel += 1) {
       const along = TREAD.wheelSpacing * (-1.5 + wheel);
       parts[`leftWheel${wheel + 1}`] = buildWheel(
-        [along, +TREAD.treadYCenter, TREAD.treadRadius], 0, WHEEL_DIVS,
+        [along, +TREAD.treadYCenter, TREAD.treadRadius], 0, WHEEL_DIVS, { mirrored: true },
       );
       parts[`rightWheel${wheel + 1}`] = buildWheel(
         [along, -TREAD.treadYCenter, TREAD.treadRadius], 0, WHEEL_DIVS,
@@ -1189,7 +1193,9 @@ for (const [label, files] of Object.entries(LODS)) {
     light(name, lx, lz);
   }
 
-  const path = resolve(__dirname, `../public/obj/bzflag-${label}.obj`);
+  // The treads tank is the stock one, `bzflag.obj`; the levels of detail are
+  // named for their level.
+  const path = resolve(__dirname, `../public/obj/${label === 'treads' ? 'bzflag' : `bzflag-${label}`}.obj`);
   writeFileSync(path, `${text}\n`, 'utf-8');
   const size = bounds.max.map((max, axis) => (max - bounds.min[axis]).toFixed(2));
   console.log(`${label}: ${vOffset} vertices, ${vOffset / 3} triangles, `
