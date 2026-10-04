@@ -14,7 +14,7 @@ Use [compose.yml](../compose.yml):
 docker compose up -d
 ```
 
-This starts the server on port 3000 and stores runtime config in `./data/server.json`.
+This starts the server on port 3000, with 5154 open for BZFlag clients, and stores runtime config in `./data/server.json`.
 
 On first start, the server copies [example-server.json](../example-server.json) to the configured runtime path if no config exists.
 
@@ -50,9 +50,13 @@ services:
 docker run -d \
   --name bzo \
   -p 3000:3000 \
+  -p 5154:5154 -p 5154:5154/udp \
   -v bzo-data:/data \
   ghcr.io/timriker/bzo:latest
 ```
+
+Port 5154, TCP and UDP, is for BZFlag clients, and only does anything once
+server.json has a `bzflag` block (**On the BZFlag list** below).
 
 The image defaults to `SERVER_CONFIG_PATH=/data/server.json`.
 
@@ -63,6 +67,7 @@ docker run -d \
   --name bzo \
   --platform linux/amd64 \
   -p 3000:3000 \
+  -p 5154:5154 -p 5154:5154/udp \
   -v bzo-data:/data \
   ghcr.io/timriker/bzo:latest
 ```
@@ -230,9 +235,9 @@ A `bzflag` block also lists the server where BZFlag clients look, with a
 
 The list shows server.json's `title` with the map's name after it. The
 port, TCP and UDP, has to be reachable at `publicAddr`, and the host
-name has to resolve to this server's IPv4 address. BZFlag clients can join
-to watch, but not to play yet, on any map with a `.bzw` file;
-[docs/bzflag-clients.md](bzflag-clients.md) has the details.
+name has to resolve to this server's IPv4 address. BZFlag clients join and
+play beside bzo's own; [docs/bzflag-clients.md](bzflag-clients.md) has the
+details.
 
 ## Proxying BZFlag servers
 
