@@ -4004,23 +4004,35 @@ function normalizeAddress(address) {
   return String(address || '').trim().replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '').toLowerCase();
 }
 
-// Every address this server answers as: its interfaces', and the public ones
-// ip4.me and ip6.me see its traffic leave by -- a home network or a cloud's
-// NAT, where a request to its own public URL comes back from the router. A
-// lookup that fails leaves the interfaces, which a CDN's edge never is.
+// Every address this server answers as: its interfaces', the ones its public
+// URL's name resolves to, and the public ones ip4.me and ip6.me see its
+// traffic leave by -- a home network or a cloud's NAT, where a request to its
+// own public URL comes back from the router. A CDN's edge names its own
+// egress address, which is never the one its DNS publishes. A lookup that
+// fails leaves the rest.
 async function ownAddresses() {
   const own = new Set();
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries || []) own.add(normalizeAddress(entry.address));
   }
+  try {
+    const records = await require('dns').promises.lookup(new URL(PUBLIC_URL).hostname, { all: true });
+    for (const record of records) own.add(normalizeAddress(record.address));
+  } catch {
+    // The others stand alone.
+  }
   await Promise.all(['https://ip4.me/api/', 'https://ip6.me/api/'].map(async (url) => {
     try {
-      const response = await fetch(url, { headers: { 'User-Agent': BZO_USER_AGENT }, signal: AbortSignal.timeout(5000) });
+      // Uncompressed: some hosts' Node fails ip4.me's gzip with Z_BUF_ERROR.
+      const response = await fetch(url, {
+        headers: { 'User-Agent': BZO_USER_AGENT, 'Accept-Encoding': 'identity' },
+        signal: AbortSignal.timeout(5000),
+      });
       // "IPv4,203.0.113.7,v1.1,,,..." -- the second field.
       const address = (await response.text()).split(',')[1];
       if (address) own.add(normalizeAddress(address));
-    } catch {
-      // The interfaces stand alone.
+    } catch (error) {
+      log(`[ADMIN] ${url} lookup failed (${error.cause?.code || error.message})`);
     }
   }));
   return own;
