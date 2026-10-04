@@ -3180,6 +3180,19 @@ function ensureServerConfig(configPath) {
 }
 
 const configPath = CONFIG_PATH;
+
+// server.json as a person reads it: keys sorted at every level so a setting is
+// found by name, and a final newline so `cat` leaves the prompt on its own line.
+// Arrays keep their order, which can matter (`voiceIceServers`, map lists).
+function sortJsonKeys(value) {
+  if (Array.isArray(value)) return value.map(sortJsonKeys);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJsonKeys(value[key])]));
+}
+
+function writeServerConfig(config) {
+  fs.writeFileSync(configPath, `${JSON.stringify(sortJsonKeys(config), null, 2)}\n`);
+}
 const BUNDLED_MAPS_DIR = path.join(__dirname, 'maps');
 const RUNTIME_MAPS_DIR = process.env.MAPS_PATH
   ? path.resolve(process.env.MAPS_PATH)
@@ -3280,7 +3293,7 @@ function purgeUnreferencedOverviews() {
     }
   }
   try {
-    fs.writeFileSync(OVERVIEW_UNUSED_PATH, JSON.stringify(stillUnused, null, 1));
+    fs.writeFileSync(OVERVIEW_UNUSED_PATH, JSON.stringify(stillUnused, null, 1) + '\n');
   } catch (error) {
     logError(`Could not write ${OVERVIEW_UNUSED_PATH}:`, error);
   }
@@ -4116,7 +4129,7 @@ function writeSessionsSoon() {
     try {
       // Pretty-printed, the same reason list-server-keys.json is: an
       // operator reasonably opens this file by hand, and it stays small.
-      fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions.serialize(), null, 2), { mode: 0o600 });
+      fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions.serialize(), null, 2) + '\n', { mode: 0o600 });
     } catch (error) {
       logError(`Could not write sessions to ${SESSIONS_PATH}:`, error);
     }
@@ -4202,7 +4215,7 @@ function writeListServerKeysSoon() {
       // this file by hand to check a registration, and it's small enough
       // that the extra bytes cost nothing.
       fs.writeFileSync(
-        LIST_SERVER_KEYS_PATH, JSON.stringify(listServerKeys.serialize(), null, 2), { mode: 0o600 });
+        LIST_SERVER_KEYS_PATH, JSON.stringify(listServerKeys.serialize(), null, 2) + '\n', { mode: 0o600 });
     } catch (error) {
       logError(`Could not write list server keys to ${LIST_SERVER_KEYS_PATH}:`, error);
     }
@@ -5176,6 +5189,27 @@ function parseVoiceIceServers(value) {
 
 const configuredVoiceIceServers = process.env.VOICE_ICE_SERVERS ?? serverConfig.voiceIceServers;
 const VOICE_ICE_SERVERS = parseVoiceIceServers(configuredVoiceIceServers);
+
+// coturn's `use-auth-secret`: a `turn:`/`turns:` entry with no username of its
+// own gets one per player, `<expiry>:<player>`, whose password is the base64
+// HMAC-SHA1 of it under the shared secret. The secret never leaves the server,
+// and a leaked credential stops working at its expiry. coturn checks it on
+// every allocation refresh, so it has to outlast a session.
+const VOICE_TURN_SECRET = String(process.env.VOICE_TURN_SECRET ?? serverConfig.voiceTurnSecret ?? '');
+const VOICE_TURN_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60;
+
+function voiceRtcConfigFor(playerId) {
+  if (!VOICE_TURN_SECRET) return { iceServers: VOICE_ICE_SERVERS };
+  const username = `${Math.floor(Date.now() / 1000) + VOICE_TURN_CREDENTIAL_TTL_SECONDS}:${playerId}`;
+  const credential = crypto.createHmac('sha1', VOICE_TURN_SECRET).update(username).digest('base64');
+  return {
+    iceServers: VOICE_ICE_SERVERS.map((server) => (
+      server.username === undefined && server.urls.some((url) => /^turns?:/i.test(url))
+        ? { ...server, username, credential }
+        : server
+    )),
+  };
+}
 
 
 // BZFlag derives both numbers from _reloadTime, which itself defaults to
@@ -7349,7 +7383,7 @@ function writeBansSoon() {
   bansWriteTimer = setTimeout(() => {
     bansWriteTimer = null;
     try {
-      fs.writeFileSync(BANS_PATH, JSON.stringify(bans.serialize(), null, 2), { mode: 0o600 });
+      fs.writeFileSync(BANS_PATH, JSON.stringify(bans.serialize(), null, 2) + '\n', { mode: 0o600 });
     } catch (error) {
       logError(`Could not write bans to ${BANS_PATH}:`, error);
     }
@@ -8719,7 +8753,7 @@ function applyServerConfigChanges(requested, byWhom) {
   try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     writeOperatorConfigFields(config, next);
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    writeServerConfig(config);
   } catch (error) {
     logError(`Failed to update config at ${configPath}:`, error);
     return { error: 'Failed to update config' };
@@ -14948,7 +14982,7 @@ function buildProxyInit(session, mapEntry, viewer, status, enterTeam) {
     // inventing a match length.
     timeLeft: session.state.timeLeft,
     gameOver: false,
-    voiceRtcConfig: { iceServers: VOICE_ICE_SERVERS },
+    voiceRtcConfig: voiceRtcConfigFor(session.playerId),
     // The target's own world, imported and hashed exactly as Map Viewer's is.
     world: { hash: mapEntry.hash, url: mapEntry.url },
     currentMap: mapEntry.fileName,
@@ -16311,7 +16345,7 @@ function acceptConnection(ws, req) {
     // docs/game-modes-plan.md.
     timeLeft: getMatchTimeLeft(),
     gameOver: matchClock.gameOver,
-    voiceRtcConfig: { iceServers: VOICE_ICE_SERVERS },
+    voiceRtcConfig: voiceRtcConfigFor(player.id),
     // A reference, not the world itself -- see `MAP_REGISTRY` above. The
     // client fetches `url` once; the hash-named, `immutable` response spares
     // a reconnect the re-fetch entirely.
@@ -17381,7 +17415,7 @@ function acceptConnection(ws, req) {
           try {
             const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
             config.mapFile = mapFile;
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            writeServerConfig(config);
             ws.send(JSON.stringify({ success: true }));
             log(`Admin set map to ${mapFile}. Server restart required.`);
             requestServerRestart(`admin map change to ${mapFile}`);
@@ -17608,7 +17642,7 @@ function acceptConnection(ws, req) {
           try {
             const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
             config.listServerKey = key;
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            writeServerConfig(config);
           } catch (error) {
             logError(`Failed to update config at ${configPath}:`, error);
             ws.send(JSON.stringify({ error: 'Failed to update config' }));

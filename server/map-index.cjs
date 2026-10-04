@@ -34,7 +34,7 @@ function createMapIndex({ statePath, overviewDir, log, logError }) {
       writeTimer = null;
       try {
         fs.mkdirSync(path.dirname(statePath), { recursive: true });
-        fs.writeFileSync(statePath, JSON.stringify(Object.fromEntries(entries), null, 1));
+        fs.writeFileSync(statePath, JSON.stringify(Object.fromEntries(entries), null, 1) + '\n');
       } catch (error) {
         logError(`Could not write ${statePath}:`, error);
       }

@@ -162,6 +162,26 @@ See [example-server.json](../example-server.json) for the supported shape.
 `"mapFile": "random"` generates a world as bzfs does, tuned by a
 `randomWorld` block -- see **Generated worlds** in [bzw.md](bzw.md).
 
+### Voice
+
+Voice is peer to peer, and is offered only with at least one
+`voiceIceServers` entry. STUN alone connects most players; a TURN relay
+reaches the rest (mobile carriers, strict NATs). For a coturn server
+with `use-auth-secret`, list its URLs without a username and set
+`voiceTurnSecret` to its `static-auth-secret`:
+
+```json
+"voiceIceServers": [
+  { "urls": ["stun:turn.example.org:3478"] },
+  { "urls": ["turn:turn.example.org:3478?transport=udp",
+             "turn:turn.example.org:3478?transport=tcp",
+             "turns:turn.example.org:443?transport=tcp"] }
+],
+"voiceTurnSecret": "same value as coturn's static-auth-secret"
+```
+
+Each player then gets their own credential, valid for 24 hours.
+
 
 ## Behind a reverse proxy
 
