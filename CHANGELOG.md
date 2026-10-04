@@ -6,6 +6,32 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.11] - 2026-10-04
+
+### Added
+- A bots column on `/list`, for bzo servers and for BZFlag servers, and a
+  `bc` filter on it. #173
+
+### Changed
+- The server uses far less memory. Bot routes are stored compactly, and only
+  the live map keeps its world in memory and on disk. Other maps are listed
+  from the map index and converted when someone views one.
+- Viewing another map, local or a remote server's, no longer stalls the game:
+  the map is converted on a worker thread.
+- Server bots think and drive on a worker thread, started with the first bot
+  and ended with the last, so planning a route no longer stalls the game.
+- `/list` builds its tables at most every 30 seconds instead of on every
+  visit.
+- The Docker image and `compose.yml` open port 5154, TCP and UDP, for BZFlag
+  clients.
+
+### Fixed
+- A shot passes over a burrowed tank, as upstream's does, rather than
+  hitting it.
+- bzo's BZFlag ping counts its bots, as bzfs's does.
+- Server bots keep sending a heartbeat while nobody is connected, rather than
+  being marked not responding.
+
 ## [1.3.10] - 2026-10-03
 
 ### Added
