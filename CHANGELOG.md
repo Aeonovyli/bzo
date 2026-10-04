@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.12] - 2026-10-04
+
+### Changed
+- The stock BZFlag tank has tracks and road wheels, and is the default. The
+  tank without them is BZFlag notracks. #176
+- A new ship model (PR #127), and Bzship 4k and 8k: the same ship at 4,000
+  and 8,000 triangles, for comparison.
+
+### Fixed
+- The road wheels on a tank's left side turn the right way. #176
+
 ## [1.3.11] - 2026-10-04
 
 ### Added
