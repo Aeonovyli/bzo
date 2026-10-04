@@ -201,20 +201,23 @@ export function buildNavGraph(world) {
   // Every node, and each column's nodes from lowest to highest.
   const nodes = [];
   const columnNodes = new Array(columns * columns);
-  // The heights each column's obstacles fill, as [bottom, top] pairs, so an
-  // arc through the air asks a lookup rather than a collision test.
-  const columnSolids = new Array(columns * columns);
+  // The heights each column's obstacles fill, as bottom, top pairs, so an
+  // arc through the air asks a lookup rather than a collision test. One
+  // packed table for the whole grid: column `c`'s pairs run from
+  // `solidStart[c]` to `solidStart[c + 1]`.
+  const solidStart = new Int32Array((columns * columns) + 1);
+  const solidPairs = [];
   const edgeMargin = STAND_RADIUS + 0.5;
   for (let cz = 0; cz < columns; cz++) {
     for (let cx = 0; cx < columns; cx++) {
       const x = origin + (cx * NAV_CELL);
       const z = origin + (cz * NAV_CELL);
+      solidStart[(cz * columns) + cx] = solidPairs.length;
       if (Math.abs(x) > half - edgeMargin || Math.abs(z) > half - edgeMargin) continue;
       const local = near(x, z);
       const levels = new Set([0]);
       for (const obs of local) for (const top of topsAt(obs, x, z)) levels.add(Math.round(top * 100) / 100);
-      const solid = solidsAt(local, x, z);
-      if (solid.length) columnSolids[(cz * columns) + cx] = solid;
+      for (const [bottom, top] of solidsAt(local, x, z)) solidPairs.push(bottom, top);
       const here = [];
       for (const y of [...levels].sort((a, b) => a - b)) {
         if (y <= water) continue;
@@ -226,6 +229,8 @@ export function buildNavGraph(world) {
       if (here.length) columnNodes[(cz * columns) + cx] = here;
     }
   }
+  solidStart[columns * columns] = solidPairs.length;
+  const solidData = Float64Array.from(solidPairs);
 
   const jump = world.jump;
   const tankSpeed = world.tankSpeed ?? jump?.tankSpeed ?? 25;
@@ -234,28 +239,60 @@ export function buildNavGraph(world) {
     ? null
     : columnNodes[(cz * columns) + cx] || null);
 
-  // The moves out of a node, each `{ to, cost, jump }`, worked out the first
-  // time a search reaches it and kept: the jump scan is the expensive part of
-  // a search, and the world does not change under it.
-  const moveCache = new Map();
-  // Whether a node is tight, asked the first time a move onto it is costed.
-  const tightCache = new Map();
-  const tight = (id) => {
-    let known = tightCache.get(id);
-    if (known === undefined) {
-      const n = nodes[id];
-      known = Boolean(findTankObstacle(near(n.x, n.z), n.x, n.y + 0.01, n.z, { radius: TIGHT_RADIUS }));
-      tightCache.set(id, known);
+  // The moves out of a node, worked out the first time a search reaches it
+  // and kept: the jump scan is the expensive part of a search, and the world
+  // does not change under it. A big map has hundreds of thousands, so they
+  // are packed rather than an object each: one row per move across the
+  // `move*` arrays, a node's rows running from `moveStart` for `moveCount`,
+  // and a flight's details in the `flight*` arrays at the row's `moveFlight`.
+  const moveStart = new Int32Array(nodes.length).fill(-1);
+  const moveCount = new Uint16Array(nodes.length);
+  const moveTable = new PackedRows({ to: Int32Array, cost: Float64Array, kind: Uint8Array, flight: Int32Array });
+  const flightTable = new PackedRows({
+    speed: Float64Array, dx: Float64Array, dz: Float64Array, launch: Float64Array, air: Float64Array,
+  });
+  const ensureMoves = (id) => {
+    if (moveStart[id] >= 0) return;
+    const out = computeMoves(nodes[id]);
+    moveStart[id] = moveTable.length;
+    moveCount[id] = out.length;
+    for (const move of out) {
+      let flight = -1;
+      if (move.flight) {
+        flight = flightTable.length;
+        flightTable.push(move.flight.speed, move.flight.dx, move.flight.dz, move.flight.launch, move.flight.air);
+      }
+      moveTable.push(move.to, move.cost,
+        (move.jump ? MOVE_JUMP : 0) | (move.bridge ? MOVE_BRIDGE : 0), flight);
     }
-    return known;
   };
-  const moves = (node) => {
-    let cached = moveCache.get(node.id);
-    if (!cached) {
-      cached = computeMoves(node);
-      moveCache.set(node.id, cached);
+  // A move row as the route reports it.
+  const moveStep = (row) => {
+    const kind = moveTable.columns.kind[row];
+    const f = moveTable.columns.flight[row];
+    const flights = flightTable.columns;
+    return {
+      jump: (kind & MOVE_JUMP) !== 0,
+      bridge: (kind & MOVE_BRIDGE) !== 0,
+      flight: f < 0 ? null : {
+        jump: (kind & MOVE_JUMP) !== 0,
+        speed: flights.speed[f],
+        dx: flights.dx[f],
+        dz: flights.dz[f],
+        launch: flights.launch[f],
+        air: flights.air[f],
+      },
+    };
+  };
+  // Whether a node is tight, asked the first time a move onto it is costed:
+  // unknown, no or yes.
+  const tightKnown = new Int8Array(nodes.length).fill(-1);
+  const tight = (id) => {
+    if (tightKnown[id] < 0) {
+      const n = nodes[id];
+      tightKnown[id] = findTankObstacle(near(n.x, n.z), n.x, n.y + 0.01, n.z, { radius: TIGHT_RADIUS }) ? 1 : 0;
     }
-    return cached;
+    return tightKnown[id] === 1;
   };
   const computeMoves = (node) => {
     const out = [];
@@ -309,7 +346,7 @@ export function buildNavGraph(world) {
     const columnAt = (d) => {
       const cx = Math.round((node.x + (ux * d) - origin) / NAV_CELL);
       const cz = Math.round((node.z + (uz * d) - origin) / NAV_CELL);
-      return { cx, cz, ids: column(cx, cz), solid: inGrid(cx, cz) ? columnSolids[(cz * columns) + cx] : null };
+      return { cx, cz, ids: column(cx, cz), solid: inGrid(cx, cz) ? (cz * columns) + cx : -1 };
     };
     // Where the surface underfoot ends along this line, and whether anything
     // different lies within a flight's reach at all.
@@ -385,10 +422,10 @@ export function buildNavGraph(world) {
   };
 
   const inGrid = (cx, cz) => cx >= 0 && cz >= 0 && cx < columns && cz < columns;
-  const isBlocked = (solid, bottom) => {
-    if (!solid) return false;
-    for (const [low, high] of solid) {
-      if (bottom < high - 0.01 && bottom + TANK_TALL > low) return true;
+  const isBlocked = (cell, bottom) => {
+    if (cell < 0) return false;
+    for (let i = solidStart[cell]; i < solidStart[cell + 1]; i += 2) {
+      if (bottom < solidData[i + 1] - 0.01 && bottom + TANK_TALL > solidData[i]) return true;
     }
     return false;
   };
@@ -427,14 +464,26 @@ export function buildNavGraph(world) {
   };
 
   // Every move into each node, built the first time a field is asked for:
-  // a field searches backwards from its destination.
+  // a field searches backwards from its destination. Packed the same way as
+  // the moves: node `id`'s run from `start[id]` to `start[id + 1]`.
   let incoming = null;
   const buildIncoming = () => {
-    const lists = Array.from({ length: nodes.length }, () => []);
-    for (const node of nodes) {
-      for (const move of moves(node)) lists[move.to].push({ from: node.id, cost: move.cost });
+    for (let id = 0; id < nodes.length; id++) ensureMoves(id);
+    const { to, cost } = moveTable.columns;
+    const start = new Int32Array(nodes.length + 1);
+    for (let row = 0; row < moveTable.length; row++) start[to[row] + 1]++;
+    for (let id = 0; id < nodes.length; id++) start[id + 1] += start[id];
+    const from = new Int32Array(moveTable.length);
+    const into = new Float64Array(moveTable.length);
+    const next = start.slice(0, nodes.length);
+    for (let id = 0; id < nodes.length; id++) {
+      for (let row = moveStart[id]; row < moveStart[id] + moveCount[id]; row++) {
+        const slot = next[to[row]]++;
+        from[slot] = id;
+        into[slot] = cost[row];
+      }
     }
-    return lists;
+    return { start, from, cost: into };
   };
 
   // How far every node is from one destination, by the cheapest way there:
@@ -456,11 +505,12 @@ export function buildNavGraph(world) {
       if (closed[current]) continue;
       closed[current] = 1;
       const base = field[current];
-      for (const edge of incoming[current]) {
-        const cost = base + edge.cost;
-        if (cost >= field[edge.from]) continue;
-        field[edge.from] = cost;
-        open.push(edge.from, cost);
+      for (let i = incoming.start[current]; i < incoming.start[current + 1]; i++) {
+        const from = incoming.from[i];
+        const cost = base + incoming.cost[i];
+        if (cost >= field[from]) continue;
+        field[from] = cost;
+        open.push(from, cost);
       }
     }
     if (fields.size >= MAX_FIELDS) fields.delete(fields.keys().next().value);
@@ -478,22 +528,20 @@ export function buildNavGraph(world) {
     if (!Number.isFinite(field[start])) return null;
     const route = [];
     for (let id = start; id !== goal && route.length < MAX_ROUTE_NODES;) {
-      let best = null;
-      for (const move of moves(nodes[id])) {
-        const total = move.cost + field[move.to];
-        if (!best || total < best.total) best = { move, total };
+      ensureMoves(id);
+      const { to, cost } = moveTable.columns;
+      let best = -1;
+      let bestTotal = Infinity;
+      for (let row = moveStart[id]; row < moveStart[id] + moveCount[id]; row++) {
+        const total = cost[row] + field[to[row]];
+        if (best < 0 || total < bestTotal) {
+          best = row;
+          bestTotal = total;
+        }
       }
-      if (!best || !Number.isFinite(best.total)) return null;
-      id = best.move.to;
-      route.push({
-        id,
-        x: nodes[id].x,
-        y: nodes[id].y,
-        z: nodes[id].z,
-        jump: best.move.jump,
-        bridge: best.move.bridge === true,
-        flight: best.move.flight ?? null,
-      });
+      if (best < 0 || !Number.isFinite(bestTotal)) return null;
+      id = to[best];
+      route.push({ id, x: nodes[id].x, y: nodes[id].y, z: nodes[id].z, ...moveStep(best) });
     }
     return route;
   };
@@ -558,7 +606,34 @@ export function buildNavGraph(world) {
     return out;
   };
 
-  return { nodes, nodeAt, findRoute, smoothRoute, moves };
+  return { nodes, nodeAt, findRoute, smoothRoute };
+}
+
+const MOVE_JUMP = 1;
+const MOVE_BRIDGE = 2;
+
+// Rows of numbers, one typed array per column, grown by doubling.
+class PackedRows {
+  constructor(types) {
+    this.length = 0;
+    this.capacity = 1024;
+    this.names = Object.keys(types);
+    this.columns = {};
+    for (const name of this.names) this.columns[name] = new types[name](this.capacity);
+  }
+
+  push(...values) {
+    if (this.length === this.capacity) {
+      this.capacity *= 2;
+      for (const name of this.names) {
+        const grown = new this.columns[name].constructor(this.capacity);
+        grown.set(this.columns[name]);
+        this.columns[name] = grown;
+      }
+    }
+    for (let i = 0; i < values.length; i++) this.columns[this.names[i]][this.length] = values[i];
+    this.length += 1;
+  }
 }
 
 class MinHeap {

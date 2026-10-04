@@ -130,8 +130,9 @@ placeholder otherwise -- see "Config" below.
 ## Ready
 
 Listening is not answering. A restart's map pass
-(`hashRemainingMapsInBackground`) holds the event loop for seconds after the
-port opens, and a list server that calls back then -- bzo's challenge, the
+(`hashRemainingMapsInBackground`) lists unchanged maps from
+`cache/map-index.json`, but one that parses new or edited maps holds the event
+loop for seconds after the port opens, and a list server that calls back then -- bzo's challenge, the
 BZFlag list's connect test -- times out and counts it against the server. So
 a server says nothing to either list until that pass is done, or a minute
 has gone by (`serverReady`): no boot report, no join or part, no BZFlag ADD,
@@ -372,6 +373,13 @@ dials an hour and no downloads. A server that refused, timed out or sent
 something unusable is left alone for six hours rather than retried on the next
 tick. State lives in `cache/bzfs-worlds.json`, a regeneratable cache: losing it
 costs one dial per server, not one download.
+
+The `B` column is robots. A bzo instance reports its count. bzfs's list row
+counts only humans (`getTeamCounts`, `bzfs.cxx:860`) while its UDP ping
+counts whole teams (`respondToPing`, `bzfs.cxx:1466`), so each refresh pings
+every listed server once and takes the difference (`countServerBots`). A
+server that did not answer is blank. A server whose game has just ended
+lists no humans, so for that moment its players read as bots.
 
 A bzo row shows the team lines only if that instance reported them: an
 instance older than the release that added `teamCounts`/`teamMaximums` to a

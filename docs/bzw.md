@@ -1,13 +1,15 @@
 # BZW map import
 
 What bzo reads out of a BZFlag `.bzw` file, and what it ignores. The importer is
-`parseBZWMap` in `server.js`, with the `options` block split between
+`parseBZWMap` in `server/bzw-parse.cjs`, with the `options` block split between
 `parseBZWServerOptions` there and `parseBZWTeamMode` in the `teams` pair.
 
 Maps live in `maps/`; `mapFile` in `server.json` picks one, and `"random"`
-generates a world instead (see **Generated worlds**). A map is parsed once, on
-startup, and the obstacle list goes to every client in the `init` payload, so
-the client and the server collide against the same geometry by construction.
+generates a world instead (see **Generated worlds**). The live map is parsed
+once, on startup, and every client loads the same world file, so the client
+and the server collide against the same geometry by construction. Any other
+map is converted on a worker thread (`server/map-convert-worker.cjs`) when
+someone views it, and while new or edited, for its picture and stats.
 
 Every keyword is matched case-insensitively against the line's first
 whitespace-delimited token, as upstream matches with `strcasecmp` -- so

@@ -28,6 +28,7 @@
 // again the instant the variables arrive, and `enterForVariables: false`
 // turns it off for a caller that would rather stay invisible.
 
+const dgram = require('node:dgram');
 const net = require('node:net');
 const { BZDB_DEFAULTS } = require('./bzdb-defaults.cjs');
 const zlib = require('node:zlib');
@@ -185,6 +186,41 @@ async function fetchServerList(url, version) {
   });
   const text = await res.text();
   return parseJsonServerList(text, version) || parsePlainServerList(text, version);
+}
+
+// How many of a listed server's tanks are robots. The list row counts only
+// humans (`getTeamCounts` skips anything not `isHuman`, bzfs.cxx:860), while a
+// UDP ping is answered with whole team sizes (`respondToPing`, bzfs.cxx:1466),
+// so the difference is the robots. One request per server, sent twice for a
+// dropped packet, and whatever has answered by `timeoutMs` is the result:
+// `bots` stays undefined on a row that did not, rather than reading as none.
+const PING_REQUEST = Buffer.from([0, 2, 0x04, 0x04, 0, 0]);
+const PING_REPLY = 0x0303;
+// After the header, the version (8), the ServerId (8), the source Address (5)
+// and eight u16s, then `maxPlayers` and each team's count and maximum.
+const PING_ROGUE_COUNT = 4 + 8 + 8 + 5 + 16 + 1;
+
+async function countServerBots(servers, { timeoutMs = 1000 } = {}) {
+  const targets = servers.filter((s) => s.info && net.isIPv4(s.ip || '') && s.port > 0);
+  if (!targets.length) return;
+  const byAddress = new Map(targets.map((s) => [`${s.ip}:${s.port}`, s]));
+  const socket = dgram.createSocket('udp4');
+  socket.on('error', () => {});
+  socket.on('message', (message, from) => {
+    if (message.length < PING_ROGUE_COUNT + 10 || message.readUInt16BE(2) !== PING_REPLY) return;
+    const server = byAddress.get(`${from.address}:${from.port}`);
+    if (!server) return;
+    let tanks = 0;
+    for (let team = 0; team < 5; team++) tanks += message[PING_ROGUE_COUNT + (team * 2)];
+    server.bots = Math.max(0, tanks - server.info.players);
+  });
+  await new Promise((resolve) => socket.bind(0, resolve));
+  const send = () => targets.forEach((s) => socket.send(PING_REQUEST, s.port, s.ip));
+  send();
+  await new Promise((resolve) => setTimeout(resolve, timeoutMs / 2));
+  send();
+  await new Promise((resolve) => setTimeout(resolve, timeoutMs / 2));
+  socket.close();
 }
 
 function splitNamePort(nameport) {
@@ -2120,6 +2156,7 @@ module.exports = {
   decodePingHex,
   findPublicServer,
   fetchServerList,
+  countServerBots,
   fetchWorldFromServer,
   probeGuestAccess,
   guestReply,

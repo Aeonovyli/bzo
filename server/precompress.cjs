@@ -98,13 +98,21 @@ function eligible(urlPath) {
   return COMPRESSIBLE.test(urlPath);
 }
 
-// Called for every file the build id walk reads, with the bytes it already has.
+// The name a sidecar is kept under for these bytes.
+function digestOf(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, DIGEST_LENGTH);
+}
+
+// Called for every file the build id walk reads, with the bytes it already
+// has -- or with `{ digest, size }` from whoever wrote it, which is a worker
+// that converted a map and kept its bytes to itself (`digestOf`).
 function consider(urlPath, source, bytes) {
   if (!eligible(urlPath)) return;
-  const digest = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, DIGEST_LENGTH);
+  const known = Buffer.isBuffer(bytes) ? null : bytes;
+  const digest = known ? known.digest : digestOf(bytes);
   const sidecar = path.join(state.cacheDir, `${urlPath.slice(1)}.${digest}.br`);
   state.expected.add(sidecar);
-  const entry = { source, digest, sidecar, size: bytes.length, ready: false };
+  const entry = { source, digest, sidecar, size: known ? known.size : bytes.length, ready: false };
   state.planned.set(urlPath, entry);
   // A sidecar under this name was made from these bytes, so its presence is the
   // whole check. An empty one is a write that did not finish and is redone.
@@ -378,6 +386,7 @@ module.exports = {
   buildAll,
   configure,
   consider,
+  digestOf,
   drain,
   eligible,
   isMissingFile,

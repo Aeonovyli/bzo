@@ -7,10 +7,10 @@
  */
 
 // A map's `options` block has two readers -- `parseBZWServerOptions` in
-// server.js and `parseBZWTeamMode` in server/teams.cjs -- and the first one
+// server/bzw-parse.cjs and `parseBZWTeamMode` in server/teams.cjs -- and the first one
 // reports the options neither of them claimed. It can only do that if it
 // knows what the second claims, which is a list written out by hand in
-// server.js as `TEAM_MODE_OPTIONS`.
+// server/bzw-parse.cjs as `TEAM_MODE_OPTIONS`.
 //
 // This holds that list to what `parseBZWTeamMode` really reads. Without it,
 // teaching teams.cjs a new option would make bzo start reporting an option it
@@ -19,7 +19,7 @@
 
 import fs from 'node:fs';
 
-const serverSource = fs.readFileSync('server.js', 'utf8');
+const serverSource = fs.readFileSync('server/bzw-parse.cjs', 'utf8');
 const teamsSource = fs.readFileSync('server/teams.cjs', 'utf8');
 
 const declaredMatch = serverSource.match(/const TEAM_MODE_OPTIONS = new Set\(\[([^\]]*)\]\)/);

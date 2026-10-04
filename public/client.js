@@ -2553,6 +2553,13 @@ async function loadWorldFile(worldRef) {
   if (worldRef.hash && worldFileCache.has(worldRef.hash)) {
     return worldFileCache.get(worldRef.hash);
   }
+  // A listed map whose world the server has not written: asked for first,
+  // the same request a remote server's map makes, and fetched by the entry
+  // that comes back -- a map parsed again may have hashed differently.
+  if (worldRef.ready === false && worldRef.file) {
+    const prepared = await prepareWorldFile(worldRef.file);
+    return prepared && prepared.ready !== false ? loadWorldFile(prepared) : null;
+  }
   if (!WORLD_FILE_URL_RE.test(worldRef.url)) {
     console.error('Refusing to fetch a world file with an unexpected URL shape:', worldRef.url);
     return null;
@@ -2567,6 +2574,31 @@ async function loadWorldFile(worldRef) {
     console.error('Failed to load world file', worldRef.url, error);
     return null;
   }
+}
+
+// Asks the server to write one of its own maps' worlds, resolving to that
+// map's fresh `viewableMaps` entry or null. One request per file at a time.
+const worldFilePreparations = new Map();
+function prepareWorldFile(file) {
+  const pending = worldFilePreparations.get(file);
+  if (pending) return pending.promise;
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  worldFilePreparations.set(file, { promise, resolve });
+  sendToServer({ type: 'importMapForView', file });
+  return promise;
+}
+
+function worldFilePrepared(message) {
+  const waiting = worldFilePreparations.get(message.file);
+  if (!waiting) return;
+  worldFilePreparations.delete(message.file);
+  const maps = Array.isArray(message.viewableMaps) ? message.viewableMaps : null;
+  if (maps) {
+    availableViewMaps = maps;
+    viewableMapEntries = maps;
+  }
+  waiting.resolve(message.success && maps ? maps.find((entry) => entry.file === message.file) || null : null);
 }
 
 // GAME_CONFIG's own default (defaultBZDB.cxx's `worldSize`, doubled the same
@@ -7188,6 +7220,9 @@ function connectToServer() {
     gameplayJoinConfirmed = false;
     activeInitSequence = 0;
     hideLoadingOverlay();
+    // A world being written for a view is not coming on this socket.
+    for (const { resolve } of worldFilePreparations.values()) resolve(null);
+    worldFilePreparations.clear();
     let wins = 0;
     let losses = 0;
     if (myTank && myTank.userData && myTank.userData.playerState) {
@@ -8199,6 +8234,7 @@ function handleServerMessage(message) {
       break;
 
     case 'importMapForViewResult':
+      worldFilePrepared(message);
       handleImportMapForViewResult(message);
       break;
 

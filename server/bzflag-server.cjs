@@ -195,7 +195,9 @@ function packReject(reason, code = REJECT_BAD_REQUEST) {
   return payload;
 }
 
-// `getStatus()` is this server's list row (`computeListServerStatus`);
+// `getStatus()` is this server's list row (`computeListServerStatus`), and
+// `getPingStatus()` the same with robots in the team counts, which is what a
+// UDP ping and MsgQueryGame answer with (bzfs.cxx:1466, :3123);
 // `getPlayers()` and `getTeams()` are what MsgQueryPlayers sends, already in
 // upstream's numbering. `rejectReason` is what a client that tries to join is
 // told.
@@ -204,7 +206,7 @@ function packReject(reason, code = REJECT_BAD_REQUEST) {
 // payload)` seats a client that sent MsgEnter, and `link.onFrame` then takes
 // every frame it sends.
 function createBzflagServer({
-  getStatus, getPlayers, getTeams, getGameSettings, getWorld, getCacheUrl = () => null, onEnter,
+  getStatus, getPingStatus = getStatus, getPlayers, getTeams, getGameSettings, getWorld, getCacheUrl = () => null, onEnter,
   reserveId, releaseId, rejectReason, log = () => {},
 }) {
   const startedAt = Date.now();
@@ -243,7 +245,7 @@ function createBzflagServer({
       return !connection.link.closed;
     }
     if (code === 'qg') {
-      sendFrame(socket, 'qg', packQueryGame(getStatus(), (Date.now() - startedAt) / 1000));
+      sendFrame(socket, 'qg', packQueryGame(getPingStatus(), (Date.now() - startedAt) / 1000));
     } else if (code === 'qp') {
       const players = getPlayers();
       const head = Buffer.alloc(4);
@@ -435,7 +437,7 @@ function createBzflagServer({
       udp.on('message', (message, from) => {
         if (message.length < 4) return;
         if (message.readUInt16BE(2) === PING_REQUEST) {
-          udp.send(packPingReply(getStatus(), port), from.port, from.address);
+          udp.send(packPingReply(getPingStatus(), port), from.port, from.address);
           return;
         }
         receiveUdp(message, from);

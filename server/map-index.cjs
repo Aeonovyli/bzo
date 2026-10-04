@@ -8,25 +8,22 @@
 // Which map file produced which cached world, so a restart can tell at once
 // what it already has (issue #147).
 //
-// `MAP_REGISTRY` is rebuilt at boot by re-parsing every `.bzw`, which takes
-// minutes once a server has imported a hundred worlds. Everything those parses
-// produce is already on disk under the map's hash -- the world JSON and the
-// overview picture both -- but nothing recorded *which* hash belongs to which
-// file, so for those minutes the server could not answer "do I have this one
-// already?" and the world tracker re-downloaded maps it was still in the
-// middle of reading back (`server/bzfs-worlds.cjs`).
+// It is also what `MAP_REGISTRY` is rebuilt from at boot: a map whose entry
+// still holds is listed from its hash, picture and stats here, and parsed only
+// when someone views it (`prepareMapForView`). Only the live map keeps its
+// world JSON on disk, so an entry does not promise one.
 //
 // This is only an index. It is never the source of a map's contents, and a
-// wrong or stale entry costs a re-import rather than a wrong world: an entry
+// wrong or stale entry costs a re-parse rather than a wrong world: an entry
 // counts only while the `.bzw` it names still has the size and mtime it had
-// when the hash was computed, and only while its world and picture are still
-// there.
+// when the hash was computed, only while its picture is still there, and only
+// for the bzo version that made it.
 const fs = require('fs');
 const path = require('path');
 
-function createMapIndex({ statePath, mapCacheDir, overviewDir, log, logError }) {
-  // mapFileName -> { hash, overview, mtimeMs, size }, `overview` being the
-  // picture's name in `overviewDir` without its `.svg`
+function createMapIndex({ statePath, overviewDir, log, logError }) {
+  // mapFileName -> { hash, overview, mtimeMs, size, stats, version },
+  // `overview` being the picture's name in `overviewDir` without its `.svg`
   let entries = new Map();
   let writeTimer = null;
 
@@ -71,28 +68,35 @@ function createMapIndex({ statePath, mapCacheDir, overviewDir, log, logError }) 
     },
 
     // Called as each map registers, with the file it was read from.
-    note(fileName, hash, overview, filePath) {
+    note(fileName, hash, overview, filePath, { stats = null, version = '' } = {}) {
       const stat = statOf(filePath);
       if (!stat) return;
       const existing = entries.get(fileName);
       if (existing && existing.hash === hash && existing.overview === overview
-        && existing.mtimeMs === stat.mtimeMs && existing.size === stat.size) return;
-      entries.set(fileName, { hash, overview, ...stat });
+        && existing.mtimeMs === stat.mtimeMs && existing.size === stat.size
+        && existing.version === version) return;
+      entries.set(fileName, { hash, overview, ...stat, stats, version });
       save();
     },
 
     // Whether this server already holds a parsed, drawn copy of `fileName` --
-    // answerable before the boot pass has re-read it. Both hashed files have
-    // to be there: an index entry whose world or picture was swept is a
-    // promise this cannot keep.
+    // answerable without parsing it. The picture has to be there: an index
+    // entry whose picture was swept is a promise this cannot keep.
     has(fileName, filePath) {
       const entry = entries.get(fileName);
       if (!entry) return false;
       const stat = statOf(filePath);
       if (!stat || stat.mtimeMs !== entry.mtimeMs || stat.size !== entry.size) return false;
       return typeof entry.overview === 'string'
-        && fs.existsSync(path.join(mapCacheDir, `${entry.hash}.json`))
         && fs.existsSync(path.join(overviewDir, `${entry.overview}.svg`));
+    },
+
+    // What a map was registered with, for listing it without a parse: only
+    // where `has` holds, the stats were kept, and this bzo made them.
+    restore(fileName, filePath, version) {
+      if (!this.has(fileName, filePath)) return null;
+      const entry = entries.get(fileName);
+      return entry.stats && entry.version === version ? entry : null;
     },
 
     // The picture's name `has` vouches for, or null.

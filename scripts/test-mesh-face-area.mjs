@@ -10,27 +10,15 @@
 // vertex triple with the largest cross product, and a face whose best triple
 // is degenerate has no plane to make: upstream logs "invalid mesh face" and
 // sets `vertexCount` to 0, dropping the face and loading the world anyway.
-// server.js's `faceMaxCrossSqr` is that test, and this holds it to the same
-// answers -- including on the coordinates real bzfs actually complained about,
-// so the case that motivated the check cannot silently stop being caught.
+// `faceMaxCrossSqr` (server/bzw-parse.cjs) is that test, and this holds it to
+// the same answers -- including on the coordinates real bzfs actually
+// complained about, so the case that motivated the check cannot silently stop
+// being caught.
 
-import fs from 'node:fs';
+import { createRequire } from 'node:module';
 
-// Lifted out of `server.js` by text, so it is the shipping function that is
-// tested rather than a copy of it. The closing brace is found at whatever
-// indentation the declaration itself sits at: the function has lived both
-// nested inside `parseBZWMap` and at module scope, and which one it is has
-// nothing to do with what it computes.
-const src = fs.readFileSync('server.js', 'utf8');
-const start = src.search(/^[ \t]*function faceMaxCrossSqr\b/m);
-if (start < 0) {
-  console.error('FAIL server.js has no faceMaxCrossSqr');
-  process.exit(1);
-}
-const indent = /^[ \t]*/.exec(src.slice(start))[0];
-const close = `\n${indent}}\n`;
-const body = src.slice(start, src.indexOf(close, start) + close.length);
-const faceMaxCrossSqr = eval(`(${body.trim().replace(/^function faceMaxCrossSqr/, 'function')})`);
+const require = createRequire(import.meta.url);
+const { faceMaxCrossSqr } = require('../server/bzw-parse.cjs');
 
 // Upstream's own threshold, MeshFace.cxx:114.
 const MIN_FACE_CROSS_SQR = 1.0e-20;

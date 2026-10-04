@@ -88,6 +88,7 @@ const BOOL_LABELS = {
 const RANGE_LABELS = {
   s: 'shots', shots: 'shots',
   p: 'players', players: 'players',
+  bc: 'botCount', botCount: 'botCount',
   f: 'freeSlots', freeSlots: 'freeSlots',
   vt: 'validTeams', validTeams: 'validTeams',
   mt: 'maxTime', maxTime: 'maxTime',
@@ -234,6 +235,7 @@ function rangeValue(entry, key) {
   switch (key) {
     case 'shots': return entry.s;
     case 'players': return entry.p;
+    case 'botCount': return entry.bt ?? undefined;
     case 'maxTime': return entry.mt;
     case 'maxPlayers': return entry.mp;
     case 'maxTeamScore': return entry.mts;
