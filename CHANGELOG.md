@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.13] - 2026-10-04
+
+### Fixed
+- The admin whitelist works behind a reverse proxy on a cloud host that NATs
+  its public address, such as Azure: the server counts the addresses its
+  public URL resolves to as its own. Its public address lookups no longer fail
+  on Node's decompression, and a failed one is logged.
+
 ## [1.3.12] - 2026-10-04
 
 ### Changed
