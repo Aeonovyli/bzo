@@ -54,7 +54,7 @@ function parseDuration(text) {
   const value = String(text || '').trim();
   if (/^(short|default)$/i.test(value)) return -1;
   if (/^(forever|max)$/i.test(value)) return 0;
-  if (!/^(\d+[hwdm]?)+$/i.test(value)) return null;
+  if (!value || !/^(\d+[hwdm])*\d*$/i.test(value)) return null;
   const unit = { w: 10080, d: 1440, h: 60, m: 1 };
   let minutes = 0;
   for (const [, digits, letter] of value.matchAll(/(\d+)([hwdm]?)/gi)) {
