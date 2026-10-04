@@ -252,6 +252,13 @@ for (const value of [1, 3, '3', MAX_SHOT_SLOTS, MAX_SHOT_SLOTS + 1, 0, '0', -1, 
   // The height gate: a shot over the roof of the tank misses it.
   assert.equal(getShotTankHit(shooter, { x: -10, y: 9, z: 0 }, { x: 10, y: 9, z: 0 }, victim),
     null, 'a shot above the tank misses');
+  // Inside the sphere but over the tank's box: a muzzle-height shell passes a
+  // tank at `_burrowDepth`, and a burrowed tank's own low shot still reaches it.
+  const burrowed = { ...victim, flagType: 'BU', position: { ...victim.position, y: -1.32 } };
+  assert.equal(getShotTankHit(shooter, { x: -10, y: 1.57, z: 0 }, { x: 10, y: 1.57, z: 0 }, burrowed),
+    null, 'a level shell passes over a burrowed tank');
+  assert.ok(getShotTankHit(shooter, { x: -10, y: 0.25, z: 0 }, { x: 10, y: 0.25, z: 0 }, burrowed),
+    'a burrowed shooter hits a burrowed tank');
 
   // A guided missile is inert until its activation time is up, which is what
   // stops it killing its own shooter as it turns back.

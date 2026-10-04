@@ -292,6 +292,14 @@ function getShotTankHit(shot, from, to, tank, rules = {}) {
   // zoned tank's bullet, and a zoned bullet reaches nobody else.
   if (shotPassesThroughTank(shot.flag, tank.zoned)) return null;
 
+  // SegmentedShotStrategy::checkHit's first test (SegmentedShotStrategy.cxx:254):
+  // the segment's bounding box must overlap the tank's, whose height is
+  // `_tankHeight` up from its feet (BaseLocalPlayer.cxx:110). The sphere below
+  // reaches well above and below that, so this is what lets a level shell pass
+  // over a tank at `_burrowDepth`.
+  if (Math.max(from.y, to.y) < tank.position.y
+    || Math.min(from.y, to.y) > tank.position.y + TANK.hitHeight) return null;
+
   const narrow = usesNarrowHitBox(tank.flagType ?? null);
   const fraction = getSegmentTankHitFraction(from, to, tank.position, {
     narrow,
