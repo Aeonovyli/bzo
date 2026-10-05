@@ -1283,6 +1283,59 @@ app.get('/api/ready', (req, res) => {
   res.json({ ready: true, build: CLIENT_BUILD });
 });
 
+// The ICE servers a player gets at join, for public/webrtc-test.html: a page
+// with no game connection that still has to reach the same relay. The TURN
+// credential is the same short-lived kind any visitor gets by joining.
+// `?provider=test` answers server.json's `testIceServers` instead: another
+// provider's relay, to tell a network's reaction to ours from its reaction to
+// any relay at all.
+app.get('/api/voice-ice', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (req.query.provider === 'test') {
+    res.json({ iceServers: parseVoiceIceServers(serverConfig.testIceServers) });
+    return;
+  }
+  // What a phone gets: the IPv4-only names, `voiceIceServersIpv4`.
+  if (req.query.provider === 'ipv4') {
+    const config = voiceRtcConfigFor('test');
+    res.json({ iceServers: config.ipv4IceServers || config.iceServers });
+    return;
+  }
+  // bzo's own relay reached over one address family alone, by its literal
+  // address: `relay4`, `relay6`.
+  if (req.query.provider === 'relay4' || req.query.provider === 'relay6') {
+    const host = req.query.provider === 'relay4' ? '4.236.50.141' : '[2603:1030:501:14::2f]';
+    const servers = voiceRtcConfigFor('test').iceServers
+      .filter((server) => server.username !== undefined)
+      .slice(0, 1)
+      .map((server) => ({ ...server, urls: [`turn:${host}:3478?transport=udp`] }));
+    res.json({ iceServers: servers });
+    return;
+  }
+  // The same relay reached on UDP 3478 alone, the port bzo's own uses.
+  if (req.query.provider === 'test3478') {
+    const servers = parseVoiceIceServers(serverConfig.testIceServers)
+      .filter((server) => server.username !== undefined)
+      .slice(0, 1)
+      .map((server) => ({ ...server, urls: [server.urls[0].replace(/:\d+(\?.*)?$/, ':3478?transport=udp')] }));
+    res.json({ iceServers: servers });
+    return;
+  }
+  res.json(voiceRtcConfigFor('test'));
+});
+
+// The test page's own log, into server.log: lines written while the device's
+// connection was down arrive together once it is back, each with the page's
+// own clock. Short lines only, and only from that page's shape of request.
+app.post('/api/webrtc-test-log', (req, res) => {
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines.slice(0, 50) : [];
+  const ip = (req.get('x-forwarded-for') || '').split(',')[0].trim() || req.socket.remoteAddress;
+  lines.forEach((line) => {
+    if (typeof line === 'string') log(`[webrtc-test] ${ip} ${line.slice(0, 200).replace(/[\r\n]/g, ' ')}`);
+  });
+  res.status(204).end();
+});
+
 // A server-rendered, standalone page -- not part of the game client bundle,
 // no websocket -- listing what /list's data sources already are: the
 // public BZFlag list server (`getRemoteServerList`, cached 5 minutes and
@@ -5201,17 +5254,29 @@ const VOICE_ICE_SERVERS = parseVoiceIceServers(configuredVoiceIceServers);
 const VOICE_TURN_SECRET = String(process.env.VOICE_TURN_SECRET ?? serverConfig.voiceTurnSecret ?? '');
 const VOICE_TURN_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60;
 
+// `voiceIceServersIpv4`: the same servers by names with no IPv6 address, for
+// the clients that keep voice on IPv4 (phones -- see voice.js `ipFamily`). A
+// relay reached over IPv6 would carry the call over IPv6 all the same.
+const VOICE_ICE_SERVERS_IPV4 = parseVoiceIceServers(
+  process.env.VOICE_ICE_SERVERS_IPV4 ?? serverConfig.voiceIceServersIpv4
+);
+
 function voiceRtcConfigFor(playerId) {
-  if (!VOICE_TURN_SECRET) return { iceServers: VOICE_ICE_SERVERS };
+  if (!VOICE_TURN_SECRET) {
+    return VOICE_ICE_SERVERS_IPV4.length > 0
+      ? { iceServers: VOICE_ICE_SERVERS, ipv4IceServers: VOICE_ICE_SERVERS_IPV4 }
+      : { iceServers: VOICE_ICE_SERVERS };
+  }
   const username = `${Math.floor(Date.now() / 1000) + VOICE_TURN_CREDENTIAL_TTL_SECONDS}:${playerId}-${crypto.randomBytes(4).toString('hex')}`;
   const credential = crypto.createHmac('sha1', VOICE_TURN_SECRET).update(username).digest('base64');
-  return {
-    iceServers: VOICE_ICE_SERVERS.map((server) => (
-      server.username === undefined && server.urls.some((url) => /^turns?:/i.test(url))
-        ? { ...server, username, credential }
-        : server
-    )),
-  };
+  const withCredentials = (servers) => servers.map((server) => (
+    server.username === undefined && server.urls.some((url) => /^turns?:/i.test(url))
+      ? { ...server, username, credential }
+      : server
+  ));
+  return VOICE_ICE_SERVERS_IPV4.length > 0
+    ? { iceServers: withCredentials(VOICE_ICE_SERVERS), ipv4IceServers: withCredentials(VOICE_ICE_SERVERS_IPV4) }
+    : { iceServers: withCredentials(VOICE_ICE_SERVERS) };
 }
 
 

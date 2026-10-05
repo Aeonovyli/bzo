@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bzo WebRTC test</title>
+<!--
+  One device, no game, no signaling: two peer connections in this page talk to
+  each other. With "relay" every packet, the DTLS handshake included, leaves the
+  device for the TURN server and comes back, so a network that objects to some
+  part of a WebRTC call sees all of it. "Host" stays on the device and is the
+  control. A once-a-second fetch of /api/ready says when this device's own
+  connection to the internet goes away.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; background: #0b0e12; color: #e6f1ff; font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 44rem; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 0.5rem; }
+  p { margin: 0 0 0.75rem; color: #b9c7d6; }
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  button { font: inherit; padding: 10px 14px; border-radius: 8px; border: 1px solid #2c3a4a; background: #16202b; color: #e6f1ff; }
+  button:active { background: #213040; }
+  #net { font-weight: 600; margin: 0 0 8px; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #11161d; border: 1px solid #2c3a4a; border-radius: 8px; padding: 10px; font-size: 13px; min-height: 12rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WebRTC test</h1>
+  <p>
+    Runs a call between two connections inside this page, every packet through
+    the named relay. turn4 is what phones use. The log's <code>servers:</code>
+    line shows exactly which URLs a run used.
+  </p>
+  <div class="modes">
+    <button data-relay="1" data-media="data" data-provider="ipv4">turn4 (IPv4), data</button>
+    <button data-relay="1" data-media="audio" data-provider="ipv4">turn4 (IPv4), audio</button>
+  </div>
+  <div class="modes">
+    <button data-relay="1" data-media="data">turn (IPv4+IPv6), data</button>
+    <button data-relay="1" data-media="data" data-provider="relay4">sam 4.236.50.141 UDP, data</button>
+    <button data-relay="1" data-media="data" data-provider="relay6">sam IPv6 UDP, data</button>
+  </div>
+  <div class="modes">
+    <button data-relay="1" data-media="data" data-provider="test">Metered, data</button>
+    <button data-relay="1" data-media="audio" data-provider="test">Metered, audio</button>
+    <button data-relay="1" data-media="data" data-provider="test3478">Metered :3478, data</button>
+  </div>
+  <div class="modes">
+    <button data-relay="0" data-media="data">On this device only, data</button>
+    <button id="stop">Stop</button>
+  </div>
+  <div id="net">Internet: checking</div>
+  <pre id="log"></pre>
+</main>
+<script>
+  const logEl = document.getElementById('log');
+  const netEl = document.getElementById('net');
+  const started = performance.now();
+  const stamp = () => ((performance.now() - started) / 1000).toFixed(1).padStart(6);
+  // Lines also go to server.log, batched, and kept until a send gets through:
+  // the ones written while the internet was down are the interesting ones.
+  const unsent = [];
+  function log(text) {
+    const line = `${stamp()}s ${text}`;
+    logEl.textContent = `${line}\n` + logEl.textContent;
+    unsent.push(line);
+  }
+  setInterval(async () => {
+    if (unsent.length === 0) return;
+    const lines = unsent.slice(0, 50);
+    try {
+      const res = await fetch('/api/webrtc-test-log', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines }),
+      });
+      if (res.ok) unsent.splice(0, lines.length);
+    } catch {}
+  }, 1000);
+
+  // The device's own internet, once a second: a dropped data session shows as
+  // failed fetches here at the moment it happens.
+  let netUp = null;
+  setInterval(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 900);
+    let up = false;
+    try {
+      up = (await fetch('/api/ready', { cache: 'no-store', signal: controller.signal })).ok;
+    } catch {}
+    clearTimeout(timeout);
+    netEl.textContent = `Internet: ${up ? 'up' : 'DOWN'}`;
+    if (up !== netUp) log(`internet ${up ? 'up' : 'DOWN'}`);
+    netUp = up;
+  }, 1000);
+
+  let running = null;
+
+  function stop() {
+    if (!running) return;
+    clearInterval(running.timer);
+    running.pcs.forEach((pc) => pc.close());
+    running.ctx?.close();
+    running = null;
+    log('stopped');
+  }
+
+  async function start(relay, media, provider = '') {
+    stop();
+    const query = provider ? `?provider=${encodeURIComponent(provider)}` : '';
+    const config = relay
+      ? { ...(await (await fetch(`/api/voice-ice${query}`, { cache: 'no-store' })).json()), iceTransportPolicy: 'relay' }
+      : { iceServers: [] };
+    const pc1 = new RTCPeerConnection(config);
+    const pc2 = new RTCPeerConnection(config);
+    running = { pcs: [pc1, pc2], timer: null, ctx: null };
+    log(`start ${relay ? `relay${provider ? ` (${provider})` : ''}` : 'host'}, ${media}`);
+    if (relay) log(`servers: ${config.iceServers.flatMap((server) => [].concat(server.urls)).join(' ')}`);
+
+    [[pc1, pc2, 'A'], [pc2, pc1, 'B']].forEach(([pc, other, name]) => {
+      pc.onicecandidate = (event) => { if (event.candidate) other.addIceCandidate(event.candidate).catch(() => {}); };
+      pc.oniceconnectionstatechange = () => log(`${name} ice ${pc.iceConnectionState}`);
+      pc.onconnectionstatechange = () => log(`${name} connection ${pc.connectionState}`);
+      pc.onicecandidateerror = (event) => log(`${name} ICE error ${event.errorCode} ${event.errorText} ${event.url} from ${event.address || '?'}`);
+    });
+
+    if (media === 'audio') {
+      // A tone rather than the microphone, so nothing asks for permission.
+      const ctx = new AudioContext();
+      running.ctx = ctx;
+      const tone = ctx.createOscillator();
+      const out = ctx.createMediaStreamDestination();
+      tone.connect(out);
+      tone.start();
+      pc1.addTrack(out.stream.getAudioTracks()[0], out.stream);
+      pc2.addTransceiver('audio', { direction: 'recvonly' });
+    } else {
+      const channel = pc1.createDataChannel('probe', { ordered: false, maxRetransmits: 0 });
+      const payload = new Uint8Array(100);
+      channel.onopen = () => {
+        log('data channel open');
+        running.timer = setInterval(() => { if (channel.readyState === 'open') channel.send(payload); }, 20);
+      };
+    }
+
+    await pc1.setLocalDescription(await pc1.createOffer());
+    await pc2.setRemoteDescription(pc1.localDescription);
+    await pc2.setLocalDescription(await pc2.createAnswer());
+    await pc1.setRemoteDescription(pc2.localDescription);
+
+    // What the connected pair is, once it is up.
+    pc1.addEventListener('connectionstatechange', async () => {
+      if (pc1.connectionState !== 'connected') return;
+      const stats = await pc1.getStats();
+      stats.forEach((report) => {
+        if (report.type === 'transport') log(`A dtls ${report.dtlsState} ${report.tlsVersion || ''} ${report.dtlsCipher || ''}`);
+        if (report.type === 'candidate-pair' && report.nominated && report.state === 'succeeded') {
+          const local = stats.get(report.localCandidateId);
+          log(`A pair ${local?.candidateType} ${local?.protocol} ${local?.relayProtocol || ''} ${local?.address || ''}`);
+        }
+      });
+    });
+  }
+
+  document.querySelectorAll('button[data-relay]').forEach((button) => {
+    button.addEventListener('click', () => {
+      start(button.dataset.relay === '1', button.dataset.media, button.dataset.provider).catch((error) => log(`error: ${error.message}`));
+    });
+  });
+  document.getElementById('stop').addEventListener('click', stop);
+  // `?run=relay-data`, `relay-audio` or `host-data` starts that test on load.
+  const run = new URLSearchParams(location.search).get('run');
+  if (run) {
+    const [mode, media] = run.split('-');
+    start(mode === 'relay', media === 'audio' ? 'audio' : 'data').catch((error) => log(`error: ${error.message}`));
+  }
+</script>
+</body>
+</html>

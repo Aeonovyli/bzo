@@ -2654,6 +2654,9 @@ player can be asked to load a link:
 - `?voicemode=nohost` -- never send peers this client's own interface
   addresses, only what STUN and TURN found. A phone lists every network it
   has, a carrier's private IMS one included, and a peer checks each address.
+- `?voicemode=ipv4` / `?voicemode=dual` -- voice on IPv4 alone, as phones
+  have it by default, or on both families, as desktops do. `ipv6` above is
+  the third choice.
 - `?voicepeers=1` -- open at most that many voice peer connections. Each one
   gathers on every interface at once, so this separates a network upset by
   the number of simultaneous connections from one upset by any at all.

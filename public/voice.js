@@ -96,13 +96,36 @@ function normalizeRosterItem(item) {
   return id ? { id } : null;
 }
 
-function serializeDescription(description, sendHostCandidates = true) {
+// The address family of an ICE candidate line, from its address field (the
+// fifth after `candidate:`): '4', '6', or null for an mDNS name, which hides it.
+function candidateFamily(line) {
+  const address = String(line || '').replace(/^a=/, '').split(' ')[4] || '';
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address)) return '4';
+  if (address.includes(':')) return '6';
+  return null;
+}
+
+function keepCandidate(line, { host = true, family = null } = {}) {
+  if (!host && / typ host(\s|$)/.test(line)) return false;
+  if (family) {
+    const own = candidateFamily(line);
+    if (own && own !== family) return false;
+  }
+  return true;
+}
+
+function filterCandidateLines(sdp, filter = {}) {
+  if (filter.host !== false && !filter.family) return sdp;
+  return sdp.split(/(?<=\n)/)
+    .filter((line) => !line.startsWith('a=candidate:') || keepCandidate(line, filter))
+    .join('');
+}
+
+function serializeDescription(description, filter = {}) {
   if (!description) return description;
   return {
     type: description.type,
-    sdp: sendHostCandidates
-      ? description.sdp
-      : description.sdp.replace(/^a=candidate:[^\r\n]* typ host[^\r\n]*\r?\n/gm, ''),
+    sdp: filterCandidateLines(description.sdp, filter),
   };
 }
 
@@ -134,6 +157,8 @@ function createVoiceError(code, message, cause) {
  * @param {boolean} [options.playRemoteAudio=true] False receives voice without ever playing it.
  * @param {number} [options.maxPeers] The most peer connections open at once.
  * @param {boolean} [options.sendHostCandidates=true] False offers peers only STUN and TURN candidates.
+ * @param {string} [options.ipFamily] '4' or '6' offers and accepts candidates of that family only.
+ * @param {boolean} [options.dataOnly=false] True sends an audio-rate data channel instead of audio.
  * @returns {object} Voice manager API.
  */
 export function createVoiceManager(options = {}) {
@@ -157,6 +182,15 @@ export function createVoiceManager(options = {}) {
   // address it is given: internet traffic aimed at that network is a test of
   // what the carrier does about it.
   const sendHostCandidates = options.sendHostCandidates !== false;
+  // '4' or '6' keeps voice on that address family alone: no candidate of the
+  // other is offered or accepted. Verizon drops a phone's whole data session
+  // when a WebRTC call runs over its IPv6 to some destinations, so phones keep
+  // voice on IPv4.
+  const ipFamily = options.ipFamily === '4' || options.ipFamily === '6' ? options.ipFamily : null;
+  const candidateFilter = { host: sendHostCandidates, family: ipFamily };
+  // True carries a data channel in place of audio: a test of whether the
+  // network objects to the RTP or to the connection.
+  const dataOnly = options.dataOnly === true;
   // The most peer connections this client opens at once; extra peers are left
   // unconnected. A test of whether the number of simultaneous connections, each
   // gathering on every interface, is what upsets a network.
@@ -695,7 +729,7 @@ export function createVoiceManager(options = {}) {
 
     pc.onicecandidate = (event) => {
       invoke('onLocalCandidate', { peerId, candidate: event.candidate || null });
-      if (event.candidate && (sendHostCandidates || event.candidate.type !== 'host')) {
+      if (event.candidate && keepCandidate(`a=${event.candidate.candidate}`, candidateFilter)) {
         sendToServer({
           type: 'voiceIceCandidate',
           channel,
@@ -802,7 +836,20 @@ export function createVoiceManager(options = {}) {
       if (shouldInitiateOffer(peerId)) void createOffer(entry);
     };
 
-    if (typeof pc.addTransceiver === 'function') {
+    if (dataOnly) {
+      // An audio-shaped stream over a data channel instead of RTP: one small
+      // message every 20 ms each way, as Opus would send, on the same kind of
+      // connection. Negotiated on both sides so neither has to wait to be told.
+      const channel = pc.createDataChannel('probe', { negotiated: true, id: 0, ordered: false, maxRetransmits: 0 });
+      const payload = new Uint8Array(100);
+      let timer = null;
+      channel.onopen = () => {
+        timer = setInterval(() => {
+          if (channel.readyState === 'open') channel.send(payload);
+        }, 20);
+      };
+      channel.onclose = () => clearInterval(timer);
+    } else if (typeof pc.addTransceiver === 'function') {
       try {
         entry.transceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
         preferOpusCodec(entry.transceiver);
@@ -881,7 +928,7 @@ export function createVoiceManager(options = {}) {
         type: 'voiceOffer',
         channel,
         to: entry.peerId,
-        description: serializeDescription(entry.pc.localDescription || offer, sendHostCandidates),
+        description: serializeDescription(entry.pc.localDescription || offer, candidateFilter),
       });
       entry.initialOfferSent = true;
     } catch (error) {
@@ -914,7 +961,7 @@ export function createVoiceManager(options = {}) {
           await entry.pc.setLocalDescription({ type: 'rollback' });
         }
       }
-      await entry.pc.setRemoteDescription(offer);
+      await entry.pc.setRemoteDescription(serializeDescription(offer, { family: ipFamily }));
       await flushCandidates(entry);
       const answer = await entry.pc.createAnswer();
       await entry.pc.setLocalDescription(answer);
@@ -922,7 +969,7 @@ export function createVoiceManager(options = {}) {
         type: 'voiceAnswer',
         channel,
         to: peerId,
-        description: serializeDescription(entry.pc.localDescription || answer, sendHostCandidates),
+        description: serializeDescription(entry.pc.localDescription || answer, candidateFilter),
       });
       updatePeerState(entry, { signalingState: entry.pc.signalingState });
     } catch (error) {
@@ -937,7 +984,7 @@ export function createVoiceManager(options = {}) {
     const entry = peers.get(peerId) || ensurePeer(peerId, message.peer || {});
     if (!entry) return;
     try {
-      await entry.pc.setRemoteDescription(answer);
+      await entry.pc.setRemoteDescription(serializeDescription(answer, { family: ipFamily }));
       await flushCandidates(entry);
       updatePeerState(entry, { signalingState: entry.pc.signalingState });
     } catch (error) {
@@ -949,6 +996,7 @@ export function createVoiceManager(options = {}) {
     const peerId = getMessagePeerId(message);
     const candidate = message && (message.candidate ?? message.iceCandidate);
     if (!peerId || candidate === undefined) return;
+    if (candidate && !keepCandidate(`a=${candidate.candidate}`, { family: ipFamily })) return;
     const entry = peers.get(peerId) || ensurePeer(peerId, message.peer || {});
     if (!entry) return;
     if (!entry.pc.remoteDescription) {

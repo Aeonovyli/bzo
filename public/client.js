@@ -686,8 +686,21 @@ const NO_VOICE = new URLSearchParams(window.location.search).has('novoice');
 // `?voicemode=direct` drops the STUN and TURN servers: this client offers only
 // its own addresses and never contacts either server.
 // `?voicemode=google` swaps them for Google's public STUN server alone.
+// `?voicemode=ipv6` is direct with every IPv4 candidate dropped both ways.
+// `?voicemode=data` carries a 50-per-second data channel in place of audio;
+// both ends need it.
 const VOICE_MODE = new URLSearchParams(window.location.search).get('voicemode');
 const VOICE_SILENT = VOICE_MODE === 'silent';
+// Which address family voice uses. Phones keep it on IPv4: Verizon drops a
+// phone's whole data session when a WebRTC call to some destinations runs over
+// its IPv6. `?voicemode=ipv6` forces IPv6, `?voicemode=dual` allows both.
+const VOICE_IP_FAMILY = VOICE_MODE === 'ipv6' ? '6'
+  : VOICE_MODE === 'dual' ? null
+    : VOICE_MODE === 'ipv4' || isMobile ? '4' : null;
+// `?voicemic=1` opens the microphone and transmits as soon as voice starts, so
+// a phone sends as well as receives: a device that only ever receives is the
+// one shape of call Meet never makes.
+const VOICE_MIC = new URLSearchParams(window.location.search).get('voicemic') === '1';
 // `?voicepeers=1` connects voice to at most that many players at once.
 const VOICE_MAX_PEERS = Number.parseInt(new URLSearchParams(window.location.search).get('voicepeers'), 10) || undefined;
 // This page's own id, sent with every join. A reconnect carries the same one,
@@ -2336,6 +2349,8 @@ function initializeVoiceManager() {
     playRemoteAudio: !VOICE_SILENT,
     maxPeers: VOICE_MAX_PEERS,
     sendHostCandidates: VOICE_MODE !== 'nohost',
+    ipFamily: VOICE_IP_FAMILY,
+    dataOnly: VOICE_MODE === 'data',
     callbacks: {
       onStateChange: updateVoiceHud,
       onError: handleVoiceError,
@@ -2349,6 +2364,10 @@ function initializeVoiceManager() {
       onSpeakingChange: handleVoiceSpeakingChange,
     },
   });
+  if (VOICE_MIC) {
+    const result = callVoiceManager('requestMicrophone', { enable: true });
+    if (result.value && typeof result.value.catch === 'function') result.value.catch(handleVoiceError);
+  }
   updateVoiceHud();
   return voiceManager;
 }
@@ -7603,13 +7622,19 @@ function handleServerMessage(message) {
       // hidden for everyone else.
       syncListServerRow(message.listServer || null);
       if (message.voiceRtcConfig && typeof message.voiceRtcConfig === 'object') {
+        // Phones keep voice on IPv4 (voice.js `ipFamily`), through the relay by
+        // its IPv4-only names when the server has them.
+        const { ipv4IceServers, ...sharedConfig } = message.voiceRtcConfig;
+        const baseConfig = VOICE_IP_FAMILY === '4' && Array.isArray(ipv4IceServers)
+          ? { ...sharedConfig, iceServers: ipv4IceServers }
+          : sharedConfig;
         voiceRtcConfig = VOICE_MODE === 'relay'
-          ? { ...message.voiceRtcConfig, iceTransportPolicy: 'relay' }
-          : VOICE_MODE === 'direct'
-            ? { ...message.voiceRtcConfig, iceServers: [] }
+          ? { ...baseConfig, iceTransportPolicy: 'relay' }
+          : VOICE_MODE === 'direct' || VOICE_MODE === 'ipv6'
+            ? { ...baseConfig, iceServers: [] }
             : VOICE_MODE === 'google'
-              ? { ...message.voiceRtcConfig, iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] }
-              : message.voiceRtcConfig;
+              ? { ...baseConfig, iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] }
+              : baseConfig;
         callVoiceManager('setRtcConfig', voiceRtcConfig);
       }
       // Keep the requested team until the server confirms the joined player.

@@ -182,6 +182,22 @@ with `use-auth-secret`, list its URLs without a username and set
 
 Each player then gets their own credential, valid for 24 hours.
 
+Phones keep voice on IPv4: some carriers (Verizon, at least) drop a phone's
+whole data connection when a WebRTC call runs over its IPv6. Give them the
+same servers by a name with no IPv6 address, or they reach the relay over
+IPv6 anyway:
+
+```json
+"voiceIceServersIpv4": [
+  { "urls": ["stun:turn4.example.org:3478"] },
+  { "urls": ["turn:turn4.example.org:3478?transport=udp",
+             "turn:turn4.example.org:3478?transport=tcp",
+             "turns:turn4.example.org:443?transport=tcp"] }
+]
+```
+
+The TLS name has to be on the relay's certificate too.
+
 
 ## Behind a reverse proxy
 

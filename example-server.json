@@ -90,6 +90,7 @@
   "timeOfDay": null,
   "title": "BZFlag Test Server",
   "voiceIceServers": [],
+  "voiceIceServersIpv4": [],
   "voiceNearbyRadius": 60,
   "voiceTurnSecret": ""
 }
