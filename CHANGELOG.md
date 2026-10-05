@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.16] - 2026-10-05
+
+### Added
+- `voiceIceServersIpv4`: the relay by names with no IPv6 address, for the
+  clients that keep voice on IPv4. See **Voice** in
+  [docs/installation.md](docs/installation.md). #8
+- [webrtc-test.html](public/webrtc-test.html): a WebRTC call inside one page,
+  through a chosen relay or on the device alone, that says when the device
+  loses its internet. More voice test modes on test.html. #8
+
+### Fixed
+- Voice on a phone over Verizon cellular no longer drops the phone's data
+  connection: phones keep voice on IPv4, where a call over the phone's IPv6
+  made Verizon end its data session about a second in. #8
+
 ## [1.3.15] - 2026-10-05
 
 ### Added
