@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.15] - 2026-10-05
+
+### Added
+- Voice test modes on [test.html](public/test.html): no voice, relay only,
+  silent, no STUN/TURN, Google STUN, no host addresses, and one peer. #8
+- The debug log shows each voice peer's gathered candidates, the network a
+  link uses, and STUN/TURN errors. #8
+
+### Fixed
+- A player whose connection drops and comes straight back keeps their name:
+  the reconnect replaces the stale connection at once rather than waiting for
+  it to time out, and a handed-out `Player n` no longer overwrites the saved
+  name.
+- Voice no longer tries to connect to server bots.
+- TURN credentials are unique per connection, so a dropped connection's
+  leftover relays no longer count against the next player with its number.
+
 ## [1.3.14] - 2026-10-04
 
 ### Added
