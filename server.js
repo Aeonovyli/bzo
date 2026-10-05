@@ -5191,8 +5191,11 @@ const configuredVoiceIceServers = process.env.VOICE_ICE_SERVERS ?? serverConfig.
 const VOICE_ICE_SERVERS = parseVoiceIceServers(configuredVoiceIceServers);
 
 // coturn's `use-auth-secret`: a `turn:`/`turns:` entry with no username of its
-// own gets one per player, `<expiry>:<player>`, whose password is the base64
-// HMAC-SHA1 of it under the shared secret. The secret never leaves the server,
+// own gets one per connection, `<expiry>:<player>-<random>`, whose password is
+// the base64 HMAC-SHA1 of it under the shared secret. coturn counts its
+// `user-quota` against the part after the colon, and player numbers are
+// reused: the relays a dropped connection leaves behind until they time out
+// must not count against whoever gets its number next. The secret never leaves the server,
 // and a leaked credential stops working at its expiry. coturn checks it on
 // every allocation refresh, so it has to outlast a session.
 const VOICE_TURN_SECRET = String(process.env.VOICE_TURN_SECRET ?? serverConfig.voiceTurnSecret ?? '');
@@ -5200,7 +5203,7 @@ const VOICE_TURN_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60;
 
 function voiceRtcConfigFor(playerId) {
   if (!VOICE_TURN_SECRET) return { iceServers: VOICE_ICE_SERVERS };
-  const username = `${Math.floor(Date.now() / 1000) + VOICE_TURN_CREDENTIAL_TTL_SECONDS}:${playerId}`;
+  const username = `${Math.floor(Date.now() / 1000) + VOICE_TURN_CREDENTIAL_TTL_SECONDS}:${playerId}-${crypto.randomBytes(4).toString('hex')}`;
   const credential = crypto.createHmac('sha1', VOICE_TURN_SECRET).update(username).digest('base64');
   return {
     iceServers: VOICE_ICE_SERVERS.map((server) => (
@@ -9215,7 +9218,7 @@ function nameCheck(requestedName, excludeId = null) {
     }
   }
   // Check if name is already taken
-  const nameTaken = Array.from(players.values()).some(p => p.id !== excludeId && p.name && p.name.toLowerCase() === name.toLowerCase());
+  const nameTaken = Array.from(players.values()).some(p => p.id !== excludeId && !p.superseded && p.name && p.name.toLowerCase() === name.toLowerCase());
   if (nameTaken) {
     // Assign 'Player n' for their own player number
     if (playerNumber !== null) {
@@ -9224,6 +9227,26 @@ function nameCheck(requestedName, excludeId = null) {
   }
   return name;
 }
+// A page's reconnect carries the token its earlier connection joined with
+// (client.js `PAGE_TOKEN`). That earlier connection is the same player, gone
+// quiet on a network that dropped and still holding the name until the pong
+// timeout: it is closed now, and left out of the name check before its close
+// arrives.
+function supersedeEarlierConnection(player, token) {
+  if (typeof token !== 'string' || !/^[0-9a-f]{32}$/.test(token)) return;
+  player.pageToken = token;
+  for (const other of players.values()) {
+    if (other === player || other.superseded || other.pageToken !== token) continue;
+    other.superseded = true;
+    log(`"${other.name}" (#${other.playerNumber}) replaced by its own reconnect, player ${player.playerNumber}`);
+    try {
+      other.ws.terminate();
+    } catch (error) {
+      logError(`Could not close the connection for "${other.name}"`, error);
+    }
+  }
+}
+
 // What a joining player is called, once authentication can outrank a typed
 // name. See docs/login-plan.md, "Name collisions".
 //
@@ -9240,7 +9263,7 @@ function resolveJoinName(player, requestedName) {
 
   const callsign = session.callsign;
   for (const other of players.values()) {
-    if (other.id === player.id || !other.joined) continue;
+    if (other.id === player.id || !other.joined || other.superseded) continue;
     if ((other.name || '').toLowerCase() !== callsign.toLowerCase()) continue;
 
     if (other.verified) {
@@ -12712,6 +12735,9 @@ function applyObserverHeartbeat(player, message, ws) {
 function isVoicePeer(source, target) {
   if (!source || !target || source.id === target.id) return false;
   if (!source.joined || !target.joined) return false;
+  // A server bot has no browser behind it to answer an offer, so a connection
+  // to one would only sit at `new` -- and take a place a person could have.
+  if (bots.has(source.id) || bots.has(target.id)) return false;
   // Infinity rather than 0 for a player with no position yet: out of earshot is
   // the safe reading, and only Nearby consults it at all.
   const planar = Number.isFinite(source.x) && Number.isFinite(source.z)
@@ -17141,6 +17167,7 @@ function acceptConnection(ws, req) {
             removeFromServer(player);
             break;
           }
+          supersedeEarlierConnection(player, message.page);
           let joinName = resolveJoinName(player, message.name);
           const requestedTankModel = typeof message.tankModel === 'string'
             ? normalizeTankModelId(message.tankModel)

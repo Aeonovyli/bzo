@@ -2637,6 +2637,26 @@ player can be asked to load a link:
   draws into belongs to the headset: a sample taken in a session reports the
   headset's own resolution whatever the page asked for. Set before a session
   starts, since it is read when the session builds its framebuffer.
+- `?novoice` -- never create a voice peer connection, so the client has no
+  WebRTC traffic at all. For a network that drops when voice connects: it
+  tells that apart from one that drops on the game.
+- `?voicemode=silent` -- connect voice as usual but never play what arrives,
+  so the browser never starts voice playout. Splits a device upset by
+  playout (Android's switch into call audio) from one upset by the traffic.
+- `?voicemode=relay` -- `iceTransportPolicy: 'relay'`: this client offers
+  only TURN relay candidates, so every voice packet to or from it goes through
+  the relay and nothing arrives from another player's address directly.
+- `?voicemode=direct` -- no STUN or TURN servers for this client: it offers
+  only its own addresses and never contacts either server.
+- `?voicemode=google` -- Google's public STUN server in place of the
+  configured ones, so a network's reaction to the configured server can be
+  told apart from its reaction to STUN at all.
+- `?voicemode=nohost` -- never send peers this client's own interface
+  addresses, only what STUN and TURN found. A phone lists every network it
+  has, a carrier's private IMS one included, and a peer checks each address.
+- `?voicepeers=1` -- open at most that many voice peer connections. Each one
+  gathers on every interface at once, so this separates a network upset by
+  the number of simultaneous connections from one upset by any at all.
 
 One URL parameter is not a measurement knob: `?follow=leader` is a feature, the
 spectator link described in the Observer section. It is listed on the same page

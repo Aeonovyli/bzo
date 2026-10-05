@@ -674,6 +674,29 @@ const XR_FLAG_HELP_TOP = -0.05;
 // from the people playing. Autopilot is not this -- a human on autopilot is
 // still a human, as upstream's `isBot()` has it.
 const IS_BOT_CLIENT = new URLSearchParams(window.location.search).has('bot');
+// `?novoice` never creates a voice peer connection, so this client sends and
+// receives no WebRTC traffic at all: for telling a network that drops on
+// voice apart from one that drops on the game.
+const NO_VOICE = new URLSearchParams(window.location.search).has('novoice');
+// `?voicemode=silent` connects voice but never plays it: separates a device
+// upset by voice playout from one upset by the WebRTC traffic.
+// `?voicemode=relay` sends all of this client's voice through the TURN relay,
+// so nothing reaches it from another player's address directly.
+// `?voicemode=nohost` never tells peers this client's own interface addresses.
+// `?voicemode=direct` drops the STUN and TURN servers: this client offers only
+// its own addresses and never contacts either server.
+// `?voicemode=google` swaps them for Google's public STUN server alone.
+const VOICE_MODE = new URLSearchParams(window.location.search).get('voicemode');
+const VOICE_SILENT = VOICE_MODE === 'silent';
+// `?voicepeers=1` connects voice to at most that many players at once.
+const VOICE_MAX_PEERS = Number.parseInt(new URLSearchParams(window.location.search).get('voicepeers'), 10) || undefined;
+// This page's own id, sent with every join. A reconnect carries the same one,
+// so the server can drop the connection it replaces at once rather than after
+// the pong timeout -- a dropped phone otherwise comes back to find its old self
+// still holding its name. Per page load, not stored: a duplicated tab copies
+// sessionStorage, and two tabs with one id would keep replacing each other.
+const PAGE_TOKEN = Array.from(window.crypto.getRandomValues(new Uint8Array(16)),
+  (byte) => byte.toString(16).padStart(2, '0')).join('');
 const FIRE_KEY = 'Enter';
 // The drive keys and which way each one pushes its axis, kept as the two axes
 // they steer rather than one list, because a held key owns its own axis and
@@ -1834,6 +1857,51 @@ function handleVoiceRemoteTrack({ peerId, track } = {}) {
   logVoiceEvent(`${describeVoicePeer(peerId)} ontrack: ${kind} (${trackState})`);
 }
 
+// What this browser offered a peer, one line once gathering finishes: the
+// candidate types, and through which server for a relayed one. `relay` here
+// means sam handed out a relay address; whether a pair through it was chosen is
+// `candidateType` in the debug HUD.
+function ipv6Prefix64(address) {
+  return `${String(address).replace(/^\[|\]$/g, '').split(':').slice(0, 4).join(':')}::/64`;
+}
+
+function handleVoiceLocalCandidate({ peerId, candidate } = {}) {
+  if (!peerId) return;
+  const entry = trackVoicePeer(peerId, {});
+  entry.gathered ||= [];
+  if (candidate) {
+    const via = candidate.type === 'relay' && candidate.relayProtocol ? ` via ${candidate.relayProtocol}` : '';
+    // Chrome hides a host address behind an mDNS name unless the page has
+    // camera or mic permission, so a host candidate may have no family.
+    const address = String(candidate.address || '');
+    const family = address.endsWith('.local') ? ' mdns' : address.includes(':') ? '6' : '4';
+    // The /64 an IPv6 candidate came from: whether it is the network the game's
+    // own connection uses, which the server logs at connect.
+    const prefix = family === '6' && candidate.type === 'host' ? ` ${ipv6Prefix64(address)}` : '';
+    entry.gathered.push(`${candidate.type || '?'} ${candidate.protocol || '?'}${family}${prefix}${via}`);
+    return;
+  }
+  const counts = new Map();
+  entry.gathered.forEach((kind) => counts.set(kind, (counts.get(kind) || 0) + 1));
+  const summary = Array.from(counts, ([kind, n]) => (n > 1 ? `${kind} x${n}` : kind)).join(', ');
+  logVoiceEvent(`${describeVoicePeer(peerId)} candidates: ${summary || 'none'}`);
+  entry.gathered = [];
+}
+
+// Each distinct STUN/TURN failure once per peer: Chrome repeats the same
+// error for every local address, and a server that cannot be reached at all
+// is one fact, not a dozen.
+function handleVoiceIceCandidateError({ peerId, url, errorCode, errorText, address, port } = {}) {
+  if (!peerId) return;
+  const entry = trackVoicePeer(peerId, {});
+  entry.iceErrors ||= new Set();
+  const key = `${url} ${errorCode}`;
+  if (entry.iceErrors.has(key)) return;
+  entry.iceErrors.add(key);
+  const from = address ? ` from ${address}${port ? `:${port}` : ''}` : '';
+  logVoiceEvent(`${describeVoicePeer(peerId)} ICE error ${errorCode} ${errorText} ${url}${from}`);
+}
+
 // The one that actually answers "does real audio ever arrive": `muted` at
 // ontrack time is expected and meaningless, but a transition away from it
 // means the browser itself decided real media showed up on the wire.
@@ -1978,7 +2046,9 @@ async function refreshVoicePeerStats(peerId, pc) {
     // this polls every 500ms while the debug HUD is open, and logging that
     // often would flood the server log with repeats of the same answer.
     [
-      ['candidateType', local?.candidateType || null],
+      ['candidateType', local?.candidateType
+        ? `${local.candidateType}${String(local.address || local.ip || '').includes(':') ? ` ${ipv6Prefix64(local.address || local.ip)}` : ''}`
+        : null],
       ['audioReceived', audioReceived],
       ['audioSent', audioSent],
     ].forEach(([key, value]) => {
@@ -2248,6 +2318,7 @@ function handleVoiceError(error) {
 
 function initializeVoiceManager() {
   if (voiceManager) return voiceManager;
+  if (NO_VOICE) return null;
 
   voiceManager = createVoiceManager({
     sendToServer,
@@ -2262,6 +2333,9 @@ function initializeVoiceManager() {
     // The renderer's context is already open, and a phone counts contexts.
     getAudioContext: () => renderManager.getAudioContext(),
     startMuted: true,
+    playRemoteAudio: !VOICE_SILENT,
+    maxPeers: VOICE_MAX_PEERS,
+    sendHostCandidates: VOICE_MODE !== 'nohost',
     callbacks: {
       onStateChange: updateVoiceHud,
       onError: handleVoiceError,
@@ -2269,6 +2343,8 @@ function initializeVoiceManager() {
       onPeerChange: handleVoicePeerChange,
       onRosterChange: handleVoiceRosterChange,
       onRemoteTrack: handleVoiceRemoteTrack,
+      onLocalCandidate: handleVoiceLocalCandidate,
+      onIceCandidateError: handleVoiceIceCandidateError,
       onRemoteTrackMuteChange: handleVoiceRemoteTrackMuteChange,
       onSpeakingChange: handleVoiceSpeakingChange,
     },
@@ -2524,6 +2600,7 @@ function maybeSendPendingJoinRequest() {
     tankModel: pendingJoinRequest.tankModel,
     motto: pendingJoinRequest.motto,
     bot: IS_BOT_CLIENT,
+    page: PAGE_TOKEN,
     ...getJoinTeamFields(),
   });
 }
@@ -7526,7 +7603,13 @@ function handleServerMessage(message) {
       // hidden for everyone else.
       syncListServerRow(message.listServer || null);
       if (message.voiceRtcConfig && typeof message.voiceRtcConfig === 'object') {
-        voiceRtcConfig = message.voiceRtcConfig;
+        voiceRtcConfig = VOICE_MODE === 'relay'
+          ? { ...message.voiceRtcConfig, iceTransportPolicy: 'relay' }
+          : VOICE_MODE === 'direct'
+            ? { ...message.voiceRtcConfig, iceServers: [] }
+            : VOICE_MODE === 'google'
+              ? { ...message.voiceRtcConfig, iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] }
+              : message.voiceRtcConfig;
         callVoiceManager('setRtcConfig', voiceRtcConfig);
       }
       // Keep the requested team until the server confirms the joined player.
@@ -7745,8 +7828,14 @@ function handleServerMessage(message) {
           confineViewerToWorld();
         }
 
-        // Save the name to localStorage (server may have kept our requested name or assigned default)
-        localStorage.setItem('playerName', myPlayerName);
+        // Saved only when it is a name the player chose. A `Player n` the server
+        // handed out because ours was taken -- on a quick reconnect, by this
+        // player's own previous connection, not yet timed out -- would
+        // otherwise replace the real one, and every later join would ask for
+        // `Player n` too.
+        if (!isDefaultPlayerName(myPlayerName) || isDefaultPlayerName(pendingJoinRequest?.name)) {
+          localStorage.setItem('playerName', myPlayerName);
+        }
         pendingJoinRequest = null;
 
         // Update player name display
@@ -9452,6 +9541,7 @@ function viewMapFile(file) {
       tankModel: selectedTankModelId,
       motto: myPlayerMotto,
       bot: IS_BOT_CLIENT,
+      page: PAGE_TOKEN,
       ...getJoinTeamFields(),
     });
   });
@@ -17281,6 +17371,7 @@ function applyXRJoinSelection() {
     tankModel: selectedTankModelId,
     motto: myPlayerMotto,
     bot: IS_BOT_CLIENT,
+    page: PAGE_TOKEN,
     ...getJoinTeamFields(),
   });
 }

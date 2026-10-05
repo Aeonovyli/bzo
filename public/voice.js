@@ -96,11 +96,13 @@ function normalizeRosterItem(item) {
   return id ? { id } : null;
 }
 
-function serializeDescription(description) {
+function serializeDescription(description, sendHostCandidates = true) {
   if (!description) return description;
   return {
     type: description.type,
-    sdp: description.sdp,
+    sdp: sendHostCandidates
+      ? description.sdp
+      : description.sdp.replace(/^a=candidate:[^\r\n]* typ host[^\r\n]*\r?\n/gm, ''),
   };
 }
 
@@ -129,6 +131,9 @@ function createVoiceError(code, message, cause) {
  * @param {number} [options.microphoneVolumeLevel=10] Capture level, 0..10, for the local microphone.
  * @param {Function} [options.getAudioContext] Supplies the AudioContext the microphone gain runs in.
  * @param {string} [options.channel='nearby'] Which players to talk to: all, nearby, or team.
+ * @param {boolean} [options.playRemoteAudio=true] False receives voice without ever playing it.
+ * @param {number} [options.maxPeers] The most peer connections open at once.
+ * @param {boolean} [options.sendHostCandidates=true] False offers peers only STUN and TURN candidates.
  * @returns {object} Voice manager API.
  */
 export function createVoiceManager(options = {}) {
@@ -141,6 +146,21 @@ export function createVoiceManager(options = {}) {
   let rtcConfig = options.rtcConfig || {
     iceServers: Array.isArray(options.iceServers) ? options.iceServers : [],
   };
+  // False connects and receives as usual but never hands a remote track to an
+  // <audio> element or the audio graph, so the browser never starts voice
+  // playout: a test of whether playout itself, not the traffic, is what upsets
+  // a device.
+  const playRemoteAudio = options.playRemoteAudio !== false;
+  // False keeps this client's own interface addresses to itself and offers only
+  // what STUN and TURN found. A phone lists every network it has, including a
+  // carrier's private one (Verizon's IMS, for VoLTE), and a peer checks every
+  // address it is given: internet traffic aimed at that network is a test of
+  // what the carrier does about it.
+  const sendHostCandidates = options.sendHostCandidates !== false;
+  // The most peer connections this client opens at once; extra peers are left
+  // unconnected. A test of whether the number of simultaneous connections, each
+  // gathering on every interface, is what upsets a network.
+  const maxPeers = Number.isInteger(options.maxPeers) && options.maxPeers > 0 ? options.maxPeers : Infinity;
 
   let started = false;
   let closed = false;
@@ -674,7 +694,8 @@ export function createVoiceManager(options = {}) {
     peers.set(peerId, entry);
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
+      invoke('onLocalCandidate', { peerId, candidate: event.candidate || null });
+      if (event.candidate && (sendHostCandidates || event.candidate.type !== 'host')) {
         sendToServer({
           type: 'voiceIceCandidate',
           channel,
@@ -682,6 +703,23 @@ export function createVoiceManager(options = {}) {
           candidate: event.candidate,
         });
       }
+    };
+
+    // A STUN or TURN server that could not be reached or refused us: the one
+    // reason for a failed link the connection states never give.
+    pc.onicecandidateerror = (event) => {
+      invoke('onIceCandidateError', {
+        peerId,
+        url: event.url || '',
+        errorCode: event.errorCode,
+        errorText: event.errorText || '',
+        address: event.address || '',
+        port: event.port ?? null,
+      });
+    };
+
+    pc.onicegatheringstatechange = () => {
+      updatePeerState(entry, { iceGatheringState: pc.iceGatheringState });
     };
 
     pc.ontrack = (event) => {
@@ -692,6 +730,10 @@ export function createVoiceManager(options = {}) {
         if (event.track && typeof stream.addTrack === 'function') stream.addTrack(event.track);
       }
       if (!stream || !entry.remoteAudio) return;
+      if (!playRemoteAudio) {
+        invoke('onRemoteTrack', { peerId, stream, track: event.track, element: null });
+        return;
+      }
       entry.remoteAudio.srcObject = stream;
       const playPromise = entry.remoteAudio.play && entry.remoteAudio.play();
       if (playPromise && typeof playPromise.catch === 'function') {
@@ -793,6 +835,7 @@ export function createVoiceManager(options = {}) {
       existing.metadata = { ...existing.metadata, ...metadata };
       return existing;
     }
+    if (peers.size >= maxPeers) return null;
     return createPeer(normalizedId, metadata);
   }
 
@@ -838,7 +881,7 @@ export function createVoiceManager(options = {}) {
         type: 'voiceOffer',
         channel,
         to: entry.peerId,
-        description: serializeDescription(entry.pc.localDescription || offer),
+        description: serializeDescription(entry.pc.localDescription || offer, sendHostCandidates),
       });
       entry.initialOfferSent = true;
     } catch (error) {
@@ -879,7 +922,7 @@ export function createVoiceManager(options = {}) {
         type: 'voiceAnswer',
         channel,
         to: peerId,
-        description: serializeDescription(entry.pc.localDescription || answer),
+        description: serializeDescription(entry.pc.localDescription || answer, sendHostCandidates),
       });
       updatePeerState(entry, { signalingState: entry.pc.signalingState });
     } catch (error) {

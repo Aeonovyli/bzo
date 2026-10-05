@@ -209,6 +209,28 @@
   </section>
 
   <section>
+    <h2><code>voicemode</code></h2>
+    <p>
+      For a network that drops when voice starts. Relay sends this client's
+      voice only through the TURN server, so nothing reaches it from another
+      player's address. Silent connects but never plays what arrives. No voice
+      creates no peer connection at all. One peer connects to a single player.
+    </p>
+    <div class="modes">
+      <a class="mode default" href="/"><b>Direct</b><span>default</span></a>
+      <a class="mode" href="/?voicemode=nohost"><b>No host addresses</b><span>?voicemode=nohost</span></a>
+      <a class="mode" href="/?voicemode=relay"><b>Relay only</b><span>?voicemode=relay</span></a>
+      <a class="mode" href="/?voicemode=direct"><b>No STUN/TURN</b><span>?voicemode=direct</span></a>
+      <a class="mode" href="/?voicemode=google"><b>Google STUN</b><span>?voicemode=google</span></a>
+      <a class="mode" href="/?voicemode=silent"><b>Silent</b><span>?voicemode=silent</span></a>
+      <a class="mode" href="/?novoice"><b>No voice</b><span>?novoice</span></a>
+      <a class="mode" href="/?voicepeers=1"><b>One peer</b><span>?voicepeers=1</span></a>
+      <a class="mode" href="/?voicepeers=1&amp;voicemode=google"><b>One peer, Google STUN</b><span>?voicepeers=1&amp;voicemode=google</span></a>
+      <a class="mode" href="/?voicepeers=1&amp;voicemode=relay"><b>One peer, relay</b><span>?voicepeers=1&amp;voicemode=relay</span></a>
+    </div>
+  </section>
+
+  <section>
     <h2><code>follow</code> &mdash; a link for watching</h2>
     <p>
       The one link here that is not a measurement. <code>?follow=leader</code>
